@@ -152,7 +152,7 @@ public class EksController {
     public Response createNodeGroup(@PathParam("name") String name, CreateNodeGroupRequest request) {
         eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.createNodeGroup(name, request);
-        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
+        return Response.ok(Map.of("nodegroup", toNodegroupResponse(nodeGroup))).build();
     }
 
     @GET
@@ -169,7 +169,7 @@ public class EksController {
             @PathParam("nodegroupName") String nodegroupName) {
         eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.describeNodeGroup(name, nodegroupName);
-        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
+        return Response.ok(Map.of("nodegroup", toNodegroupResponse(nodeGroup))).build();
     }
 
     @DELETE
@@ -178,7 +178,17 @@ public class EksController {
             @PathParam("nodegroupName") String nodegroupName) {
         eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.deleteNodeGroup(name, nodegroupName);
-        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
+        return Response.ok(Map.of("nodegroup", toNodegroupResponse(nodeGroup))).build();
+    }
+
+    /** The node group without {@link Nodegroup#isAutoScalingGroupCreated()}, which is Floci's own record. */
+    private static Nodegroup toNodegroupResponse(Nodegroup nodeGroup) {
+        if (!nodeGroup.isAutoScalingGroupCreated()) {
+            return nodeGroup;
+        }
+        Nodegroup response = nodeGroup.copy();
+        response.setAutoScalingGroupCreated(false);
+        return response;
     }
 
     @POST

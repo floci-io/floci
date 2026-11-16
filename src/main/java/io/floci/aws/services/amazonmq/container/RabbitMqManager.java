@@ -1,7 +1,6 @@
 package io.floci.aws.services.amazonmq.container;
 
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
@@ -184,9 +183,9 @@ public class RabbitMqManager {
         }
     }
 
-    /** The region in the broker's ARN; a broker recorded without one counts as the default region's. */
+    /** The broker's Region, {@link Broker#region} with the configured default Region. */
     private String brokerRegion(Broker broker) {
-        return AwsArnUtils.regionOrDefault(broker.getBrokerArn(), regionResolver.getDefaultRegion());
+        return broker.region(regionResolver.getDefaultRegion());
     }
 
     /**

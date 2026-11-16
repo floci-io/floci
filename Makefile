@@ -603,6 +603,8 @@ S3CONTROL_TAG_CONDITION_KEYS_PATHS := src/main/resources/aws/s3control-tag-condi
 REQUEST_CONDITION_KEYS_PATHS := src/main/resources/aws/request-condition-keys.json \
 	tools/aws/regen_request_condition_keys.py tools/aws/test_regen_request_condition_keys.py \
 	tools/aws/regen_dynamodb_condition_keys.py tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
+DOCUMENTED_ROUTES_PATHS := src/main/resources/aws/rest-routes.json tools/aws/regen_rest_routes.py \
+	tools/aws/test_regen_rest_routes.py
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py
@@ -611,7 +613,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; requestkeys=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; requestkeys=0; routes=0; \
 	covers() { \
 		[ -z "$(strip $(CHANGED))" ] && return 0; \
 		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
@@ -651,9 +653,12 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	if covers "$(REQUEST_CONDITION_KEYS_PATHS)" "the request condition key table"; then \
 		$(MAKE) --no-print-directory request-condition-keys-verify || requestkeys=$$?; \
 	fi; \
+	if covers "$(DOCUMENTED_ROUTES_PATHS)" "the REST routes AWS documents for endpoints botocore does not model"; then \
+		$(MAKE) --no-print-directory documented-routes-verify || routes=$$?; \
+	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
 			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$dynamodb -ne 0 ] \
-			|| [ $$conditionkeys -ne 0 ] || [ $$s3control -ne 0 ] || [ $$requestkeys -ne 0 ]; then \
+			|| [ $$conditionkeys -ne 0 ] || [ $$s3control -ne 0 ] || [ $$requestkeys -ne 0 ] || [ $$routes -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -681,6 +686,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		if [ $$conditionkeys -ne 0 ]; then echo "       the IAM condition key table"; fi; \
 		if [ $$s3control -ne 0 ]; then echo "       the S3 Control tag condition key table"; fi; \
 		if [ $$requestkeys -ne 0 ]; then echo "       the request condition key table"; fi; \
+		if [ $$routes -ne 0 ]; then echo "       the REST routes AWS documents, see its message above"; fi; \
 		exit 1; \
 	fi
 
@@ -920,3 +926,9 @@ request-condition-keys-check: ## Check the request condition key members against
 	$(PYTHON) tools/aws/regen_request_condition_keys.py --check
 request-condition-keys-verify: ## Check the request condition action keys against AWS
 	$(PYTHON) tools/aws/regen_request_condition_keys.py --verify
+
+.PHONY: documented-routes-sync documented-routes-verify
+documented-routes-sync: ## Read the REST routes AWS documents for endpoints botocore does not model again (commit the result)
+	$(PYTHON) tools/aws/regen_rest_routes.py --fetch-documented
+documented-routes-verify: ## CI gate (online): the vendored documented REST routes must still be the ones AWS's pages give
+	$(PYTHON) tools/aws/regen_rest_routes.py --verify

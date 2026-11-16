@@ -1163,6 +1163,17 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void scanOfEmptyTableDoesNotReadFilterExpression() {
+        // Callers that skip the handler's validation (the Step Functions scan integration)
+        // only see a malformed FilterExpression once an item is evaluated.
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        DynamoDbService.ScanResult result = service.scan("Users", "nickname = = :n", null, null, null, null, null, region);
+        assertEquals(0, result.items().size());
+    }
+
+    @Test
     void scanWithLimit() {
         String region = "eu-west-1";
         createUsersTable(region);

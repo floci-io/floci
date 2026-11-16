@@ -72,6 +72,18 @@ them returns.
 adding that it "is idempotent but asynchronous". On an earlier release a `RUNNING` step answers `FAILED` with "Step
 is not in a cancellable state: RUNNING".
 
+The limits the API reference and the Management Guide give steps are checked, in each operation's own error code, in
+Floci's words, as no source gives AWS's: a `StepConcurrencyLevel` from 1 to 256 ("You can specify a minimum of 1 step
+and a maximum of 256 steps"), which `RunJobFlow` refuses with `ValidationException` and `ModifyCluster` with
+`InvalidRequestException`; at most 256 steps `PENDING` or `RUNNING` ("only 256 steps can be RUNNING or PENDING at any
+given time", a `CANCEL_PENDING` one counted as running), which `RunJobFlow` and `AddJobFlowSteps` refuse with
+`ValidationException`; no step with an `ActionOnFailure` other than `CONTINUE` added while the level is above 1 ("The
+step is not submitted and the action fails with a message that the ActionOnFailure setting is not valid"), which
+`AddJobFlowSteps` refuses with `ValidationException`, a step naming none taking `TERMINATE_CLUSTER`, as it is
+submitted, and so refused too; and `CancelSteps` "Available only
+in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0", with at most 256 steps a request, refused otherwise
+with `InvalidRequestException`.
+
 In the `docker` runner mode a cancelled `RUNNING` step is `CANCEL_PENDING` while its driver stops, and keeps its
 place among the running steps until the driver is gone: then it is `CANCELLED`, and the next `PENDING` step starts.
 That is Floci's reading of the Management Guide's "Canceling a running step does not allow a pending step to start
@@ -92,9 +104,20 @@ also applies when termination protection is enabled.
 `AddJobFlowSteps` rejects a `TERMINATING` or `TERMINATED` cluster without adding steps or changing its
 termination status, and answers an unknown cluster with `ValidationException` "Specified job flow ID
 does not exist.", as AWS does.
-Instance groups and fleets report `RUNNING` from the cluster's creation until it is `TERMINATED`. Then
-they report `TERMINATED` with zero running or provisioned capacity; their requested and target
-capacities remain recorded. `ListInstances` numbers the synthetic IDs and addresses of the `MASTER`
+Instance groups and fleets follow their cluster's state, Floci's reading, as no source says when theirs apply:
+`PROVISIONING` while it is `STARTING`, with nothing running or provisioned yet (the guide's events end an instance
+fleet's provisioning with "Provisioning for instance fleet ... is complete ... The instance fleet now has On-Demand
+capacity of Num"), `BOOTSTRAPPING` while it is, with every instance up for its bootstrap actions, `RUNNING` while it
+runs or waits, and `TERMINATING` as it ends; one added later takes the state the cluster's others are in. Once it is
+`TERMINATED` they report `TERMINATED` with zero running or provisioned capacity; their requested and target
+capacities remain recorded, and a group that ended while it was provisioned counts the instances it asked for as
+terminated, which `ListInstances` lists so, as an ended fleet's targets are. `ListInstances` gives each instance
+its group's or fleet's state, `PROVISIONING`,
+`BOOTSTRAPPING`, `RUNNING` (while its cluster ends too) or `TERMINATED`, lists one being provisioned though none runs
+yet, and its `InstanceStates` filter keeps the instances in the states it names. A cluster terminated while it is
+`STARTING` keeps the instances it was provisioning listed, still `PROVISIONING` and with none of them running, until
+it is `TERMINATED`, so the same instances are listed throughout. `ListInstances` numbers the
+synthetic IDs and addresses of the `MASTER`
 group's or fleet's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
 `DescribeCluster`'s `MasterPublicDnsName` says, while the others resize, and every other instance's private
 address is `10.<group>.0.<n>`, its group's or fleet's number in the cluster and its own in it, so it too stays while
@@ -115,6 +138,10 @@ other state, such as `STARTING` or `BOOTSTRAPPING`. `AddInstanceFleet` gives a `
 `TERMINATED` instances. As `ListInstances` "Provides information for all active Amazon EC2 instances and Amazon EC2
 instances terminated in the last 30 days, up to a maximum of 2,000", a call lists at most 2,000 and gives a `Marker`
 for the next; a `Marker` no call gave is refused with `InvalidRequestException`.
+A cluster's `SecurityConfiguration` names one `CreateSecurityConfiguration` made, and `DescribeCluster` gives it back.
+`RunJobFlow` naming one that does not exist is refused with `ValidationException` "Security configuration does not
+exist: <name>"; no source gives AWS's answer, so the code is the one `RunJobFlow` refuses its other input with, and the
+wording that of `DescribeSecurityConfiguration` and `DeleteSecurityConfiguration`.
 A cluster has instance groups or instance fleets, never both, as "instance fleets and instance groups cannot coexist in a
 cluster": `RunJobFlow` with both is refused with `ValidationException` "The RunJobFlow request can contain
 InstanceFleets parameters or InstanceGroups parameters, but not both.", the API reference's own words, and
@@ -186,7 +213,12 @@ holding the driver and its executors, or a command or a script. The cluster itse
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
-  when a file there has it, one a former step left there included. `hadoop fs` and `hdfs dfs` reach the
+  when a file there has it, one a former step left there included. A step can run `sudo`, as the Release Guide's
+  "Using HBase snapshots" step does with `command-runner.jar` and `sudo -u hbase`, and the Management Guide's
+  Kerberos users step with a `script-runner.jar` script running `sudo kadmin.local`. The image has no `sudo`, so a
+  step finds Floci's first on its `PATH`, a Hive step's shell commands (Hive's `!`) too, the bootstrap actions' one: it
+  drops its options, with their values, and runs its command as it is, as the step's `hadoop` user. So
+  `sudo -u hadoop spark-submit ...` runs as on EMR, and a command that needs root fails, as it would for `hadoop`. `hadoop fs` and `hdfs dfs` reach the
   cluster's HDFS (see **Storage**) and Floci's S3. A `spark-submit` they start runs on the cluster's YARN, or in local
   mode where it runs none, on Floci's S3 with the
   cluster's `spark-defaults`, `core-site`, `spark-hive-site` and `spark-log4j2`, which Floci puts in a Spark
@@ -213,9 +245,17 @@ holding the driver and its executors, or a command or a script. The cluster itse
   settings, as EMR's primary node does, so a `hive-site` setting of `hive.metastore.warehouse.dir`, say, holds for the
   service as for the Hive steps. A primary node with the service that an earlier Floci left running starts again, on
   the data its volume keeps, as its session went with that Floci. The container is on a Docker network of the cluster's own, also
-  `emr-<cluster-id>-hdfs`, which the cluster's steps join besides their own, so the steps of other clusters, another
-  account's included, cannot reach its files or tables; each cluster whose HDFS runs takes one network from the
-  Docker daemon's address pools. When Floci runs in a container, that container joins the network of each cluster
+  `emr-<cluster-id>-hdfs`, which the cluster's steps join besides their own, where the cluster's nodes and steps reach
+  it by the primary node's name; each cluster whose HDFS runs takes one network from the Docker daemon's address pools.
+  Each of the cluster's nodes, this one and its core and task nodes (see **YARN**), is on the steps' network too, the
+  one Floci's other containers are on, from before it starts, with Floci's DNS, as a cluster's nodes reach what is in
+  their VPC: a cluster-mode driver or an executor reaches an MSK cluster's brokers or an RDS instance by the endpoints
+  Floci gives, and a virtual-hosted bucket name under Floci's host name, as Iceberg's `S3FileIO` uses by default,
+  resolves to Floci. The nodes' HDFS and YARN listen on their address on the cluster's network alone, so a container on
+  the steps' network, another cluster's included, reaches neither. Hive 3's metastore has no setting for the address it
+  listens on, so on a cluster with Hive or HCatalog the primary node, which runs it, stays on the cluster's network
+  alone, and the executors YARN runs there, on such a cluster with no core node, reach Floci at its address on the
+  cluster's network. Where Docker does not say the subnet of the cluster's network, its nodes stay on it alone. A node an earlier Floci started on the cluster's network alone starts again, on its data. When Floci runs in a container, that container joins the network of each cluster
   with Hive too, as `floci`, which is how the metastore reaches Floci's S3, and leaves it when the HDFS container
   goes. The cluster's first step starts it, and waits for it: a step whose cluster's HDFS is not ready within two
   minutes fails ("The step could not start: The HDFS of EMR cluster ... did not start within 120 seconds"). If its
@@ -255,20 +295,22 @@ holding the driver and its executors, or a command or a script. The cluster itse
   containers on the cluster's nodes; in cluster mode the driver runs on one of them too, its output in the application's
   container logs (see **Output**) and only the client's in the step's.
   A node needs Spark, Python and what the bootstrap actions installed, as an EMR cluster's nodes hold every
-  application it installs, so each runs from the image the steps run in: the bootstrap's, else the release's EMR
-  Serverless image with the HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with
-  Hive, which Floci makes the first time one of the release's clusters needs it (see **Hive steps**), and in which the
-  cluster's bootstrap actions run. An `emr-spark-*` release has no EMR Serverless Hive image, and `emr-7.5.0`'s HDFS and
+  application it installs, so each runs from the image the steps run in, the release's EMR Serverless image with the
+  HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with Hive, which Floci makes the
+  first time one of the release's clusters needs it (see **Hive steps**), or, on a cluster with bootstrap actions, from
+  the image its own bootstrap left on that image (see **Bootstrap actions**). An `emr-spark-*` release has no EMR
+  Serverless Hive image, and `emr-7.5.0`'s HDFS and
   YARN do not run on its newer Hadoop, so its image holds the whole of `emr-7.5.0`'s Hadoop in `/opt`, which only the
   node's daemons run from (see **Known limitations**). EMR sizes a NodeManager, and the executors' memory and cores ("determined by the
   core and task instance types"), by the instance type; Floci's node shares the machine it runs on, so its NodeManager
   offers `yarn-node-memory-mb` and `yarn-node-vcores`, 4096 MB and 4 by default, and an executor is 1 GB and one core
   and a driver 2 GB and one core, which the cluster's `spark-defaults` and a step's own options replace. A container
   larger than the NodeManager offers is refused by YARN, and its step fails. Dynamic allocation is on, as it is on
-  EMR, through Spark's shuffle tracking: the images have no external shuffle service. Executors reach Floci's S3 at
-  Floci's address on the cluster's network, which Floci's container joins as for the metastore (see **Storage**), over
-  HTTP, which Floci serves beside HTTPS with TLS on, so no certificate is involved, with the step's AWS credentials,
-  and find the driver at its container's name on that network.
+  EMR, through Spark's shuffle tracking: the images have no external shuffle service. Executors reach Floci's S3 as the
+  steps do, their node being on the steps' network (see **Storage**), or, where the steps have no network of Floci's,
+  at Floci's address on the cluster's network, which Floci's container joins as for the metastore, over HTTP, which
+  Floci serves beside HTTPS with TLS on, so no certificate is involved, with the step's AWS credentials, and find the
+  driver at its container's name on the cluster's network.
   Each core and task node is a container of its own on that network, `emr-<cluster-id>-node-<group>-<n>`, with its data
   in a volume of its own: "Core nodes run the Data Node daemon", "a core node runs YARN NodeManager daemons, Hadoop
   MapReduce tasks, and Spark executors", and "Task nodes don't run the Data Node daemon". Its name on the network is the
@@ -338,7 +380,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   another). Floci makes it the first time one of the release's clusters needs it: a container of the release's
   image, never started, gets the Hive image's folders, and is committed, as a bootstrap's is, as
   `floci-aws-emr-release:<release>-<hash>`, 0.6 GB more than the release's image, and kept for the release's next
-  cluster (`docker image rm` removes it); a newer pull of either image makes another. A failure to make it, a Hive
+  cluster (`docker image rm` removes it); a newer pull of either image makes another, which replaces the ones made
+  before from the same two image names for the same release and kind (with Hive or without): each is removed then,
+  unless a container still uses it, or a step or a bootstrap given it has yet to end, which keeps it until the next
+  newer one. Images of one kind are made one at a time, so one made of the older images never comes after the newer
+  one. One made before Floci labelled images with their kind is left. A failure to make it, a Hive
   image that cannot be pulled say, fails the step that needed it ("The step could not start: ..."), or, for a
   bootstrap, ends the cluster with `INTERNAL_ERROR`. The two images ship different builds of one goodies JAR under
   one name, so Tez keeps the Hive image's, and Hive runs with the Hive image's Hadoop configuration, which puts Tez
@@ -430,9 +476,23 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `INTERNAL_ERROR`. `TerminateJobFlows` stops the actions at once, and a cluster Floci was bootstrapping
   when it stopped ends with `INTERNAL_ERROR` once Floci is back. With a `LogUri`, each action's output
   goes to `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/node/<instance-id>/bootstrap-actions/<n>/`,
-  as the Management Guide's bootstrap failure pages give the folder. The actions run once, as on the
-  master, and every node of the cluster runs from the image they leave, so each holds what they installed. Shutdown
-  actions do not run. A cluster a failed action ended has a `Status.ErrorDetails` entry in `DescribeCluster` and
+  as the Management Guide's bootstrap failure pages give the folder. Bootstrap actions "run on cluster after
+  Amazon EMR launches the instance", on each node: where a cluster's core and task nodes run in containers of their
+  own (see **YARN**), each runs them too, in a container of its own beside the primary node's, as that node, its files
+  saying so (see **Node files**), its instance metadata its own (see **Instance metadata**), its output under its own
+  instance id, and is kept as the image that node runs from, so it holds what its own actions installed. A node a
+  resize adds runs them before it starts, as "If you add nodes to a running cluster, bootstrap actions also run on
+  those nodes in the same way", and one that leaves keeps its image only until the cluster ends, so one added again
+  runs them again; a bootstrap that cannot run for the nodes a resize adds ends the cluster with `INTERNAL_ERROR`, as
+  at its start. The nodes' bootstraps stop as the cluster ends, or as the primary node's actions fail. AWS
+  terminates a node whose action fails, and "If too many instances fail their bootstrap actions, then Amazon EMR
+  terminates the cluster. If just a few instances fail, Amazon EMR attempts to reallocate the failed instances and
+  continue", with no number given: Floci runs a node's actions again once, in a fresh container, and a second failure
+  ends the cluster with `BOOTSTRAP_FAILURE` and, as no source gives AWS's words or an error code for a core or task
+  node, a message of Floci's after the primary node's, "On the core instance (i-00000000000000002), bootstrap action 1
+  returned a non-zero return code", with no `ErrorDetails`. Elsewhere the actions run once, as on the primary node, and
+  every node runs from the image they leave. Shutdown actions do not run. A cluster a failed action ended has a
+  `Status.ErrorDetails` entry in `DescribeCluster` and
   `ListClusters`, with the code and `ErrorData` keys of the Management Guide's error code pages:
   `BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE` with `primary-instance-id`, `bootstrap-action`, `return-code`,
   `amazon-s3-path` and `public-doc` for an action that exits with another code than 0, and
@@ -440,6 +500,15 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `ErrorData` is a list of maps, and no source shows how AWS spreads the keys over them: Floci gives one map holding
   them all. `ErrorMessage` is the reason's message and the error code's page, in Floci's words, as AWS advises
   against parsing that text. A cluster that ends with `INTERNAL_ERROR` has no `ErrorDetails`.
+* **Node files**: an EMR node's `/mnt/var/lib/info/instance.json` says whether it is the primary node, in its
+  `isMaster`, which the Management Guide's bootstrap action reads (`grep isMaster /mnt/var/lib/info/instance.json |
+  grep false` on any other node), and its `/mnt/var/lib/instance-controller/extraInstanceData.json` gives its
+  `instanceRole`, which AWS's Knowledge Center reads with `jq` and compares, lowercased, with `master`, `core` and
+  `task`. AWS documents nothing else in either file, so Floci writes those two fields alone: `{"isMaster": true}` and
+  `{"instanceRole": "MASTER"}` in the bootstrap actions' container and each step's, which run as on the primary node,
+  and in the primary node's own, and `false` with `CORE` or `TASK` in each core or task node's, the roles as the API's
+  `InstanceRoleType` names them, and in each core or task node's bootstrap container its own (see **Bootstrap
+  actions**). Files that cannot be written fail the bootstrap, the step or the node they are for.
 * **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
   unpacked; see [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md)). It is then
@@ -497,6 +566,20 @@ holding the driver and its executors, or a command or a script. The cluster itse
 * **Credentials**: the container gets a session for the step's `ExecutionRoleArn`, or else for the role
   of the cluster's `JobFlowRole` instance profile, when IAM knows it and the profile holds one role,
   and otherwise the account's placeholder credentials, with `AWS_ENDPOINT_URL` pointing at Floci.
+* **Instance metadata**: each node of an EMR cluster is an EC2 instance, so any process on it, a bootstrap action, a
+  step's command or a Spark executor YARN runs, reads its instance metadata at `http://169.254.169.254`, IMDSv1 and
+  IMDSv2. On a cluster with a Docker network of its own (see **Storage**), a relay container on that network holds
+  that address, as ECS's credentials endpoint is held, and each of the cluster's containers gets a link-local address
+  of its own there, so no container needs privileges; the relay forwards to Floci's EC2 metadata server, which answers
+  each as the instance it is: the bootstrap actions and each step's container as the primary node, each core or task
+  node's container as that node. Each answers with the instance id, type, private address and name and public name
+  `ListInstances` gives it, the cluster's account, the cluster's availability zone, which `DescribeCluster`'s
+  `Ec2InstanceAttributes` gives as `Ec2AvailabilityZone` (the one `RunJobFlow`'s `Instances.Placement` names, else the
+  Region's first), and the `JobFlowRole` instance profile, whose role's credentials `iam/security-credentials` gives
+  when IAM holds the profile with one role. Only the cluster's own containers reach its relay, and the metadata server
+  trusts the caller the relay names only from the relays Floci started. A relay that cannot start fails the step that
+  would read it, or ends the cluster as bootstrap actions that could not run do. Where the steps share a namespace or
+  have none, there is no relay.
 * **Output**: the driver's output goes to Floci's log, prefixed `emr:<stepId>`. With a `LogUri` on the
   cluster, its standard output and error also go to Floci's S3 once the step ends, gzipped, as
   `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/steps/<step-id>/`, the step log folder of the

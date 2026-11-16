@@ -75,14 +75,17 @@ public class CodeArtifactCargoController {
     private final CodeArtifactService service;
     private final KellnrSidecarClient kellnr;
     private final CodeArtifactCargoExternalConnectionImporter externalConnectionImporter;
+    private final CodeArtifactCargoUpstreamRepositoryImporter upstreamRepositoryImporter;
     private final ObjectMapper mapper;
 
     @Inject
     public CodeArtifactCargoController(CodeArtifactService service, KellnrSidecarClient kellnr,
-            CodeArtifactCargoExternalConnectionImporter externalConnectionImporter, ObjectMapper mapper) {
+            CodeArtifactCargoExternalConnectionImporter externalConnectionImporter,
+            CodeArtifactCargoUpstreamRepositoryImporter upstreamRepositoryImporter, ObjectMapper mapper) {
         this.service = service;
         this.kellnr = kellnr;
         this.externalConnectionImporter = externalConnectionImporter;
+        this.upstreamRepositoryImporter = upstreamRepositoryImporter;
         this.mapper = mapper;
     }
 
@@ -150,8 +153,15 @@ public class CodeArtifactCargoController {
         // one cheap local existence check, the same pattern CodeArtifactNuGetController's own
         // .nupkg route already uses.
         if (!kellnr.packageVersionExists(handle.repoId(), domain, repository, null, packageName, version)) {
-            externalConnectionImporter.tryImport(handle.region(), domain, handle.owner(), repository,
-                    handle.repoId(), packageName, version);
+            // A repository has either an external connection or upstreams, never both: at most
+            // one of these two calls ever does real work, and the other's own no-op is a single
+            // cheap in-memory check, the same pattern CodeArtifactNuGetController's own .nupkg
+            // route already uses.
+            if (!externalConnectionImporter.tryImport(handle.region(), domain, handle.owner(), repository,
+                    handle.repoId(), packageName, version)) {
+                upstreamRepositoryImporter.tryImport(handle.region(), domain, handle.owner(), repository,
+                        handle.repoId(), packageName, version);
+            }
         }
         Optional<RepositorySidecarManager.StreamedAsset> streamed = kellnr.fetchPackageVersionAssetStreamed(
                 handle.repoId(), domain, repository, null, packageName, version,
@@ -177,11 +187,12 @@ public class CodeArtifactCargoController {
      * javadoc for why that mapping is deliberately deferred rather than guessed at.
      *
      * <p>Merged with any real upstream-only version lines the repository's own {@code
-     * public:crates-io} external connection can see (see {@link
-     * CodeArtifactCargoExternalConnectionImporter}'s own javadoc for why this, unlike every other
-     * format's own external-connection importer, needs a listing merge and not just an
-     * on-demand download): a real {@code cargo} client's dependency resolver only ever sees a
-     * version by first finding it here.
+     * public:crates-io} external connection, and now its own same-domain upstream chain too, can
+     * see (see {@link CodeArtifactCargoExternalConnectionImporter}'s own javadoc for why this,
+     * unlike every other format's own external-connection importer, needs a listing merge and not
+     * just an on-demand download, and {@link CodeArtifactCargoUpstreamRepositoryImporter}'s own
+     * javadoc for the same reasoning extended across an upstream chain): a real {@code cargo}
+     * client's dependency resolver only ever sees a version by first finding it here.
      */
     private Response sparseIndexLookup(RepositoryHandle handle, String domain, String repository, String path) {
         int lastSlash = path.lastIndexOf('/');
@@ -190,8 +201,10 @@ public class CodeArtifactCargoController {
             return Response.status(404).build();
         }
         Optional<byte[]> local = kellnr.fetchSparseIndexRaw(handle.repoId(), domain, repository, packageName);
-        Optional<byte[]> merged = externalConnectionImporter.mergeExternalVersions(handle.region(), domain,
+        Optional<byte[]> mergedExternal = externalConnectionImporter.mergeExternalVersions(handle.region(), domain,
                 handle.owner(), repository, packageName, local);
+        Optional<byte[]> merged = upstreamRepositoryImporter.mergeUpstreamRepositoryVersions(handle.region(), domain,
+                handle.owner(), repository, handle.repoId(), packageName, mergedExternal);
         return merged.map(bytes -> Response.status(200).entity(bytes).type(MediaType.APPLICATION_OCTET_STREAM)
                         .build())
                 .orElseGet(() -> Response.status(404).build());

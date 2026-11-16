@@ -9,7 +9,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 @ApplicationScoped
 public class GlueViewDdlBuilder {
@@ -31,6 +33,18 @@ public class GlueViewDdlBuilder {
     }
 
     public String build(String contextDatabase) {
+        return build(contextDatabase, null);
+    }
+
+    /**
+     * Views for the Glue tables {@code query} names, or for every table when {@code query} is null,
+     * reads {@code information_schema} or is a {@code SHOW} statement, all of which list tables.
+     * DuckDB binds each view of the batch before the query runs, so a table whose view cannot bind
+     * (files that do not match its declared schema) fails only the queries that read it rather than
+     * every query.
+     */
+    public String build(String contextDatabase, String query) {
+        ViewFilter wanted = viewFilter(query);
         StringBuilder sb = new StringBuilder();
         boolean usesIceberg = false;
         boolean contextDbHandled = false;
@@ -47,9 +61,9 @@ public class GlueViewDdlBuilder {
                 sb.append("CREATE SCHEMA IF NOT EXISTS ").append(quote(schema)).append(";\n");
                 try {
                     List<Table> tables = glueService.getTables(schema);
-                    usesIceberg |= appendViews(sb, schema, tables, true);
+                    usesIceberg |= appendViews(sb, schema, tables, true, wanted);
                     if (schema.equals(contextDatabase)) {
-                        usesIceberg |= appendViews(sb, schema, tables, false);
+                        usesIceberg |= appendViews(sb, schema, tables, false, wanted);
                         contextDbHandled = true;
                     }
                 } catch (Exception e) {
@@ -61,7 +75,7 @@ public class GlueViewDdlBuilder {
         if (!contextDbHandled && contextDatabase != null && !contextDatabase.isBlank()) {
             try {
                 List<Table> tables = glueService.getTables(contextDatabase);
-                usesIceberg |= appendViews(sb, contextDatabase, tables, false);
+                usesIceberg |= appendViews(sb, contextDatabase, tables, false, wanted);
             } catch (Exception e) {
                 LOG.debugv("Could not fetch tables for context database {0}: {1}", contextDatabase, e.getMessage());
             }
@@ -75,7 +89,8 @@ public class GlueViewDdlBuilder {
     }
 
     /** @return true if at least one of the appended views reads an Iceberg table. */
-    private boolean appendViews(StringBuilder sb, String schemaOrNull, List<Table> tables, boolean qualified) {
+    private boolean appendViews(StringBuilder sb, String schemaOrNull, List<Table> tables, boolean qualified,
+                                ViewFilter wanted) {
         if (tables == null) {
             return false;
         }
@@ -85,7 +100,8 @@ public class GlueViewDdlBuilder {
                 if (t == null) {
                     continue;
                 }
-                if (t.getName() == null || t.getName().isBlank()) {
+                if (t.getName() == null || t.getName().isBlank()
+                        || !wanted.wants(schemaOrNull, t.getName(), qualified)) {
                     continue;
                 }
                 if (t.getStorageDescriptor() == null
@@ -134,6 +150,134 @@ public class GlueViewDdlBuilder {
             }
         }
         return usesIceberg;
+    }
+
+    /** Which views a query needs: a qualified view of a database's table, or an unqualified one of the context's. */
+    @FunctionalInterface
+    interface ViewFilter {
+        boolean wants(String schema, String table, boolean qualified);
+    }
+
+    /**
+     * The views {@code query} needs, from the names it references (see {@link #references}): a qualified view
+     * {@code "db"."t"} for a reference whose parts include {@code db} then {@code t} ({@code db.t},
+     * {@code awsdatacatalog.db.t}, a column {@code db.t.c}), and an unqualified one for a reference starting with
+     * {@code t}, which resolves in the context database. Every view when {@code query} is null, starts with
+     * {@code SHOW} or references {@code information_schema}, all of which list tables.
+     */
+    static ViewFilter viewFilter(String query) {
+        if (query == null) {
+            return (schema, table, qualified) -> true;
+        }
+        List<List<String>> references = references(query);
+        boolean lists = references.stream().anyMatch(name -> name.contains("information_schema"))
+                || (!references.isEmpty() && references.getFirst().getFirst().equals("show"));
+        if (lists) {
+            return (schema, table, qualified) -> true;
+        }
+        return (schema, table, qualified) -> {
+            String db = schema == null ? null : schema.toLowerCase(Locale.ROOT);
+            String name = table.toLowerCase(Locale.ROOT);
+            for (List<String> reference : references) {
+                if (!qualified && names(reference.getFirst(), name)) {
+                    return true;
+                }
+                for (int i = 0; qualified && i + 1 < reference.size(); i++) {
+                    if (reference.get(i).equals(db) && names(reference.get(i + 1), name)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+    }
+
+    /** Whether a referenced name names the table: itself, or one of its Iceberg metadata tables ({@code "t$files"}). */
+    private static boolean names(String referenced, String table) {
+        return referenced.equals(table) || referenced.startsWith(table + "$");
+    }
+
+    /**
+     * The dotted names {@code query} references, each part lowercased, a quoted part decoded ({@code "a""b"} is
+     * {@code a"b}), in the order they appear: keywords too, since a table may share a keyword's name. String
+     * literals and comments are skipped, so a name only they hold is no reference.
+     */
+    static List<List<String>> references(String query) {
+        List<List<String>> names = new ArrayList<>();
+        List<String> current = null;
+        boolean dotted = false;
+        int i = 0;
+        int n = query.length();
+        while (i < n) {
+            char c = query.charAt(i);
+            if (c == '-' && i + 1 < n && query.charAt(i + 1) == '-') {
+                int end = query.indexOf('\n', i);
+                i = end < 0 ? n : end + 1;
+                current = null;
+            } else if (c == '/' && i + 1 < n && query.charAt(i + 1) == '*') {
+                int end = query.indexOf("*/", i + 2);
+                i = end < 0 ? n : end + 2;
+                current = null;
+            } else if (c == '\'') {
+                i = skipQuoted(query, i, '\'');
+                current = null;
+            } else if (c == '"' || Character.isLetter(c) || c == '_') {
+                String part;
+                if (c == '"') {
+                    int end = skipQuoted(query, i, '"');
+                    part = query.substring(i + 1, Math.max(i + 1, end - 1)).replace("\"\"", "\"");
+                    i = end;
+                } else {
+                    int start = i;
+                    while (i < n && isIdentifierChar(query.charAt(i))) {
+                        i++;
+                    }
+                    part = query.substring(start, i);
+                }
+                part = part.toLowerCase(Locale.ROOT);
+                if (dotted && current != null) {
+                    current.add(part);
+                } else {
+                    current = new ArrayList<>(List.of(part));
+                    names.add(current);
+                }
+                dotted = false;
+                continue;
+            } else if (c == '.' && current != null) {
+                dotted = true;
+                i++;
+                continue;
+            } else if (Character.isWhitespace(c)) {
+                // A name may span whitespace around its dots (db . t); anything else between parts ends it.
+                i++;
+                continue;
+            } else {
+                current = null;
+                i++;
+            }
+            dotted = false;
+        }
+        return names;
+    }
+
+    /** The index just past the quoted text starting at {@code start}, a doubled {@code quote} inside it kept. */
+    private static int skipQuoted(String query, int start, char quote) {
+        int i = start + 1;
+        while (i < query.length()) {
+            if (query.charAt(i) == quote) {
+                if (i + 1 < query.length() && query.charAt(i + 1) == quote) {
+                    i += 2;
+                    continue;
+                }
+                return i + 1;
+            }
+            i++;
+        }
+        return query.length();
+    }
+
+    private static boolean isIdentifierChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$';
     }
 
     static String quote(String id) {

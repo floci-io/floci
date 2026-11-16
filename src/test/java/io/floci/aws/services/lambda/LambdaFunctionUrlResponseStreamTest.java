@@ -1,13 +1,10 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -58,21 +55,15 @@ class LambdaFunctionUrlResponseStreamTest {
         return functionUrl.substring(scheme + 3, functionUrl.indexOf('.', scheme + 3));
     }
 
-    private byte[] lambdaZip() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("""
-                    exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
-                      responseStream = awslambda.HttpResponseStream.from(responseStream, {
-                        statusCode: 201, headers: { "content-type": "text/event-stream" } });
-                      responseStream.write("data: first\\n\\n");
-                      responseStream.write("data: last\\n\\n");
-                      responseStream.end();
-                    });
-                    """.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
+    private byte[] lambdaZip() {
+        return LambdaCodeFixtures.nodeJsZip("""
+                exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
+                  responseStream = awslambda.HttpResponseStream.from(responseStream, {
+                    statusCode: 201, headers: { "content-type": "text/event-stream" } });
+                  responseStream.write("data: first\\n\\n");
+                  responseStream.write("data: last\\n\\n");
+                  responseStream.end();
+                });
+                """);
     }
 }

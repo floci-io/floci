@@ -162,8 +162,9 @@ class RequestResourceMembersTest {
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
-        assertTrue(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "lambda", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertTrue(table.namespaces().contains("lambda"));
+        assertFalse(table.handBuilt().contains("lambda"));
+        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
         Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
                 "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
@@ -172,8 +173,6 @@ class RequestResourceMembersTest {
                 .map(operation -> "logs:" + operation).collect(Collectors.toSet());
         Set<String> expected = new HashSet<>(logsDelivery);
         expected.add("logs:PutDestination");
-        expected.add("lambda:GetLayerVersion");
-        expected.add("lambda:GetLayerVersionByArn");
         // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
         expected.add("dynamodb:ListTables");
         assertEquals(expected, table.operations().keySet().stream()
@@ -426,6 +425,12 @@ class RequestResourceMembersTest {
                 Map.of(), Map.of(), null, Map.of(), false, null)),
                 parseUnchecked("{\"namespaces\":{\"a\":[]}," + formats + ",\"operations\":{\"a:Op\":{\"types\":[],"
                         + "\"resources\":[]," + makes + "}}}").makes().get("a:Op"));
+        // So does a create acting on other types alone (Glue's CreateConnection, on its connection type).
+        String kinds = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
+                + "\"kind\":\"arn:${Partition}:a:${Region}:${Account}:kind/${KindName}\"}}";
+        assertEquals(List.of("thing"), parseUnchecked("{\"namespaces\":{\"a\":[]}," + kinds
+                + ",\"operations\":{\"a:Op\":{\"types\":[\"kind\"],\"resources\":[]," + makes + "}}}")
+                .makes().get("a:Op").getFirst().types());
         for (String bad : List.of("\"types\":[\"thing\"],\"resources\":[]," + makes, "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"type\":\"thing\",\"fill\":{},\"made\":true}]", "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"types\":[\"thing\"],\"arn\":\"ThingArn\"}]")) {
@@ -554,11 +559,11 @@ class RequestResourceMembersTest {
     }
 
     /**
-     * Each resource a create whose action acts on no type makes, from a request naming it, is where its tags go, and
-     * the create itself names none.
+     * Each resource a create whose action acts on no type, or on other types alone, makes, from a request naming it,
+     * is where its tags go, and a create acting on no type names nothing itself.
      */
     @TestFactory
-    Stream<DynamicTest> everyResourceACreateActingOnNoTypeMakesIsWhereItsTagsGo() {
+    Stream<DynamicTest> everyResourceACreateMakesIsWhereItsTagsGo() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         return table.makes().entrySet().stream().map(operation -> DynamicTest.dynamicTest(operation.getKey(), () -> {
             String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
@@ -578,8 +583,10 @@ class RequestResourceMembersTest {
                     "000000000000");
             assertEquals(List.of(expected), RequestResources.created(operation.getKey(), null, json(body.toString()),
                     "aws", "us-east-1", "000000000000", labels), body + " " + labels);
-            assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
-                    "us-east-1", "000000000000", null, labels));
+            if (table.types().getOrDefault(operation.getKey(), List.of()).isEmpty()) {
+                assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
+                        "us-east-1", "000000000000", null, labels));
+            }
         }));
     }
 
@@ -594,6 +601,15 @@ class RequestResourceMembersTest {
                     String parent = example(table.formats().get(namespace).get(created.parent()).format());
                     String child = example(table.formats().get(namespace).get(created.type()).format());
                     String expected = child.substring(0, child.length() - 1) + "*";
+                    // A REST request carrying the parent's ARN in its path names it there alone (S3 Tables'
+                    // CreateTable, under /tables/{tableBucketARN}/...), as its handler reads it.
+                    String where = table.located().getOrDefault(operation.getKey(), Map.of()).get(created.arn().name());
+                    if (where != null && where.startsWith("{")) {
+                        assertTrue(RequestResources.created(operation.getKey(), null, json("{}"), "aws", "us-east-1",
+                                "000000000000", Map.of(where.substring(1, where.length() - 1), parent))
+                                .contains(expected), where + " " + parent);
+                        return;
+                    }
                     ObjectNode body = MAPPER.createObjectNode();
                     if (created.arn().list()) {
                         body.putArray(created.arn().name()).add(parent);

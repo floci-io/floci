@@ -4,7 +4,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
 public record ExternalSchemaBinding(String accountId, String clusterKey, String databaseName,
-                                   String schemaName, String glueDatabase, String iamRoleArn) {
+                                   String schemaName, String glueDatabase, String iamRoleArn)
+        implements SchemaBinding {
     public ExternalSchemaBinding {
         require(accountId, "accountId");
         require(clusterKey, "clusterKey");

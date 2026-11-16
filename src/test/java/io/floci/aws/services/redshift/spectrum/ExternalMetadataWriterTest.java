@@ -57,6 +57,27 @@ class ExternalMetadataWriterTest {
     }
 
     @Test
+    void kinesisSchemaListsAsKindNineWithItsRoleAndNoTables() {
+        KinesisSchemaBinding kinesis = new KinesisSchemaBinding("000000000000", "000000000000:c", "dev", "kds",
+                "us-west-2", "arn:aws:iam::000000000000:role/R");
+
+        String sql = writer.refreshKinesisSql(kinesis);
+
+        assertThat(sql, containsString("SELECT floci_internal.refresh_external_catalog(E'kds'"));
+        assertThat(sql, containsString("\"eskind\":9"));
+        assertThat(sql, containsString("\"databasename\":\"\""));
+        assertThat(sql, containsString("IAM_ROLE"));
+        assertThat(sql, containsString("\"tables\":[]"));
+    }
+
+    @Test
+    void glueSchemaPayloadLeavesTheKindToTheViewDefault() {
+        String sql = writer.refreshSql(BINDING, List.of(), Map.of());
+
+        assertThat(sql.contains("eskind"), equalTo(false));
+    }
+
+    @Test
     void refreshSqlUsesPartitionStorageSettings() throws Exception {
         StorageDescriptor tableDescriptor = new StorageDescriptor();
         tableDescriptor.setSerdeInfo(serdeInfo("table-serde", Map.of("source", "table")));

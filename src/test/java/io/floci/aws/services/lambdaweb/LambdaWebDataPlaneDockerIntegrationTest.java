@@ -10,6 +10,7 @@ import io.floci.aws.services.cloudfront.model.OriginAccessControl;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -23,7 +24,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -44,8 +44,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -548,7 +546,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     @Timeout(180)
     void anEnvironmentRunsTheCodeTheRevisionWasCreatedFrom() throws Exception {
         String domain = createFunction(30);
-        s3Service.putObject(BUCKET, functionName + ".zip", zip("process.exit(1);"), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, functionName + ".zip", LambdaCodeFixtures.nodeJsZip("process.exit(1);"),
+                "application/zip", Map.of());
 
         given().header("Host", domain).when().get("/status/200").then().statusCode(200).body(equalTo("status body"));
     }
@@ -672,7 +671,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
         LambdaWebRoles.trustLambda(iamService, ROLE);
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, functionName + ".zip", LambdaCodeFixtures.nodeJsZip(APP), "application/zip", Map.of());
         return given().contentType("application/json")
                 .body("""
                         {"functionName": "%s",
@@ -940,16 +939,6 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         String prefix = name + ":";
         return List.of(head.split("\r\n")).stream()
                 .filter(line -> line.regionMatches(true, 0, prefix, 0, prefix.length())).toList();
-    }
-
-    private static byte[] zip(String indexJs) throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(indexJs.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
     }
 
     private boolean isDockerAvailable() {

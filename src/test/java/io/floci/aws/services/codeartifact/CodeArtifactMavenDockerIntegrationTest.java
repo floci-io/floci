@@ -835,6 +835,42 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * A throwaway groupId/artifactId, not {@link #GAV}: {@code ListPackageVersionDependencies}
+     * parses this version's own real POM, fetched back off the real Reposilite sidecar, rather
+     * than anything hand-built in process.
+     */
+    @Test
+    @Order(25)
+    void listPackageVersionDependenciesParsesTheRealPomFetchedBackFromReposilite() {
+        byte[] jar = "depcheck-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        String pomXml = "<project><parent><groupId>com.example</groupId><artifactId>depcheck-parent</artifactId>"
+                + "<version>9.0.0</version></parent><dependencies>"
+                + "<dependency><groupId>com.example</groupId><artifactId>depcheck-dep</artifactId>"
+                + "<version>2.0.0</version><scope>test</scope></dependency>"
+                + "</dependencies></project>";
+        given().header("Authorization", "Bearer " + bearerToken).body(jar)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/depcheck/1.0.0/depcheck-1.0.0.jar")
+                .then().statusCode(200);
+        given().header("Authorization", "Bearer " + bearerToken).body(pomXml.getBytes(StandardCharsets.UTF_8))
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO + "/com/example/depcheck/1.0.0/depcheck-1.0.0.pom")
+                .then().statusCode(200);
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/version/dependencies?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example&package=depcheck&version=1.0.0")
+                .then().statusCode(200)
+                .body("package", equalTo("depcheck"))
+                .body("dependencies.size()", equalTo(2))
+                .extract().jsonPath();
+        List<String> dependencyTypes = body.getList("dependencies.dependencyType", String.class);
+        List<String> packageNames = body.getList("dependencies.package", String.class);
+        assertTrue(dependencyTypes.contains("parent"), "expected a parent entry among " + dependencyTypes);
+        assertTrue(packageNames.contains("depcheck-parent"));
+        assertTrue(dependencyTypes.contains("test"), "expected a test-scoped entry among " + dependencyTypes);
+        assertTrue(packageNames.contains("depcheck-dep"));
+    }
+
+    /**
      * Reads the real Reposilite instance's own {@code maven} settings domain directly (the same
      * shared container {@link ReposiliteSidecarManager} started for every test in this class).
      */

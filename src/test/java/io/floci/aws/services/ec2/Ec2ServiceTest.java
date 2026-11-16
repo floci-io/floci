@@ -163,6 +163,49 @@ import static org.mockito.Mockito.withSettings;
 class Ec2ServiceTest {
 
     @ParameterizedTest
+    @CsvSource({"false, us-east-1", "true, us-east-1", "false, eu-west-1", "true, eu-west-1"})
+    void ipv6AllocationWaitsForThePreviousVpcPublication(boolean associate, String secondRegion) throws Exception {
+        AccountAwareStorageBackend<Vpc> vpcStore = spy(AccountAwareStorageBackend.<Vpc>inMemory("000000000000"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-vpcs.json", vpcStore)));
+        Vpc existing = service.createVpc(secondRegion, "10.112.0.0/16", false);
+        CountDownLatch publishing = new CountDownLatch(1);
+        CountDownLatch resume = new CountDownLatch(1);
+        doAnswer(call -> {
+            Vpc publishingVpc = call.getArgument(1);
+            if ("10.111.0.0/16".equals(publishingVpc.getCidrBlock())) {
+                publishing.countDown();
+                assertTrue(resume.await(15, TimeUnit.SECONDS));
+            }
+            return call.callRealMethod();
+        }).when(vpcStore).put(anyString(), any(Vpc.class));
+        AtomicReference<Thread> allocating = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<Vpc> first = workers.submit(() -> service.createVpc("us-east-1", "10.111.0.0/16", false, true));
+            assertTrue(publishing.await(5, TimeUnit.SECONDS));
+            Future<String> second = workers.submit(() -> {
+                allocating.set(Thread.currentThread());
+                return associate
+                        ? service.associateAmazonProvidedIpv6CidrBlock(secondRegion, existing.getVpcId()).getIpv6CidrBlock()
+                        : service.createVpc(secondRegion, "10.113.0.0/16", false, true)
+                                .getIpv6CidrBlockAssociationSet().getFirst().getIpv6CidrBlock();
+            });
+            awaitBlockedOrDone(allocating, second);
+            assertFalse(second.isDone(), "A new allocation must wait until the previous block is visible in storage");
+            resume.countDown();
+            String firstBlock = first.get(5, TimeUnit.SECONDS).getIpv6CidrBlockAssociationSet().getFirst()
+                    .getIpv6CidrBlock();
+            assertNotEquals(firstBlock, second.get(5, TimeUnit.SECONDS));
+        } finally {
+            resume.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
     @CsvSource({
             "false, aws:autoscaling:groupName", "true, aws:autoscaling:groupName",
             "false, AWS:custom", "true, AWS:custom",
@@ -537,6 +580,74 @@ class Ec2ServiceTest {
                         .map(volume -> volume.getAttachments().getFirst())
                         .map(a -> a.getDevice() + "=" + a.isDeleteOnTermination())
                         .collect(Collectors.toSet()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"terminate", "settle", "rollback"})
+    void logicalRootDeletionDoesNotRequireABlockDeviceHelper(String operation) {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        when(devices.isAvailable()).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(),
+                null, null, devices);
+        Reservation launch = service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null);
+        Instance instance = launch.getInstances().getFirst();
+        String rootId = instance.getRootVolumeId();
+        service.createTags("us-east-1", List.of(rootId), List.of(new Tag("Owner", "root")));
+
+        switch (operation) {
+            case "terminate" -> service.terminateInstances("us-east-1", List.of(instance.getInstanceId()));
+            case "rollback" -> service.rollBackLaunch("us-east-1", launch);
+            case "settle" -> instance.setState(InstanceState.terminated());
+            default -> throw new IllegalArgumentException(operation);
+        }
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(rootId))).isEmpty());
+        verify(devices, never()).deleteVolume(anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rollbackDeletesRetainedLogicalRootWithoutBlockDeviceCleanup(boolean settleFirst) {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        when(devices.isAvailable()).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(),
+                null, null, devices);
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeSize(5);
+        ebs.setDeleteOnTermination(false);
+        LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
+        root.setDeviceName("/dev/xvda");
+        root.setEbs(ebs);
+        LaunchTemplateData.BlockDeviceMapping data = new LaunchTemplateData.BlockDeviceMapping();
+        data.setDeviceName("/dev/sdf");
+        data.setEbs(ebs);
+        Reservation launch = service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null,
+                null, null, 0, null, null, null, null, false, null, null,
+                List.of(root, data), false, null, null);
+        Instance instance = launch.getInstances().getFirst();
+        String rootId = instance.getRootVolumeId();
+        String dataId = launch.getLaunchVolumeIds().stream()
+                .filter(id -> !rootId.equals(id)).findFirst().orElseThrow();
+        service.createTags("us-east-1", List.of(rootId, dataId), List.of(new Tag("Owner", "launch")));
+        if (settleFirst) {
+            instance.setState(InstanceState.terminated());
+            assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                    .allMatch(volume -> volume.getAttachments().isEmpty()));
+        }
+
+        service.rollBackLaunch("us-east-1", launch);
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(rootId, dataId))).isEmpty());
+        verify(devices, never()).deleteVolume(rootId);
+        verify(devices).deleteVolume(dataId);
     }
 
     private static Reservation launchKeepingADataVolume(Ec2Service service) {
@@ -3557,6 +3668,25 @@ class Ec2ServiceTest {
 
         assertEquals("arm64", reservation.getInstances().getFirst().getArchitecture());
         assertEquals(reservation.getOwnerId(), reservation.getInstances().getFirst().getOwnerId());
+    }
+
+    @Test
+    void runInstancesRefusesAnImageWhoseArchitectureTheInstanceTypeCannotRun() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException graviton = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-amd64", "m6g.large", 1, 1, null, List.of(), null, null, List.of(), null, null));
+        AwsException intel = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-arm64", "t3.micro", 1, 1, null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("InvalidParameterValue", graviton.getErrorCode());
+        assertEquals("The architecture 'arm64' of the specified instance type does not match the architecture "
+                + "'x86_64' of the specified AMI.", graviton.getMessage());
+        assertEquals("The architecture 'x86_64' of the specified instance type does not match the architecture "
+                + "'arm64' of the specified AMI.", intel.getMessage());
     }
 
     @Test

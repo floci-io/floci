@@ -108,7 +108,16 @@ Editing a permission set marks its provisioned copies stale. Explicit reprovisio
 the role without changing its ARN or role ID, removes policies no longer configured, and
 preserves the previous role configuration if that account's desired policies cannot be
 validated. A missing policy or invalid inline document reports a `FAILED` provisioning or
-assignment operation with a failure reason. Failed assignment creation leaves no assignment.
+assignment operation with a failure reason. What makes an inline document invalid is the reading IAM
+gives it, the role being where it lands: `PutInlinePolicyToPermissionSet` holds the document to its
+size and its non-whitespace quota, as AWS documents a syntax error there, and the policy language's
+own values are read when the document is applied, so one naming an action that no vendor prefaces, a
+resource that is neither an ARN nor `*`, an effect the language does not define or a version it does
+not publish is attached and then reported in that failure reason. See
+[IAM](iam.md#inline-policies) for the sentences each clause is refused with. A permission set keeps
+whatever document it was attached, so one stored before a clause was read reports that failure
+reason on its next provisioning, refresh or assignment rather than when it was attached, and
+provisions again once the document is replaced. Failed assignment creation leaves no assignment.
 `ALL_PROVISIONED_ACCOUNTS` refreshes the permission set's currently provisioned accounts;
 an operation can fail after an earlier account was refreshed.
 

@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -106,6 +107,41 @@ class NuspecXmlTest {
         byte[] nupkg = buildNupkg(nuspec);
 
         assertThrows(IllegalStateException.class, () -> NuspecXml.extractFromNupkg(nupkg));
+    }
+
+    @Test
+    void dependenciesFlattensEveryTargetFrameworkGroupAndAllowsTheSamePackageTwice() {
+        String nuspec = "<?xml version=\"1.0\"?><package><metadata><id>Demo</id><version>1.0.0</version>"
+                + "<dependencies>"
+                + "<group targetFramework=\"net6.0\"><dependency id=\"Newtonsoft.Json\" version=\"13.0.1\"/></group>"
+                + "<group targetFramework=\"netstandard2.0\"><dependency id=\"Newtonsoft.Json\" version=\"12.0.3\"/>"
+                + "<dependency id=\"NoVersion\"/></group>"
+                + "</dependencies></metadata></package>";
+
+        List<NuspecXml.RawDependency> dependencies = NuspecXml.dependencies(nuspec.getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(3, dependencies.size());
+        assertEquals(new NuspecXml.RawDependency("Newtonsoft.Json", "13.0.1"), dependencies.get(0));
+        assertEquals(new NuspecXml.RawDependency("Newtonsoft.Json", "12.0.3"), dependencies.get(1));
+        assertEquals(new NuspecXml.RawDependency("NoVersion", null), dependencies.get(2));
+    }
+
+    @Test
+    void dependenciesHandlesTheLegacySchemaWithNoGroupWrapper() {
+        String nuspec = "<?xml version=\"1.0\"?><package><metadata><id>Demo</id><version>1.0.0</version>"
+                + "<dependencies><dependency id=\"Old.Style\" version=\"1.2.3\"/></dependencies>"
+                + "</metadata></package>";
+
+        List<NuspecXml.RawDependency> dependencies = NuspecXml.dependencies(nuspec.getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(List.of(new NuspecXml.RawDependency("Old.Style", "1.2.3")), dependencies);
+    }
+
+    @Test
+    void dependenciesIsEmptyWhenTheNuspecDeclaresNone() {
+        List<NuspecXml.RawDependency> dependencies = NuspecXml.dependencies(NUSPEC.getBytes(StandardCharsets.UTF_8));
+
+        assertTrue(dependencies.isEmpty());
     }
 
     private static byte[] buildNupkg(String rootNuspecOrNull) {

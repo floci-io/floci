@@ -506,7 +506,7 @@ public class IamPolicyEvaluator {
             return false;
         }
         for (PolicyStatement stmt : parseAll(List.of(policyDocument))) {
-            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+            if (!stmt.isAllow()) {
                 continue;
             }
             if (stmt.getActions() != null) {
@@ -543,7 +543,7 @@ public class IamPolicyEvaluator {
     public List<String> servicesGrantedBy(List<String> policyDocuments) {
         Set<String> granted = new TreeSet<>();
         for (PolicyStatement stmt : parseAll(policyDocuments)) {
-            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+            if (!stmt.isAllow()) {
                 continue;
             }
             if (stmt.getNotActions() != null) {
@@ -1057,18 +1057,24 @@ public class IamPolicyEvaluator {
         return match;
     }
 
-    /** A {@code NotPrincipal} statement applies to every caller it does not spare. */
+    /**
+     * A {@code NotPrincipal} statement applies to every caller it does not spare. A {@code
+     * Principal} the statement carries decides it instead, naming nobody included, and an element
+     * that names nobody carves nobody out, so the statement covers no caller.
+     */
     private PrincipalMatch principalMatch(PolicyStatement stmt, RequestPrincipal principal) {
-        if (stmt.getPrincipals() != null) {
-            return matchAnyPrincipal(stmt.getPrincipals(), principal);
+        Map<String, List<String>> principals = stmt.getPrincipals();
+        if (principals != null) {
+            return matchAnyPrincipal(principals, principal);
         }
-        if (stmt.getNotPrincipals() != null) {
-            boolean spared = stmt.isDeny()
-                    ? sparedFromDeny(stmt.getNotPrincipals(), principal)
-                    : matchAnyPrincipal(stmt.getNotPrincipals(), principal) != PrincipalMatch.NONE;
-            return spared ? PrincipalMatch.NONE : PrincipalMatch.CALLER;
+        Map<String, List<String>> notPrincipals = stmt.getNotPrincipals();
+        if (notPrincipals == null || notPrincipals.isEmpty()) {
+            return PrincipalMatch.NONE;
         }
-        return PrincipalMatch.NONE;
+        boolean spared = stmt.isDeny()
+                ? sparedFromDeny(notPrincipals, principal)
+                : matchAnyPrincipal(notPrincipals, principal) != PrincipalMatch.NONE;
+        return spared ? PrincipalMatch.NONE : PrincipalMatch.CALLER;
     }
 
     /**
@@ -1884,7 +1890,10 @@ public class IamPolicyEvaluator {
         // nothing. An Effect that is absent, is not a string, or names neither is read as neither:
         // the statement grants nothing, denies nothing, and leaves the request to the rest of the
         // document. Reading an absent Effect as an Allow would grant on a statement that describes
-        // no permission.
+        // no permission. The two words are the words themselves, "The Effect value is case
+        // sensitive" (IAM User Guide, "AWS JSON policy elements: Effect"), which is the comparison
+        // IamPolicyDocuments makes of a document being written, so "allow" states nothing here
+        // rather than granting what no write of this package would have stored.
         String effect = stmt.path("Effect").isTextual() ? stmt.get("Effect").asText() : "";
         Map<String, List<String>> principals = parsePrincipals(stmt.get("Principal"));
         Map<String, List<String>> notPrincipals = parsePrincipals(stmt.get("NotPrincipal"));
@@ -1908,29 +1917,47 @@ public class IamPolicyEvaluator {
                 stmt.path("Sid").isTextual() ? stmt.get("Sid").asText() : null);
     }
 
+    /**
+     * The callers a {@code Principal} or {@code NotPrincipal} element names, by principal type.
+     * Each of them is written as a {@code <principal_id_string>}, so an entry that is no string
+     * names nobody, as {@link #patternValues} reads the action and resource patterns beside it. An
+     * element naming nobody at all is no principal element rather than one naming an empty list,
+     * which the typed spelling already came to by dropping a type whose entries named nobody and
+     * the string and list spellings are read the same way here.
+     *
+     * <p>Where it tells is {@code NotPrincipal}, the element whose statement covers every caller it
+     * does not name: one naming nobody spared nobody, so an {@code Allow} whose {@code
+     * NotPrincipal} was an empty list, or a list of entries that are no strings, granted to anyone
+     * the statement otherwise covered. A statement whose principal element names nobody matches no
+     * caller now, which is how a {@code NotAction} or {@code NotResource} naming nothing already
+     * leaves a statement matching neither.
+     *
+     * <p>An element that is written and names nobody is still the element the statement carries, so
+     * this answers an empty map rather than null and only an absent element answers null. A
+     * statement carrying both elements is a shape the grammar does not describe, and the {@code
+     * Principal} it names decides it either way, so writing that one as an empty list leaves the
+     * statement matching nobody instead of handing the decision to the {@code NotPrincipal} beside
+     * it.
+     */
     private Map<String, List<String>> parsePrincipals(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }
         Map<String, List<String>> result = new LinkedHashMap<>();
-        if (node.isTextual()) {
-            result.put("*", List.of(node.asText()));
-            return result;
-        }
-        if (node.isArray()) {
-            result.put("*", patternValues(node));
-            return result;
-        }
-        if (node.isObject()) {
+        if (node.isTextual() || node.isArray()) {
+            List<String> values = patternValues(node);
+            if (!values.isEmpty()) {
+                result.put("*", values);
+            }
+        } else if (node.isObject()) {
             node.fields().forEachRemaining(entry -> {
                 List<String> values = patternValues(entry.getValue());
                 if (!values.isEmpty()) {
                     result.put(entry.getKey(), values);
                 }
             });
-            return result.isEmpty() ? null : result;
         }
-        return null;
+        return result;
     }
 
     private Map<String, Map<String, List<String>>> parseConditions(JsonNode condNode) {

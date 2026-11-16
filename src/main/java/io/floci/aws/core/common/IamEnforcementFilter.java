@@ -399,6 +399,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         ResolvedAuthorization resolvedAuthorization = resolveAuthorization(auth, claimedScope, ctx);
         String credentialScope = resolvedAuthorization.credentialScope();
         String action = resolvedAuthorization.action();
+        if (IamActionRegistry.takenByDocumentedRoute(credentialScope, ctx)) {
+            // Another API's request (Glue's Iceberg REST endpoint takes Apache Iceberg's) carries none of the
+            // operation's members, so none is read from it: not its resources, condition keys, tags or roles.
+            IamConditionContextResolver.readNoMembers(ctx);
+        }
         if (action == null) {
             if (!"OPTIONS".equalsIgnoreCase(ctx.getMethod())
                     && iamService.presignedScope(akid).isPresent()) {
@@ -782,9 +787,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return false;
         }
         String prefix = "s3:ListBucket".equals(action) ? ctx.getUriInfo().getQueryParameters().getFirst("prefix") : null;
+        // the session's own account must own the bucket: a same-named scratch bucket of another account is out of bounds
+        String sessionAccountId = AwsArnUtils.accountOrDefault(callerArns.principalArn(), null);
         for (S3ScratchSpace space : S3ScratchSpace.values()) {
             if (space.permits(action, allowed.get(), resources, prefix)
-                    && s3ServiceProvider.get().isScratchBucket(space.bucketName())) {
+                    && s3ServiceProvider.get().isScratchBucket(space.bucketName(), sessionAccountId)) {
                 return true;
             }
         }
@@ -1839,7 +1846,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * Logs, Secrets Manager and KMS targets depend on the serving operation and the request's partition, STS
      * targets on the serving operation;
-     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in, as are
+     * Pipes and DSQL targets on the request's partition, which those services mint their ARNs in, as are
      * API Gateway's path ARNs; and the
      * targets of a namespace the table of request resources reads on {@code operation}, the one the request is
      * dispatched as (see {@link RequestResources}).
@@ -1855,8 +1862,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("sts".equals(credentialScope)) {
             return arnBuilder.buildStsResources(action, ctx);
         }
-        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope) || "dsql".equals(credentialScope)
-                || "apigateway".equals(credentialScope)) {
+        if ("pipes".equals(credentialScope) || "dsql".equals(credentialScope) || "apigateway".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
         // ARNs the table renders take the request's partition, which a Region Floci does not know cannot be mapped to.

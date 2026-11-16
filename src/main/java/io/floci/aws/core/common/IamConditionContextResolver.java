@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
@@ -20,6 +21,7 @@ import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
+import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3ConditionKeys;
 import io.floci.aws.services.s3.S3ControlTagConditionKeys;
 import io.floci.aws.services.s3.S3ObjectActions;
@@ -50,6 +52,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Function;
@@ -78,6 +81,8 @@ public class IamConditionContextResolver {
     /** Set by {@code ResourceArnBuilder.readJsonBody}, which runs earlier in the same filter pass. */
     static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
     private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
+    /** Set on a request that carries none of its operation's members, see {@link #readNoMembers}. */
+    private static final String NO_MEMBERS = "floci.noRequestMembers";
     /** Prefixes the action whose numbered EC2 targets {@link #heldTargets} looked up for the request. */
     private static final String HELD_TARGETS = "floci.heldTargets.";
     private static final String REQUEST_TAG_PREFIX = "aws:RequestTag/";
@@ -342,6 +347,17 @@ public class IamConditionContextResolver {
         return conditions;
     }
 
+    /** The condition key whose value a delegation can decide rather than the request. */
+    private static final String PERMISSIONS_BOUNDARY_KEY = "iam:PermissionsBoundary";
+
+    /** The boundary the caller's delegation registered, or empty for any other caller. */
+    private Optional<String> delegatedBoundary() {
+        if (iamService.isUnsatisfied() || requestContext == null) {
+            return Optional.empty();
+        }
+        return iamService.get().delegatedRoleBoundaryArn(requestContext.getAccessKeyId());
+    }
+
     private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
         Map<String, String> targets = IamConditionKeys.targets(action);
@@ -357,6 +373,13 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
+        // iam:PermissionsBoundary names the boundary the request will leave on the principal, so a
+        // role created under a delegation publishes the cap that delegation registered rather than
+        // whatever the call asked for: the write applies the cap, and a policy conditioned on the
+        // boundary has to be told the same value the role ends up with.
+        if (members.containsKey(PERMISSIONS_BOUNDARY_KEY) && "iam:CreateRole".equals(action)) {
+            delegatedBoundary().ifPresent(arn -> conditions.put(PERMISSIONS_BOUNDARY_KEY, List.of(arn)));
+        }
         targets.forEach((key, target) -> {
             if (key.contains("${TagKey}")) {
                 Map<String, String> tags = storedTargetValue(target, form.get(target), IamRole::getTags, IamUser::getTags);
@@ -609,25 +632,28 @@ public class IamConditionContextResolver {
                     .forEach(value -> putIfPresent(conditions, REQUEST_AUTH_TYPE, value));
         }
         if (RequestConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
-            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
+            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(action, ctx));
         }
         return conditions.isEmpty() ? null : conditions;
     }
 
-    private String storedAuthType(ContainerRequestContext ctx) {
+    /** The authType of the web function endpoint the request names, as the request resources read it. */
+    private String storedAuthType(String action, ContainerRequestContext ctx) {
         if (!lambdaWebService.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
-        String endpointArn = ResourceArnBuilder.webFunctionArn(ctx.getUriInfo().getPath(), region,
-                requestContext.getAccountId());
+        String endpointArn = RequestResources.of(action, ctx, regionResolver.partitionForRegion(region), region,
+                        requestContext.getAccountId(), null, IamActionRegistry.pathLabels("lambda", ctx)).stream()
+                .filter(arn -> arn.contains("/endpoint/")).findFirst().orElse("");
         int child = endpointArn.lastIndexOf("/endpoint/");
         if (child < 0) {
             return null;
         }
         try {
-            return lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
-                    endpointArn.substring(child + "/endpoint/".length())).authType;
+            WebFunctionEndpoint endpoint = lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
+                    endpointArn.substring(child + "/endpoint/".length()));
+            return endpoint == null ? null : endpoint.authType;
         } catch (AwsException expected) {
             // The handler refuses the same names, so the key is only left out, as for a missing endpoint on AWS.
             return null;
@@ -1173,6 +1199,21 @@ public class IamConditionContextResolver {
     // ── Request body access ─────────────────────────────────────────────────────
 
     /**
+     * Has every reader of the request's members read none from it: its JSON body reads as one naming nothing, and its
+     * form, its raw body and a Query request's parameters as absent. A request a route AWS documents outside botocore
+     * takes is another API's, so a member its body gives was added by the caller, naming a resource or giving a
+     * condition key a value its handler never acts on.
+     */
+    static void readNoMembers(ContainerRequestContext ctx) {
+        ctx.setProperty(NO_MEMBERS, Boolean.TRUE);
+        ctx.setProperty(BUFFERED_JSON_BODY, JsonNodeFactory.instance.objectNode());
+    }
+
+    private static boolean carriesNoMembers(ContainerRequestContext ctx) {
+        return Boolean.TRUE.equals(ctx.getProperty(NO_MEMBERS));
+    }
+
+    /**
      * The decoded form parameters of a Query-protocol request, buffered once per request and
      * restored for the controller that reads the form next. A repeated key keeps its first
      * value, which is the value the Query handlers read through {@code getFirst}, so the
@@ -1180,6 +1221,9 @@ public class IamConditionContextResolver {
      */
     @SuppressWarnings("unchecked")
     static Map<String, String> formParameters(ContainerRequestContext ctx) {
+        if (carriesNoMembers(ctx)) {
+            return Map.of();
+        }
         if ("GET".equalsIgnoreCase(ctx.getMethod()) && IamActionRegistry.isQueryRequest(ctx)) {
             Map<String, String> parameters = new LinkedHashMap<>();
             ctx.getUriInfo().getQueryParameters().forEach((key, values) -> {
@@ -1219,8 +1263,14 @@ public class IamConditionContextResolver {
         return parameters;
     }
 
-    /** Reads the entity fully and puts an equivalent stream back for downstream readers. */
+    /**
+     * Reads the entity fully and puts an equivalent stream back for downstream readers; none for a request that
+     * carries no members, whose entity is left to its handler.
+     */
     static byte[] bufferEntity(ContainerRequestContext ctx) {
+        if (carriesNoMembers(ctx)) {
+            return null;
+        }
         InputStream in = ctx.getEntityStream();
         if (in == null) {
             return null;

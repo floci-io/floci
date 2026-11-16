@@ -12,8 +12,6 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -47,24 +45,6 @@ class CloudFormationLogGroupProvisionerTest {
                 .objectMapper(mapper)
                 .logs(logsService)
                 .build();
-    }
-
-    @Test
-    void legacyExplicitNameWithNoRecordedMode_replacesWhenNameIsRemoved() {
-        // Simulates a log group created before FlociLogGroupNameMode was tracked: no attributes at
-        // all, and a physical id that does not match generatePhysicalName's shape, so it must have
-        // been an explicit LogGroupName the caller chose.
-        String legacyExplicitName = "my-hand-chosen-log-group";
-        when(logsService.logGroupExists(legacyExplicitName, REGION)).thenReturn(true);
-
-        StackResource result = provision("{}", legacyExplicitName, Map.of());
-
-        assertEquals("CREATE_COMPLETE", result.getStatus());
-        assertNotEquals(legacyExplicitName, result.getPhysicalId());
-        assertTrue(result.getPhysicalId().startsWith(STACK_NAME + "-LogGroup-"),
-                "expected a freshly generated name, got: " + result.getPhysicalId());
-        verify(logsService).createLogGroup(eq(result.getPhysicalId()), isNull(), anyMap(), eq(REGION));
-        verify(logsService).deleteLogGroup(legacyExplicitName, REGION);
     }
 
     @Test

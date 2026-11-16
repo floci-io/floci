@@ -3,6 +3,7 @@ package io.floci.aws.services.lambdaweb;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.IamEnforcementProfile;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -163,7 +164,7 @@ class LambdaWebCodeBucketIntegrationTest {
     }
 
     private String put(String in) {
-        return s3Service.putObject(in, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of())
+        return s3Service.putObject(in, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of())
                 .getVersionId();
     }
 

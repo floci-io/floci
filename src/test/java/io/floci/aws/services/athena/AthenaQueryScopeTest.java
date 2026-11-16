@@ -1,6 +1,5 @@
 package io.floci.aws.services.athena;
 
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageFactory;
@@ -28,7 +27,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * A query runs on a worker after the call that started it has returned, with no request scope of its own;
@@ -68,7 +66,7 @@ class AthenaQueryScopeTest {
             return null;
         }).when(duckClient).execute(anyString(), any(), any(), any());
         AthenaService athena = new AthenaService(storageFactory, duckClient, glueService, mock(S3Service.class),
-                realQueries(), vertx, ddlBuilder, regionResolver);
+                AthenaTestConfigs.realQueries(), vertx, ddlBuilder, regionResolver, mock(AthenaIcebergStatements.class));
         try {
             String expected = RequestScopes.callAs(account, REGION, () -> {
                 glueService.createDatabase(new Database(database));
@@ -81,23 +79,13 @@ class AthenaQueryScopeTest {
             String id = RequestScopes.callAs(account, REGION,
                     () -> athena.startQueryExecution("SELECT 1", "primary", context, null));
 
-            assertEquals(List.of(expected, account), handedToDuck.get(10, TimeUnit.SECONDS));
+            assertEquals(List.of(TrinoSqlCompatibility.FUNCTION_MACROS + expected, account),
+                    handedToDuck.get(10, TimeUnit.SECONDS));
             await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50)).untilAsserted(() ->
                     assertEquals(QueryExecutionState.SUCCEEDED, RequestScopes.callAs(account, REGION,
                             () -> athena.getQueryExecution(id).getStatus().getState())));
         } finally {
             RequestScopes.runAs(account, REGION, () -> glueService.deleteDatabase(database));
         }
-    }
-
-    /** A configuration under which a query is handed to the duck client rather than answered at once. */
-    private static EmulatorConfig realQueries() {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.AthenaServiceConfig athena = mock(EmulatorConfig.AthenaServiceConfig.class);
-        when(config.services()).thenReturn(services);
-        when(services.athena()).thenReturn(athena);
-        when(athena.mock()).thenReturn(false);
-        return config;
     }
 }

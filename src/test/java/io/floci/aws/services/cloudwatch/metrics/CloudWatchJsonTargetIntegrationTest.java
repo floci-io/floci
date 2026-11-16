@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * CloudWatch JSON 1.0 requests name their operation with either target prefix: the
  * {@code GraniteServiceVersion20100801.} prefix of the AWS SDKs, or the
  * {@code CloudWatchVersion20130116.} prefix of the CloudWatch console's API. The console prefix
- * reaches the same metrics and alarms for four operations and the request members the handler
+ * reaches the same metrics and alarms for five operations and the request members the handler
  * honours for them. It refuses the other operations, other members that are set, and a
  * {@code DescribeAlarms} answer listing an alarm defined with {@code Metrics}, which the handler
  * would otherwise ignore or answer in a shape the console's API does not have; top-level
@@ -130,7 +130,6 @@ class CloudWatchJsonTargetIntegrationTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            PutMetricData       | {"Namespace":"Example/JsonTarget","MetricData":[{"MetricName":"Requests","Value":1}]}
             SetAlarmState       | {"AlarmName":"json-target-none","StateValue":"OK","StateReason":"test"}
             PutDashboard        | {"DashboardName":"json-target-none","DashboardBody":"{}"}
             ListTagsForResource | {"ResourceARN":"arn:aws:cloudwatch:us-east-1:000000000000:alarm:json-target-none"}

@@ -5,6 +5,8 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.PersistentStorage;
+import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecr.model.ImageDetail;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.CreateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.ImageConfiguration;
@@ -32,7 +34,13 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class EmrServerlessServiceTest {
@@ -41,7 +49,12 @@ class EmrServerlessServiceTest {
     private static final String ACCOUNT_ID = "000000000000";
     private static final TypeReference<Map<String, Application>> APPLICATIONS = new TypeReference<>() {};
     private static final String CUSTOM_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+    private static final String DIGEST = "sha256:" + "a".repeat(64);
+    private static final String NEWER_DIGEST = "sha256:" + "b".repeat(64);
     private static final String OTHER_IMAGE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.1";
+    // Images in the application's own account's ECR, which an application resolves as it starts.
+    private static final String OWN_IMAGE = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+    private static final String OWN_NEWER_IMAGE = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/newer:7.5.0";
     // The settings a STARTED application's update may name, besides an idempotency token and the path's application.
     private static final Set<String> STARTED_UPDATE_MEMBERS = Set.of("setApplicationId", "setClientToken",
             "setMaximumCapacity", "setImageConfiguration", "setWorkerTypeSpecifications");
@@ -106,6 +119,176 @@ class EmrServerlessServiceTest {
         assertEquals(app.getCreatedAt(), reloaded.getCreatedAt());
         assertEquals(app.getUpdatedAt(), reloaded.getUpdatedAt());
         assertEquals("create-00abc", reloaded.getClientToken());
+    }
+
+    @Test
+    void anApplicationOf713OrEarlierResolvesItsImageAsItStartsAndKeepsItUntilItStartsAgain() {
+        EmrServerlessService service = service();
+        service.ecrService = ecrHolding("spark/custom", "7.5.0", DIGEST, "spark/newer", "7.5.0", NEWER_DIGEST);
+        CreateApplicationRequest create = createRequest();
+        create.setImageConfiguration(image(OWN_IMAGE));
+        String applicationId = service.createApplication(create).getApplicationId();
+        // "The image digest doesn't exist until an application has started."
+        assertNull(service.getApplication(applicationId).getImageConfiguration().getResolvedImageDigest());
+
+        service.startApplication(applicationId);
+
+        // "Custom images are resolved to a digest at application start" for EMR 7.13 and earlier.
+        Application started = service.getApplication(applicationId);
+        assertEquals(DIGEST, started.getImageConfiguration().getResolvedImageDigest());
+        assertEquals(DIGEST, started.getPinnedImages().get("").getResolvedImageDigest());
+        // "that digest is used for all jobs until the application restarts", an update notwithstanding.
+        UpdateApplicationRequest update = new UpdateApplicationRequest();
+        update.setImageConfiguration(image(OWN_NEWER_IMAGE));
+        service.updateApplication(applicationId, update);
+        assertEquals(OWN_IMAGE, service.getApplication(applicationId).getPinnedImages().get("").getImageUri());
+        service.stopApplication(applicationId);
+        service.startApplication(applicationId);
+        assertEquals(NEWER_DIGEST, service.getApplication(applicationId).getPinnedImages().get("")
+                .getResolvedImageDigest());
+    }
+
+    @Test
+    void anApplicationOf714OrLaterResolvesItsImageForEachRunUnlessItAsksOtherwise() {
+        EmrServerlessService service = service();
+        service.ecrService = ecrHolding("spark/custom", "7.5.0", DIGEST, "spark/newer", "7.5.0", NEWER_DIGEST);
+        CreateApplicationRequest later = createRequest();
+        later.setReleaseLabel("emr-7.14.0");
+        later.setImageConfiguration(image(OWN_IMAGE));
+        String laterId = service.createApplication(later).getApplicationId();
+        CreateApplicationRequest asked = createRequest();
+        asked.setReleaseLabel("emr-7.14.0");
+        asked.setImageConfiguration(image(OWN_IMAGE));
+        asked.getImageConfiguration().setApplicationLevelDigestResolution(true);
+        String askedId = service.createApplication(asked).getApplicationId();
+        CreateApplicationRequest declined = createRequest();
+        declined.setImageConfiguration(image(OWN_IMAGE));
+        declined.getImageConfiguration().setApplicationLevelDigestResolution(false);
+        String declinedId = service.createApplication(declined).getApplicationId();
+
+        service.startApplication(laterId);
+        service.startApplication(askedId);
+        service.startApplication(declinedId);
+
+        // "EMR 7.14 and later: applicationLevelDigestResolution = false".
+        assertNull(service.getApplication(laterId).getPinnedImages());
+        assertEquals(DIGEST, service.getApplication(askedId).getImageConfiguration().getResolvedImageDigest());
+        assertNull(service.getApplication(declinedId).getPinnedImages());
+    }
+
+    @Test
+    void anImageInAnotherAccountsRepositoryIsResolvedForEachRun() {
+        EmrServerlessService service = service();
+        EcrService ecr = ecrHolding("spark/custom", "7.5.0", DIGEST);
+        service.ecrService = ecr;
+        CreateApplicationRequest create = createRequest();
+        create.setImageConfiguration(image(CUSTOM_IMAGE));
+        String applicationId = service.createApplication(create).getApplicationId();
+
+        service.startApplication(applicationId);
+
+        // Floci does not check the application may pull another account's image, so it reads nothing of it.
+        assertNull(service.getApplication(applicationId).getPinnedImages());
+        assertNull(service.getApplication(applicationId).getImageConfiguration().getResolvedImageDigest());
+        verifyNoInteractions(ecr);
+    }
+
+    @Test
+    void anImageEcrDoesNotHoldIsResolvedForEachRunAndAnyOtherAnswerFailsTheStart() {
+        EmrServerlessService service = service();
+        for (String code : List.of("RepositoryNotFoundException", "ImageNotFoundException", "ServerException")) {
+            service.ecrService = ecrAnswering(new AwsException(code, "not held", 400));
+            CreateApplicationRequest create = createRequest();
+            create.setImageConfiguration(image(OWN_IMAGE));
+            String applicationId = service.createApplication(create).getApplicationId();
+
+            service.startApplication(applicationId);
+
+            assertEquals("STARTED", service.getApplication(applicationId).getState(), code);
+            assertNull(service.getApplication(applicationId).getPinnedImages(), code);
+        }
+
+        service.ecrService = ecrAnswering(new AwsException("InvalidParameterException", "Invalid tag.", 400));
+        CreateApplicationRequest create = createRequest();
+        create.setImageConfiguration(image(OWN_IMAGE));
+        String applicationId = service.createApplication(create).getApplicationId();
+        AwsException error = assertThrows(AwsException.class, () -> service.startApplication(applicationId));
+
+        assertEquals("InternalServerException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Invalid tag."), error.getMessage());
+        // The failed start leaves the application as it was.
+        assertEquals("CREATED", service.getApplication(applicationId).getState());
+        assertNull(service.getApplication(applicationId).getImageConfiguration().getResolvedImageDigest());
+    }
+
+    @Test
+    void aStoppedApplicationReportsNoDigestAndAStartThatResolvesNoneLeavesNone() {
+        EmrServerlessService service = service();
+        service.ecrService = ecrHolding("spark/custom", "7.5.0", DIGEST);
+        CreateApplicationRequest create = createRequest();
+        create.setImageConfiguration(image(OWN_IMAGE));
+        create.setWorkerTypeSpecifications(Map.of("Driver", workerType(OWN_IMAGE)));
+        String applicationId = service.createApplication(create).getApplicationId();
+        service.startApplication(applicationId);
+        assertEquals(DIGEST, service.getApplication(applicationId).getWorkerTypeSpecifications().get("Driver")
+                .getImageConfiguration().getResolvedImageDigest());
+
+        service.stopApplication(applicationId);
+
+        Application stopped = service.getApplication(applicationId);
+        assertNull(stopped.getImageConfiguration().getResolvedImageDigest());
+        assertNull(stopped.getWorkerTypeSpecifications().get("Driver").getImageConfiguration()
+                .getResolvedImageDigest());
+        UpdateApplicationRequest later = new UpdateApplicationRequest();
+        later.setReleaseLabel("emr-7.14.0");
+        service.updateApplication(applicationId, later);
+        service.startApplication(applicationId);
+        Application restarted = service.getApplication(applicationId);
+        assertNull(restarted.getPinnedImages());
+        assertNull(restarted.getImageConfiguration().getResolvedImageDigest());
+    }
+
+    @Test
+    void anUpdateTurningARunningApplicationsImageToResolutionPerWorkloadEndsItsPin() {
+        EmrServerlessService service = service();
+        service.ecrService = ecrHolding("spark/custom", "7.5.0", DIGEST, "spark/newer", "7.5.0", NEWER_DIGEST);
+        CreateApplicationRequest create = createRequest();
+        create.setImageConfiguration(image(OWN_IMAGE));
+        create.setWorkerTypeSpecifications(Map.of("Driver", workerType(OWN_IMAGE)));
+        String applicationId = service.createApplication(create).getApplicationId();
+        service.startApplication(applicationId);
+        ImageConfiguration perWorkload = image(OWN_NEWER_IMAGE);
+        perWorkload.setApplicationLevelDigestResolution(false);
+        UpdateApplicationRequest update = new UpdateApplicationRequest();
+        update.setImageConfiguration(perWorkload);
+
+        service.updateApplication(applicationId, update);
+
+        // New runs take the new image, resolved for each; the driver's image is still resolved at the start.
+        Map<String, ImageConfiguration> pinned = service.getApplication(applicationId).getPinnedImages();
+        assertEquals(Set.of("Driver"), pinned.keySet());
+        assertEquals(DIGEST, pinned.get("Driver").getResolvedImageDigest());
+    }
+
+    // An ECR answering every image query with error.
+    private static EcrService ecrAnswering(AwsException error) {
+        EcrService ecr = mock(EcrService.class);
+        when(ecr.describeImages(anyString(), anyList(), anyString(), anyString())).thenThrow(error);
+        return ecr;
+    }
+
+    // An ECR holding each repository's tag, given as repository, tag and digest in turn.
+    static EcrService ecrHolding(String... images) {
+        EcrService ecr = mock(EcrService.class);
+        for (int i = 0; i < images.length; i += 3) {
+            ImageDetail detail = new ImageDetail();
+            detail.setImageDigest(images[i + 2]);
+            String tag = images[i + 1];
+            when(ecr.describeImages(eq(images[i]),
+                    argThat(ids -> ids.size() == 1 && tag.equals(ids.get(0).getImageTag())), eq(ACCOUNT_ID),
+                    eq(REGION))).thenReturn(new EcrService.DescribeImagesResult(List.of(detail), List.of()));
+        }
+        return ecr;
     }
 
     @Test

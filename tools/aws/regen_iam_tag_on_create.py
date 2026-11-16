@@ -112,9 +112,10 @@ NAMESPACES = (
     "elasticmapreduce", "emr-serverless", "es", "events", "firehose", "fis", "globalaccelerator", "glue",
     "guardduty", "iam", "kinesis", "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb",
     "network-firewall", "oam", "organizations", "payment-cryptography", "pipes", "ram", "rds", "redshift",
-    "redshift-serverless", "rekognition", "resource-explorer-2", "resource-groups", "route53resolver", "sagemaker",
-    "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso",
-    "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
+    "redshift-serverless", "rekognition", "resource-explorer-2", "resource-groups", "route53resolver", "s3tables",
+    "s3vectors", "sagemaker", "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns",
+    "sqs", "ssm", "sso", "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer",
+    "translate", "wafv2",
     "xray",
 )
 
@@ -132,7 +133,7 @@ NOT_COVERED = {
     "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
     "mq": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
-    "rum": _NO_ROUTES, "s3tables": _NO_ROUTES,
+    "rum": _NO_ROUTES,
     "s3": "authorized by route; S3 checks s3:PutObjectTagging for an object it creates with tags itself",
     "servicecatalog": "its operations that tag are AppRegistry's, whose REST routes no rule maps yet",
 }

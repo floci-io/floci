@@ -513,6 +513,11 @@ held in memory. The service scheduler starts at boot, so within a few seconds of
 persisted service is brought back to its `desiredCount`, re-registering load balancer targets
 and Cloud Map instances as its tasks start, without waiting for an ECS request.
 
+Before shared container teardown, Floci pauses ECS reconciliation and waits for its current
+pass to finish. It also interrupts and waits for background task launches before other services
+retire their credentials or networking. A state reset starts fresh executors after the old tasks
+have been drained.
+
 #### Service deployments
 
 An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,
@@ -744,10 +749,14 @@ The task set round-trips `networkConfiguration` (defaulting to the service's), `
 scale percentage, always rounded up: 3 desired at 50 percent is 2 tasks, not 1. `UpdateTaskSet`
 recomputes it.
 
-Floci places no tasks for a task set, so `runningCount` and `pendingCount` stay at 0 and
-`stabilityStatus` is always `STEADY_STATE`. On AWS the status reaches `STEADY_STATE` once the
-running count matches the computed one; reporting `STABILIZING` here would hang anything that
-waits for the set to stabilise, since no count ever moves.
+Creating a service with the `CODE_DEPLOY` controller creates an initial `PRIMARY` task set
+at 100 percent scale. Its running and pending counts track the tasks launched by the service
+scheduler. The set reaches `STEADY_STATE` when the running count matches its computed desired
+count and no tasks are pending. `CreateService` and `DescribeServices` return the task set and an
+empty `deployments` list for this controller.
+
+Sets added through `CreateTaskSet` have simulated scheduling. Their running and pending counts
+stay at zero, and they report `STEADY_STATE` so deployment tools can continue.
 
 `DeleteTaskSet` refuses a task set that has not been scaled down to zero unless `force` is set.
 `DescribeTaskSets` returns tags only for `include: ["TAGS"]` and reports a reference naming no

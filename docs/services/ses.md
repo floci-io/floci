@@ -430,7 +430,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 
 Floci models no leased dedicated IPs: `GetDedicatedIps` is empty and IP-targeted operations return `NotFoundException`, as real AWS does for an account with no leased IPs, with required request members validated first (`BadRequestException`). `PutDedicatedIpPoolScalingAttributes` rejects downgrading a `MANAGED` pool to `STANDARD`, and `PutAccountDedicatedIpWarmupAttributes` stores the flag behind `GetAccount.DedicatedIpAutoWarmupEnabled` (default `true`).
 
-Configuration set event destinations are stored as configuration. The target is not validated for existence; missing targets cause Floci to log a warning and skip that destination. Each event destination must specify exactly one destination type and at least one matching event type. A CloudWatch destination requires a non-empty dimension configuration list, and a Pinpoint destination requires an application ARN.
+Configuration set event destinations are stored as configuration. An `SnsDestination` topic is checked when the destination is created or updated: a value that is not an SNS topic ARN, a topic of another region, one that does not exist, or one whose policy does not let SES publish under IAM enforcement is refused with `InvalidSNSDestination` (v1) or `BadRequestException` (v2). AWS answers a topic of an unknown account with its own message; Floci reports it as not found. The other destination types are not validated for existence; missing targets cause Floci to log a warning and skip that destination. Each event destination must specify exactly one destination type and at least one matching event type. A CloudWatch destination requires a non-empty dimension configuration list, and a Pinpoint destination requires an application ARN.
 
 A configuration set's `MessageSecurityOptions`, set with `CreateConfigurationSet` or the partial update [`UpdateConfigurationSet`](https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_UpdateConfigurationSet.html) and read back by `GetConfigurationSet`, is stored as configuration only: Floci never adds an S/MIME signature to a message. Where the API reference is silent, Floci follows what real SES answered (probed 2026-10-04): an empty `SigningScheme` resets the set to `DefaultScheme`, a request naming both union members stores `SmimeScheme`, and an `SmimeScheme` without a `SignatureFormat` stores `DETACHED`.
 
@@ -584,8 +584,8 @@ the identity that names the topic, the sender's own or its domain's. Both carry 
 `aws:SourceAccount` and `aws:SourceOwner`. The default policy of a topic in the sending account admits
 SES; a topic whose policy was replaced, or a topic in another account, needs a statement for SES like
 the one in the [SES Developer Guide](https://docs.aws.amazon.com/ses/latest/dg/event-publishing-add-event-destination-sns.html).
-Floci checks the topic when SES publishes, not when an event destination is created or a notification
-topic is set. A refused event is not delivered. When a notification cannot be published because the
+Floci checks the topic when an event destination is created or updated or a notification topic is
+set, and again when SES publishes. A refused event is not delivered. When a notification cannot be published because the
 topic is gone or its policy refuses SES, Floci does what SES does: it takes the topic out of the
 identity's bounce and complaint settings that name it and turns email feedback forwarding back on,
 while a delivery setting stays. A topic that is gone counts with enforcement off too. SES also emails the account about

@@ -1,5 +1,6 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
@@ -23,15 +24,11 @@ import software.amazon.awssdk.services.lambda.model.Runtime;
 import software.amazon.awssdk.services.lambda.model.VpcConfig;
 import software.amazon.awssdk.services.lambda.model.VpcConfigResponse;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -72,13 +69,8 @@ class LambdaVpcResourceValidationIntegrationTest {
                 "Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
                 """)).role().arn();
         cleanup.add(() -> iam.deleteRole(r -> r.roleName(name)));
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async event => event;".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        code = FunctionCode.builder().zipFile(SdkBytes.fromByteArray(bytes.toByteArray())).build();
+        byte[] bytes = LambdaCodeFixtures.nodeJsZip("exports.handler = async event => event;");
+        code = FunctionCode.builder().zipFile(SdkBytes.fromByteArray(bytes)).build();
         cleanup.add(() -> {
             try {
                 lambda.deleteFunction(r -> r.functionName(name));

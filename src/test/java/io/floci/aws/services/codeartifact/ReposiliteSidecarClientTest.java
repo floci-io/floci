@@ -740,6 +740,85 @@ class ReposiliteSidecarClientTest {
     }
 
     @Test
+    void listPackageVersionDependenciesParsesTheFetchedPomsParentAndDependencies() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String pom = "<project><parent><groupId>com.example</groupId><artifactId>parent-pom</artifactId>"
+                + "<version>1.0.0</version></parent><dependencies>"
+                + "<dependency><groupId>com.example</groupId><artifactId>other</artifactId>"
+                + "<version>2.0.0</version><scope>test</scope></dependency>"
+                + "</dependencies></project>";
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.pom", exchange -> respond(exchange, 200, pom));
+
+        List<CodeArtifactService.PackageDependency> dependencies = client.listPackageVersionDependencies("dom--repo",
+                "dom", "repo", "com.example", "a", "1.0");
+
+        assertThat(dependencies, containsInAnyOrder(
+                new CodeArtifactService.PackageDependency("com.example", "parent-pom", "parent", "1.0.0"),
+                new CodeArtifactService.PackageDependency("com.example", "other", "test", "2.0.0")));
+    }
+
+    @Test
+    void listPackageVersionDependenciesIsEmptyWhenTheVersionHasNoPom() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.pom", exchange -> respond(exchange, 404, ""));
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"a-1.0.jar\",\"type\":\"FILE\"}]}"));
+
+        assertThat(client.listPackageVersionDependencies("dom--repo", "dom", "repo", "com.example", "a", "1.0"),
+                equalTo(List.of()));
+    }
+
+    /**
+     * Qodo review finding: a {@code -SNAPSHOT} version's real POM is not named
+     * {@code <artifactId>-<version>.pom} at all - a real {@code mvn deploy} writes it under a
+     * timestamped unique-snapshot name instead - so the literal-name fetch misses and the fallback
+     * to the real directory listing must find and fetch the real file.
+     */
+    @Test
+    void listPackageVersionDependenciesResolvesASnapshotsRealTimestampedPom() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/1.0-SNAPSHOT/a-1.0-SNAPSHOT.pom",
+                exchange -> respond(exchange, 404, ""));
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0-SNAPSHOT",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0-SNAPSHOT\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"a-1.0-20261115.120000-1.jar\",\"type\":\"FILE\"},"
+                        + "{\"name\":\"a-1.0-20261115.120000-1.pom\",\"type\":\"FILE\"}]}"));
+        String pom = "<project><dependencies><dependency><groupId>com.example</groupId>"
+                + "<artifactId>snapshot-dep</artifactId><version>1.0.0</version></dependency>"
+                + "</dependencies></project>";
+        server.createContext("/dom--repo/com/example/a/1.0-SNAPSHOT/a-1.0-20261115.120000-1.pom",
+                exchange -> respond(exchange, 200, pom));
+
+        List<CodeArtifactService.PackageDependency> dependencies = client.listPackageVersionDependencies("dom--repo",
+                "dom", "repo", "com.example", "a", "1.0-SNAPSHOT");
+
+        assertThat(dependencies, equalTo(List.of(
+                new CodeArtifactService.PackageDependency("com.example", "snapshot-dep", "compile", "1.0.0"))));
+    }
+
+    /**
+     * Qodo review finding: a genuine Reposilite error on the POM fetch (not a real 404) must
+     * surface as an error, not be silently reported as "no dependencies" - this reuses {@link
+     * #listPackageVersionAssetNames}'s own already-established unexpected-status handling as the
+     * fallback path, which is exactly what makes this case throw rather than return quietly.
+     */
+    @Test
+    void listPackageVersionDependenciesThrowsWhenTheFallbackListingFailsWithARealError() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.pom", exchange -> respond(exchange, 404, ""));
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
+                exchange -> respond(exchange, 500, "{\"status\":500,\"message\":\"internal error\"}"));
+
+        assertThrows(IllegalStateException.class,
+                () -> client.listPackageVersionDependencies("dom--repo", "dom", "repo", "com.example", "a", "1.0"));
+    }
+
+    @Test
     void listPackageVersionAssetNamesReturnsOnlyTheFileEntriesFromTheVersionDirectory() {
         server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
                 exchange -> respond(exchange, 200, "{\"name\":\"1.0\",\"type\":\"DIRECTORY\",\"files\":["

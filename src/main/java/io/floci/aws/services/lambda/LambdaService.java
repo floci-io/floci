@@ -116,6 +116,7 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
+    private static final int FUNCTION_URL_CONFIGS_PAGE_SIZE = 50;
     private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
     private static final int MAX_ENVIRONMENT_BYTES = 4096;
     private static final int MAX_ENVIRONMENT_DIAGNOSTIC_BYTES = 5120;
@@ -221,6 +222,7 @@ public class LambdaService implements ResourceProvider {
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
     private final SignedMarkers listFunctionMarkers = new SignedMarkers();
     private final SignedMarkers codeSigningFunctionMarkers = new SignedMarkers();
+    private final SignedMarkers functionUrlMarkers = new SignedMarkers();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -3535,6 +3537,45 @@ public class LambdaService implements ResourceProvider {
 
         LOG.infov("Created Function URL for {0} (qualifier: {1}): {2}", functionName, qualifier, url);
         return urlConfig;
+    }
+
+    public PaginatedResult<LambdaUrlConfig> listFunctionUrlConfigs(
+            String region, String functionName, String maxItems, String marker) {
+        requireFunctionUrlsAvailable(region);
+        List<String> errors = new ArrayList<>();
+        Integer requested = LambdaPagination.parseMaxItems(maxItems, FUNCTION_URL_CONFIGS_PAGE_SIZE, errors);
+        if (!errors.isEmpty()) {
+            throw SmithyValidationErrors.validationException(errors);
+        }
+
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, null);
+        validateFunctionUrlQualifier(ref.qualifier());
+        if (AwsArnUtils.looksLikeArn(functionName)
+                && AwsArnUtils.isForeignPartition(AwsArnUtils.parse(functionName),
+                        regionResolver.partitionForRegion(region))) {
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
+        }
+        String accountId = regionResolver.getAccountId();
+        if (ref.account() != null && !accountId.equals(ref.account())) {
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
+        }
+        LambdaFunction function = functionStore.get(region, ref.name())
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Function not found: " + functionName, 404));
+        List<LambdaUrlConfig> urls = new ArrayList<>();
+        if (function.getUrlConfig() != null) {
+            urls.add(function.getUrlConfig());
+        }
+        if (aliasStore != null) {
+            for (LambdaAlias alias : aliasStore.list(region, function.getFunctionName())) {
+                if (alias.getUrlConfig() != null) {
+                    urls.add(alias.getUrlConfig());
+                }
+            }
+        }
+        String scope = accountId + "\n" + region + "\n" + function.getFunctionName() + "\n";
+        return LambdaPagination.paginate(urls, LambdaUrlConfig::getFunctionArn, requested,
+                FUNCTION_URL_CONFIGS_PAGE_SIZE, marker, functionUrlMarkers, scope);
     }
 
     public LambdaUrlConfig getFunctionUrlConfig(String region, String functionName, String qualifier) {

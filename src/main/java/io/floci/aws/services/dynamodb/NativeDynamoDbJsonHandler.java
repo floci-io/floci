@@ -52,6 +52,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -572,23 +573,22 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleListTables(JsonNode request, String region) {
         Integer limit = request.has("Limit") ? request.get("Limit").asInt() : null;
-        String exclusiveStart = request.has("ExclusiveStartTableName")
+        String exclusiveStart = request.hasNonNull("ExclusiveStartTableName")
                 ? request.get("ExclusiveStartTableName").asText() : null;
 
+        List<String> violations = new ArrayList<>();
         if (limit != null) {
-            if (limit < 1) {
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + limit
-                        + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value greater than or equal to 1");
-            }
-            if (limit > 100) {
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + limit
-                        + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value less than or equal to 100");
+            addIfPresent(violations, SmithyValidationErrors.outOfRange("limit", limit, 1, 100));
+        }
+        if (exclusiveStart != null) {
+            addIfPresent(violations,
+                    SmithyValidationErrors.lengthOutOfRange("exclusiveStartTableName", exclusiveStart, 3, 255));
+            if (!INDEX_NAME_CHARS.matcher(exclusiveStart).matches()) {
+                violations.add(SmithyValidationErrors.pattern("exclusiveStartTableName", exclusiveStart,
+                        "[a-zA-Z0-9_.-]+"));
             }
         }
+        throwValidationErrors(violations);
 
         DynamoDbService.ListTablesResult result = dynamoDbService.listTables(region, limit, exclusiveStart);
 
@@ -680,7 +680,7 @@ public class NativeDynamoDbJsonHandler {
             List.of("ALL_NEW", "UPDATED_OLD", "ALL_OLD", "NONE", "UPDATED_NEW");
     private static final List<String> OLDER_CONDITIONAL_OPERATORS = List.of("OR", "AND");
 
-    // The older validator lists the members in this order and leaves out a missing table name.
+    // The older validator lists the members in this order.
     private void requireValidOlderItemWrite(JsonNode request, String target) {
         String tableName = textOrNull(request, "TableName");
         String returnValues = textOrNull(request, "ReturnValues");
@@ -697,7 +697,9 @@ public class NativeDynamoDbJsonHandler {
         if ("Key".equals(target) && !request.hasNonNull(target)) {
             validationErrors.add(SmithyValidationErrors.notNull("key"));
         }
-        if ("".equals(tableName)) {
+        if (tableName == null) {
+            validationErrors.add(SmithyValidationErrors.notNull("tableName"));
+        } else if (tableName.isEmpty()) {
             validationErrors.add(SmithyValidationErrors.lengthTooShort("tableName", "", 1));
         }
         throwValidationErrors(validationErrors);
@@ -909,6 +911,7 @@ public class NativeDynamoDbJsonHandler {
             ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
         }
 
+        DynamoDbTableNames.resolveForItemCall(tableName);
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
         int itemBytes = item != null
                 ? DynamoDbItemSize.billedItemSize(dynamoDbService.requireTableForItemCall(tableName, region), item)
@@ -976,7 +979,11 @@ public class NativeDynamoDbJsonHandler {
             requireValidOlderUpdate(request);
         }
         String tableName = request.path("TableName").asText();
-        DynamoDbTableNames.resolve(tableName); // validate tableName first
+        // UpdateItem lists every problem of a short name, the pattern first.
+        if (DynamoDbTableNames.isShortName(tableName)) {
+            throwValidationErrors(nameViolations(tableName, "tableName"));
+        }
+        DynamoDbTableNames.resolve(tableName);
         JsonNode key = request.path("Key");
         JsonNode attributeUpdates = request.path("AttributeUpdates");
         JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
@@ -1322,7 +1329,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleQuery(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
-        DynamoDbTableNames.resolve(tableName); // validate tableName first
+        DynamoDbTableNames.resolveForItemCall(tableName); // validate tableName first
         JsonNode keyConditions = request.has("KeyConditions") ? request.get("KeyConditions") : null;
         JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
                 ? request.get("ExpressionAttributeValues") : null;
@@ -1446,8 +1453,10 @@ public class NativeDynamoDbJsonHandler {
             queryItems = applyIndexProjection(queryItems, queryTable, queryAccessPath, select);
         }
         if (projectionExpression != null) {
+            Function<JsonNode, ObjectNode> projection =
+                    ProjectionEvaluator.projector(projectionExpression, exprAttrNames);
             queryItems = queryItems.stream()
-                    .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpression, exprAttrNames))
+                    .map(i -> (JsonNode) projection.apply(i))
                     .toList();
         } else if (attributesToGet != null) {
             Set<String> keep = new HashSet<>();
@@ -1531,7 +1540,7 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
-        DynamoDbTableNames.resolve(tableName);
+        DynamoDbTableNames.resolveForItemCall(tableName);
         requireValidConditionalOperator(request, "ScanFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
@@ -1596,8 +1605,10 @@ public class NativeDynamoDbJsonHandler {
             scanItems = applyIndexProjection(scanItems, scanTable, scanAccessPath, select);
         }
         if (projectionExpressionScan != null) {
+            Function<JsonNode, ObjectNode> projection =
+                    ProjectionEvaluator.projector(projectionExpressionScan, exprAttrNames);
             scanItems = scanItems.stream()
-                    .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpressionScan, exprAttrNames))
+                    .map(i -> (JsonNode) projection.apply(i))
                     .toList();
         } else if (attributesToGetScan != null) {
             Set<String> keep = new HashSet<>();
@@ -1883,10 +1894,12 @@ public class NativeDynamoDbJsonHandler {
             JsonNode attrToGet = tableRequest != null && tableRequest.has("AttributesToGet")
                     ? tableRequest.get("AttributesToGet") : null;
             ArrayNode tableItems = objectMapper.createArrayNode();
+            Function<JsonNode, ObjectNode> projection = projExpr != null
+                    ? ProjectionEvaluator.projector(projExpr, exprNames) : null;
             for (JsonNode item : entry.getValue()) {
                 JsonNode projected;
-                if (projExpr != null) {
-                    projected = ProjectionEvaluator.project(item, projExpr, exprNames);
+                if (projection != null) {
+                    projected = projection.apply(item);
                 } else if (attrToGet != null) {
                     Set<String> keep = new HashSet<>();
                     attrToGet.forEach(n -> keep.add(n.asText()));

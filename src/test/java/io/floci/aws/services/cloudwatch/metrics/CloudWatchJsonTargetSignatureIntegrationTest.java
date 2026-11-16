@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -88,6 +89,37 @@ class CloudWatchJsonTargetSignatureIntegrationTest {
             json(prefix, "DescribeAlarms").filter(signer).post("/")
                     .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {CURRENT_TARGET, CONSOLE_TARGET})
+    void putMetricDataChecksSignaturesAndPermissionsBeforeStoringMetrics(String prefix) throws Exception {
+        String namespace = "cw-put-permissions-" + Long.toString(System.nanoTime(), 36);
+        String body = """
+                {"Namespace":"%s","MetricData":[{"MetricName":"Requests","Value":7}]}
+                """.formatted(namespace);
+        AwsRequestSigner root = AwsRequestSigner.signedAs("test", "test", "monitoring");
+        json(prefix, "PutMetricData").body(body).post("/")
+                .then().statusCode(403).body("__type", equalTo("MissingAuthenticationTokenException"));
+        json(prefix, "PutMetricData").body(body).filter(root.withSecret("wrong-secret")).post("/")
+                .then().statusCode(403).body("__type", equalTo("InvalidSignatureException"));
+
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "cw-put-permissions-", "list-only", """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Action":"cloudwatch:ListMetrics","Resource":"*"
+                }]}
+                """)) {
+            json(prefix, "PutMetricData").body(body).filter(user.signer("monitoring")).post("/")
+                    .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+        }
+        json(CURRENT_TARGET, "ListMetrics").body("{\"Namespace\":\"" + namespace + "\"}")
+                .filter(root).post("/").then().statusCode(200).body("Metrics", empty());
+
+        json(prefix, "PutMetricData").body(body).filter(root).post("/")
+                .then().statusCode(200);
+        json(CURRENT_TARGET, "ListMetrics").body("{\"Namespace\":\"" + namespace + "\"}")
+                .filter(root).post("/").then().statusCode(200)
+                .body("Metrics[0].MetricName", equalTo("Requests"));
     }
 
     @Test

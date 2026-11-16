@@ -145,6 +145,47 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                     + "\"Resource\":[\"%s\",\"%s\"]},"
                     + "{\"Effect\":\"Allow\",\"Action\":\"iam:GetAccountPasswordPolicy\","
                     + "\"Resource\":\"*\"}]}";
+    /**
+     * What the customer-side guide grants the holder of a delegation request: "By default, IAM
+     * principals who initiate a delegation request are automatically granted permissions to manage
+     * that specific request. They can associate it with their account, view request details, reject
+     * a request, forward it to an administrator for approval, release the exchange token to the
+     * product provider after admin approval, and list delegation requests that they own."
+     *
+     * <p>So the actions are the ones that note names, each on the requests the caller owns, and
+     * approving is not among them: the page lists {@code iam:AcceptDelegationRequest} as a
+     * permission an administrator grants, which is the step this grant deliberately leaves to one.
+     * The summary rides along with reading the request, which the API reference states outright:
+     * {@code GetHumanReadableSummary}'s "rules are identical to GetDelegationRequest API
+     * behavior, such that a party who has permissions to call GetDelegationRequest for a given
+     * delegation request will always be able to retrieve the human readable summary for that
+     * request", so the two are granted together or the summary would be refused to the one
+     * identity the note says may read the request.
+     *
+     * <p>Listing carries no resource of its own, the Service Reference giving
+     * {@code ListDelegationRequests} no resource type, so the statement is written on {@code *}
+     * and scoped by the condition key that reference does publish for it,
+     * {@code iam:DelegationRequestOwner}, held to the owner's own ARN. That is the difference the
+     * guide draws between the two permissions: the one an administrator grants is "List
+     * delegation requests for your account", while the one an owner carries without a policy is
+     * to "list delegation requests that they own". So an owner's call names itself as
+     * {@code OwnerId} and is answered, one that names another owner or no owner at all is
+     * refused, and an account-wide listing stays with the granted permission. The key's published
+     * type is ARN, hence {@code ArnEquals}.
+     *
+     * <p>Associating cannot be granted here at all: a request records no owner until it is
+     * claimed, so there is nobody to write a grant for before the claim. That is a documented
+     * limit of this reading rather than a decision about the operation.
+     */
+    private static final String DELEGATION_OWNER_GRANT =
+            "{\"Version\":\"2012-10-17\",\"Statement\":["
+                    + "{\"Effect\":\"Allow\",\"Action\":[\"iam:GetDelegationRequest\","
+                    + "\"iam:GetHumanReadableSummary\",\"iam:RejectDelegationRequest\","
+                    + "\"iam:UpdateDelegationRequest\",\"iam:SendDelegationToken\"],"
+                    + "\"Resource\":[%s]},"
+                    + "{\"Effect\":\"Allow\",\"Action\":\"iam:ListDelegationRequests\","
+                    + "\"Resource\":\"*\",\"Condition\":{\"ArnEquals\":"
+                    + "{\"iam:DelegationRequestOwner\":\"%s\"}}}]}";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -420,6 +461,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private final Object mfaDeviceLock = new Object();
     private final RegionResolver regionResolver;
+    /**
+     * The partner permissions boundaries configuration registered, by ARN. Empty unless a file was
+     * configured, which is the account that never onboarded with AWS for temporary delegation.
+     */
+    private final Map<String, String> partnerPermissionBoundaries;
     private final Clock clock;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -453,6 +499,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     @Inject
     Instance<ScpProvider> scpProvider;
+
+    /**
+     * Which delegation requests an identity owns, for the grant the guide gives its holder. Absent
+     * in a unit test that builds this service directly, which then writes no such grant.
+     */
+    @Inject
+    Instance<DelegationRequestOwnership> delegationRequestOwnership;
 
     /**
      * The service control policy levels that cap {@code accountId}, or null when SCPs do not apply
@@ -492,6 +545,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null),
+            PartnerPermissionBoundaries.load(config.services().iam().partnerPermissionBoundariesPath())
+                    .documentsByArn(),
             clock
         );
     }
@@ -620,7 +675,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
                 credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
                 serviceCredentials, accountProperties, stsPreferences, outboundFederation,
-                regionResolver, seedDeployerPrincipal, seededAccountAlias, Clock.systemUTC());
+                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), Clock.systemUTC());
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -649,6 +704,44 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                boolean seedDeployerPrincipal,
                String seededAccountAlias,
                Clock clock) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, accountAliases,
+                passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
+                credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
+                serviceCredentials, accountProperties, stsPreferences, outboundFederation,
+                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), clock);
+    }
+
+    /**
+     * The same with the permissions boundaries registered for a delegation partner, which no
+     * account holds and no caller can create. Every other constructor registers none.
+     */
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, String> accountAliases,
+               StorageBackend<String, AccountPasswordPolicy> passwordPolicies,
+               StorageBackend<String, LoginProfile> loginProfiles,
+               StorageBackend<String, OpenIDConnectProvider> oidcProviders,
+               StorageBackend<String, String> serviceLinkedRoleDeletions,
+               StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
+               StorageBackend<String, CredentialReport> credentialReports,
+               StorageBackend<String, VirtualMfaDevice> virtualMfaDevices,
+               StorageBackend<String, ServerCertificate> serverCertificates,
+               StorageBackend<String, SigningCertificate> signingCertificates,
+               StorageBackend<String, SshPublicKey> sshPublicKeys,
+               StorageBackend<String, ServiceSpecificCredential> serviceCredentials,
+               StorageBackend<String, String> accountProperties,
+               StorageBackend<String, String> stsPreferences,
+               StorageBackend<String, OutboundWebIdentityFederation> outboundFederation,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal,
+               String seededAccountAlias,
+               Map<String, String> partnerPermissionBoundaries,
+               Clock clock) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -674,6 +767,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
+        this.partnerPermissionBoundaries = Map.copyOf(partnerPermissionBoundaries);
         this.clock = clock;
     }
 
@@ -1187,7 +1281,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamPolicyDocuments.checkTrustPolicy(assumeRolePolicyDocument);
         validateRoleDescription(description);
         if (permissionsBoundaryArn != null) {
-            requirePolicy(permissionsBoundaryArn); // validate before anything is created
+            requireBoundaryPolicy(permissionsBoundaryArn); // validate before anything is created
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
@@ -1707,6 +1801,43 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return Optional.ofNullable(awsManagedPoliciesFor(arn).get(arn));
         }
         return policies.get(arn);
+    }
+
+    /**
+     * The document a permissions boundary ARN resolves to, which is the registered partner
+     * boundary when configuration holds one and the stored policy's default version otherwise.
+     *
+     * <p>A registered boundary is read here and nowhere else. It is not a policy of any account:
+     * {@code GetPolicy} does not answer it, {@code Attach*Policy} cannot attach it, no list
+     * reports it, and a policy someone stores under the same ARN cannot shadow it, because the
+     * registration is read first. It caps, and that is all it does.
+     */
+    private String boundaryDocument(String boundaryArn) {
+        if (boundaryArn == null) {
+            return null;
+        }
+        String registered = partnerPermissionBoundaries.get(boundaryArn);
+        if (registered != null) {
+            return registered;
+        }
+        return resolvePolicy(boundaryArn).map(IamPolicy::getDefaultDocument).orElse(null);
+    }
+
+    /** Whether a boundary ARN is one configuration registered for a delegation partner. */
+    boolean registeredPartnerBoundary(String boundaryArn) {
+        return boundaryArn != null && partnerPermissionBoundaries.containsKey(boundaryArn);
+    }
+
+    /**
+     * Holds a boundary ARN to existing, which a registered partner boundary satisfies without
+     * being a policy of the account: configuration holds its document and
+     * {@link #boundaryDocument} reads it, so every write that sets a boundary accepts the same
+     * ARNs rather than the create accepting one the put refuses.
+     */
+    private void requireBoundaryPolicy(String permissionsBoundaryArn) {
+        if (!registeredPartnerBoundary(permissionsBoundaryArn)) {
+            requirePolicy(permissionsBoundaryArn);
+        }
     }
 
     private int managedPolicyAttachmentCount(String policyArn) {
@@ -4908,10 +5039,45 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerDelegatedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
                                          String delegatedApproverArn, Instant expiration,
                                          String sessionPolicyDocument, String ownerAccountId) {
+        registerDelegatedSession(sessionAccessKeyId, secretAccessKey, sessionToken, delegatedApproverArn,
+                expiration, sessionPolicyDocument, ownerAccountId, List.of());
+    }
+
+    /**
+     * The same with the boundaries the delegation request restricts a role to, which the guide
+     * calls the long-term half of the feature: they "limit the permissions of any roles that are
+     * created or managed through temporary access", so the session carries them and a role created
+     * with it takes one.
+     */
+    public void registerDelegatedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                         String delegatedApproverArn, Instant expiration,
+                                         String sessionPolicyDocument, String ownerAccountId,
+                                         List<String> roleBoundaryArns) {
         SessionCredential session = new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken,
                 null, expiration, sessionPolicyDocument, ownerAccountId);
         session.setDelegatedApproverArn(delegatedApproverArn);
+        session.setDelegatedRoleBoundaryArns(roleBoundaryArns);
         sessions.put(sessionAccessKeyId, session);
+    }
+
+    /**
+     * The boundary a role created by {@code callerAccessKeyId} has to carry, or empty for a caller
+     * holding no delegated session or one whose request restricted nothing. A request may name
+     * several and a role carries one, so the first is the one applied, which this emulator's own
+     * reading documents. Only a boundary still registered is applied: a request stored before the
+     * registration changed names an ARN with no document, and a role bounded by a document nobody
+     * can read would be a role nothing can use.
+     */
+    public Optional<String> delegatedRoleBoundaryArn(String callerAccessKeyId) {
+        if (callerAccessKeyId == null) {
+            return Optional.empty();
+        }
+        // The session was minted in the partner's namespace and the request it bounds runs in the
+        // customer's, so this is one of the lookups that has to span accounts, as
+        // findSessionAnyAccount describes: an account-scoped get would miss it.
+        return findSessionAnyAccount(callerAccessKeyId)
+                .map(SessionCredential::getDelegatedRoleBoundaryArns)
+                .flatMap(arns -> arns.stream().filter(partnerPermissionBoundaries::containsKey).findFirst());
     }
 
     /** Stores a temporary session in an explicit account namespace. */
@@ -5379,7 +5545,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return arn != null && "root".equals(AwsArnUtils.parse(arn).resource());
     }
 
-    /** One policy document holding only the Deny statements of a user's policies and boundary. */
+    /**
+     * One policy document holding only the Deny statements of a user's policies and boundary. A
+     * statement is a Deny when its {@code Effect} is that word as written, which is the reading
+     * the policy evaluator makes of the same element.
+     */
     private String denyStatementsOf(String userName) {
         List<String> documents = new ArrayList<>();
         List<String> userPolicies = collectUserPolicies(userName);
@@ -5395,7 +5565,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             try {
                 JsonNode statements = POLICY_MAPPER.readTree(document).path("Statement");
                 for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
-                    if ("Deny".equalsIgnoreCase(statement.path("Effect").asText())) {
+                    if ("Deny".equals(statement.path("Effect").asText())) {
                         denies.add(statement);
                     }
                 }
@@ -5471,7 +5641,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         : List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY, session.getSessionPolicyDocument()),
                         null, null);
             }
-            List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
+            // A session that claimed a delegation request is recorded as its owner under its own
+            // assumed-role ARN, AssociateDelegationRequest storing "the ARN of the current calling
+            // identity", so the owner grant is looked up by that ARN and not by the role's.
+            String sessionAccount = AwsArnUtils.accountOrDefault(session.getRoleArn(),
+                    regionResolver.getAccountId());
+            List<String> identityPolicies = withDelegationOwnerGrant(
+                    collectRolePolicies(session.getRoleArn()), sessionAccount,
+                    assumedRoleSessionArn(session, session.getRoleArn()));
             String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
             return new CallerContext(identityPolicies, session.getSessionPolicyDocument(), boundaryDoc);
         }
@@ -5767,18 +5944,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 return Optional.of(new CallerArns(roleArn, roleArn, CallerArns.TYPE_ACCOUNT,
                         AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId()), null));
             }
-            String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-            String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
-            String sessionName = session.getRoleSessionName();
-            if (sessionName == null) {
-                sessionName = session.getEc2InstanceId() != null
-                        ? session.getEc2InstanceId() : "floci-session";
-            }
-            // The session lives in its role's partition, as AssumeRole issued it, whatever region
-            // a later call is signed for.
-            String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
-            String sessionArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
-                    "assumed-role/" + roleName + "/" + sessionName).toString();
+            String sessionArn = assumedRoleSessionArn(session, roleArn);
             Optional<IamRole> role = roleFromArnOrName(roleArn);
             return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
                     sessionUserId(session).orElse(null), null,
@@ -5838,6 +6004,27 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * list gives the kind of principal that holds it. Shared with {@link #resolveCallerArns}, which
      * reports the same key for the same credential and must not derive it a second way.
      */
+    /**
+     * The ARN a role session acts as: the {@code assumed-role} ARN, not the role's own. It is the
+     * identity its calls are recorded under, which is why a grant written for what a session owns
+     * has to be looked up by this ARN rather than by the role that was assumed.
+     *
+     * <p>The session lives in its role's partition, as AssumeRole issued it, whatever region a
+     * later call is signed for.
+     */
+    private String assumedRoleSessionArn(SessionCredential session, String roleArn) {
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+        String sessionName = session.getRoleSessionName();
+        if (sessionName == null) {
+            sessionName = session.getEc2InstanceId() != null
+                    ? session.getEc2InstanceId() : "floci-session";
+        }
+        String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
+        return AwsArnUtils.Arn.global(partition, "sts", accountId,
+                "assumed-role/" + roleName + "/" + sessionName).toString();
+    }
+
     private Optional<String> sessionUserId(SessionCredential session) {
         if (session.getDelegatedApproverArn() != null) {
             return delegatedApproverUserId(session.getDelegatedApproverArn());
@@ -5968,8 +6155,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return userFromArnOrName(userArnOrName)
                 .map(IamUser::getPermissionsBoundaryArn)
                 .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
-                .flatMap(this::resolvePolicy)
-                .map(IamPolicy::getDefaultDocument)
+                .map(this::boundaryDocument)
                 .orElse(null);
     }
 
@@ -5984,8 +6170,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return roleFromArnOrName(roleArn)
                 .map(IamRole::getPermissionsBoundaryArn)
                 .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
-                .flatMap(this::resolvePolicy)
-                .map(IamPolicy::getDefaultDocument)
+                .map(this::boundaryDocument)
                 .orElse(null);
     }
 
@@ -6003,7 +6188,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * {@link #updateUser(String, String, String, String)}. A null ID skips the check.
      */
     public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn, String expectedUserId) {
-        requirePolicy(permissionsBoundaryArn); // validate policy exists
+        requireBoundaryPolicy(permissionsBoundaryArn);
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
             requireSameUser(user, userName, expectedUserId);
@@ -6047,7 +6232,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
-            requirePolicy(permissionsBoundaryArn); // validate policy exists
+            requireBoundaryPolicy(permissionsBoundaryArn);
             role.setPermissionsBoundaryArn(permissionsBoundaryArn);
             roles.put(roleName, role);
         }
@@ -6150,25 +6335,80 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         // The flag that answers is the user's own account's, which is the account the lookup above
         // resolved them in: a PolicySourceArn may name another account's user, and that user
         // carries whatever their own account's password policy says, never this one's.
-        Optional<String> grant = passwordSelfServiceGrant(
-                AwsArnUtils.accountOrDefault(userArnOrName, regionResolver.getAccountId()));
-        if (grant.isEmpty()) {
+        String account = AwsArnUtils.accountOrDefault(userArnOrName, regionResolver.getAccountId());
+        Optional<String> grant = passwordSelfServiceGrant(account);
+        Optional<String> delegationGrant = delegationOwnerGrant(account, userArnOrName);
+        if (grant.isEmpty() && delegationGrant.isEmpty()) {
             return docs;
         }
         List<String> withGrant = new ArrayList<>(docs);
+        grant.ifPresent(withGrant::add);
+        delegationGrant.ifPresent(withGrant::add);
+        return withGrant;
+    }
+
+    /**
+     * The grant the holder of a delegation request carries over that request, or empty for an
+     * identity that owns none. See {@link #DELEGATION_OWNER_GRANT} for what the guide gives them
+     * and what it leaves to a granted permission.
+     *
+     * <p>The principal is whoever claimed the request, which is an IAM user's ARN or a role
+     * session's {@code assumed-role} ARN, so a name is resolved to a user's ARN first and anything
+     * else is already the ARN its calls record. A simulation of a role is the one caller this
+     * cannot answer for: {@code PolicySourceArn} names the role, never one of its sessions, and
+     * the owner recorded is the session, so there is no ARN to match.
+     */
+    private Optional<String> delegationOwnerGrant(String accountId, String principalArnOrName) {
+        if (delegationRequestOwnership == null || delegationRequestOwnership.isUnsatisfied()) {
+            return Optional.empty();
+        }
+        String ownerArn = userFromArnOrName(principalArnOrName).map(IamUser::getArn)
+                .orElse(principalArnOrName);
+        List<String> owned = delegationRequestOwnership.get().requestIdsOwnedBy(accountId, ownerArn);
+        if (owned.isEmpty()) {
+            return Optional.empty();
+        }
+        String resources = owned.stream()
+                .map(id -> "\"" + regionResolver.buildGlobalArn("iam", accountId,
+                        "delegation-request/" + id) + "\"")
+                .collect(Collectors.joining(","));
+        return Optional.of(DELEGATION_OWNER_GRANT.formatted(resources, ownerArn));
+    }
+
+    /**
+     * {@code documents} with the delegation owner grant beside them, for a principal that holds a
+     * request. Returns the list unchanged when it owns none, and {@code null} when the principal
+     * itself was not found, as the collectors answer for an identity that does not exist.
+     */
+    private List<String> withDelegationOwnerGrant(List<String> documents, String accountId,
+                                                  String principalArn) {
+        if (documents == null) {
+            return null;
+        }
+        Optional<String> grant = delegationOwnerGrant(accountId, principalArn);
+        if (grant.isEmpty()) {
+            return documents;
+        }
+        List<String> withGrant = new ArrayList<>(documents);
         withGrant.add(grant.get());
         return withGrant;
     }
 
     /**
-     * The account-level grants an IAM user of {@code accountId} is authorized by without holding a
-     * policy of its own, which today is the password self-service grant alone. Separate from
-     * {@link #userIdentityPolicies} because a caller reporting on a user needs these without the
-     * user's own documents, and because "the policies attached to a user" and "what the user can
-     * reach" are different questions that AWS answers from different sets.
+     * The grants an IAM user is authorized by without holding a policy of its own: the account's
+     * password self-service grant, and the owner grant over whatever delegation requests the user
+     * holds. Separate from {@link #userIdentityPolicies} because a caller reporting on a user
+     * needs these without the user's own documents, and because "the policies attached to a user"
+     * and "what the user can reach" are different questions that AWS answers from different sets.
+     *
+     * <p>Both belong here for the same reason: a report that left them out would answer that a
+     * user with no attached policy reaches nothing, while authorization lets it reach IAM.
      */
-    public List<String> accountLevelUserGrants(String accountId) {
-        return passwordSelfServiceGrant(accountId).map(List::of).orElseGet(List::of);
+    public List<String> implicitUserGrants(String accountId, String userArnOrName) {
+        List<String> grants = new ArrayList<>();
+        passwordSelfServiceGrant(accountId).ifPresent(grants::add);
+        delegationOwnerGrant(accountId, userArnOrName).ifPresent(grants::add);
+        return List.copyOf(grants);
     }
 
     /**

@@ -8,12 +8,17 @@ import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.InspectImageCmd;
 import com.github.dockerjava.api.command.InspectImageResponse;
+import com.github.dockerjava.api.command.ListImagesCmd;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.RemoveImageCmd;
+import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerConfig;
+import com.github.dockerjava.api.model.Image;
 import com.github.dockerjava.api.model.Info;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
@@ -41,6 +46,7 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -59,6 +65,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /** The image a release's clusters with Hive run in, made of its EMR Serverless and EMR Serverless Hive images. */
 class EmrReleaseImagesTest {
@@ -71,6 +78,9 @@ class EmrReleaseImagesTest {
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
     private final ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
     private final ImageCacheService imageCache = mock(ImageCacheService.class);
+    // The images of the made image's kind the daemon lists, and the command listing them.
+    private final List<Image> listed = new ArrayList<>();
+    private final ListImagesCmd listImages = mock(ListImagesCmd.class, RETURNS_SELF);
     private final EmrReleaseImages images = new EmrReleaseImages(lifecycle, containerBuilder, imageCache, config);
 
     @Test
@@ -138,9 +148,13 @@ class EmrReleaseImagesTest {
         assertEquals(List.of("/usr/lib/hadoop-hdfs", "/usr/lib/hadoop-mapreduce", "/usr/lib/hadoop-yarn"), copied);
         assertTrue(EmrReleaseImages.COPIES.containsAll(EmrReleaseImages.HADOOP_COPIES));
         ArgumentCaptor<String> tags = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, String>> labels = mapCaptor();
         images.image("emr-7.5.0", SPARK, HIVE, true);
-        verify(lifecycle, times(2)).commit(eq("target"), anyString(), tags.capture(), anyString(), any());
+        verify(lifecycle, times(2)).commit(eq("target"), anyString(), tags.capture(), anyString(), labels.capture());
         assertNotEquals(tags.getAllValues().get(0), tags.getAllValues().get(1));
+        // Nor does either replace the other: they are of two kinds.
+        assertNotEquals(labels.getAllValues().get(0).get(EmrReleaseImages.KIND_LABEL),
+                labels.getAllValues().get(1).get(EmrReleaseImages.KIND_LABEL));
     }
 
     @Test
@@ -154,6 +168,129 @@ class EmrReleaseImagesTest {
         assertTrue(EmrReleaseImages.HADOOP_APART_COPIES.stream().allMatch(copy -> "/opt".equals(copy.into())));
         verify(lifecycle).commit(eq("target"), anyString(),
                 argThat(tag -> tag.matches("emr-spark-8\\.0\\.0-[0-9a-f]{12}")), eq("hadoop:hadoop"), any());
+    }
+
+    @Test
+    void theImageANewerPullMakesReplacesTheOlderOnesOfItsKindButOneAContainerStillUses() {
+        String repository = ContainerStorageHelper.dockerName(config, "emr-release");
+        String name = repository + ":emr-7.5.0-"
+                + Digests.sha256Hex("sha256:spark\nsha256:hive\n" + EmrReleaseImages.COPIES).substring(0, 12);
+        // The one just made by its id, as an untagged image is listed, and one under its name.
+        listed.addAll(List.of(image("sha256:made", "<none>:<none>"), image("sha256:same-name", name),
+                image("sha256:older", repository + ":emr-7.5.0-000000000000"),
+                image("sha256:used", repository + ":emr-7.5.0-111111111111")));
+        RemoveImageCmd removed = mock(RemoveImageCmd.class, RETURNS_SELF);
+        when(docker.removeImageCmd("sha256:older")).thenReturn(removed);
+        RemoveImageCmd refused = mock(RemoveImageCmd.class, RETURNS_SELF);
+        when(refused.exec()).thenThrow(new ConflictException("image is being used by running container"));
+        when(docker.removeImageCmd("sha256:used")).thenReturn(refused);
+
+        makesMissing(true);
+
+        // Only images of its kind are listed: its release, the names of the two it is made of, and what is copied.
+        ArgumentCaptor<Map<String, String>> committed = mapCaptor();
+        verify(lifecycle).commit(eq("target"), eq(repository), anyString(), anyString(), committed.capture());
+        verify(listImages).withLabelFilter(committed.getValue());
+        assertTrue(committed.getValue().get(EmrReleaseImages.KIND_LABEL).matches("[0-9a-f]{12}"));
+        // Without force, so Docker keeps one a container uses.
+        verify(removed, never()).withForce(true);
+        verify(docker).removeImageCmd("sha256:used");
+        verify(docker, never()).removeImageCmd("sha256:made");
+        verify(docker, never()).removeImageCmd("sha256:same-name");
+    }
+
+    @Test
+    void anImageAStepOrABootstrapHoldsStaysUntilItIsReleased() {
+        String repository = ContainerStorageHelper.dockerName(config, "emr-release");
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        when(containerBuilder.resolveImage(anyString()))
+                .thenAnswer(invocation -> "mirror/" + invocation.getArgument(0));
+        resolves("mirror/" + SPARK, "sha256:spark");
+        resolves("mirror/" + HIVE, "sha256:hive");
+        InspectImageCmd there = mock(InspectImageCmd.class);
+        InspectImageResponse given = mock(InspectImageResponse.class);
+        when(given.getId()).thenReturn("sha256:given");
+        when(there.exec()).thenReturn(given);
+        when(docker.inspectImageCmd(argThat((String image) -> image != null && image.startsWith(repository + ":"))))
+                .thenReturn(there);
+        // A step is given the image there, and has no container of it yet when a newer pull makes another.
+        assertEquals("sha256:given", images.image("emr-7.5.0", SPARK, HIVE, true));
+        listed.add(image("sha256:given", repository + ":emr-7.5.0-000000000000"));
+        when(docker.removeImageCmd("sha256:given")).thenReturn(mock(RemoveImageCmd.class, RETURNS_SELF));
+
+        makesMissing(true);
+
+        verify(docker, never()).removeImageCmd("sha256:given");
+
+        images.released("sha256:given");
+        makesMissing(true);
+
+        verify(docker).removeImageCmd("sha256:given");
+    }
+
+    @Test
+    void anImageMadeOfOlderImagesIsNeverMadeAfterANewerOneOfItsKindToRemoveIt() throws InterruptedException {
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
+        String repository = ContainerStorageHelper.dockerName(config, "emr-release");
+        resolves(SPARK, "sha256:spark");
+        // The Hive image's name leads to a newer id once a newer image is pulled under it.
+        when(imageCache.resolveForLaunch(HIVE, ImagePullBehavior.PREFER_CACHED, null)).thenReturn(
+                new LaunchImage("sha256:hive", null), new LaunchImage("sha256:newer-hive", null));
+        when(docker.inspectImageCmd(anyString())).thenAnswer(invocation -> {
+            InspectImageCmd inspect = mock(InspectImageCmd.class);
+            if (invocation.<String>getArgument(0).startsWith(repository + ":")) {
+                when(inspect.exec()).thenThrow(new NotFoundException("missing"));
+            } else {
+                when(inspect.exec()).thenReturn(mock(InspectImageResponse.class, RETURNS_DEEP_STUBS));
+            }
+            return inspect;
+        });
+        CreateContainerCmd create = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(create.exec()).thenReturn(mock(CreateContainerResponse.class));
+        when(docker.createContainerCmd(anyString())).thenReturn(create);
+        when(docker.copyArchiveFromContainerCmd(any(), anyString())).thenAnswer(invocation -> {
+            CopyArchiveFromContainerCmd from = mock(CopyArchiveFromContainerCmd.class);
+            when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
+            return from;
+        });
+        when(docker.copyArchiveToContainerCmd(any())).thenReturn(copyCommand());
+        when(docker.removeContainerCmd(any())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+        when(docker.removeImageCmd(anyString())).thenReturn(mock(RemoveImageCmd.class, RETURNS_SELF));
+        when(listImages.exec()).thenAnswer(invocation -> List.copyOf(listed));
+        when(docker.listImagesCmd()).thenReturn(listImages);
+        CountDownLatch committing = new CountDownLatch(1);
+        CountDownLatch committed = new CountDownLatch(1);
+        AtomicInteger commits = new AtomicInteger();
+        when(lifecycle.commit(any(), anyString(), anyString(), any(), any())).thenAnswer(invocation -> {
+            String tag = invocation.getArgument(2);
+            if (commits.getAndIncrement() == 0) {
+                committing.countDown();
+                assertTrue(committed.await(10, TimeUnit.SECONDS));
+                listed.add(image("sha256:older", repository + ":" + tag));
+                return "sha256:older";
+            }
+            listed.add(image("sha256:newer", repository + ":" + tag));
+            return "sha256:newer";
+        });
+        AtomicReference<String> first = new AtomicReference<>();
+        Thread older = Thread.ofPlatform().start(() -> first.set(images.image("emr-7.5.0", SPARK, HIVE, true)));
+        assertTrue(committing.await(10, TimeUnit.SECONDS));
+
+        AtomicReference<String> second = new AtomicReference<>();
+        Thread newer = Thread.ofPlatform().start(() -> second.set(images.image("emr-7.5.0", SPARK, HIVE, true)));
+        ThreadStates.awaitBlockedOrDone(newer);
+        // It waits for the image of its kind being made before it reads where the two names lead.
+        verify(imageCache, times(1)).resolveForLaunch(HIVE, ImagePullBehavior.PREFER_CACHED, null);
+        committed.countDown();
+        older.join(10_000);
+        newer.join(10_000);
+
+        assertEquals("sha256:older", first.get());
+        assertEquals("sha256:newer", second.get());
+        // The newer one is made last, and the older one, which the first caller still holds, stays too.
+        verify(docker, never()).removeImageCmd("sha256:newer");
+        verify(docker, never()).removeImageCmd("sha256:older");
     }
 
     @Test
@@ -188,8 +325,10 @@ class EmrReleaseImagesTest {
             when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
             return from;
         });
-        when(docker.copyArchiveToContainerCmd(any())).thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
+        when(docker.copyArchiveToContainerCmd(any())).thenReturn(copyCommand());
         when(docker.removeContainerCmd(any())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+        when(listImages.exec()).thenAnswer(invocation -> listed);
+        when(docker.listImagesCmd()).thenReturn(listImages);
         CountDownLatch committing = new CountDownLatch(1);
         CountDownLatch committed = new CountDownLatch(1);
         when(lifecycle.commit(any(), anyString(), anyString(), any(), any())).thenAnswer(invocation -> {
@@ -244,7 +383,7 @@ class EmrReleaseImagesTest {
         when(docker.inspectImageCmd(anyString())).thenAnswer(invocation -> {
             asked.add(invocation.getArgument(0));
             InspectImageCmd there = mock(InspectImageCmd.class);
-            when(there.exec()).thenReturn(mock(InspectImageResponse.class));
+            when(there.exec()).thenReturn(new InspectImageResponse().withId("sha256:made"));
             return there;
         });
 
@@ -317,7 +456,7 @@ class EmrReleaseImagesTest {
         resolves("mirror/" + HIVE, "sha256:hive");
         InspectImageCmd missing = mock(InspectImageCmd.class);
         when(missing.exec()).thenThrow(new NotFoundException("missing"));
-        when(docker.inspectImageCmd(argThat((String image) -> image.startsWith(repository + ":"))))
+        when(docker.inspectImageCmd(argThat((String image) -> image != null && image.startsWith(repository + ":"))))
                 .thenReturn(missing);
         InspectImageCmd spark = mock(InspectImageCmd.class);
         InspectImageResponse sparkImage = mock(InspectImageResponse.class);
@@ -336,13 +475,25 @@ class EmrReleaseImagesTest {
             return from;
         });
         when(docker.copyArchiveToContainerCmd("target"))
-                .thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
+                .thenReturn(copyCommand());
         when(lifecycle.commit(eq("target"), eq(repository), anyString(), eq("hadoop:hadoop"), any()))
                 .thenReturn("sha256:made");
         when(docker.removeContainerCmd(anyString())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+        when(listImages.exec()).thenAnswer(invocation -> listed);
+        when(docker.listImagesCmd()).thenReturn(listImages);
 
         assertEquals("sha256:made", images.image(release, SPARK, HIVE, withHive));
         return copied;
+    }
+
+    /**
+     * A stub-only command: Mockito verification on it is unsupported. Tests that verify copy calls
+     * must create a recording mock and account for the tar streams retained by its invocation history.
+     */
+    private static CopyArchiveToContainerCmd copyCommand() {
+        // These fixtures verify source paths, not copy-command calls. Recording every call
+        // would retain each closed tar pipe's 16 MiB buffer for the lifetime of this mock.
+        return mock(CopyArchiveToContainerCmd.class, withSettings().defaultAnswer(RETURNS_SELF).stubOnly());
     }
 
     private void resolves(String image, String id) {
@@ -353,6 +504,18 @@ class EmrReleaseImagesTest {
     private void resolvesEachToItself() {
         when(imageCache.resolveForLaunch(anyString(), eq(ImagePullBehavior.PREFER_CACHED), isNull()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
+    }
+
+    private static Image image(String id, String tag) {
+        Image image = mock(Image.class);
+        when(image.getId()).thenReturn(id);
+        when(image.getRepoTags()).thenReturn(new String[] {tag});
+        return image;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Map<String, String>> mapCaptor() {
+        return ArgumentCaptor.forClass(Map.class);
     }
 
     private void container(String image, String id) {

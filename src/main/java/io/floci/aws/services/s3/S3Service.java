@@ -101,6 +101,7 @@ import java.util.function.Function;
 import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -127,6 +128,12 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String REDSHIFT_UNLOAD_STAGING_TAG_VALUE = "redshift-unload-staging";
     public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
+
+    /**
+     * The suffix S3 Tables gives the bucket behind each table's warehouse. Such a bucket is the table's
+     * storage, not a general purpose bucket, so it is left out of {@code ListBuckets} as on AWS.
+     */
+    public static final String TABLE_WAREHOUSE_BUCKET_SUFFIX = "--table-s3";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
@@ -669,6 +676,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
                 .filter(bucket -> !isScratchBucket(bucket))
+                .filter(bucket -> !bucket.getName().endsWith(TABLE_WAREHOUSE_BUCKET_SUFFIX))
                 .toList();
     }
 
@@ -687,8 +695,21 @@ public class S3Service implements Resettable, ResourceProvider {
         return Arrays.stream(S3ScratchSpace.values()).anyMatch(space -> space.matchesBucket(bucket));
     }
 
+    /** Not for authorization: it can resolve another account's bucket. Use the overload that names the account. */
     public boolean isScratchBucket(String bucketName) {
         return resolveBucket(bucketName).filter(S3Service::isScratchBucket).isPresent();
+    }
+
+    /**
+     * Whether {@code accountId} itself owns the scratch bucket. With a global bucket namespace the plain
+     * lookup falls back to another account's bucket of the same name, which a transfer session must never reach.
+     */
+    public boolean isScratchBucket(String bucketName, String accountId) {
+        return accountId != null && resolveBucketEntry(bucketName)
+                .filter(entry -> accountId.equals(entry.account()))
+                .map(AccountAwareStorageBackend.OwnedEntry::value)
+                .filter(S3Service::isScratchBucket)
+                .isPresent();
     }
 
     public String getBucketOwnerAccountId(String bucketName) {
@@ -3930,10 +3951,34 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /** Replaces the tags of the bucket a control-plane tagging ARN names, in the partition it names. */
     public void putBucketTaggingForAccount(String accountId, String bucketName, Map<String, String> tags) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> tags != null ? tags : new HashMap<>());
+    }
+
+    public void mergeBucketTaggingForAccount(String accountId, String bucketName, Map<String, String> tags) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> {
+            Map<String, String> updated = new HashMap<>(existing);
+            updated.putAll(tags);
+            return updated;
+        });
+    }
+
+    public void removeBucketTagsForAccount(String accountId, String bucketName, List<String> tagKeys) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> {
+            Map<String, String> updated = new HashMap<>(existing);
+            tagKeys.forEach(updated::remove);
+            return updated;
+        });
+    }
+
+    private void updateBucketTaggingForAccount(String accountId, String bucketName,
+                                               UnaryOperator<Map<String, String>> update) {
         Bucket bucket = bucketForAccount(accountId, bucketName);
-        bucket.setTags(tags != null ? tags : new HashMap<>());
-        writeBucketForAccount(namedAccount(accountId), bucketName, bucket);
-        LOG.debugv("Put tags on bucket {0} of account {1}", bucketName, namedAccount(accountId));
+        synchronized (bucket) {
+            Map<String, String> existing = bucket.getTags() != null ? bucket.getTags() : Map.of();
+            bucket.setTags(update.apply(existing));
+            writeBucketForAccount(namedAccount(accountId), bucketName, bucket);
+        }
+        LOG.debugv("Updated tags on bucket {0} of account {1}", bucketName, namedAccount(accountId));
     }
 
     /**
@@ -4135,12 +4180,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public void deleteBucketTagging(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
-        bucket.setTags(new java.util.HashMap<>());
-        bucketStore.put(bucketName, bucket);
-        LOG.debugv("Deleted tags from bucket: {0}", bucketName);
+        putBucketTagging(bucketName, Map.of());
     }
 
     // --- Metrics Configurations ---

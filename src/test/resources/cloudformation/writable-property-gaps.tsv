@@ -253,7 +253,6 @@ AWS::EC2::VPCEndpoint	ServiceNetworkArn	accepted and ignored
 AWS::EC2::VPCEndpoint	ServiceRegion	accepted and ignored
 AWS::EC2::VPCEndpoint	Tags	accepted and ignored
 AWS::ECR::Repository	EmptyOnDelete	accepted and ignored
-AWS::ECR::Repository	EncryptionConfiguration	accepted and ignored
 AWS::ECR::Repository	ImageScanningConfiguration	accepted and ignored
 AWS::ECR::Repository	ImageTagMutabilityExclusionFilters	accepted and ignored
 AWS::ECS::CapacityProvider	ClusterName	accepted and ignored
@@ -338,6 +337,21 @@ AWS::ElastiCache::CacheCluster	PreferredAvailabilityZones	accepted and ignored, 
 AWS::ElastiCache::CacheCluster	SnapshotArns	accepted and ignored, a warning is logged
 AWS::ElastiCache::CacheCluster	SnapshotName	accepted and ignored, a warning is logged
 AWS::ElastiCache::CacheCluster	TransitEncryptionEnabled	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	AutoMinorVersionUpgrade	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	DataTieringEnabled	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	Durability	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	GlobalReplicationGroupId	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	IpDiscovery	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	LogDeliveryConfigurations	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	NetworkType	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	NodeGroupConfiguration	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	NotificationTopicArn	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	PreferredCacheClusterAZs	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	PreferredMaintenanceWindow	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	PrimaryClusterId	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshotArns	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshotName	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshottingClusterId	accepted and ignored, a warning is logged
 AWS::ElastiCache::ServerlessCache	FinalSnapshotName	accepted and ignored
 AWS::ElasticLoadBalancingV2::Listener	AlpnPolicy	accepted and ignored
 AWS::ElasticLoadBalancingV2::Listener	ListenerAttributes	accepted and ignored
@@ -608,8 +622,6 @@ AWS::S3::Bucket	AbacStatus	accepted and ignored
 AWS::S3::Bucket	AccelerateConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AccessControl	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AnalyticsConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
-AWS::S3::Bucket	BucketNamePrefix	accepted and ignored
-AWS::S3::Bucket	BucketNamespace	accepted and ignored
 AWS::S3::Bucket	IntelligentTieringConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	InventoryConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	LoggingConfiguration	silently dropped, as the S3CfnProvisioner javadoc records

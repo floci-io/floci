@@ -13,6 +13,7 @@ MODEL = {"operations": {
     "GetRole": {"input": {"shape": "GetInput"}},
     "CreateServiceSpecificCredential": {"input": {"shape": "CredentialInput"}},
     "CreateDelegationRequest": {"input": {"shape": "DelegationInput"}},
+    "ListDelegationRequests": {"input": {"shape": "ListDelegationInput"}},
     "DeleteUserPolicy": {"input": {"shape": "UserInput"}},
     "ListRoles": {"input": {"shape": "ListInput"}},
 }, "shapes": {
@@ -26,6 +27,7 @@ MODEL = {"operations": {
     "DelegationInput": {"type": "structure", "members": {"Permissions": {"shape": "Permission"},
                                                          "SessionDuration": {"shape": "Days"}}},
     "Permission": {"type": "structure", "members": {"PolicyTemplateArn": {"shape": "Arn"}}},
+    "ListDelegationInput": {"type": "structure", "members": {"OwnerId": {"shape": "Arn"}}},
     "Arn": {"type": "string"}, "Name": {"type": "string"}, "Days": {"type": "integer"},
 }}
 
@@ -78,6 +80,7 @@ def test_unread_pairs_name_their_reason():
 
 
 BY_HAND_TYPES = {"iam:DelegationDuration": ["String"], "iam:TemplateArn": ["ARN"],
+                 "iam:DelegationRequestOwner": ["ARN"],
                  "iam:ServiceSpecificCredentialAgeDays": ["Numeric"],
                  "iam:ServiceSpecificCredentialServiceName": ["String"]}
 
@@ -108,7 +111,7 @@ def test_by_hand_pair_the_reference_no_longer_lists_fails():
         require_by_hand_listed(pairs)
 
 
-def test_vendored_table_reads_nine_keys_on_fourteen_actions_and_the_boundary_of_fifteen_targets():
+def test_vendored_table_reads_ten_keys_on_fifteen_actions_and_the_boundary_of_fifteen_targets():
     document = json.loads(OUTPUT.read_text())
     assert {(e["action"], e["key"]) for e in document["read"]} == {
         *(("iam:" + verb + kind + "Policy", "iam:PolicyARN")
@@ -122,7 +125,8 @@ def test_vendored_table_reads_nine_keys_on_fourteen_actions_and_the_boundary_of_
         ("iam:CreateDelegationRequest", "iam:TemplateArn"),
         ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialAgeDays"),
         ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialServiceName"),
-        ("iam:GenerateOrganizationsAccessReport", "iam:OrganizationsPolicyId")}
+        ("iam:GenerateOrganizationsAccessReport", "iam:OrganizationsPolicyId"),
+        ("iam:ListDelegationRequests", "iam:DelegationRequestOwner")}
     assert not [e for e in document["notRead"] if e["key"] == "iam:PermissionsBoundary"]
     targets = {e["action"]: e["target"] for e in document["fromTarget"] if e["key"] == "iam:PermissionsBoundary"}
     assert len(targets) == 15

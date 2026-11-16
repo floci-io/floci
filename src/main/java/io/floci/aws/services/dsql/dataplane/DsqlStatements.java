@@ -22,8 +22,7 @@ public final class DsqlStatements {
             "pg_try_advisory_xact_lock_shared", "pg_advisory_unlock", "pg_advisory_unlock_shared",
             "pg_advisory_unlock_all");
     private static final Set<String> COLUMN_CONSTRAINTS = Set.of(
-            "DEFAULT", "NOT", "NULL", "CHECK", "UNIQUE", "PRIMARY", "REFERENCES", "GENERATED", "CONSTRAINT",
-            "COLLATE");
+            "DEFAULT", "NOT", "CHECK", "UNIQUE", "PRIMARY", "REFERENCES", "GENERATED", "CONSTRAINT", "COLLATE");
     private static final Set<String> TABLE_CONSTRAINTS = Set.of(
             "CONSTRAINT", "PRIMARY", "UNIQUE", "CHECK", "FOREIGN", "EXCLUDE");
     private static final String RESERVED_PREFIX = "dsql.";
