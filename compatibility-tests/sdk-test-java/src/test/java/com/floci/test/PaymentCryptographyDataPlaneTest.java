@@ -21,6 +21,7 @@ import software.amazon.awssdk.services.paymentcryptographydata.model.ReEncryptio
 import software.amazon.awssdk.services.paymentcryptographydata.model.SymmetricEncryptionAttributes;
 import software.amazon.awssdk.services.paymentcryptographydata.model.SymmetricKeyAlgorithm;
 import software.amazon.awssdk.services.paymentcryptographydata.model.TranslateKeyMaterialResponse;
+import software.amazon.awssdk.services.paymentcryptographydata.model.WrappedKeyMaterialFormat;
 
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
@@ -299,7 +300,8 @@ class PaymentCryptographyDataPlaneTest {
                 .key().keyCheckValue();
 
         assertThat(keyCheckValue).isNotBlank();
-        assertThat(translated.wrappedKey().wrappedKeyMaterialFormat()).isEqualTo("TR31_KEY_BLOCK");
+        assertThat(translated.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.TR31_KEY_BLOCK);
     }
 
     /**
