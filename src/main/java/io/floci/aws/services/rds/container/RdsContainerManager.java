@@ -1699,8 +1699,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * where the server listens and keeps its data, which Floci controls, and the ones that would
      * lock Floci's proxy out. {@code time_zone} is set through {@code --default-time-zone}, and
      * Aurora's {@code binlog_format=OFF}, which turns binary logging off, through
-     * {@code --skip-log-bin}. A PostgreSQL server takes only RDS's {@code rds.logical_replication=1},
-     * which sets {@code wal_level=logical}.
+     * {@code --skip-log-bin}.
      */
     public static List<String> engineParameterOptions(
             DatabaseEngine engine, Map<String, String> engineParameters) {
