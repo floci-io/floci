@@ -236,7 +236,7 @@ public class CloudWatchMetricsJsonHandler {
     }
 
     private static boolean isConsoleNumber(JsonNode node) {
-        return node.isNumber() && Double.isFinite(node.doubleValue());
+        return MetricNumberValidation.isValid(node);
     }
 
     private static Response unsupportedWithConsoleTarget(String subject) {
@@ -923,7 +923,10 @@ public class CloudWatchMetricsJsonHandler {
             }
             MetricDatum datum = new MetricDatum();
             datum.setMetricName(metricName.asText());
-            datum.setValue(item.path("Value").asDouble(0));
+            String memberPath = listPath + ".member." + index;
+            if (item.hasNonNull("Value")) {
+                datum.setValue(MetricNumberValidation.parse(item.get("Value"), memberPath + ".Value"));
+            }
             datum.setUnit(item.path("Unit").asText(null));
             JsonNode ts = item.path("Timestamp");
             if (!ts.isMissingNode()) {
@@ -933,11 +936,19 @@ public class CloudWatchMetricsJsonHandler {
             datum.setDimensions(parseDimensionsJson(item.path("Dimensions")));
 
             JsonNode statsValues = item.path("StatisticValues");
-            if (!statsValues.isMissingNode()) {
-                datum.setSampleCount(statsValues.path("SampleCount").asDouble(0));
-                datum.setSum(statsValues.path("Sum").asDouble(0));
-                datum.setMinimum(statsValues.path("Minimum").asDouble(0));
-                datum.setMaximum(statsValues.path("Maximum").asDouble(0));
+            if (!statsValues.isMissingNode() && !statsValues.isNull()) {
+                String statsPath = memberPath + ".StatisticValues";
+                if (!statsValues.isObject()) {
+                    throw CloudWatchMetricsException.invalidParameterValue(statsPath + " must be an object.");
+                }
+                if (item.hasNonNull("Value")) {
+                    throw CloudWatchMetricsException.invalidParameterCombination(
+                            statsPath + " cannot be combined with Value.");
+                }
+                datum.setSampleCount(MetricNumberValidation.parse(statsValues.path("SampleCount"), statsPath + ".SampleCount"));
+                datum.setSum(MetricNumberValidation.parse(statsValues.path("Sum"), statsPath + ".Sum"));
+                datum.setMinimum(MetricNumberValidation.parse(statsValues.path("Minimum"), statsPath + ".Minimum"));
+                datum.setMaximum(MetricNumberValidation.parse(statsValues.path("Maximum"), statsPath + ".Maximum"));
             }
 
             datums.add(datum);
