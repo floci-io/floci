@@ -13,6 +13,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.dns.DnsAnswer;
 import io.floci.aws.core.common.dns.DnsClientVpcSource;
 import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
@@ -200,6 +201,7 @@ public class EksClusterManager
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
+    private final StripedLocks podIdentityForwardLocks = new StripedLocks(256);
     private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
@@ -2810,34 +2812,44 @@ public class EksClusterManager
      * image could not do.
      */
     void configurePodIdentityForward(Cluster cluster, String containerId) {
-        if (!podIdentityForwardEnabled()) {
-            return;
-        }
-        if (podIdentityAgentInstalled(cluster)) {
-            forwardPodIdentityAddress(cluster, containerId);
-        } else {
-            removePodIdentityForward(cluster, containerId);
+        if (podIdentityForwardEnabled()) {
+            reconcilePodIdentityForward(cluster, containerId);
         }
     }
 
     /**
-     * CreateAddon stored the {@code eks-pod-identity-agent} add-on for {@code cluster}: its node
-     * starts answering on the Pod Identity address. A cluster without a node, as when EKS is
-     * mocked, is left alone.
+     * CreateAddon stored, or DeleteAddon without {@code preserve} removed, the
+     * {@code eks-pod-identity-agent} add-on of {@code cluster}: its node answers on the Pod Identity
+     * address while the add-on is stored. A cluster without a node, as when EKS is mocked, is left
+     * alone.
      */
-    public void podIdentityAgentCreated(Cluster cluster) {
+    public void podIdentityAgentChanged(Cluster cluster) {
         if (podIdentityForwardEnabled() && cluster.getContainerId() != null) {
-            forwardPodIdentityAddress(cluster, cluster.getContainerId());
+            reconcilePodIdentityForward(cluster, cluster.getContainerId());
         }
     }
 
     /**
-     * DeleteAddon removed the {@code eks-pod-identity-agent} add-on from {@code cluster} without
-     * {@code preserve}: nothing answers on the Pod Identity address any more.
+     * Forwards the address while the add-on is stored and removes the forward otherwise, reading the
+     * store under the cluster's lock: of a CreateAddon and a DeleteAddon racing, or of either and a
+     * restart's adoption, the later waits for the earlier's exec and then reads the store, so the node
+     * ends as the store does. A store that can't be read leaves the node as it is.
      */
-    public void podIdentityAgentDeleted(Cluster cluster) {
-        if (podIdentityForwardEnabled() && cluster.getContainerId() != null) {
-            removePodIdentityForward(cluster, cluster.getContainerId());
+    private void reconcilePodIdentityForward(Cluster cluster, String containerId) {
+        synchronized (podIdentityForwardLocks.lockFor(clusterResourceName(cluster))) {
+            boolean installed;
+            try {
+                installed = podIdentityAgentInstalled(cluster);
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not read the {0} add-on of EKS cluster {1}, leaving its Pod Identity address as it is: {2}",
+                        EksPodIdentityWebhook.POD_IDENTITY_ADDON, cluster.getName(), e.getMessage());
+                return;
+            }
+            if (installed) {
+                forwardPodIdentityAddress(cluster, containerId);
+            } else {
+                removePodIdentityForward(cluster, containerId);
+            }
         }
     }
 

@@ -40,22 +40,20 @@ class EksAddonIntegrationTest {
                         .body(Map.of("addonName", addon)).post(basePath).then().statusCode(200);
             }
             Mockito.verify(clusterManager, Mockito.times(1))
-                    .podIdentityAgentCreated(Mockito.argThat(cluster -> name.equals(cluster.getName())));
+                    .podIdentityAgentChanged(Mockito.argThat(cluster -> name.equals(cluster.getName())));
 
             given().header("Authorization", auth(account, "eks")).queryParam("preserve", true)
                     .delete(basePath + "/eks-pod-identity-agent").then().statusCode(200);
             given().header("Authorization", auth(account, "eks"))
                     .delete(basePath + "/coredns").then().statusCode(200);
-            Mockito.verify(clusterManager, Mockito.never()).podIdentityAgentDeleted(Mockito.any());
+            Mockito.verify(clusterManager, Mockito.times(1)).podIdentityAgentChanged(Mockito.any());
 
             given().header("Authorization", auth(account, "eks")).contentType("application/json")
                     .body(Map.of("addonName", "eks-pod-identity-agent")).post(basePath).then().statusCode(200);
             given().header("Authorization", auth(account, "eks"))
                     .delete(basePath + "/eks-pod-identity-agent").then().statusCode(200);
-            Mockito.verify(clusterManager, Mockito.times(2))
-                    .podIdentityAgentCreated(Mockito.argThat(cluster -> name.equals(cluster.getName())));
-            Mockito.verify(clusterManager, Mockito.times(1))
-                    .podIdentityAgentDeleted(Mockito.argThat(cluster -> name.equals(cluster.getName())));
+            Mockito.verify(clusterManager, Mockito.times(3))
+                    .podIdentityAgentChanged(Mockito.argThat(cluster -> name.equals(cluster.getName())));
         } finally {
             deleteCluster(account, name);
         }

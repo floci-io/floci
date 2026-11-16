@@ -306,7 +306,7 @@ public class EksController {
         Addon addon = addons.create(cluster, request);
         // After the add-on is stored and outside the add-on service's lock: the node is changed by an exec.
         if (isPodIdentityAgent(addon)) {
-            clusterManager.podIdentityAgentCreated(cluster);
+            clusterManager.podIdentityAgentChanged(cluster);
         }
         return Response.ok(Map.of("addon", addon)).build();
     }
@@ -363,7 +363,7 @@ public class EksController {
         Addon addon = addons.delete(cluster, addonName, Boolean.TRUE.equals(preserve));
         // With preserve, EKS leaves the add-on's software running on the cluster, and so its answers.
         if (isPodIdentityAgent(addon) && !Boolean.TRUE.equals(preserve)) {
-            clusterManager.podIdentityAgentDeleted(cluster);
+            clusterManager.podIdentityAgentChanged(cluster);
         }
         return Response.ok(Map.of("addon", addon)).build();
     }

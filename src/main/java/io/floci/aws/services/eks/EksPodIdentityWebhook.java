@@ -166,14 +166,12 @@ public class EksPodIdentityWebhook {
     }
 
     private boolean podIdentityAgentInstalled(Cluster cluster) {
-        try {
-            addons.describe(cluster, POD_IDENTITY_ADDON);
+        if (addons.isInstalled(cluster, POD_IDENTITY_ADDON)) {
             return true;
-        } catch (AwsException e) {
-            LOG.debugv("EKS pod-identity-webhook: cluster {0} has no {1} addon, admitting pods unchanged ({2})",
-                    cluster.getName(), POD_IDENTITY_ADDON, e.getMessage());
-            return false;
         }
+        LOG.debugv("EKS pod-identity-webhook: cluster {0} has no {1} addon, admitting pods unchanged",
+                cluster.getName(), POD_IDENTITY_ADDON);
+        return false;
     }
 
     private boolean hasAssociation(Cluster cluster, String namespace, String serviceAccount) {
