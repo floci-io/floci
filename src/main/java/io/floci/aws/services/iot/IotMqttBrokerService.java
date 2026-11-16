@@ -482,11 +482,11 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * A CONNECT through a custom authorizer, the default one when {@code authorizerName} is null, is
-     * admitted only when the authorizer's function allows it and the policies it returns allow
-     * {@code iot:Connect} for the client id. The function runs off the event loop. A refusal closes
-     * an MQTT 3.1.1 connection without a CONNACK and answers MQTT 5 with reason code 0x87, as AWS
-     * IoT does.
+     * A CONNECT through the named custom authorizer, or the default authorizer when
+     * {@code authorizerName} is null, is admitted only when the authorizer's function allows it and
+     * the policies it returns allow {@code iot:Connect} for the client id; with no default authorizer
+     * set it is refused. The function runs off the event loop. A refusal closes an MQTT 3.1.1
+     * connection without a CONNACK and answers MQTT 5 with reason code 0x87, as AWS IoT does.
      */
     private void authorizeCustom(MqttEndpoint endpoint, String authorizerName, IotCustomAuthorizer.WebSocketUpgrade upgrade,
                                  String sourceIp, int sourcePort, long connectNanos) {

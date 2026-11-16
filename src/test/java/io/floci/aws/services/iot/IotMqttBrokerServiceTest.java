@@ -535,12 +535,7 @@ class IotMqttBrokerServiceTest {
         when(iotService.get()).thenReturn(service);
         when(customAuthorizer.connectPolicies(eq("ws-auth"), eq("ws-client"), any(), any(), any()))
                 .thenReturn(List.of("{}"));
-        SocketAddress bridge = SocketAddress.inetSocketAddress(50123, "127.0.0.1");
-        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
-                Map.of(), IotCustomAuthorizer.NAME_PARAM + "=ws-auth", null, "203.0.113.7", 41233));
-        MqttEndpoint endpoint = mock(MqttEndpoint.class);
-        when(endpoint.clientIdentifier()).thenReturn("ws-client");
-        when(endpoint.remoteAddress()).thenReturn(bridge);
+        MqttEndpoint endpoint = bridgedEndpoint("ws-client", IotCustomAuthorizer.NAME_PARAM + "=ws-auth");
 
         broker.handleEndpoint(endpoint, false);
 
@@ -552,11 +547,7 @@ class IotMqttBrokerServiceTest {
         IotService service = mock(IotService.class);
         when(iotService.get()).thenReturn(service);
         when(customAuthorizer.connectPolicies(isNull(), eq("ws-unsigned"), any(), any(), any())).thenReturn(List.of("{}"));
-        SocketAddress bridge = SocketAddress.inetSocketAddress(50126, "127.0.0.1");
-        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(Map.of(), "", null, "203.0.113.7", 41236));
-        MqttEndpoint endpoint = mock(MqttEndpoint.class);
-        when(endpoint.clientIdentifier()).thenReturn("ws-unsigned");
-        when(endpoint.remoteAddress()).thenReturn(bridge);
+        MqttEndpoint endpoint = bridgedEndpoint("ws-unsigned", "");
 
         broker.handleEndpoint(endpoint, false);
 
@@ -566,19 +557,14 @@ class IotMqttBrokerServiceTest {
     @Test
     void aWebSocketClientsConnectedEventCarriesTheWebSocketClientsAddress() throws Exception {
         startBrokerRecordingPublishes();
-        SocketAddress bridge = SocketAddress.inetSocketAddress(50124, "127.0.0.1");
-        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
-                Map.of(), IotWebSocketSigV4.QUERY.substring(1), null, "203.0.113.7", 41234));
-        MqttEndpoint endpoint = mock(MqttEndpoint.class);
-        when(endpoint.clientIdentifier()).thenReturn("ws-client");
-        when(endpoint.remoteAddress()).thenReturn(bridge);
+        MqttEndpoint endpoint = bridgedEndpoint("ws-client", IotWebSocketSigV4.QUERY.substring(1));
         when(endpoint.isConnected()).thenReturn(true);
 
         broker.handleEndpoint(endpoint, false);
 
         assertEquals("203.0.113.7", awaitPresence("connected", "ws-client", 1).get(0).get("ipAddress").asText(),
                 "the WebSocket client's address, not the bridge's loopback socket");
-        assertEquals(new IotMqttBrokerService.ConnectionInfo("ws-client", "203.0.113.7", 41234),
+        assertEquals(new IotMqttBrokerService.ConnectionInfo("ws-client", "203.0.113.7", 41233),
                 broker.getConnection("ws-client").orElseThrow(), "the WebSocket client's address and port");
     }
 
@@ -1232,12 +1218,7 @@ class IotMqttBrokerServiceTest {
             return List.of("""
                     {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "iot:Connect", "Resource": "*"}]}""");
         });
-        SocketAddress bridge = SocketAddress.inetSocketAddress(50125, "127.0.0.1");
-        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
-                Map.of(), IotCustomAuthorizer.NAME_PARAM + "=slow-auth", null, "203.0.113.7", 41235));
-        MqttEndpoint endpoint = mock(MqttEndpoint.class);
-        when(endpoint.clientIdentifier()).thenReturn("slow");
-        when(endpoint.remoteAddress()).thenReturn(bridge);
+        MqttEndpoint endpoint = bridgedEndpoint("slow", IotCustomAuthorizer.NAME_PARAM + "=slow-auth");
         when(endpoint.keepAliveTimeSeconds()).thenReturn(1);
 
         broker.handleEndpoint(endpoint, false);
@@ -1919,6 +1900,16 @@ class IotMqttBrokerServiceTest {
         MqttSubscribeMessage message = mock(MqttSubscribeMessage.class);
         when(message.topicSubscriptions()).thenReturn(List.of(requested));
         return message;
+    }
+
+    private MqttEndpoint bridgedEndpoint(String clientId, String queryString) {
+        SocketAddress bridge = SocketAddress.inetSocketAddress(50123, "127.0.0.1");
+        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
+                Map.of(), queryString, null, "203.0.113.7", 41233));
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn(clientId);
+        when(endpoint.remoteAddress()).thenReturn(bridge);
+        return endpoint;
     }
 
     /** A connected client with a one-second keep-alive. */

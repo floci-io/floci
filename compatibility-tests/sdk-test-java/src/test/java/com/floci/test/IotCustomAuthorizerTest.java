@@ -741,8 +741,7 @@ class IotCustomAuthorizerTest {
     @EnumSource(Mqtt.class)
     @DisplayName("a CONNECT that names no authorizer and carries no SigV4 is refused")
     void mqttUnsignedWithoutAuthorizerRefused(Mqtt version) {
-        assertRefused(version, new Target(mqttUri, clientId, clientId,
-                "allow-me".getBytes(StandardCharsets.UTF_8), Map.of()));
+        assertRefused(version, target(clientId, "allow-me"));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -751,8 +750,7 @@ class IotCustomAuthorizerTest {
     void mqttUnsignedGoesThroughTheDefaultAuthorizer(Mqtt version) throws Exception {
         iot.setDefaultAuthorizer(r -> r.authorizerName(authorizer));
         try {
-            assertConnects(version, new Target(mqttUri, clientId, clientId,
-                    "allow-me".getBytes(StandardCharsets.UTF_8), Map.of()));
+            assertConnects(version, target(clientId, "allow-me"));
         } finally {
             iot.clearDefaultAuthorizer(r -> { });
         }
@@ -764,8 +762,7 @@ class IotCustomAuthorizerTest {
     void mqttUnsignedDeniedByTheDefaultAuthorizer(Mqtt version) {
         iot.setDefaultAuthorizer(r -> r.authorizerName(authorizer));
         try {
-            assertRefused(version, new Target(mqttUri, clientId, clientId,
-                    "deny".getBytes(StandardCharsets.UTF_8), Map.of()));
+            assertRefused(version, target(clientId, "deny"));
         } finally {
             iot.clearDefaultAuthorizer(r -> { });
         }

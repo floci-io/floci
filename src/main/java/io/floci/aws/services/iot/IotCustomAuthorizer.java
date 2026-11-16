@@ -142,8 +142,9 @@ public class IotCustomAuthorizer {
      * The policies an MQTT CONNECT through the named authorizer, or the default authorizer when
      * {@code name} is null, is admitted with. None when the authorizer is not ACTIVE, which never
      * invokes the function, or when the function denies or returns no policy; an
-     * {@link AwsException} when the authorizer does not exist, a signature
-     * does not verify (the function is not invoked) or the answer is one TestInvokeAuthorizer rejects.
+     * {@link AwsException} when the authorizer does not exist or no default authorizer is set, a
+     * signature does not verify (the function is not invoked) or the answer is one
+     * TestInvokeAuthorizer rejects.
      */
     List<String> connectPolicies(String name, String clientId, String username, String password, WebSocketUpgrade upgrade) {
         // ponytail: the broker has no request context, so a connection finds authorizers in the default account and region.
