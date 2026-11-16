@@ -7,6 +7,7 @@ import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.IpPermission;
 import io.floci.aws.services.ec2.model.NetworkInterface;
+import io.floci.aws.services.ec2.model.PublishedPortFamily;
 import io.floci.aws.services.ec2.model.Reservation;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.SecurityGroupRule;
@@ -16,6 +17,7 @@ import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.model.VpcEndpoint;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.IpPermissions;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -741,12 +743,40 @@ class Ec2SecurityGroupPublicationRaceTest {
 
         service.modifyNetworkInterfaceAttribute(region, secondary,
                 new Ec2Service.NetworkInterfaceAttributeChange(List.of(replacement), null, null, null, null), false);
-        verify(ports, never()).reconcile(any(), anySet());
+        verify(ports, never()).reconcile(any(), any());
 
         service.modifyNetworkInterfaceAttribute(region, primary,
                 new Ec2Service.NetworkInterfaceAttributeChange(List.of(replacement), null, null, null, null), false);
         verify(ports).reconcile(argThat(reconciled -> instance.getInstanceId().equals(reconciled.getInstanceId())),
-                anySet());
+                any());
+    }
+
+    // Catches: enforcement publishing a port only a narrower CIDR opens, judged on a host client address Docker may
+    // have replaced, or publishing none at all; each port admits the family whose world-open rule opens it.
+    @Test
+    void withEnforcementOnlyRulesOpenToEveryAddressPublishPorts() {
+        TestStores factory = new TestStores();
+        EmulatorConfig config = mockConfig();
+        Ec2PortForwardManager ports = mock(Ec2PortForwardManager.class);
+        Ec2Service service = service(factory, config, mock(Ec2ContainerManager.class), ports);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        String subnet = service.createSubnet(region, vpc, "10.0.1.0/24", region + "a").getSubnetId();
+        String group = service.createSecurityGroup(region, "world-open", "world-open", vpc).getGroupId();
+        Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+                List.of(group), subnet, null, List.of(), null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        instance.setDockerContainerId("container-world-open");
+        enableEnforcement(config);
+        when(config.services().ec2().publishSecurityGroupPorts()).thenReturn(true);
+        when(config.services().ec2().maxPublishedPortsPerInstance()).thenReturn(20);
+
+        service.authorizeSecurityGroupIngress(region, group, List.of(IpPermissions.tcp(80, "0.0.0.0/0"),
+                IpPermissions.tcp(8080, "10.0.0.0/8"), IpPermissions.tcp(443, "::/0")));
+
+        verify(ports).reconcile(argThat(reconciled -> instance.getInstanceId().equals(reconciled.getInstanceId())),
+                eq(new Ec2PortForwardManager.DesiredPorts(Map.of(80, PublishedPortFamily.IPV4,
+                        443, PublishedPortFamily.IPV6))));
     }
 
     /** A dual-stack subnet's interface, with enforcement on and the container manager a mock. */

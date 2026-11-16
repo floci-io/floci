@@ -1129,9 +1129,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return false;
         }
         putForOwner(instances, entry, instance);
-        // Container is running: re-reserve host ports and recreate any missing socat sidecars.
+        // Container is running: re-reserve host ports and recreate any missing socat sidecars, then
+        // bring them to what the current rules publish, since a forward may come from other rules or
+        // another enforcement setting.
         if (portForwardManager != null) {
             portForwardManager.restore(instance);
+            portForwardManager.reconcile(instance, desiredPublishedPorts(instance.getRegion(), instance));
         }
         return true;
     }
@@ -4524,11 +4527,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Resolves the TCP ingress ports Floci should publish on the host for an instance, aggregated
-     * across its attached security groups. Empty when publishing is disabled or nothing is opened.
+     * across its attached security groups: with enforcement on, only those opened to every address.
+     * Empty when publishing is disabled or nothing is opened.
      */
-    private Set<Integer> desiredPublishedPorts(String region, Instance inst) {
+    private Ec2PortForwardManager.DesiredPorts desiredPublishedPorts(String region, Instance inst) {
         if (!config.services().ec2().publishSecurityGroupPorts()) {
-            return Set.of();
+            return Ec2PortForwardManager.DesiredPorts.NONE;
         }
         List<SecurityGroup> sgs = new ArrayList<>();
         if (inst.getSecurityGroups() != null) {
@@ -4536,8 +4540,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 securityGroups.get(key(region, gi.getGroupId())).ifPresent(sgs::add);
             }
         }
-        return Ec2PortForwardManager.extractPublishablePorts(
-                sgs, config.services().ec2().maxPublishedPortsPerInstance());
+        int max = config.services().ec2().maxPublishedPortsPerInstance();
+        return securityGroupEnforcementEnabled()
+                ? Ec2PortForwardManager.extractWorldOpenPorts(sgs, max)
+                : Ec2PortForwardManager.DesiredPorts.anyFamily(Ec2PortForwardManager.extractPublishablePorts(sgs, max));
     }
 
     private Map<String, List<String>> policyPrefixLists(String region, List<SecurityGroup> groups) {
