@@ -476,8 +476,7 @@ def _takes_name(name: str, member: dict, model: dict) -> bool:
     one, unless its pattern only admits an ARN."""
     shape = _leaf(model, member["shape"])
     if shape is None:
-        # The member holds no string, so it takes no role by name.
-        return False
+        raise ValueError(f"{name}: only a member that holds a string can take a role by name")
     if shape.get("pattern", "").lstrip("^").startswith("arn:"):
         return False
     return bool(ROLE_NAME_MEMBER_RE.search(name) or BY_NAME_DOC_RE.search(_documentation(member, shape)))

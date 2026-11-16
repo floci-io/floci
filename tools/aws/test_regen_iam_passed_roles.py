@@ -149,6 +149,13 @@ def test_a_pattern_that_only_admits_an_arn_takes_no_name():
     assert r.role_members(m, "Op") == {"ExecutionRoleArn": False}
 
 
+def test_a_member_that_holds_no_string_cannot_be_asked_whether_it_takes_a_name():
+    m = model({"Op": "In"}, {"In": structure(role="RoleType"),
+                             "RoleType": {"type": "string", "enum": ["ADMIN"]}})
+    with pytest.raises(ValueError, match="holds a string"):
+        r._takes_name("role", {"shape": "RoleType"}, m)
+
+
 @pytest.mark.parametrize("protocol", ["ec2", "rest-xml"])
 def test_a_model_whose_requests_are_not_read_has_no_members(protocol):
     m = model({"Op": "In"}, {"In": structure(RoleArn="String")}, protocol=protocol)
