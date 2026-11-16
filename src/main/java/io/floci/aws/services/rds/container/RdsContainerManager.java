@@ -1693,7 +1693,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     /**
      * A parameter group's overrides as server options. PostgreSQL takes only
      * {@code rds.logical_replication}, whose value of 1 becomes {@code wal_level=logical}; its
-     * other values, and those of other engines, give no options. For MySQL or MariaDB each
+     * other values, and SQL Server's, give no options. For MySQL or MariaDB each
      * override takes the {@code --loose-} prefix, so a parameter only Aurora or RDS knows (or one
      * an older server does not have) is skipped with a warning instead of stopping the server. A
      * value that is a formula, such as {@code {DBInstanceClassMemory*3/4}}, is worked out by AWS
