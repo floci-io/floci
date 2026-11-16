@@ -215,8 +215,11 @@ class GlueTableResolverTest {
      * string or a date failing with Athena's error.
      */
     private static String parquetTimestamp(String column, String name) {
+        String nanos = "epoch_ns(TRY_CAST(" + column + " AS TIMESTAMP_NS))";
         return "date_trunc('millisecond', CASE WHEN typeof(" + column + ") = 'BIGINT' THEN epoch_ms(TRY_CAST(" + column
-                + " AS BIGINT)) WHEN typeof(" + column + ") IN ('VARCHAR', 'BLOB') THEN error('HIVE_BAD_DATA: Malformed"
+                + " AS BIGINT)) WHEN typeof(" + column + ") = 'TIMESTAMP_NS' THEN epoch_ms(" + nanos + " // 1000000 -"
+                + " CASE WHEN " + nanos + " % 1000000 < 0 THEN 1 ELSE 0 END)"
+                + " WHEN typeof(" + column + ") IN ('VARCHAR', 'BLOB') THEN error('HIVE_BAD_DATA: Malformed"
                 + " Parquet file."
                 + " Field " + name + "''s type BINARY in parquet file is incompatible with type timestamp(3) defined in"
                 + " table schema') WHEN typeof(" + column + ") = 'DATE' THEN error('SERIALIZATION_ERROR: Could not"

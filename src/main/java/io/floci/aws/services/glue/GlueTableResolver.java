@@ -527,7 +527,8 @@ public final class GlueTableResolver {
      *
      * <p>A name is resolved to its first declaration, as {@link #buildProjection} projects it.
      *
-     * <p>TODO: a JSON table's {@code timestamp} column is still typed as DuckDB infers it, and a
+     * <p>TODO: a {@code timestamp} column of a JSON table, or of a delimited-text table read by
+     * sniffing (no CSV options, see {@link #hasCsvOptions}), is still typed as DuckDB infers it, and a
      * {@code timestamp} partition key keeps a value's microseconds where Athena would presumably
      * truncate them (unchecked; such values rarely carry a fraction).
      */
@@ -548,7 +549,11 @@ public final class GlueTableResolver {
      *
      * <p>A timestamp column is cast to a plain {@code TIMESTAMP}, which every timestamp DuckDB reads
      * from Parquet converts to: a UTC-adjusted one (taken at UTC, the session's zone, see
-     * {@link #readsParquetTimestamps}), MICROS, NANOS and the legacy INT96.
+     * {@link #readsParquetTimestamps}), MICROS, NANOS and the legacy INT96. A NANOS one that is not
+     * UTC-adjusted ({@code TIMESTAMP_NS}, pandas' naive unit) is floored to milliseconds first,
+     * because that cast truncates towards zero, which before 1970 is towards the future: the floor is
+     * integer arithmetic on {@code epoch_ns}, since DuckDB divides a {@code DECIMAL} as a
+     * {@code DOUBLE}, which cannot place every nanosecond value in its millisecond.
      *
      * <p>A file whose column holds something else reads as on Athena (engine v3), which goes by the
      * file's physical type: an INT64 without a logical type is epoch milliseconds, and a string
@@ -568,7 +573,10 @@ public final class GlueTableResolver {
         String binary = "HIVE_BAD_DATA: Malformed Parquet file. Field " + name
                 + "'s type BINARY in parquet file is incompatible with type timestamp(3) defined in table schema";
         String date = "SERIALIZATION_ERROR: Could not serialize column '" + name + "' of type 'timestamp(3)'";
+        String nanos = "epoch_ns(TRY_CAST(" + column + " AS TIMESTAMP_NS))";
         return athenaTimestamp("CASE WHEN " + type + " = 'BIGINT' THEN epoch_ms(TRY_CAST(" + column + " AS BIGINT))"
+                + " WHEN " + type + " = 'TIMESTAMP_NS' THEN epoch_ms(" + nanos + " // 1000000 - CASE WHEN " + nanos
+                + " % 1000000 < 0 THEN 1 ELSE 0 END)"
                 + " WHEN " + type + " IN ('VARCHAR', 'BLOB') THEN error('" + escape(binary) + "')"
                 + " WHEN " + type + " = 'DATE' THEN error('" + escape(date) + "')"
                 + " ELSE CAST(" + column + " AS TIMESTAMP) END");
@@ -581,8 +589,10 @@ public final class GlueTableResolver {
      * {@code .999}), as {@code date_trunc} does. DuckDB's {@code TIMESTAMP_MS} would round instead,
      * and has no cast from {@code TIMESTAMP_NS}.
      *
-     * <p>TODO: DuckDB truncates NANOS to micros towards zero, so a value before 1970 less than a
-     * microsecond past a millisecond reads one millisecond late.
+     * <p>TODO: DuckDB's Parquet reader converts a UTC-adjusted NANOS value to micros towards zero,
+     * before any SQL sees it, so such a value before 1970 less than a microsecond past a millisecond
+     * reads one millisecond late. A NANOS value that is not UTC-adjusted is floored exactly
+     * ({@link #parquetTimestamp}).
      */
     private static String athenaTimestamp(String timestamp) {
         return "date_trunc('millisecond', " + timestamp + ")";

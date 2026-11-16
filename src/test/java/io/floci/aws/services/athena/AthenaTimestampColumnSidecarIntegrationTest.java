@@ -46,13 +46,19 @@ import static org.mockito.Mockito.when;
 @TestProfile(SidecarContainersProfile.class)
 class AthenaTimestampColumnSidecarIntegrationTest {
 
-    /** The rows of every table here, by id: whole seconds, a half millisecond, before the epoch, and NULL. */
+    /**
+     * The rows of every table here, by id: whole seconds, a half millisecond, before the epoch, NULL, and a value one
+     * nanosecond (and one millisecond and one nanosecond) before the epoch, which truncating towards zero would put
+     * in the following millisecond. Row 2's {@code .123999999} is a nanosecond short of the next millisecond.
+     */
     private static final String ROWS = """
             SELECT * FROM (VALUES
               (1, TIMESTAMPTZ '2026-03-14 09:30:00+00',       TIMESTAMP_NS '2026-03-14 09:30:00'),
               (2, TIMESTAMPTZ '2026-03-14 09:30:00.1235+00',  TIMESTAMP_NS '2026-03-14 09:30:00.123999999'),
               (3, TIMESTAMPTZ '1969-12-31 23:59:59.9995+00',  TIMESTAMP_NS '1969-12-31 23:59:59.9995'),
-              (4, CAST(NULL AS TIMESTAMPTZ),                  CAST(NULL AS TIMESTAMP_NS))
+              (4, CAST(NULL AS TIMESTAMPTZ),                  CAST(NULL AS TIMESTAMP_NS)),
+              (5, TIMESTAMPTZ '1969-12-31 23:59:59.999999+00', TIMESTAMP_NS '1969-12-31 23:59:59.999999999'),
+              (6, TIMESTAMPTZ '1969-12-31 23:59:59.998999+00', TIMESTAMP_NS '1969-12-31 23:59:59.998999999')
             ) AS t (id, ts, ts_ns)""";
 
     /**
@@ -63,7 +69,9 @@ class AthenaTimestampColumnSidecarIntegrationTest {
             row("1", "2026-03-14 09:30:00", "2026-03-14 09:30:00"),
             row("2", "2026-03-14 09:30:00.123", "2026-03-14 09:30:00.123"),
             row("3", "1969-12-31 23:59:59.999", "1969-12-31 23:59:59.999"),
-            row("4", "null", "null"));
+            row("4", "null", "null"),
+            row("5", "1969-12-31 23:59:59.999", "1969-12-31 23:59:59.999"),
+            row("6", "1969-12-31 23:59:59.998", "1969-12-31 23:59:59.998"));
 
     private static final String SELECT = "SELECT id, CAST(ts AS VARCHAR) AS ts, CAST(ts_ns AS VARCHAR) AS ts_ns,"
             + " typeof(ts) AS ts_type, typeof(ts_ns) AS ts_ns_type FROM ";
