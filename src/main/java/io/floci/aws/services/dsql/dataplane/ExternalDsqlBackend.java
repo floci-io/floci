@@ -180,7 +180,7 @@ public class ExternalDsqlBackend implements DsqlBackend {
                     dropDatabase(server, names);
                     for (String role : roles) {
                         if (!names.owns(role)) {
-                            LOG.warnv("Role {0} is not one of DSQL cluster {1}'s roles; it is left in place", role,
+                            LOG.warnv("Role {0} is not a role of DSQL cluster {1}; it is left in place", role,
                                     cluster.getIdentifier());
                             continue;
                         }
