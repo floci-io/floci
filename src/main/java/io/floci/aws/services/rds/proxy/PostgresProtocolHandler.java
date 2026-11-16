@@ -1401,10 +1401,6 @@ public class PostgresProtocolHandler {
         return value != null && ("database".equals(value) || Boolean.TRUE.equals(parseBool(value)));
     }
 
-    /**
-     * Whether the session's role may start a WAL sender: a superuser, a role with the
-     * {@code REPLICATION} attribute, or a direct or indirect member of {@code rds_replication}.
-     */
     static String replicationPrivilegeQuery() {
         return "SELECT r.oid::pg_catalog.text, r.rolsuper OR r.rolreplication OR EXISTS ("
                 + "SELECT 1 FROM pg_catalog.pg_roles g WHERE g.rolname OPERATOR(pg_catalog.=) 'rds_replication' "
