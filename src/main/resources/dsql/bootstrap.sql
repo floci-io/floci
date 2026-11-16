@@ -1,4 +1,4 @@
--- Aurora DSQL's dialect inside a cluster's PostgreSQL, installed by Floci as the superuser dbowner
+-- Aurora DSQL's dialect inside a cluster's PostgreSQL, installed by Floci as the superuser {{owner}}
 -- every time the database starts. Every statement is idempotent. What DSQL answers was measured on
 -- AWS (eu-west-1, 2026-10-16); the messages and SQLSTATEs below are its own. Event triggers do not
 -- fire for a session in the replica role, so the dialect's own DDL is not checked against it.
@@ -6,16 +6,16 @@ SET session_replication_role = replica;
 
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
-        CREATE ROLE admin WITH LOGIN CREATEROLE CREATEDB;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{admin_literal}}) THEN
+        CREATE ROLE {{admin}} WITH LOGIN CREATEROLE CREATEDB;
     END IF;
 END
 $$;
-GRANT CREATE ON DATABASE postgres TO admin;
-ALTER SCHEMA public OWNER TO admin;
-ALTER DATABASE postgres SET default_transaction_isolation TO 'repeatable read';
+GRANT CREATE ON DATABASE {{database}} TO {{admin}};
+ALTER SCHEMA public OWNER TO {{admin}};
+ALTER DATABASE {{database}} SET default_transaction_isolation TO 'repeatable read';
 
-CREATE SCHEMA IF NOT EXISTS sys AUTHORIZATION dbowner;
+CREATE SCHEMA IF NOT EXISTS sys AUTHORIZATION {{owner}};
 GRANT USAGE ON SCHEMA sys TO PUBLIC;
 
 -- ── Identifiers: a UUID as 26 characters of lowercase base32 ──────────────────
@@ -102,7 +102,7 @@ CREATE OR REPLACE FUNCTION sys.cluster_size_limit() RETURNS bigint
 LANGUAGE sql IMMUTABLE AS $$ SELECT 10995116277760::bigint $$;
 
 CREATE OR REPLACE FUNCTION sys.cluster_size() RETURNS bigint
-LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT pg_database_size('postgres') $$;
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT pg_database_size(current_database()) $$;
 
 CREATE OR REPLACE VIEW sys.roles AS
 SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
@@ -367,7 +367,7 @@ SELECT sys.uuid_to_base32_str(job_id) AS job_id,
 FROM sys.job;
 GRANT SELECT ON sys.jobs TO PUBLIC;
 
--- The job and the invalid index below are written as dbowner, so each first checks that the caller
+-- The job and the invalid index below are written as {{owner}}, so each first checks that the caller
 -- owns the index it names: a client can record or invalidate only what it built itself.
 CREATE OR REPLACE FUNCTION sys._require_index_owner(index_oid oid) RETURNS void
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
@@ -488,7 +488,7 @@ LEFT JOIN pg_authid b ON b.oid = m.grantor;
 GRANT SELECT ON sys.iam_pg_role_mappings TO PUBLIC;
 
 -- The role an IAM role may be trusted with: one that exists, is no superuser, and on which the caller
--- holds the ADMIN option, which admin holds on every role it created and on none other, itself
+-- holds the ADMIN option, which {{admin}} holds on every role it created and on none other, itself
 -- included.
 CREATE OR REPLACE FUNCTION sys._trusted_role(role_name text, verb text, preposition text) RETURNS oid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$

@@ -12,8 +12,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -93,7 +91,7 @@ public class DockerDsqlBackend implements DsqlBackend {
             LOG.infov("DSQL cluster {0} serves from {1}:{2}", cluster.getIdentifier(), backend.host(),
                     String.valueOf(backend.port()));
             return backend;
-        } catch (SQLException | IOException | RuntimeException e) {
+        } catch (SQLException | RuntimeException e) {
             // A database that never served does not keep running: its cluster is FAILED, and deleting
             // the cluster removes its data.
             try {
@@ -144,14 +142,8 @@ public class DockerDsqlBackend implements DsqlBackend {
         throw new SQLException("The database did not start within " + READY_TIMEOUT.toSeconds() + " s", last);
     }
 
-    private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException, IOException {
-        String script;
-        try (InputStream in = DockerDsqlBackend.class.getResourceAsStream("/dsql/bootstrap.sql")) {
-            if (in == null) {
-                throw new IOException("dsql/bootstrap.sql is missing from the classpath");
-            }
-            script = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        }
+    private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException {
+        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, "admin");
         try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
             statement.execute(script);
         }
