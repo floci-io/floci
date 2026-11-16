@@ -1405,8 +1405,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 $ACCOUNTS
                 EOF
                 while IFS= read -r grantee; do
-                  # A statement ends where the next GRANT, REVOKE or SET DEFAULT ROLE begins, not at every line: a name with a newline spans two.
-                  if [ -n "$grantee" ]; then unesc "$grantee"; SQL "SHOW GRANTS FOR $R" | awk 'BEGIN{ORS=""} /^(GRANT|REVOKE|SET DEFAULT ROLE) /{if(NR>1)print ";\\n"} NR>1&&!/^(GRANT|REVOKE|SET DEFAULT ROLE) /{print "\\n"} {print} END{if(NR)print ";\\n"}'; fi
+                  # Batch mode without -r prints each statement on one line (a newline in a name is \\n), so one row is
+                  # one statement whatever a name contains; %b undoes the escapes.
+                  if [ -n "$grantee" ]; then unesc "$grantee"; NAMES "SHOW GRANTS FOR $R" | while IFS= read -r g; do printf '%b;\\n' "$g"; done; fi
                 done <<EOF
                 $ROLES
                 $ACCOUNTS

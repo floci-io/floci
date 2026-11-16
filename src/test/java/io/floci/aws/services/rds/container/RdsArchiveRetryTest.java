@@ -262,9 +262,9 @@ class RdsArchiveRetryTest {
                 case "$last" in
                   *information_schema.schemata*) printf 'a\\\\nb\\nplain\\n' ;;
                   *CONCAT*QUOTE*) printf '\\047u\\\\nser\\047@\\047%%\\047\\n' ;;
-                  *QUOTE*) printf '\\047r\\\\nole\\047\\n' ;;
-                  *SHOW*GRANTS*) printf 'GRANT USAGE ON *.* TO %s\\nREVOKE SELECT ON mysql.* FROM %s\\nSET DEFAULT ROLE r FOR %s\\n' \\
-                      "${last#SHOW GRANTS FOR }" "${last#SHOW GRANTS FOR }" "${last#SHOW GRANTS FOR }" ;;
+                  *QUOTE*) printf '\\047r\\\\nGRANT ole\\047\\n' ;;
+                  *SHOW*GRANTS*) n=$(printf '%s\\n' "${last#SHOW GRANTS FOR }" | awk 'NR>1{printf "\\\\n"} {printf "%s", $0}')
+                      printf 'GRANT USAGE ON *.* TO %s\\nREVOKE SELECT ON mysql.* FROM %s\\nSET DEFAULT ROLE r FOR %s\\n' "$n" "$n" "$n" ;;
                   *SHOW*) printf '%s\\n' "$last" ;;
                 esac
                 """);
@@ -283,10 +283,10 @@ class RdsArchiveRetryTest {
         assertEquals(0, process.waitFor(), output);
         assertTrue(output.startsWith("<a\nb><plain>"), output);
         // Roles, accounts and grantees are decoded too: each statement carries the real newline.
-        assertTrue(output.contains("CREATE ROLE IF NOT EXISTS 'r\nole';"), output);
+        assertTrue(output.contains("CREATE ROLE IF NOT EXISTS 'r\nGRANT ole';"), output);
         assertTrue(output.contains("SHOW CREATE USER 'u\nser'@'%'"), output);
-        // Each GRANT ends with one ';', after the whole name, not after the line the newline split.
-        assertTrue(output.contains("GRANT USAGE ON *.* TO 'r\nole';\n"), output);
+        // Each GRANT ends with one ';' after the whole name, even when a continuation line starts with a keyword.
+        assertTrue(output.contains("GRANT USAGE ON *.* TO 'r\nGRANT ole';\n"), output);
         assertTrue(output.contains("GRANT USAGE ON *.* TO 'u\nser'@'%';\n"), output);
         // MariaDB's SET DEFAULT ROLE and MySQL's partial REVOKE are statements of their own, not GRANT tails.
         assertTrue(output.contains("GRANT USAGE ON *.* TO 'u\nser'@'%';\nREVOKE SELECT ON mysql.* FROM 'u\nser'@'%';\n"
