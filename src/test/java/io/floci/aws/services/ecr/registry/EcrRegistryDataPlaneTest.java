@@ -251,9 +251,11 @@ class EcrRegistryDataPlaneTest {
         String digest = "sha256:" + "a".repeat(64);
         AtomicBoolean accept = new AtomicBoolean();
         HttpServer registry = vertx.createHttpServer()
-                .requestHandler(request -> request.bodyHandler(body -> request.response()
-                        .putHeader("Docker-Content-Digest", digest)
-                        .setStatusCode(accept.get() ? 201 : 400).end()))
+                .requestHandler(request -> request.bodyHandler(body -> {
+                    int successStatus = request.method() == HttpMethod.DELETE ? 202 : 201;
+                    request.response().putHeader("Docker-Content-Digest", digest)
+                            .setStatusCode(accept.get() ? successStatus : 400).end();
+                }))
                 .listen(0, "127.0.0.1")
                 .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
 
@@ -263,6 +265,9 @@ class EcrRegistryDataPlaneTest {
             assertEquals(400, putManifest(dataPlane.actualPort()).statusCode());
             Mockito.verify(ecrService, Mockito.never()).recordImagePush(anyString(), anyString(),
                     anyString(), anyString(), any());
+            String manifestPath = "/v2/platform/api/manifests/" + digest;
+            assertEquals(400, request(dataPlane.actualPort(), HttpMethod.DELETE, manifestPath).status());
+            Mockito.verify(ecrService, Mockito.never()).removeImagePush(anyString(), anyString(), anyString(), anyString());
 
             Mockito.doAnswer(call -> {
                 assertEquals(0, repositoryWriteLock.availablePermits());
@@ -273,6 +278,13 @@ class EcrRegistryDataPlaneTest {
             assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
             Mockito.verify(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
                     eq("platform/api"), eq(digest), any());
+
+            Mockito.doAnswer(call -> {
+                assertEquals(0, repositoryWriteLock.availablePermits());
+                return null;
+            }).when(ecrService).removeImagePush("000000000000", "us-east-1", "platform/api", digest);
+            assertEquals(202, request(dataPlane.actualPort(), HttpMethod.DELETE, manifestPath).status());
+            Mockito.verify(ecrService).removeImagePush("000000000000", "us-east-1", "platform/api", digest);
 
             Mockito.doThrow(new IllegalStateException("metadata store unavailable"))
                     .when(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
