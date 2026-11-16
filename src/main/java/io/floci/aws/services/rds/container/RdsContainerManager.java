@@ -1557,7 +1557,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
                 # Replay the dump connected to postgres
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -f /tmp/dump.sql
-                """;
+
+                # A dump taken before Floci created a predefined role does not recreate it
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres <<'SQL'
+                """ + postgresIamRoleInitSql() + "SQL\n";
     }
 
     private static void addTarEntry(

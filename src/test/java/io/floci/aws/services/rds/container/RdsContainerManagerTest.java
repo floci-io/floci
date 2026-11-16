@@ -1547,6 +1547,15 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void restoreScriptCreatesThePredefinedRolesAfterReplayingTheDump() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        int replay = script.indexOf("-f /tmp/dump.sql");
+        int roles = script.indexOf(RdsContainerManager.postgresIamRoleInitSql());
+        assertTrue(replay >= 0 && roles > replay, "Roles a dump lacks must be created after it is replayed");
+    }
+
+    @Test
     void restoreScriptInterpolatesUser() {
         String script = RdsContainerManager.postgresRestoreScript();
 
