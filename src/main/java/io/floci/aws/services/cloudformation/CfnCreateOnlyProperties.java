@@ -19,6 +19,8 @@ public final class CfnCreateOnlyProperties {
 
     private static final Logger LOG = Logger.getLogger(CfnCreateOnlyProperties.class);
     private static final String RESOURCE_NAME = "cloudformation/create-only-properties.json";
+    private static final String SES_EVENT_DESTINATION = "AWS::SES::ConfigurationSetEventDestination";
+    private static final String SES_DESTINATION_NAME = "EventDestination/Name";
     private static final Map<String, Set<String>> PROPERTIES = load();
 
     private CfnCreateOnlyProperties() {
@@ -86,7 +88,9 @@ public final class CfnCreateOnlyProperties {
                 return true;
             }
         }
-        return false;
+        // The SES schema lists Name as conditionalCreateOnlyProperties: SES cannot rename a destination.
+        return SES_EVENT_DESTINATION.equals(resourceType)
+                && createOnlyPointerChanged(SES_DESTINATION_NAME, oldProps, newProps);
     }
 
     /** {@link #createOnlyValueChanged} for one pointer of the type's table. */
@@ -107,6 +111,9 @@ public final class CfnCreateOnlyProperties {
         List<JsonNode> out = new ArrayList<>();
         for (String pointer : getCreateOnlyProperties(resourceType)) {
             collect(props, pointer.split("/"), 0, out);
+        }
+        if (SES_EVENT_DESTINATION.equals(resourceType)) {
+            collect(props, SES_DESTINATION_NAME.split("/"), 0, out);
         }
         return out;
     }

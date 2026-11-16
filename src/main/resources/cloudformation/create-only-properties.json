@@ -908,6 +908,9 @@
   "AWS::SES::ConfigurationSet": [
     "Name"
   ],
+  "AWS::SES::ConfigurationSetEventDestination": [
+    "ConfigurationSetName"
+  ],
   "AWS::SES::EmailIdentity": [
     "EmailIdentity"
   ],
