@@ -142,8 +142,10 @@ public final class DsqlStatements {
         boolean changed = false;
         for (int index : roleNamePositions(tokens)) {
             Token token = tokens.get(index);
-            String logical = identifier(token);
-            String backend = names.toBackend(logical, token.type() == Type.QUOTED_IDENTIFIER);
+            boolean string = token.type() == Type.STRING;
+            String logical = string ? token.value() : identifier(token);
+            // A string constant names a role exactly, as a quoted identifier does.
+            String backend = names.toBackend(logical, string || token.type() == Type.QUOTED_IDENTIFIER);
             if (backend.equals(logical)) {
                 continue;
             }
@@ -154,7 +156,7 @@ public final class DsqlStatements {
                         + PrefixedRoleNames.MAX_LOGICAL + " bytes)");
             }
             translated.append(text, copied, token.start() - base)
-                    .append(roleIdentifier(backend, token.type() == Type.QUOTED_IDENTIFIER));
+                    .append(string ? literal(backend) : roleIdentifier(backend, token.type() == Type.QUOTED_IDENTIFIER));
             copied = token.end() - base;
             changed = true;
         }
@@ -771,7 +773,9 @@ public final class DsqlStatements {
 
     /**
      * {@code SET [SESSION|LOCAL] ROLE name} (or {@code TO} or {@code =} name) and
-     * {@code SET [SESSION|LOCAL] SESSION AUTHORIZATION name}.
+     * {@code SET [SESSION|LOCAL] SESSION AUTHORIZATION name}, where the name may also be a string
+     * constant. PostgreSQL takes a role named {@code none}, however it is written, for
+     * {@code SET ROLE NONE}, so that one is left as it is.
      */
     private static void setRole(List<Token> tokens, Set<Integer> at) {
         int i = 1;
@@ -785,9 +789,12 @@ public final class DsqlStatements {
                     && tokens.get(value).type() == Type.SYMBOL) {
                 value++;
             }
-            addName(tokens, value, at);
-        } else if ("SESSION".equals(word(tokens, i)) && "AUTHORIZATION".equals(word(tokens, i + 1))) {
-            addName(tokens, i + 2, at);
+            if (isNameOrString(tokens, value) && !"none".equals(settingValue(tokens.get(value)))) {
+                at.add(value);
+            }
+        } else if ("SESSION".equals(word(tokens, i)) && "AUTHORIZATION".equals(word(tokens, i + 1))
+                && isNameOrString(tokens, i + 2)) {
+            at.add(i + 2);
         }
     }
 
@@ -819,6 +826,15 @@ public final class DsqlStatements {
         if (isName(tokens, index)) {
             at.add(index);
         }
+    }
+
+    private static boolean isNameOrString(List<Token> tokens, int index) {
+        return isName(tokens, index) || index >= 0 && index < tokens.size() && tokens.get(index).type() == Type.STRING;
+    }
+
+    /** The value a {@code SET} sees in a name or string constant. */
+    private static String settingValue(Token token) {
+        return token.type() == Type.STRING ? token.value() : identifier(token);
     }
 
     private static boolean isName(List<Token> tokens, int index) {
