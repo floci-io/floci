@@ -6,8 +6,9 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * A page size the SDK's typed setter cannot produce, so these are raw requests: a non-numeric or
@@ -64,13 +65,29 @@ class ApiGatewayMalformedPageLimitIntegrationTest {
         assertRejected("/usageplans/" + planId + "/usage?startDate=2026-09-01&endDate=2026-09-02");
     }
 
+    private static void createAuthorizer(String apiId, String name) {
+        given().contentType(ContentType.JSON)
+                .body("{\"name\":\"" + name + "\",\"type\":\"TOKEN\","
+                        + "\"authorizerUri\":\"arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/"
+                        + "arn:aws:lambda:us-east-1:000000000000:function:f/invocations\","
+                        + "\"identitySource\":\"method.request.header.Authorization\"}")
+                .when().post("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(201);
+    }
+
     @Test
-    void anIntegerLimitStillPages() {
+    void anIntegerLimitStillPagesAndABlankLimitUsesTheDefault() {
         String apiId = createRestApi();
+        createAuthorizer(apiId, "first");
+        createAuthorizer(apiId, "second");
 
         given().when().get("/restapis/" + apiId + "/authorizers?limit=1")
                 .then().statusCode(200)
-                .body("item", hasSize(0))
-                .body("position", equalTo(null));
+                .body("item", hasSize(1))
+                .body("position", notNullValue());
+        given().when().get("/restapis/" + apiId + "/authorizers?limit=")
+                .then().statusCode(200)
+                .body("item", hasSize(2))
+                .body("position", nullValue());
     }
 }

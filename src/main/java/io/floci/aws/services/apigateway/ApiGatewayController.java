@@ -275,10 +275,6 @@ public class ApiGatewayController {
         return Response.ok(toAuthorizerNode(service.getAuthorizer(region, apiId, authorizerId)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
-    /**
-     * The {@code limit} query parameter is bound as a string: RESTEasy Reactive answers a non-numeric
-     * value for an {@code Integer} binding with a 404 before the resource method runs.
-     */
     private static Integer pageLimit(String limit) {
         return Pagination.parseMaxResults(limit, "limit", "BadRequestException");
     }
