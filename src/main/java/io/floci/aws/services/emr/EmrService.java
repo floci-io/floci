@@ -1889,7 +1889,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      * Spark has no EMR Serverless Hive image, so {@link #SPARK_RUNTIME_HDFS_RELEASE}'s gives its Hadoop. Null for a
      * cluster with neither, which starts from the release's EMR Serverless image.
      */
-    private Supplier<String> releaseImage(EmrCluster cluster) {
+    Supplier<String> releaseImage(EmrCluster cluster) {
         if (releaseImages == null) {
             return null;
         }

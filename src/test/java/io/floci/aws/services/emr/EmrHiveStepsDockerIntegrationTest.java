@@ -3,6 +3,7 @@ package io.floci.aws.services.emr;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.ContainerDataPlaneProfile;
 import io.floci.aws.testing.DockerAvailability;
@@ -17,6 +18,8 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
@@ -30,6 +33,7 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
@@ -47,6 +51,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 @QuarkusTest
 @TestProfile(ContainerDataPlaneProfile.class)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class EmrHiveStepsDockerIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -59,18 +64,27 @@ class EmrHiveStepsDockerIntegrationTest {
     @Inject
     EmrService emrService;
 
+    @Inject
+    EmrReleaseImages releaseImages;
+
     private S3Client s3;
     private String bucket;
     private String clusterId;
 
     @BeforeAll
-    static void configure() {
+    @Timeout(value = 6, unit = TimeUnit.MINUTES)
+    void prepareReleaseImage() throws InterruptedException {
+        assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available for EMR's Hive steps");
         RestAssuredJsonUtils.configureAwsContentTypes();
+        EmrCluster cluster = new EmrCluster();
+        cluster.setReleaseLabel("emr-7.5.0");
+        cluster.setApplications(HIVE_AND_SPARK);
+        String preparedImage = emrService.releaseImage(cluster).get();
+        releaseImages.released(preparedImage);
     }
 
     @BeforeEach
-    void putInputs() throws InterruptedException {
-        assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available for EMR's Hive steps");
+    void putInputs() {
         s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), "000000000000", Region.US_EAST_1);
         cleanup.register(s3::close);
         bucket = "emr-hive-" + UUID.randomUUID().toString().substring(0, 8);
