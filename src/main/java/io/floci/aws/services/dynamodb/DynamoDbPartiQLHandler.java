@@ -259,7 +259,7 @@ class DynamoDbPartiQLHandler {
         }
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-        String kce = buildKce(pkEq, skCond, pkName, skName, eav, ean);
+        String kce = buildKce(pkEq.val(), skCond, pkName, skName, eav, ean);
         String fe = buildFe(filterConds, eav, ean);
         JsonNode exclusiveStartKey = startKey.get();
         DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
@@ -275,7 +275,8 @@ class DynamoDbPartiQLHandler {
                                Routing routing, Supplier<JsonNode> startKey, Integer limit, String region) {
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-        String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(routing.partition()));
+        String kce = buildKce(routing.partition(), null, accessPath.partitionKeyName(), accessPath.sortKeyName(),
+                eav, ean);
         JsonNode exclusiveStartKey = startKey.get();
         DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
         DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
@@ -298,8 +299,8 @@ class DynamoDbPartiQLHandler {
         for (; read < reads.size(); read++) {
             ExprAttrBuilder eav = new ExprAttrBuilder();
             ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-            String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(partition))
-                    + " AND " + buildCondExpr(reads.get(read), eav, ean);
+            String kce = buildKce(partition, reads.get(read), accessPath.partitionKeyName(),
+                    accessPath.sortKeyName(), eav, ean);
             DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
             Integer remaining = limit == null ? null : limit - scannedItems.size();
             DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
@@ -511,12 +512,12 @@ class DynamoDbPartiQLHandler {
         return payload.get("k");
     }
 
-    private String buildKce(Cond.Eq pkEq, Cond skCond, String pkName, String skName,
+    private String buildKce(PVal partition, Cond skCond, String pkName, String skName,
                              ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
         // Query branch: callers only reach this with a partition-key equality
         // in the WHERE clause; every other shape routes to the scan branch.
         String pkAlias = ean.alias(pkName);
-        String pkPlaceholder = eav.add(toTypedNode(pkEq.val()));
+        String pkPlaceholder = eav.add(toTypedNode(partition));
         StringBuilder kce = new StringBuilder(pkAlias).append(" = ").append(pkPlaceholder);
         if (skCond != null) {
             kce.append(" AND ").append(buildCondExpr(skCond, eav, ean));

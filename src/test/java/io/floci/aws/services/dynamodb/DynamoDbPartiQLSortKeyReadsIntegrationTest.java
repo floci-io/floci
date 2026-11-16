@@ -18,6 +18,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.floci.aws.testing.DynamoDbRequests.CONTENT_TYPE;
+import static io.floci.aws.testing.DynamoDbRequests.ddb;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -25,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class DynamoDbPartiQLSortKeyReadsIntegrationTest {
 
-    private static final String CT = "application/x-amz-json-1.0";
     private static final String TABLE = "PartiQLSortKeyReads";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static int testPort;
@@ -144,16 +145,7 @@ class DynamoDbPartiQLSortKeyReadsIntegrationTest {
     }
 
     private JsonNode call(String action, String body) throws Exception {
-        String response = given()
-                .header("X-Amz-Target", "DynamoDB_20120810." + action)
-                .contentType(CT)
-                .body(body)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract().body().asString();
-        return MAPPER.readTree(response);
+        return MAPPER.readTree(ddb(action, body).statusCode(200).extract().body().asString());
     }
 
     @AfterAll
@@ -161,7 +153,7 @@ class DynamoDbPartiQLSortKeyReadsIntegrationTest {
         given()
                 .port(testPort)
                 .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
-                .contentType(CT)
+                .contentType(CONTENT_TYPE)
                 .body("{\"TableName\": \"" + TABLE + "\"}")
             .when()
                 .post("/")
