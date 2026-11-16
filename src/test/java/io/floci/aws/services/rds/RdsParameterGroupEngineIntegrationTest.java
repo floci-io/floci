@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Properties;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
@@ -26,7 +27,9 @@ import static org.hamcrest.Matchers.equalTo;
  * its DB cluster parameter group with its writer's DB parameter group on top, a standalone MySQL
  * instance with its DB parameter group, and a value changed in the group, or a group switched by
  * ModifyDBCluster or ModifyDBInstance, takes effect when the writer or the instance is rebooted. A
- * value the server refuses leaves the instance incompatible-parameters. Skipped without Docker.
+ * value the server refuses leaves the instance incompatible-parameters. A PostgreSQL instance or an
+ * Aurora PostgreSQL writer whose groups set {@code rds.logical_replication} to 1 runs with
+ * {@code wal_level=logical}, from the same reboot. Skipped without Docker.
  */
 @QuarkusTest
 @Tag("docker")
@@ -395,27 +398,13 @@ class RdsParameterGroupEngineIntegrationTest {
         .when().post("/").then().statusCode(200);
     }
 
-    /**
-     * The first row of a query, its columns joined by single spaces. The MySQL image restarts its
-     * server once after initializing a new data directory, so a refused connection is retried.
-     */
+    /** The first row of a MySQL query, its columns joined by single spaces. */
     private static String query(int port, String sql) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
-        while (true) {
-            try {
-                return queryOnce(port, sql);
-            } catch (SQLException e) {
-                if (System.nanoTime() > deadline) {
-                    throw e;
-                }
-                Thread.sleep(1000);
-            }
-        }
+        return retryUntilConnected(() -> queryOnce(port, sql));
     }
 
     private static String postgresQuery(int port, String sql) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
-        while (true) {
+        return retryUntilConnected(() -> {
             try (Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:" + port
                          + "/postgres?sslmode=disable&connectTimeout=5&socketTimeout=10",
                          MASTER_USER, MASTER_PASSWORD);
@@ -423,6 +412,20 @@ class RdsParameterGroupEngineIntegrationTest {
                  ResultSet rows = statement.executeQuery(sql)) {
                 rows.next();
                 return rows.getString(1);
+            }
+        });
+    }
+
+    /**
+     * Runs a query until the server answers it, for up to 90 seconds. A server still starting
+     * refuses connections, and the MySQL image restarts its server once after initializing a new
+     * data directory, so a refused connection is retried.
+     */
+    private static String retryUntilConnected(Callable<String> attempt) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
+        while (true) {
+            try {
+                return attempt.call();
             } catch (SQLException e) {
                 if (System.nanoTime() > deadline) {
                     throw e;
