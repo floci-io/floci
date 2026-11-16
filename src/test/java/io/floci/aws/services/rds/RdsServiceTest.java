@@ -134,7 +134,7 @@ class RdsServiceTest {
 
     private static final String PROXY_ROLE_ARN = "arn:aws:iam::123456789012:role/proxy";
     private static final List<String> PROXY_SUBNET_IDS =
-            List.of("subnet-default-a", "subnet-default-b");
+            List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"));
     private static final List<DbProxyAuth> PROXY_AUTH = List.of(new DbProxyAuth(
             "SECRETS", "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf",
             "DISABLED", null, null));
@@ -3074,7 +3074,7 @@ class RdsServiceTest {
 
     @Test
     void createDbInstanceOmittedPubliclyAccessibleDefaultsFalseForNamedNonDefaultSubnetGroup() {
-        rdsService.createDbSubnetGroup("custom-subnets", "test", List.of("subnet-default-a", "subnet-default-b"));
+        rdsService.createDbSubnetGroup("custom-subnets", "test", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
 
         DbInstance instance = rdsService.createDbInstance("custom-subnet-db", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -4969,10 +4969,10 @@ class RdsServiceTest {
     @Test
     void dbSubnetGroupRoundTrip() {
         DbSubnetGroup group = rdsService.createDbSubnetGroup(
-                "sample-db-subnets", "test", List.of("subnet-default-a", "subnet-default-b"));
+                "sample-db-subnets", "test", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
 
         assertEquals("sample-db-subnets", group.getDbSubnetGroupName());
-        assertEquals(List.of("subnet-default-a", "subnet-default-b"), group.getSubnetIds());
+        assertEquals(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")), group.getSubnetIds());
         assertEquals(1, rdsService.listDbSubnetGroups("sample-db-subnets").size());
 
         rdsService.deleteDbSubnetGroup("sample-db-subnets");
@@ -5000,7 +5000,7 @@ class RdsServiceTest {
     @Test
     void dbSubnetGroupTagsRoundTripAndMutateByArn() {
         rdsService.createDbSubnetGroup(
-                "sample-db-subnets", "test", List.of("subnet-default-a", "subnet-default-b"));
+                "sample-db-subnets", "test", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
         String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:sample-db-subnets";
 
         // A subnet group with no tags must list cleanly — previously this threw DBInstanceNotFound (404)
@@ -5018,11 +5018,11 @@ class RdsServiceTest {
     @Test
     void dbSubnetGroupTagsSurviveModify() {
         rdsService.createDbSubnetGroup(
-                "sample-db-subnets", "test", List.of("subnet-default-a", "subnet-default-b"));
+                "sample-db-subnets", "test", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
         String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:sample-db-subnets";
         rdsService.addTagsToResource(arn, Map.of("Name", "sample-db-subnets"));
 
-        rdsService.modifyDbSubnetGroup("sample-db-subnets", List.of("subnet-default-a"));
+        rdsService.modifyDbSubnetGroup("sample-db-subnets", List.of(Ec2Service.defaultSubnetId("us-east-1", "a")));
 
         assertEquals(Map.of("Name", "sample-db-subnets"),
                 rdsService.listTagsForResource(arn));
@@ -6652,7 +6652,7 @@ class RdsServiceTest {
                 new InMemoryStorage<>();
         DbSubnetGroup subnetGroup = new DbSubnetGroup(
                 "legacy-subnets", "legacy", "vpc-default", PROXY_SUBNET_IDS,
-                Map.of("subnet-default-a", "us-east-1a", "subnet-default-b", "us-east-1b"));
+                Map.of(Ec2Service.defaultSubnetId("us-east-1", "a"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b"), "us-east-1b"));
         subnetGroup.setDbSubnetGroupArn(
                 "arn:aws:rds:us-east-1:" + accountId + ":subgrp:legacy-subnets");
         rawSubnetGroups.put("legacy-subnets", subnetGroup);
@@ -6752,10 +6752,10 @@ class RdsServiceTest {
 
     @Test
     void createDbSubnetGroupRejectsDuplicateWithModelCode() {
-        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b"));
+        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
 
         AwsException exception = assertThrows(AwsException.class, () ->
-                rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b")));
+                rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"))));
 
         assertEquals("DBSubnetGroupAlreadyExists", exception.getErrorCode());
     }
@@ -6763,7 +6763,7 @@ class RdsServiceTest {
     @Test
     void createDbSubnetGroupPopulatesArn() {
         DbSubnetGroup group = rdsService.createDbSubnetGroup("my-subnet-group", "desc",
-                List.of("subnet-default-a", "subnet-default-b"));
+                List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
 
         assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group", group.getDbSubnetGroupArn());
     }
@@ -6829,7 +6829,7 @@ class RdsServiceTest {
 
     @Test
     void resolveDbSubnetGroupViewReturnsStoredCustomGroup() {
-        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b"));
+        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
 
         DbSubnetGroup group = rdsService.resolveDbSubnetGroupView("my-subnet-group");
 
@@ -11443,8 +11443,8 @@ class RdsServiceTest {
 
     private static List<Subnet> defaultSubnets() {
         return List.of(
-                subnet("subnet-default-a", "vpc-default", "us-east-1a"),
-                subnet("subnet-default-b", "vpc-default", "us-east-1b"));
+                subnet(Ec2Service.defaultSubnetId("us-east-1", "a"), "vpc-default", "us-east-1a"),
+                subnet(Ec2Service.defaultSubnetId("us-east-1", "b"), "vpc-default", "us-east-1b"));
     }
 
     private static DbInstance persistedInstance(
@@ -11520,7 +11520,7 @@ class RdsServiceTest {
 
     @Test
     void createDbSubnetGroupStoresTheTagsItIsGiven() {
-        rdsService.createDbSubnetGroup("tagged", "d", List.of("subnet-default-a", "subnet-default-b"), "us-east-1",
+        rdsService.createDbSubnetGroup("tagged", "d", List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")), "us-east-1",
                 Map.of("Name", "tagged", "env", "tst"));
         String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:tagged";
 
@@ -11538,7 +11538,7 @@ class RdsServiceTest {
 
     @Test
     void createDbSubnetGroupErrorNamesMissingSubnetIds() {
-        String subnetA = "subnet-default-a";
+        String subnetA = Ec2Service.defaultSubnetId("us-east-1", "a");
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 rdsService.createDbSubnetGroup("grp", "desc",

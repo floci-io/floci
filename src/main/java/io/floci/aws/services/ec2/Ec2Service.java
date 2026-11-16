@@ -1557,7 +1557,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         defaultVpc.setOwnerId(ownerAccountId);
         defaultVpc.setRegion(region);
         defaultVpc.getCidrBlockAssociationSet().add(
-                new VpcCidrBlockAssociation("vpc-cidr-assoc-default", "172.31.0.0/16"));
+                new VpcCidrBlockAssociation("vpc-cidr-assoc-" + Ec2Ids.stableHex("vpc-cidr-assoc::" + region), "172.31.0.0/16"));
         vpcs.put(key(region, vpcId), defaultVpc);
         declareVpcNetwork(region, vpcId, "172.31.0.0/16");
 
@@ -1588,22 +1588,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
         createDefaultSecurityGroup(region, vpcId, defaultSecurityGroupId(region));
 
-        // Default NACL, with the default subnets associated to it.
-        String defaultAclId = createDefaultNetworkAcl(region, vpcId, "acl-default");
-        NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
-        if (defaultAcl != null) {
-            for (String subnetId : subnetIds) {
-                NetworkAclAssociation assoc = new NetworkAclAssociation();
-                assoc.setNetworkAclAssociationId("aclassoc-" + subnetId);
-                assoc.setNetworkAclId(defaultAclId);
-                assoc.setSubnetId(subnetId);
-                defaultAcl.getAssociations().add(assoc);
-            }
-            networkAcls.put(key(region, defaultAclId), defaultAcl);
-        }
-
         // Default internet gateway
-        String igwId = "igw-default";
+        String igwId = defaultInternetGatewayId(region);
         InternetGateway igw = new InternetGateway();
         igw.setInternetGatewayId(igwId);
         igw.setOwnerId(ownerAccountId);
@@ -1611,11 +1597,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
 
-        String rtId = createMainRouteTable(region, defaultVpc, "rtb-default", "rtbassoc-default");
+        String rtId = defaultRouteTableId(region);
+        String rtAssocId = defaultRouteTableAssociationId(region);
+        createMainRouteTable(region, defaultVpc, rtId, rtAssocId);
 
         RouteTable mainRt = routeTables.get(key(region, rtId)).orElse(null);
         if (mainRt != null) {
             mainRt.getRoutes().add(new Route("0.0.0.0/0", igwId, "CreateRoute"));
+        }
+
+        // Default NACL - create and associate with default subnets
+        String defaultAclId = defaultNetworkAclId(region);
+        createDefaultNetworkAcl(region, vpcId, defaultAclId);
+        NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
+        if (defaultAcl != null) {
+            for (String subnetId : subnetIds) {
+                String assocId = defaultNetworkAclAssociationId(region, subnetId);
+                NetworkAclAssociation assoc = new NetworkAclAssociation();
+                assoc.setNetworkAclAssociationId(assocId);
+                assoc.setNetworkAclId(defaultAclId);
+                assoc.setSubnetId(subnetId);
+                defaultAcl.getAssociations().add(assoc);
+            }
+            networkAcls.put(key(region, defaultAclId), defaultAcl);
         }
     }
 
@@ -2196,11 +2200,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // correctly keyed by region. RdsService derives the same ids from these methods so its
     // default DB subnet group resolves against the right region's default VPC.
     public static String defaultVpcId(String region) {
-        return "vpc-default-" + region;
+        return "vpc-" + Ec2Ids.stableHex("vpc::" + region);
     }
 
     public static String defaultSubnetId(String region, String azSuffix) {
-        return "subnet-default-" + region + "-" + azSuffix;
+        return "subnet-" + Ec2Ids.stableHex("subnet::" + region + "::" + azSuffix);
     }
 
     public static boolean isModelledAvailabilityZone(String region, String zone) {
@@ -2208,18 +2212,76 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public static String defaultSecurityGroupId(String region) {
-        return "sg-default-" + region;
+        return "sg-" + Ec2Ids.stableHex("sg::" + region);
     }
 
-    // Persisted default VPCs may retain the unscoped id from before ids became region-scoped.
-    // Resolve against storage so callers still find the existing VPC instead of a computed id.
+    /**
+     * Internet Gateway ID for the default network in a region: igw-<17 hex digits>.
+     */
+    public static String defaultInternetGatewayId(String region) {
+        return "igw-" + Ec2Ids.stableHex("igw::" + region);
+    }
+
+    /**
+     * Main Route Table ID for the default network in a region: rtb-<17 hex digits>.
+     */
+    public static String defaultRouteTableId(String region) {
+        return "rtb-" + Ec2Ids.stableHex("rtb::" + region);
+    }
+
+    /**
+     * Main Route Table Association ID for the default network in a region: rtbassoc-<17 hex digits>.
+     */
+    public static String defaultRouteTableAssociationId(String region) {
+        return "rtbassoc-" + Ec2Ids.stableHex("rtbassoc::" + region);
+    }
+
+    /**
+     * Default Network ACL ID for the default network in a region: acl-<17 hex digits>.
+     */
+    public static String defaultNetworkAclId(String region) {
+        return "acl-" + Ec2Ids.stableHex("acl::" + region);
+    }
+
+    /**
+     * Network ACL Association ID for a default subnet in a region: aclassoc-<17 hex digits>.
+     */
+    public static String defaultNetworkAclAssociationId(String region, String subnetId) {
+        return "aclassoc-" + Ec2Ids.stableHex("aclassoc::" + region + "::" + subnetId);
+    }
+
+    // Resolves the default VPC/security-group id actually on file for a region, falling back to
+    // the pre-lex00/floci#21 unscoped literal ("vpc-default"/"sg-default") when storage was persisted before
+    // ids were made region-scoped. Seeding (ensureDefaultResources) always assigns the new
+    // region-scoped id going forward; these resolvers only cover lookups against what may already
+    // be on disk. Without this, a region seeded under the old scheme would silently lose its
+    // default VPC/security group to every caller that resolves them by computed id.
     public String resolveDefaultVpcId(String region) {
         String scoped = defaultVpcId(region);
         if (vpcs.get(key(region, scoped)).isPresent()) {
             return scoped;
         }
-        String legacy = "vpc-default";
-        return vpcs.get(key(region, legacy)).isPresent() ? legacy : scoped;
+        // Legacy literals from before ids became region-scoped.
+        for (String legacy : List.of("vpc-default", "vpc-default-" + region)) {
+            if (vpcs.get(key(region, legacy)).isPresent()) {
+                return legacy;
+            }
+        }
+        return scoped;
+    }
+
+    public String resolveDefaultSecurityGroupId(String region) {
+        String scoped = defaultSecurityGroupId(region);
+        if (securityGroups.get(key(region, scoped)).isPresent()) {
+            return scoped;
+        }
+        // Legacy literals from before ids became region-scoped.
+        for (String legacy : List.of("sg-default", "sg-default-" + region)) {
+            if (securityGroups.get(key(region, legacy)).isPresent()) {
+                return legacy;
+            }
+        }
+        return scoped;
     }
 
     // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
@@ -4054,10 +4116,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         } else if (availabilityZone != null && !availabilityZone.isBlank()) {
             subnet = resolveSubnetForAvailabilityZone(region, availabilityZone);
         } else {
-            // Pick first default subnet
+            // Pick the default subnet of the region's first availability zone. Storage order is
+            // not the creation order, so a scan's findFirst is whichever entry the map hashes
+            // first; the choice has to stay us-east-1a whatever the ids are.
             subnet = subnets.scan(k -> true).stream()
                     .filter(s -> s.getRegion().equals(region) && s.isDefaultForAz())
-                    .findFirst()
+                    .min(Comparator.comparing(Subnet::getAvailabilityZone))
                     .orElse(null);
         }
 
@@ -7383,7 +7447,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Split out so that everything reporting an endpoint's interfaces -- the ids on
      * the wire, the objects flow-log attribution reads -- comes from one place and
      * cannot disagree. The alternative, deriving ids independently from the same
-     * {@link #eniIdFromSeed}, looks equivalent and is not: this method skips a subnet
+     * {@link Ec2Ids#eniIdFromSeed}, looks equivalent and is not: this method skips a subnet
      * whose record has gone, and a second derivation that forgot to would report an
      * interface the first one denies exists. Congruence by construction beats congruence
      * by inspection, and the two had in fact already diverged.
@@ -7415,7 +7479,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 continue;
             }
             NetworkInterface ni = new NetworkInterface();
-            ni.setNetworkInterfaceId(eniIdFromSeed(endpoint.getVpcEndpointId() + "|" + subnetId));
+            ni.setNetworkInterfaceId(Ec2Ids.eniIdFromSeed(endpoint.getVpcEndpointId() + "|" + subnetId));
             ni.setSubnetId(subnetId);
             ni.setVpcId(endpoint.getVpcId());
             ni.setAvailabilityZone(subnet.getAvailabilityZone());
@@ -7478,13 +7542,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return result;
     }
 
-    /** A stable interface id derived from {@code seed}, for interfaces Floci projects rather than stores. */
-    private static String eniIdFromSeed(String seed) {
-        String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8))
-                .toString().replace("-", "");
-        return "eni-" + hex.substring(0, 17);
-    }
-
     /**
      * The network interfaces an interface endpoint owns, by id, in subnet order.
      *
@@ -7496,7 +7553,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Mapped over {@link #endpointNetworkInterfacesOf(VpcEndpoint)} rather than derived
      * separately, so the ids on the wire come BY CONSTRUCTION from the same derivation
      * flow-log attribution uses, and no endpoint can be described two ways. An earlier
-     * version of this method called {@link #eniIdFromSeed} itself and looked equivalent;
+     * version of this method called {@link Ec2Ids#eniIdFromSeed} itself and looked equivalent;
      * it was not, because it lacked that method's skip of a subnet whose record has gone,
      * and the two were measured reporting different sets after a subnet was deleted out
      * from under a live endpoint.
@@ -13359,7 +13416,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String allocationId,
                                                 String privateIp) {
         NatGatewayAddress address = new NatGatewayAddress();
-        address.setNetworkInterfaceId(eniIdFromSeed("nat|" + natGatewayId));
+        address.setNetworkInterfaceId(Ec2Ids.eniIdFromSeed("nat|" + natGatewayId));
         address.setPrivateIp(privateIp);
         if (isSet(allocationId)) {
             address.setAllocationId(allocationId);

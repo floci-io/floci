@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.config.JsonPathConfig;
@@ -116,9 +117,9 @@ class EcsDescribeServicesIntegrationTest {
         Response created = call("CreateService", """
                 {"cluster":"blue-running-cluster","serviceName":"blue-running-service",
                  "taskDefinition":"blue-running-task","desiredCount":1,"launchType":"FARGATE",
-                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-default-us-east-1-a"]}},
+                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["%s"]}},
                  "deploymentController":{"type":"CODE_DEPLOY"}}
-                """);
+                """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a")));
         String primaryId = created.path("service.taskSets[0].id");
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
                 describe("blue-running-cluster", "blue-running-service").then()
