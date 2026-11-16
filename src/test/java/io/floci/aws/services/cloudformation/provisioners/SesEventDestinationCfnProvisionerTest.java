@@ -88,13 +88,17 @@ class SesEventDestinationCfnProvisionerTest {
     @Test
     void rejectsUnsupportedNestedDestinationProperties() {
         ObjectNode props = properties("first", "events", true);
+        props.withObject("EventDestination").remove("Enabled");
         props.withObject("EventDestination").putObject("SnsDestination")
                 .put("TopicARN", "arn:aws:sns:us-east-1:000000000000:events")
                 .put("Unexpected", "ignored");
 
-        assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, context(null)));
-        verify(configurationSets, never()).createEventDestination(eq("first"), eq("events"),
-                any(EventDestination.class), eq(ACCOUNT), eq(REGION), eq(true));
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), props, context(null)));
+        assertEquals("InvalidRequest", failure.getErrorCode());
+        assertEquals("Model validation failed (#/EventDestination/SnsDestination: extraneous key"
+                + " [Unexpected] is not permitted)", failure.getMessage());
+        verifyNoInteractions(configurationSets);
     }
 
     @Test
@@ -105,7 +109,7 @@ class SesEventDestinationCfnProvisionerTest {
 
         ObjectNode blank = properties("first", "events", true);
         blank.withObject("EventDestination").putObject("SnsDestination").put("TopicARN", " ");
-        assertInvalidWithoutSesCall(blank);
+        assertSchemaInvalidWithoutSesCall(blank);
     }
 
     @Test
@@ -119,7 +123,7 @@ class SesEventDestinationCfnProvisionerTest {
         blank.withObject("EventDestination").putObject("KinesisFirehoseDestination")
                 .put("IAMRoleARN", " ")
                 .put("DeliveryStreamARN", "arn:aws:firehose:us-east-1:000000000000:deliverystream/events");
-        assertInvalidWithoutSesCall(blank);
+        assertSchemaInvalidWithoutSesCall(blank);
     }
 
     @Test
@@ -130,7 +134,7 @@ class SesEventDestinationCfnProvisionerTest {
 
         ObjectNode blank = properties("first", "events", true);
         blank.withObject("EventDestination").putObject("EventBridgeDestination").put("EventBusArn", " ");
-        assertInvalidWithoutSesCall(blank);
+        assertSchemaInvalidWithoutSesCall(blank);
     }
 
     @Test
@@ -140,7 +144,7 @@ class SesEventDestinationCfnProvisionerTest {
         assertSchemaInvalidWithoutSesCall(missingSet);
 
         ObjectNode blankSet = properties("first", "events", true).put("ConfigurationSetName", " ");
-        assertInvalidWithoutSesCall(blankSet);
+        assertSchemaInvalidWithoutSesCall(blankSet);
 
         ObjectNode nonObjectDestination = properties("first", "events", true)
                 .put("EventDestination", "events");
@@ -182,11 +186,11 @@ class SesEventDestinationCfnProvisionerTest {
     void rejectsNullRequiredMembersAndDimensionEntriesBeforeCallingSes() {
         ObjectNode nullEvents = properties("first", "events", true);
         nullEvents.withObject("EventDestination").putNull("MatchingEventTypes");
-        assertInvalidWithoutSesCall(nullEvents);
+        assertSchemaInvalidWithoutSesCall(nullEvents);
 
         ObjectNode nullTopic = properties("first", "events", true);
         nullTopic.withObject("EventDestination").putObject("SnsDestination").putNull("TopicARN");
-        assertInvalidWithoutSesCall(nullTopic);
+        assertSchemaInvalidWithoutSesCall(nullTopic);
 
         ObjectNode nullDimensionName = properties("first", "events", true);
         nullDimensionName.withObject("EventDestination").putObject("CloudWatchDestination")
@@ -194,7 +198,7 @@ class SesEventDestinationCfnProvisionerTest {
                 .put("DimensionValueSource", "messageTag")
                 .put("DefaultDimensionValue", "unknown")
                 .putNull("DimensionName");
-        assertInvalidWithoutSesCall(nullDimensionName);
+        assertSchemaInvalidWithoutSesCall(nullDimensionName);
 
         ObjectNode nullDimensionEntry = properties("first", "events", true);
         nullDimensionEntry.withObject("EventDestination").putObject("CloudWatchDestination")
