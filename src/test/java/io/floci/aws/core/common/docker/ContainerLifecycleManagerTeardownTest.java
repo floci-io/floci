@@ -71,13 +71,15 @@ class ContainerLifecycleManagerTeardownTest {
         ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         CountDownLatch ninthStop = new CountDownLatch(1);
-        when(docker.stopContainerCmd(anyString())).thenAnswer(invocation -> {
-            if ("ninth".equals(invocation.getArgument(0))) {
-                ninthStop.countDown();
-            }
-            return stop;
-        });
+        when(docker.stopContainerCmd(anyString())).thenReturn(stop);
         when(stop.withTimeout(anyInt())).thenReturn(stop);
+        StopContainerCmd ninthStopCommand = mock(StopContainerCmd.class);
+        when(docker.stopContainerCmd("ninth")).thenReturn(ninthStopCommand);
+        when(ninthStopCommand.withTimeout(anyInt())).thenReturn(ninthStopCommand);
+        when(ninthStopCommand.exec()).thenAnswer(invocation -> {
+            ninthStop.countDown();
+            return null;
+        });
         RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
         when(docker.removeContainerCmd(anyString())).thenReturn(remove);
         when(remove.withForce(true)).thenReturn(remove);
@@ -128,6 +130,7 @@ class ContainerLifecycleManagerTeardownTest {
         }
         assertNull(failure.get());
         verify(docker).stopContainerCmd("ninth");
+        verify(ninthStopCommand).exec();
         if ("stop-only".equals(mode)) {
             verify(docker, never()).removeContainerCmd("ninth");
         } else {
