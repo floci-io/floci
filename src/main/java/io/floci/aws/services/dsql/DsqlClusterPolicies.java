@@ -270,10 +270,10 @@ final class DsqlClusterPolicies {
         return switch (operator) {
             case "StringEquals", "StringEqualsIgnoreCase" -> values.stream().noneMatch(value -> value.contains("${"));
             case "StringLike" -> values.stream().allMatch(value -> ARN_KEYS.contains(key)
-                    ? PublicAccessConditions.pinsAccount(value) && !value.contains("${")
+                    ? PublicAccessConditions.isFixedAccountArn(value)
                     : PublicAccessConditions.isFixedValue(value));
             case "ArnEquals", "ArnLike" -> values.stream().allMatch(value -> value.split(":", 6).length < 6
-                    || PublicAccessConditions.pinsAccount(value) && !value.contains("${"));
+                    || PublicAccessConditions.isFixedAccountArn(value));
             case "Bool" -> PRINCIPAL_IS_AWS_SERVICE.equals(key) && values.stream().allMatch("true"::equalsIgnoreCase);
             default -> false;
         };

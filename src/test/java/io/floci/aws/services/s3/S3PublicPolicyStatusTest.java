@@ -80,11 +80,10 @@ class S3PublicPolicyStatusTest {
     }
 
     @Test
-    void principalOrSourceArnResourceWildcardWithFixedAccountIsNotPublic() {
+    void principalArnResourceWildcardWithFixedAccountIsNotPublic() {
         for (String condition : List.of(
                 "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/app-*\"}",
-                "\"StringLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/app-*\"}",
-                "\"ArnLike\":{\"aws:SourceArn\":\"arn:aws:lambda:us-east-1:111122223333:function:app-*\"}")) {
+                "\"StringLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/app-*\"}")) {
             assertFalse(isPublic("""
                     {"Statement":[{"Principal":{"AWS":"*"},"Resource":"arn:aws:s3:::b/*",
                     "Action":"s3:GetObject","Effect":"Allow","Condition":{%s}}]}
@@ -93,17 +92,19 @@ class S3PublicPolicyStatusTest {
     }
 
     @Test
-    void principalOrSourceArnWithWildcardAccountOrPolicyVariableIsPublic() {
-        for (String arn : List.of(
-                "arn:aws:iam::*:role/app-*",
-                "arn:aws:iam::11112222333?:role/app",
-                "*",
-                "arn:aws:iam::111122223333:role/${aws:username}")) {
+    void principalOrSourceArnWithWildcardAccountOrUnfixedSourceArnIsPublic() {
+        for (String condition : List.of(
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::*:role/app-*\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::11112222333?:role/app\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam:::role/app-*\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"*\"}",
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/${aws:username}\"}",
+                "\"ArnLike\":{\"aws:SourceArn\":\"arn:aws:s3:::*\"}",
+                "\"ArnLike\":{\"aws:SourceArn\":\"arn:aws:lambda:us-east-1:111122223333:function:app-*\"}")) {
             assertTrue(isPublic("""
                     {"Statement":[{"Principal":{"AWS":"*"},"Resource":"arn:aws:s3:::b/*",
-                    "Action":"s3:GetObject","Effect":"Allow",
-                    "Condition":{"ArnLike":{"aws:PrincipalArn":"%s"}}}]}
-                    """.formatted(arn)), arn);
+                    "Action":"s3:GetObject","Effect":"Allow","Condition":{%s}}]}
+                    """.formatted(condition)), condition);
         }
     }
 
