@@ -10,9 +10,6 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Network;
-import com.github.dockerjava.core.DefaultDockerClientConfig;
-import com.github.dockerjava.core.DockerClientImpl;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
@@ -26,6 +23,7 @@ import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
 import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
+import io.floci.aws.testing.TestDockerClients;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -91,16 +89,7 @@ class RdsBackendEndpointRefreshIntegrationTest {
     @BeforeAll
     void connectToDocker() {
         try {
-            DefaultDockerClientConfig clientConfig = DefaultDockerClientConfig
-                    .createDefaultConfigBuilder()
-                    .build();
-            ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
-                    .dockerHost(clientConfig.getDockerHost())
-                    .maxConnections(10)
-                    .connectionTimeout(Duration.ofSeconds(10))
-                    .responseTimeout(Duration.ofMinutes(5))
-                    .build();
-            dockerClient = DockerClientImpl.getInstance(clientConfig, httpClient);
+            dockerClient = TestDockerClients.local();
             dockerClient.pingCmd().exec();
             dockerClient.pullImageCmd(IMAGE).start().awaitCompletion(120, TimeUnit.SECONDS);
         } catch (Exception e) {
