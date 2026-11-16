@@ -259,6 +259,30 @@ class DsqlBootstrapExternalIntegrationTest {
     }
 
     @Test
+    void translatedRevocationsOfAGrantsOptionsReachTheClustersRoles() throws SQLException {
+        RoleNames names = new PrefixedRoleNames("abc");
+        try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+            statement.execute(DsqlStatements.rewriteQuery("CREATE ROLE granted", names).sql());
+            statement.execute(DsqlStatements.rewriteQuery("CREATE ROLE holder", names).sql());
+            statement.execute(DsqlStatements.rewriteQuery(
+                    "GRANT granted TO holder WITH ADMIN TRUE, INHERIT TRUE, SET TRUE", names).sql());
+            for (String option : List.of("ADMIN", "INHERIT", "SET")) {
+                statement.execute(DsqlStatements.rewriteQuery(
+                        "REVOKE " + option + " OPTION FOR granted FROM holder", names).sql());
+            }
+        }
+        try {
+            assertEquals(List.of("false|false|false"), query("postgres", "SELECT m.admin_option || '|' || m.inherit_option"
+                    + " || '|' || m.set_option FROM pg_auth_members m WHERE m.roleid = '" + PREFIX + "granted'::regrole"
+                    + " AND m.member = '" + PREFIX + "holder'::regrole"));
+        } finally {
+            try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+                statement.execute(DsqlStatements.rewriteQuery("DROP ROLE holder, granted", names).sql());
+            }
+        }
+    }
+
+    @Test
     void theImplicitGrantOfARoleToItsCreatorIsMadeByTheBootstrapSuperuser() throws SQLException {
         try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
             statement.execute("CALL sys.run_role_ddl($$CREATE ROLE " + PREFIX + "made$$)");

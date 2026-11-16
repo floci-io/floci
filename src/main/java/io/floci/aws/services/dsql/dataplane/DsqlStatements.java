@@ -34,6 +34,8 @@ public final class DsqlStatements {
     private static final Set<String> ROLE_KINDS = Set.of("ROLE", "USER", "GROUP");
     private static final Set<String> ROLE_SPECIFIERS = Set.of("CURRENT_ROLE", "CURRENT_USER", "SESSION_USER", "PUBLIC",
             "NONE");
+    /** What PostgreSQL 16 lets {@code REVOKE <option> OPTION FOR} take back of a role's grant. */
+    private static final Set<String> ROLE_GRANT_OPTIONS = Set.of("ADMIN", "INHERIT", "SET");
     private static final Set<String> RENAME_TARGETS = Set.of("RENAME", "COLUMN", "CONSTRAINT", "ATTRIBUTE");
     private static final Pattern SIMPLE_IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_$]*");
     /**
@@ -709,8 +711,9 @@ public final class DsqlStatements {
     }
 
     /**
-     * {@code GRANT} or {@code REVOKE} from {@code g}: of a role, the roles granted and the grantees;
-     * of privileges {@code ON} an object, the grantees; and the role after {@code GRANTED BY}.
+     * {@code GRANT} or {@code REVOKE} from {@code g}: of a role, the roles granted and the grantees,
+     * after {@code ADMIN|INHERIT|SET OPTION FOR} in a {@code REVOKE}; of privileges {@code ON} an
+     * object, the grantees; and the role after {@code GRANTED BY}.
      */
     private static void grantRoles(List<Token> tokens, int g, Set<Integer> at) {
         boolean grant = "GRANT".equals(word(tokens, g));
@@ -728,7 +731,8 @@ public final class DsqlStatements {
         int i;
         if (on < 0) {
             i = g + 1;
-            if (!grant && "OPTION".equals(word(tokens, i + 1)) && "FOR".equals(word(tokens, i + 2))) {
+            if (!grant && ROLE_GRANT_OPTIONS.contains(word(tokens, i)) && "OPTION".equals(word(tokens, i + 1))
+                    && "FOR".equals(word(tokens, i + 2))) {
                 i += 3;
             }
             i = roleList(tokens, i, false, found);

@@ -53,6 +53,14 @@ class DsqlRoleNamesTest {
                 + "|CALL sys.run_role_ddl($dsql$GRANT dx_a, dx_b TO dx_c WITH ADMIN OPTION GRANTED BY dx_d$dsql$)",
         "REVOKE ADMIN OPTION FOR app FROM reader CASCADE"
                 + "|CALL sys.run_role_ddl($dsql$REVOKE ADMIN OPTION FOR dx_app FROM dx_reader CASCADE$dsql$)",
+        "REVOKE INHERIT OPTION FOR app FROM reader"
+                + "|CALL sys.run_role_ddl($dsql$REVOKE INHERIT OPTION FOR dx_app FROM dx_reader$dsql$)",
+        "REVOKE SET OPTION FOR app, other FROM reader GRANTED BY admin RESTRICT"
+                + "|CALL sys.run_role_ddl($dsql$REVOKE SET OPTION FOR dx_app, dx_other FROM dx_reader GRANTED BY dx_admin"
+                + " RESTRICT$dsql$)",
+        "revoke inherit option for app from GROUP reader"
+                + "|CALL sys.run_role_ddl($dsql$revoke inherit option for dx_app from GROUP dx_reader$dsql$)",
+        "REVOKE app FROM reader|CALL sys.run_role_ddl($dsql$REVOKE dx_app FROM dx_reader$dsql$)",
         "GRANT SELECT ON t TO GROUP g, CURRENT_USER WITH GRANT OPTION"
                 + "|GRANT SELECT ON t TO GROUP dx_g, CURRENT_USER WITH GRANT OPTION",
         "SET SESSION ROLE app|SET SESSION ROLE dx_app",
