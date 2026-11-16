@@ -208,7 +208,34 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * {@code context} with the condition keys {@link #resourceTags} read from a resource's stored tags, each in place of
+     * The condition keys the table reads from the record of the resource {@code resource} names for
+     * {@code action}: what the service holding that resource keeps in the member the table asks for
+     * ({@link StoredResourceArns#recorded}), by key. Null when the action takes none, the ARN is of no type the
+     * table gives such a key, or the record holds nothing there, which is every resource a request names before
+     * the value is set on it. Read for each ARN on its own, as the stored tags are, and
+     * {@link #withResourceTags} puts them in that ARN's context.
+     */
+    public Map<String, List<String>> resourceKeys(String action, String resource) {
+        Map<String, IamConditionKeys.Resource> keys = IamConditionKeys.resources(action);
+        if (keys.isEmpty() || !AwsArnUtils.isArn(resource)) {
+            return null;
+        }
+        StoredResourceArns stored = storedResourceArns(AwsArnUtils.parse(resource).service());
+        if (stored == null) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        keys.forEach((key, held) -> {
+            if (held.arn().matcher(resource).matches()) {
+                stored.recorded(resource, held.member()).ifPresent(value -> conditions.put(key, List.of(value)));
+            }
+        });
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    /**
+     * {@code context} with the condition keys read from a resource itself, its stored tags through
+     * {@link #resourceTags} or its record through {@link #resourceKeys}, each in place of
      * any key of the same name, case aside, the context held; {@code context} itself when there are none.
      */
     public static Map<String, List<String>> withResourceTags(Map<String, List<String>> context,
