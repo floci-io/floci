@@ -409,3 +409,5 @@ Precedence is per-region setting, global setting, then AWS behavior.
 A per-region `aws` entry restores AWS behavior even when the global rule is overridden.
 These explicit overrides intentionally change local compatibility; they do not
 change the AWS API shape or require a separate Floci process for each region.
+
+CloudFormation rollback can restore a saved legacy ALB subnet list with repeated Availability Zones. This internal snapshot path still checks subnet existence, the zone minimum, and VPC membership; new API and stack-update requests continue to reject repeated zones.

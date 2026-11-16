@@ -10,6 +10,9 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
+import io.floci.aws.services.cloudformation.provisioners.ElbV2CfnProvisioner;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.elbv2.model.Action;
@@ -109,6 +112,58 @@ class ElbV2ServiceTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
         stubAlbSubnets(ec2Service);
+    }
+
+    @Test
+    void rollbackRestoresLegacyDuplicateZoneSubnetsWhileNewRequestsRemainStrict() {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "legacy-subnets", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of());
+        List<String> legacy = List.of("subnet-a", "subnet-b", "subnet-c");
+        when(ec2Service.describeSubnets(REGION, legacy, Map.of())).thenReturn(List.of(
+                subnet("subnet-a", REGION + "a"), subnet("subnet-b", REGION + "b"),
+                subnet("subnet-c", REGION + "a")));
+        assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(REGION,
+                lb.getLoadBalancerArn(), legacy));
+        StackResource resource = subnetRollbackResource(lb, legacy);
+
+        assertTrue(new ElbV2CfnProvisioner(service).rollbackUpdate(resource));
+
+        assertEquals(legacy, lb.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+        assertFalse(resource.getAttributes().containsKey(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR));
+        assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(REGION,
+                lb.getLoadBalancerArn(), legacy));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rollbackRetainsSnapshotAndStateWhenPriorSubnetsAreMissingOrInAnotherVpc(boolean foreignVpc) {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "rollback-invalid-subnets", "internal", "application",
+                "ipv4", ALB_SUBNETS, List.of(), Map.of());
+        List<String> prior = List.of("subnet-a", "subnet-b", "subnet-c");
+        Subnet other = subnet("subnet-c", REGION + "a");
+        other.setVpcId("vpc-other");
+        when(ec2Service.describeSubnets(REGION, prior, Map.of())).thenReturn(foreignVpc
+                ? List.of(subnet("subnet-a", REGION + "a"), subnet("subnet-b", REGION + "b"), other)
+                : List.of(subnet("subnet-a", REGION + "a"), subnet("subnet-b", REGION + "b")));
+        StackResource resource = subnetRollbackResource(lb, prior);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new ElbV2CfnProvisioner(service).rollbackUpdate(resource));
+
+        assertEquals(foreignVpc ? "InvalidConfigurationRequest" : "SubnetNotFound", failure.getErrorCode());
+        assertEquals(ALB_SUBNETS, lb.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+        assertEquals(String.join(",", prior), resource.getAttributes()
+                .get(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR));
+        assertEquals("vpc-a", lb.getVpcId());
+    }
+
+    private static StackResource subnetRollbackResource(LoadBalancer lb, List<String> subnets) {
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::ElasticLoadBalancingV2::LoadBalancer");
+        resource.setPhysicalId(lb.getLoadBalancerArn());
+        resource.getAttributes().put(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR,
+                String.join(",", subnets));
+        return resource;
     }
 
     @ParameterizedTest

@@ -506,13 +506,22 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
      * moves a balancer an earlier Floci version saved without subnets back onto none.
      */
     public void setSubnets(String region, String arn, List<String> subnets) {
+        setSubnets(region, arn, subnets, false);
+    }
+
+    /** Restores CloudFormation's saved subnet snapshot, including legacy duplicate-zone assignments. */
+    public void restoreSubnetSnapshot(String region, String arn, List<String> subnets) {
+        setSubnets(region, arn, subnets, true);
+    }
+
+    private void setSubnets(String region, String arn, List<String> subnets, boolean restoreSnapshot) {
         ec2Service.runWithSubnetReferencesHeld(region, () -> {
             LoadBalancer lb = requireLoadBalancer(region, arn);
             // Counted as on create, before any subnet is looked up; an empty list is taken, as above.
             if (subnets != null && !subnets.isEmpty()) {
                 requireSubnets(region, lb.getType(), subnets);
             }
-            String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets);
+            String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets, restoreSnapshot);
             if (vpcId != null && lb.getVpcId() != null && !lb.getVpcId().equals(vpcId)) {
                 throw new AwsException("InvalidConfigurationRequest",
                         "All subnets must belong to the load balancer VPC.", 400);
@@ -1730,6 +1739,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     }
 
     private String resolveSubnetVpcId(String region, String lbType, List<String> subnetIds) {
+        return resolveSubnetVpcId(region, lbType, subnetIds, false);
+    }
+
+    private String resolveSubnetVpcId(String region, String lbType, List<String> subnetIds,
+                                      boolean restoreSnapshot) {
         if (subnetIds == null || subnetIds.isEmpty()) {
             return null;
         }
@@ -1746,7 +1760,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 throw new AwsException("InvalidConfigurationRequest",
                         "Application Load Balancers must be attached to subnets in at least two Availability Zones.", 400);
             }
-            if (distinctAvailabilityZones < subnetIds.size()) {
+            if (!restoreSnapshot && distinctAvailabilityZones < subnetIds.size()) {
                 throw new AwsException("InvalidConfigurationRequest",
                         "A load balancer cannot be attached to multiple subnets in the same Availability Zone", 400);
             }
