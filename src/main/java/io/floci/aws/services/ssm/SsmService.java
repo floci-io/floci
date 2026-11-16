@@ -59,6 +59,8 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
     private static final String DOCUMENT_PREFIX = "document/";
+    private static final String PARAMETER_PREFIX = "parameter/";
+    private static final String ASSOCIATION_PREFIX = "association/";
     private static final String ECS_AL2023_RECOMMENDED =
             "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended";
     private static final String ECS_AL2023_ARM64_RECOMMENDED =
@@ -1154,8 +1156,9 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     }
 
     /**
-     * Applies {@code change} to the tags of the document or association {@code resourceId} names and stores
-     * it; {@code false}, changing nothing, for any other {@code resourceType}.
+     * Applies {@code change} to a copy of the tags of the document or association {@code resourceId} names, puts the
+     * copy in place of the held map and stores it; {@code false}, changing nothing, for any other
+     * {@code resourceType}.
      */
     private boolean updateTags(String resourceType, String resourceId, String region,
                                Consumer<Map<String, String>> change) {
@@ -1163,12 +1166,16 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         switch (resourceType) {
             case "Document" -> {
                 SsmDocument document = taggableDocument(resourceId, region);
-                change.accept(document.getTags());
+                Map<String, String> updated = new LinkedHashMap<>(document.getTags());
+                change.accept(updated);
+                document.setTags(updated);
                 documentStore.put(storageKey, document);
             }
             case "Association" -> {
                 SsmAssociation association = taggableAssociation(resourceId, region);
-                change.accept(association.getTags());
+                Map<String, String> updated = new LinkedHashMap<>(association.getTags());
+                change.accept(updated);
+                association.setTags(updated);
                 associationStore.put(storageKey, association);
             }
             default -> {
@@ -1190,17 +1197,16 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         return new AwsException("InvalidResourceId", "Resource " + resourceId + " not found.", 400);
     }
 
-    public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
+    public synchronized void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
         validateTagKeys(tags);
         String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
 
-        if (param.getTags() == null) {
-            param.setTags(new HashMap<>());
-        }
-        param.getTags().putAll(tags);
+        Map<String, String> updated = copyOfTags(param);
+        updated.putAll(tags);
+        param.setTags(updated);
         parameterStore.put(storageKey, param);
         LOG.debugv("Added tags to parameter: {0}", resourceId);
     }
@@ -1257,19 +1263,76 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         return param.getTags() != null ? param.getTags() : Map.of();
     }
 
-    public void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
+    public synchronized void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
         String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
 
         if (param.getTags() != null) {
-            for (String key : tagKeys) {
-                param.getTags().remove(key);
-            }
+            Map<String, String> updated = copyOfTags(param);
+            tagKeys.forEach(updated::remove);
+            param.setTags(updated);
             parameterStore.put(storageKey, param);
         }
         LOG.debugv("Removed tags from parameter: {0}", resourceId);
+    }
+
+    /**
+     * A new map of the parameter's tags, to put in place of the held one: filled one entry at a time, as the held map
+     * was, so ListTagsForResource lists them in the same order.
+     */
+    private static Map<String, String> copyOfTags(Parameter parameter) {
+        Map<String, String> copy = new HashMap<>();
+        if (parameter.getTags() != null) {
+            parameter.getTags().forEach(copy::put);
+        }
+        return copy;
+    }
+
+    /**
+     * The tags held on the parameter, document or association stored under {@code arn}, in the account and Region it
+     * names, read in place and matched on the whole ARN; empty for an ARN naming nothing stored. A parameter ARN names
+     * {@code /<name>} before {@code <name>}, as the tagging operations read it.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "ssm")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String region = parsed.region();
+        String resource = parsed.resource();
+        if (account.isEmpty() || !arn.equals(AwsArnUtils.Arn.of("ssm", region, account, resource).toString())) {
+            return Map.of();
+        }
+        Map<String, String> tags = null;
+        if (resource.startsWith(PARAMETER_PREFIX)) {
+            String name = resource.substring(PARAMETER_PREFIX.length());
+            tags = AccountAwareStorageBackend.readInAccount(parameterStore, account, regionKey(region, "/" + name))
+                    .or(() -> AccountAwareStorageBackend.readInAccount(parameterStore, account,
+                            regionKey(region, name)))
+                    .filter(parameter -> arn.equals(parameter.getArn()))
+                    .map(Parameter::getTags).orElse(null);
+        } else if (resource.startsWith(DOCUMENT_PREFIX)) {
+            tags = AccountAwareStorageBackend.readInAccount(documentStore, account,
+                    regionKey(region, resource.substring(DOCUMENT_PREFIX.length()))).map(SsmDocument::getTags)
+                    .orElse(null);
+        } else if (resource.startsWith(ASSOCIATION_PREFIX)) {
+            tags = AccountAwareStorageBackend.readInAccount(associationStore, account,
+                    regionKey(region, resource.substring(ASSOCIATION_PREFIX.length()))).map(SsmAssociation::getTags)
+                    .orElse(null);
+        }
+        Map<String, String> held = new LinkedHashMap<>();
+        if (tags != null) {
+            tags.forEach((key, value) -> {
+                if (key != null && value != null) {
+                    held.put(key, value);
+                }
+            });
+        }
+        return held;
     }
 
     /**
