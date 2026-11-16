@@ -3198,22 +3198,28 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public ClusterSubnetGroup createClusterSubnetGroup(String name, String description, String vpcId,
                                                        List<String> subnetIds, Map<String, String> tags) {
+        // A name taken already is refused before EC2 is asked about the subnets, as before.
+        requireFreeSubnetGroupName(name);
         ClusterSubnetGroup group = new ClusterSubnetGroup(name, description, vpcId, subnetIds);
         if (tags != null) {
             group.setTags(new LinkedHashMap<>(tags));
         }
         resolveSubnets(group);
-        // The free-name check and the write under the service's lock (mutate), so two creates of one name can't both
-        // pass the check; EC2 is asked about the subnets before it.
+        // The free-name check again, with the write, under the service's lock (mutate), so two creates of one name
+        // can't both pass it; EC2 is asked about the subnets before it.
         return mutate(() -> {
-            if (subnetGroups.get(regionalKey(name)).isPresent()) {
-                throw new AwsException("ClusterSubnetGroupAlreadyExists",
-                        "Cluster subnet group " + name + " already exists", 400);
-            }
+            requireFreeSubnetGroupName(name);
             subnetGroups.put(regionalKey(name), group);
             subnetGroups.flush();
             return group;
         });
+    }
+
+    private void requireFreeSubnetGroupName(String name) {
+        if (subnetGroups.get(regionalKey(name)).isPresent()) {
+            throw new AwsException("ClusterSubnetGroupAlreadyExists",
+                    "Cluster subnet group " + name + " already exists", 400);
+        }
     }
 
     /**
