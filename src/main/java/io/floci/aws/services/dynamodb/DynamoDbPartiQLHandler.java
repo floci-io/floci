@@ -90,6 +90,7 @@ class DynamoDbPartiQLHandler {
         DynamoDbPartiQLKeyPlan keys = new DynamoDbPartiQLKeyPlan(stmt.where(), accessPath, table);
         keys.requireKeyTypesMatchSchema();
         keys.requireNoOverlap();
+        keys.requireFilterWithoutKeys();
         keys.requireReadsWithinLimit();
         requireFilterAttributesProjected(keys, accessPath, table);
         requireColumnsProjected(stmt, accessPath, table);

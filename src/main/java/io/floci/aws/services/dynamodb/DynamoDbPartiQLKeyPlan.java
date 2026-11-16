@@ -29,6 +29,7 @@ final class DynamoDbPartiQLKeyPlan {
     private final String partitionKey;
     private final String sortKey;
     private final TableDefinition table;
+    private final List<Cond> where;
     private final boolean everyBranchPinsPartition;
     private final List<Cond.Leaf> keyConditions = new ArrayList<>();
     private final List<Branch> branches;
@@ -50,6 +51,7 @@ final class DynamoDbPartiQLKeyPlan {
         this.partitionKey = accessPath.partitionKeyName();
         this.sortKey = accessPath.sortKeyName();
         this.table = table;
+        this.where = where;
         Cond conditions = new Cond.And(where);
         this.everyBranchPinsPartition = everyBranchPinsPartition(conditions);
         List<Spread> spread = spread(conditions);
@@ -116,14 +118,42 @@ final class DynamoDbPartiQLKeyPlan {
         }
     }
 
+    /**
+     * A key read leaves the rest of WHERE to its filter, and the filter may not name a key of the
+     * access path. A conjunct that an OR spreads into key reads is no filter, and a statement that
+     * tests a key outside a range is read as a scan, whose filter may name the keys.
+     */
+    void requireFilterWithoutKeys() {
+        if (!keyed() || branches.stream().anyMatch(this::testsAKeyOutsideARange)) {
+            return;
+        }
+        // DynamoDB names the sort key when the filter names both keys.
+        for (String key : sortKey == null ? List.of(partitionKey) : List.of(sortKey, partitionKey)) {
+            if (where.stream().anyMatch(conjunct -> filterNames(conjunct, key))) {
+                throw DynamoDbPartiQLParser.validationEx(
+                        "Filter Expression can only contain non-primary key attributes: Primary key attribute: " + key);
+            }
+        }
+    }
+
+    private boolean filterNames(Cond conjunct, String key) {
+        return switch (conjunct) {
+            case Cond.And and -> and.operands().stream().anyMatch(operand -> filterNames(operand, key));
+            case Cond.Or or when anyLeaf(or, this::isKeyCondition) -> false;
+            case Cond.Leaf leaf when isKeyCondition(leaf) -> false;
+            default -> DynamoDbPartiQLParser.leaves(conjunct).anyMatch(leaf -> leaf.path().root().equals(key));
+        };
+    }
+
     // DynamoDB drops the overlap check once a branch tests a key in a way no key condition can
     // hold, such as sk <> 'a', attribute_exists(sk) or NOT sk = 'a'. A NOT counts only when it
-    // sits right on the test, and a NOT over size() never counts.
+    // sits right on the test, a NOT over size() never counts, and size() counts only on its own.
     private boolean testsAKeyOutsideARange(Branch branch) {
         return branch.filters().stream().anyMatch(filter -> switch (filter) {
             case Cond.Not not -> not.operand() instanceof Cond.Leaf leaf
                     && !(leaf instanceof Cond.SizeCmp) && namesAKey(leaf);
-            default -> anyLeaf(filter, this::namesAKey);
+            case Cond.Leaf leaf -> namesAKey(leaf);
+            default -> anyLeaf(filter, leaf -> !(leaf instanceof Cond.SizeCmp) && namesAKey(leaf));
         });
     }
 
