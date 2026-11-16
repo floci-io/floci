@@ -325,29 +325,56 @@ public class EcrRegistryDataPlane {
         if (exchange.ended()) {
             return;
         }
-        String digest = upstream.getHeader("Docker-Content-Digest");
-        if (exchange.holdingWriteLock() && context.request().method() == HttpMethod.PUT
-                && upstream.statusCode() == 201 && digest != null && !digest.isBlank()) {
-            Instant pushedAt = Instant.now();
-            upstream.pause();
-            exchange.recordingPush = true;
-            vertx.executeBlocking(() -> ecrService.recordImagePush(request.accountId(), request.region(),
-                    request.repositoryName(), digest, pushedAt), false).onComplete(result -> {
-                exchange.recordingPush = false;
-                if (result.failed()) {
-                    LOG.warnv(result.cause(), "Could not record the push time of ECR manifest {0} in {1}",
-                            digest, request.storageRepositoryName());
-                    failUnlessGone(context, 502);
-                    exchange.end();
-                } else if (exchange.endRequested) {
-                    exchange.end();
-                } else {
-                    forwardResponse(context, request, exchange, upstream);
-                }
-            });
+        Runnable update = exchange.holdingWriteLock() ? manifestMetadataUpdate(context, request, upstream) : null;
+        if (update == null) {
+            forwardResponse(context, request, exchange, upstream);
             return;
         }
-        forwardResponse(context, request, exchange, upstream);
+        upstream.pause();
+        exchange.updatingManifestMetadata = true;
+        vertx.executeBlocking(() -> {
+            try {
+                update.run();
+            } catch (RuntimeException firstFailure) {
+                LOG.debugv(firstFailure, "Retrying ECR manifest metadata update for {0}", request.storageRepositoryName());
+                update.run();
+            }
+            return null;
+        }, false).onComplete(result -> {
+            exchange.updatingManifestMetadata = false;
+            if (result.failed()) {
+                LOG.warnv(result.cause(), "Registry accepted {0} {1}, but the ECR manifest metadata update failed",
+                        context.request().method(), request.backendUri());
+            }
+            if (exchange.endRequested) {
+                exchange.end();
+            } else {
+                forwardResponse(context, request, exchange, upstream);
+            }
+        });
+    }
+
+    private Runnable manifestMetadataUpdate(RoutingContext context, RegistryRequest request,
+                                             HttpClientResponse upstream) {
+        HttpMethod method = context.request().method();
+        if (method == HttpMethod.PUT && upstream.statusCode() == 201) {
+            String digest = upstream.getHeader("Docker-Content-Digest");
+            if (digest != null && !digest.isBlank()) {
+                Instant pushedAt = Instant.now();
+                return () -> ecrService.recordImagePush(request.accountId(), request.region(),
+                        request.repositoryName(), digest, pushedAt);
+            }
+        }
+        if (method == HttpMethod.DELETE && upstream.statusCode() == 202) {
+            String path = context.request().path();
+            String digest = path.substring(path.lastIndexOf('/') + 1);
+            // Registry V2 deletes a manifest by digest. A tag alone does not identify this metadata.
+            if (digest.contains(":")) {
+                return () -> ecrService.removeImagePush(request.accountId(), request.region(),
+                        request.repositoryName(), digest);
+            }
+        }
+        return null;
     }
 
     private static void forwardResponse(RoutingContext context, RegistryRequest request, Exchange exchange,
@@ -458,7 +485,7 @@ public class EcrRegistryDataPlane {
         private final AtomicBoolean admissionReleased = new AtomicBoolean();
         private Buffer waitingBody;
         private boolean waitingBodyRead;
-        private boolean recordingPush;
+        private boolean updatingManifestMetadata;
         private boolean endRequested;
         private HttpClient client;
 
@@ -539,7 +566,7 @@ public class EcrRegistryDataPlane {
         }
 
         private void end() {
-            if (recordingPush) {
+            if (updatingManifestMetadata) {
                 // Keep the repository lock until the metadata write finishes, even on disconnect.
                 endRequested = true;
                 return;

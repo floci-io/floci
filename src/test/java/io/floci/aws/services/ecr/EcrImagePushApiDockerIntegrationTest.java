@@ -298,7 +298,7 @@ class EcrImagePushApiDockerIntegrationTest {
         String host = "000000000000.dkr.ecr.us-east-1.localhost";
         String path = "/v2/" + repo + "/manifests/";
         long before = Instant.now().getEpochSecond();
-        Fetched pushed = registryRequest(host, path + "registry", null, manifest);
+        Fetched pushed = registryRequest(host, path + "registry", HttpMethod.PUT, null, manifest);
         long after = Instant.now().getEpochSecond();
         assertEquals(201, pushed.statusCode());
         assertEquals(manifestDigest, pushed.digest());
@@ -310,11 +310,21 @@ class EcrImagePushApiDockerIntegrationTest {
         assertTrue(pushTime >= before && pushTime <= after,
                 () -> "Expected push time in [" + before + ", " + after + "], got " + pushTime);
 
-        assertEquals(201, registryRequest(host, path + "registry-retag", null, manifest).statusCode());
+        assertEquals(201, registryRequest(host, path + "registry-retag", HttpMethod.PUT, null, manifest).statusCode());
         long retaggedPushTime = call("DescribeImages", "{\"repositoryName\":\"" + repo
                 + "\",\"imageIds\":[{\"imageTag\":\"registry-retag\"}]}")
                 .statusCode(200).extract().jsonPath().getLong("imageDetails[0].imagePushedAt");
         assertEquals(pushTime, retaggedPushTime);
+
+        assertEquals(202, registryRequest(host, path + manifestDigest, HttpMethod.DELETE, null, null).statusCode());
+        long beforeRepush = Instant.now().getEpochSecond();
+        assertEquals(201, registryRequest(host, path + "registry", HttpMethod.PUT, null, manifest).statusCode());
+        long afterRepush = Instant.now().getEpochSecond();
+        long repushTime = call("DescribeImages", "{\"repositoryName\":\"" + repo
+                + "\",\"imageIds\":[{\"imageTag\":\"registry\"}]}")
+                .statusCode(200).extract().jsonPath().getLong("imageDetails[0].imagePushedAt");
+        assertTrue(repushTime >= beforeRepush && repushTime <= afterRepush,
+                () -> "Expected repush time in [" + beforeRepush + ", " + afterRepush + "], got " + repushTime);
     }
 
     @Test
@@ -349,17 +359,18 @@ class EcrImagePushApiDockerIntegrationTest {
 
     /** A GET through Floci's registry data plane, by the host name a Docker client would use. */
     private Fetched registryGet(String host, String path, String accept) throws Exception {
-        return registryRequest(host, path, accept, null);
+        return registryRequest(host, path, HttpMethod.GET, accept, null);
     }
 
-    private Fetched registryRequest(String host, String path, String accept, String manifestBody) throws Exception {
+    private Fetched registryRequest(String host, String path, HttpMethod method, String accept,
+                                    String manifestBody) throws Exception {
         int port = RestAssured.port;
         HttpClient client = vertx.createHttpClient();
         RequestOptions options = new RequestOptions()
                 .setServer(SocketAddress.inetSocketAddress(port, "127.0.0.1"))
                 .setHost(host)
                 .setPort(port)
-                .setMethod(manifestBody == null ? HttpMethod.GET : HttpMethod.PUT)
+                .setMethod(method)
                 .setURI(path);
         return client.request(options)
                 .compose(request -> {

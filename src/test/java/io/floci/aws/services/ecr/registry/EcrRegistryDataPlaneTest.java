@@ -273,6 +273,11 @@ class EcrRegistryDataPlaneTest {
             assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
             Mockito.verify(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
                     eq("platform/api"), eq(digest), any());
+
+            Mockito.doThrow(new IllegalStateException("metadata store unavailable"))
+                    .when(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                            eq("platform/api"), eq(digest), any());
+            assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
         } finally {
             if (dataPlane != null) {
                 dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -283,6 +288,7 @@ class EcrRegistryDataPlaneTest {
 
     @Test
     void immutableTagRejectsReplacementBeforeItReachesTheRegistry() throws Exception {
+        String digest = "sha256:" + "b".repeat(64);
         AtomicBoolean tagExists = new AtomicBoolean();
         AtomicInteger manifestWrites = new AtomicInteger();
         AtomicReference<String> headPath = new AtomicReference<>();
@@ -301,7 +307,7 @@ class EcrRegistryDataPlaneTest {
                             manifestBody.set(body.toString());
                             manifestWrites.incrementAndGet();
                             tagExists.set(true);
-                            request.response().setStatusCode(201).end();
+                            request.response().setStatusCode(201).putHeader("Docker-Content-Digest", digest).end();
                         });
                     } else {
                         request.response().setStatusCode(405).end();
@@ -313,6 +319,9 @@ class EcrRegistryDataPlaneTest {
         HttpServer dataPlane = null;
         try {
             dataPlane = dataPlane(registry, true);
+            Mockito.doThrow(new IllegalStateException("transient metadata store failure")).doReturn(null)
+                    .when(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                            eq("platform/api"), eq(digest), any());
 
             assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
 
@@ -328,6 +337,8 @@ class EcrRegistryDataPlaneTest {
                     error.getString("message"));
 
             assertEquals(1, manifestWrites.get());
+            Mockito.verify(ecrService, Mockito.times(2)).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                    eq("platform/api"), eq(digest), any());
             assertEquals("/v2/legacy/platform-api/manifests/v1", headPath.get());
             assertEquals("/v2/legacy/platform-api/manifests/v1", manifestPath.get());
             assertEquals("{}", manifestBody.get());

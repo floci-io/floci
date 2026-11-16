@@ -1814,6 +1814,18 @@ public class EcrService implements ResourceProvider {
         }
     }
 
+    public void removeImagePush(String account, String region, String repositoryName, String digest) {
+        String key = imageMetaKey(region, account, repositoryName, digest);
+        synchronized (imageMetaStore) {
+            if (imageMetaStore instanceof AccountAwareStorageBackend<ImageMetadata> aware) {
+                aware.getForAccountMigratingLegacy(account, key, metadata -> digest.equals(metadata.getDigest()));
+                aware.deleteForAccount(account, key);
+            } else {
+                imageMetaStore.delete(key);
+            }
+        }
+    }
+
     private static String imageMetaKey(String region, String account, String repoName, String digest) {
         return key(region, account, repoName) + "::" + digest;
     }
