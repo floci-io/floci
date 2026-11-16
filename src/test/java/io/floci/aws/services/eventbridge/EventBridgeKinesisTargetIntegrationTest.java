@@ -16,14 +16,17 @@ import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 @QuarkusTest
 class EventBridgeKinesisTargetIntegrationTest {
@@ -51,14 +54,37 @@ class EventBridgeKinesisTargetIntegrationTest {
 
     @AfterEach
     void deleteStreamAndRule() {
-        try {
-            events.removeTargets(request -> request.rule(rule).ids("stream"));
-            events.deleteRule(request -> request.name(rule));
-            kinesis.deleteStream(request -> request.streamName(stream));
-        } finally {
-            kinesis.close();
-            events.close();
+        try (EventBridgeClient closingEvents = events; KinesisClient closingKinesis = kinesis) {
+            deleteResources(closingEvents, closingKinesis, rule, stream);
         }
+    }
+
+    @Test
+    void removeTargetsFailureStillAttemptsRuleAndStreamDeletion() {
+        List<String> attempts = new ArrayList<>();
+        IllegalStateException removeFailure = new IllegalStateException("remove targets failed");
+        IllegalStateException ruleFailure = new IllegalStateException("delete rule failed");
+        IllegalStateException streamFailure = new IllegalStateException("delete stream failed");
+        EventBridgeKinesisTargetIntegrationTest fixture = cleanupFixture(
+                attempts, removeFailure, ruleFailure, streamFailure);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, fixture::deleteStreamAndRule);
+        assertSame(removeFailure, thrown);
+        assertEquals(List.of(ruleFailure, streamFailure), List.of(thrown.getSuppressed()));
+        assertEquals(List.of("removeTargets", "deleteRule", "deleteStream"), attempts);
+    }
+
+    @Test
+    void deleteRuleFailureStillAttemptsStreamDeletionWithoutSelfSuppression() {
+        List<String> attempts = new ArrayList<>();
+        IllegalStateException sharedFailure = new IllegalStateException("delete failed");
+        EventBridgeKinesisTargetIntegrationTest fixture = cleanupFixture(
+                attempts, null, sharedFailure, sharedFailure);
+
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, fixture::deleteStreamAndRule);
+        assertSame(sharedFailure, thrown);
+        assertEquals(0, thrown.getSuppressed().length);
+        assertEquals(List.of("removeTargets", "deleteRule", "deleteStream"), attempts);
     }
 
     @Test
@@ -174,31 +200,26 @@ class EventBridgeKinesisTargetIntegrationTest {
     }
 
     @Test
-    void westRegionRuleAndTargetDoNotWriteToEastDecoyStream() {
+    void westRegionRuleAndTargetDoNotWriteToEastDecoyStream() throws Exception {
         String westRule = rule + "-west";
         try (EventBridgeClient westEvents = AwsTestClients.create(EventBridgeClient.builder(),
                 ACCOUNT, Region.US_WEST_2);
              KinesisClient westKinesis = AwsTestClients.create(KinesisClient.builder(),
-                     ACCOUNT, Region.US_WEST_2)) {
+                     ACCOUNT, Region.US_WEST_2);
+             AutoCloseable westCleanup = () -> deleteResources(westEvents, westKinesis, westRule, stream)) {
             westKinesis.createStream(request -> request.streamName(stream).shardCount(1));
             westEvents.putRule(request -> request.name(westRule)
                     .eventPattern("{\"source\":[\"example.orders\"]}"));
-            try {
-                String westArn = westKinesis.describeStream(request -> request.streamName(stream))
-                        .streamDescription().streamARN();
-                assertEquals(0, westEvents.putTargets(request -> request.rule(westRule).targets(Target.builder()
-                        .id("stream").arn(westArn).build())).failedEntryCount());
+            String westArn = westKinesis.describeStream(request -> request.streamName(stream))
+                    .streamDescription().streamARN();
+            assertEquals(0, westEvents.putTargets(request -> request.rule(westRule).targets(Target.builder()
+                    .id("stream").arn(westArn).build())).failedEntryCount());
 
-                westEvents.putEvents(request -> request.entries(entry -> entry.source("example.orders")
-                        .detailType("OrderPlaced").detail("{\"orderId\":\"west\"}")));
+            westEvents.putEvents(request -> request.entries(entry -> entry.source("example.orders")
+                    .detailType("OrderPlaced").detail("{\"orderId\":\"west\"}")));
 
-                assertEquals(1, records(westKinesis).size());
-                assertTrue(records().isEmpty());
-            } finally {
-                westEvents.removeTargets(request -> request.rule(westRule).ids("stream"));
-                westEvents.deleteRule(request -> request.name(westRule));
-                westKinesis.deleteStream(request -> request.streamName(stream));
-            }
+            assertEquals(1, records(westKinesis).size());
+            assertTrue(records().isEmpty());
         }
     }
 
@@ -239,5 +260,57 @@ class EventBridgeKinesisTargetIntegrationTest {
         String iterator = client.getShardIterator(request -> request.streamName(stream)
                 .shardId(shard).shardIteratorType(ShardIteratorType.TRIM_HORIZON)).shardIterator();
         return client.getRecords(request -> request.shardIterator(iterator)).records();
+    }
+
+    private static void deleteResources(EventBridgeClient eventClient, KinesisClient streamClient,
+            String ruleName, String streamName) {
+        RuntimeException firstFailure = null;
+        Runnable[] deletions = {
+                () -> eventClient.removeTargets(request -> request.rule(ruleName).ids("stream")),
+                () -> eventClient.deleteRule(request -> request.name(ruleName)),
+                () -> streamClient.deleteStream(request -> request.streamName(streamName))
+        };
+        for (Runnable deletion : deletions) {
+            try {
+                deletion.run();
+            } catch (RuntimeException failure) {
+                if (firstFailure == null) {
+                    firstFailure = failure;
+                } else if (firstFailure != failure) {
+                    firstFailure.addSuppressed(failure);
+                }
+            }
+        }
+        if (firstFailure != null) {
+            throw firstFailure;
+        }
+    }
+
+    private EventBridgeKinesisTargetIntegrationTest cleanupFixture(List<String> attempts,
+            RuntimeException removeFailure, RuntimeException ruleFailure, RuntimeException streamFailure) {
+        EventBridgeKinesisTargetIntegrationTest fixture = new EventBridgeKinesisTargetIntegrationTest();
+        fixture.rule = "cleanup-control";
+        fixture.stream = "cleanup-control";
+        fixture.events = mock(EventBridgeClient.class, invocation -> {
+            String operation = invocation.getMethod().getName();
+            if ("removeTargets".equals(operation) || "deleteRule".equals(operation)) {
+                attempts.add(operation);
+                RuntimeException failure = "removeTargets".equals(operation) ? removeFailure : ruleFailure;
+                if (failure != null) {
+                    throw failure;
+                }
+            }
+            return null;
+        });
+        fixture.kinesis = mock(KinesisClient.class, invocation -> {
+            if ("deleteStream".equals(invocation.getMethod().getName())) {
+                attempts.add("deleteStream");
+                if (streamFailure != null) {
+                    throw streamFailure;
+                }
+            }
+            return null;
+        });
+        return fixture;
     }
 }
