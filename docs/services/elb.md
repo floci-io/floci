@@ -392,7 +392,7 @@ This applies to CreateLoadBalancer and SetSubnets; NLB and GWLB rules are unchan
 Local Zone and Outpost-specific placement is not implemented by this setting.
 
 To override this rule globally, set
-`FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE=allow-single-zone` or `require-two-zones`.
+`FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE=allow-single-zone`.
 The default is `aws`. Individual regions can override the global setting in YAML:
 
 ```yaml
@@ -401,7 +401,7 @@ floci:
     elbv2:
       alb-zone-rule: allow-single-zone
       alb-zone-rule-by-region:
-        us-east-1: require-two-zones
+        us-east-1: aws
         ap-northeast-3: aws
 ```
 

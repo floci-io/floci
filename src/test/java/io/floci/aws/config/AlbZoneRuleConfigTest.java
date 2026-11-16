@@ -26,10 +26,10 @@ class AlbZoneRuleConfigTest {
         Settings settings = settings(Map.of(
                 "floci.services.elbv2.alb-zone-rule", "allow-single-zone",
                 "floci.services.elbv2.alb-zone-rule-by-region.ap-northeast-3", "aws",
-                "floci.services.elbv2.alb-zone-rule-by-region.us-east-1", "require-two-zones"));
+                "floci.services.elbv2.alb-zone-rule-by-region.us-east-1", "allow-single-zone"));
         assertEquals(EmulatorConfig.AlbZoneRule.ALLOW_SINGLE_ZONE, settings.albZoneRule());
         assertEquals(Map.of("ap-northeast-3", EmulatorConfig.AlbZoneRule.AWS,
-                "us-east-1", EmulatorConfig.AlbZoneRule.REQUIRE_TWO_ZONES), settings.albZoneRuleByRegion());
+                "us-east-1", EmulatorConfig.AlbZoneRule.ALLOW_SINGLE_ZONE), settings.albZoneRuleByRegion());
     }
 
     @Test

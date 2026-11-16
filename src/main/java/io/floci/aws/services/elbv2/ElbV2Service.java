@@ -370,7 +370,6 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         return switch (rule) {
             case AWS -> true;
             case ALLOW_SINGLE_ZONE -> false;
-            case REQUIRE_TWO_ZONES -> true;
         };
     }
 

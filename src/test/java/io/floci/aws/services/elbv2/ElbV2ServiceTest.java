@@ -171,25 +171,15 @@ class ElbV2ServiceTest {
         "ap-northeast-3,AWS,none,false",
         "us-east-1,AWS,none,false",
         "us-east-1,ALLOW_SINGLE_ZONE,none,true",
-        "ap-northeast-3,REQUIRE_TWO_ZONES,none,false",
-        "us-east-1,ALLOW_SINGLE_ZONE,REQUIRE_TWO_ZONES,false",
-        "us-east-1,REQUIRE_TWO_ZONES,ALLOW_SINGLE_ZONE,true",
-        "ap-northeast-3,REQUIRE_TWO_ZONES,AWS,false",
+        "us-east-1,AWS,ALLOW_SINGLE_ZONE,true",
+        "ap-northeast-3,ALLOW_SINGLE_ZONE,AWS,false",
         "us-east-1,ALLOW_SINGLE_ZONE,AWS,false"
     })
     void albZonePolicyAppliesToCreateAndSetSubnets(String region, EmulatorConfig.AlbZoneRule global,
                                                   String regional, boolean allowed) {
-        EmulatorConfig settings = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
-        when(settings.services()).thenReturn(services);
-        when(services.elbv2()).thenReturn(elbv2);
-        when(elbv2.albZoneRule()).thenReturn(global);
         Map<String, EmulatorConfig.AlbZoneRule> overrides = "none".equals(regional) ? Map.of()
                 : Map.of(region, EmulatorConfig.AlbZoneRule.valueOf(regional));
-        when(elbv2.albZoneRuleByRegion()).thenReturn(overrides);
-        lenient().when(settings.hostname()).thenReturn(Optional.empty());
-        service.config = settings;
+        service.config = albZoneConfig(global, overrides);
         service.regionResolver = new RegionResolver(region, "000000000000");
         lenient().when(ec2Service.describeSubnets(eq(region), anyList(), eq(Map.of())))
                 .thenAnswer(invocation -> invocation.<List<String>>getArgument(1).stream()
@@ -220,14 +210,7 @@ class ElbV2ServiceTest {
     @Test
     void singleZonePolicyStillRejectsMultipleSubnetsInTheSameZone() {
         String region = "ap-northeast-3";
-        EmulatorConfig settings = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
-        when(settings.services()).thenReturn(services);
-        when(services.elbv2()).thenReturn(elbv2);
-        when(elbv2.albZoneRule()).thenReturn(EmulatorConfig.AlbZoneRule.ALLOW_SINGLE_ZONE);
-        when(elbv2.albZoneRuleByRegion()).thenReturn(Map.of());
-        service.config = settings;
+        service.config = albZoneConfig(EmulatorConfig.AlbZoneRule.ALLOW_SINGLE_ZONE, Map.of());
         Subnet first = subnet("subnet-a", region + "a");
         Subnet second = subnet("subnet-b", region + "a");
         when(ec2Service.describeSubnets(region, ALB_SUBNETS, Map.of())).thenReturn(List.of(first, second));
@@ -243,6 +226,19 @@ class ElbV2ServiceTest {
                 () -> service.setSubnetsFromRequest(region, single.getLoadBalancerArn(), ALB_SUBNETS));
         assertEquals(List.of("subnet-a"), single.getAvailabilityZones().stream()
                 .map(AvailabilityZone::getSubnetId).toList());
+    }
+
+    private static EmulatorConfig albZoneConfig(EmulatorConfig.AlbZoneRule global,
+                                                Map<String, EmulatorConfig.AlbZoneRule> overrides) {
+        EmulatorConfig settings = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
+        when(settings.services()).thenReturn(services);
+        when(services.elbv2()).thenReturn(elbv2);
+        when(elbv2.albZoneRule()).thenReturn(global);
+        when(elbv2.albZoneRuleByRegion()).thenReturn(overrides);
+        lenient().when(settings.hostname()).thenReturn(Optional.empty());
+        return settings;
     }
 
     @Test

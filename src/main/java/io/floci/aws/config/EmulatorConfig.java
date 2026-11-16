@@ -3858,8 +3858,7 @@ public interface EmulatorConfig {
 
     enum AlbZoneRule {
         AWS,
-        ALLOW_SINGLE_ZONE,
-        REQUIRE_TWO_ZONES
+        ALLOW_SINGLE_ZONE
     }
 
     interface EksServiceConfig {
