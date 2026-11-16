@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.services.eventbridge.EventBridgeService;
@@ -1964,5 +1965,64 @@ class SsmServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 ssmService.describeParameters(List.of(filter), "us-east-1"));
         assertEquals(errorCode, ex.getErrorCode());
+    }
+
+    private static final String CALLER = "000000000000";
+    private static final String OWNER = "100000008364";
+
+    @Test
+    void anAssociationOnASharedDocumentGivenByItsArnTakesANewDocumentVersion() {
+        AccountAwareStorageBackend<List<String>> permissions = AccountAwareStorageBackend.inMemory(CALLER);
+        AccountAwareStorageBackend<SsmDocument> documents = AccountAwareStorageBackend.inMemory(CALLER);
+        documents.putForAccount(OWNER, "us-east-1::shared", ownerDocument("shared"));
+        permissions.putForAccount(OWNER, "us-east-1::shared", List.of(CALLER));
+        SsmService service = sharingService(permissions, documents);
+        SsmAssociation association = service.createAssociation("arn:aws:ssm:us-east-1:" + OWNER + ":document/shared",
+                null, null, "i-0123456789abcdef0", null, null, null, "us-east-1");
+
+        SsmAssociation updated = service.updateAssociation(association.getAssociationId(), null, "1", null, null,
+                null, null, null, null, "us-east-1");
+
+        assertEquals("1", updated.getDocumentVersion());
+    }
+
+    @Test
+    void aSharedDocumentGivenByAnArnOfAnotherPartitionDoesNotExist() {
+        AccountAwareStorageBackend<List<String>> permissions = AccountAwareStorageBackend.inMemory(CALLER);
+        AccountAwareStorageBackend<SsmDocument> documents = AccountAwareStorageBackend.inMemory(CALLER);
+        documents.putForAccount(OWNER, "us-east-1::shared", ownerDocument("shared"));
+        permissions.putForAccount(OWNER, "us-east-1::shared", List.of(CALLER));
+        SsmService service = sharingService(permissions, documents);
+        String otherPartition = "arn:aws-cn:ssm:us-east-1:" + OWNER + ":document/shared";
+
+        AwsException e = assertThrows(AwsException.class, () -> service.createAssociation(otherPartition,
+                null, null, "i-0123456789abcdef0", null, null, null, "us-east-1"));
+        assertEquals("InvalidDocument", e.getErrorCode());
+        assertFalse(service.reachedInItsAccount(otherPartition, CALLER));
+    }
+
+    @Test
+    void aDocumentSharedBeforeStorageWasScopedByAccountIsStillShared() {
+        InMemoryStorage<String, List<String>> permissions = new InMemoryStorage<>();
+        InMemoryStorage<String, SsmDocument> documents = new InMemoryStorage<>();
+        permissions.put("us-east-1::legacy", List.of(OWNER));
+        documents.put("us-east-1::legacy", ownerDocument("legacy"));
+        SsmService service = sharingService(new AccountAwareStorageBackend<>(permissions, null, CALLER),
+                new AccountAwareStorageBackend<>(documents, null, CALLER));
+
+        assertEquals(List.of(OWNER), service.documentSharedWith(CALLER, "legacy", "us-east-1"));
+    }
+
+    private static SsmService sharingService(StorageBackend<String, List<String>> permissions,
+                                             StorageBackend<String, SsmDocument> documents) {
+        return new SsmService(new InMemoryStorage<>(), new InMemoryStorage<>(), permissions, documents,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 5, new RegionResolver("us-east-1", CALLER));
+    }
+
+    private static SsmDocument ownerDocument(String name) {
+        SsmDocument document = new SsmDocument(name, "{}", "Command");
+        document.setDocumentVersion(1);
+        document.setVersions(new LinkedHashMap<>(Map.of("1", "{}")));
+        return document;
     }
 }
