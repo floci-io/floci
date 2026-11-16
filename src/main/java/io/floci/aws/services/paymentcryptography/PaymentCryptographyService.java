@@ -1214,42 +1214,64 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * The regions the account replicates a new key to when the request names none.
      *
      * <p>They are kept in the account-aware store, so they belong to the account that set
-     * them and to no other account.
+     * them and to no other account. Each Region has its own settings, so a Region whose
+     * keys are replicated is not the same as another Region whose keys are not.
+     *
+     * @param region the Region the settings are read in
      */
-    public List<String> defaultReplicationRegions() {
-        List<String> regions = settingsStore.get(DEFAULT_REGIONS_KEY).orElseGet(ArrayList::new);
+    public List<String> defaultReplicationRegions(String region) {
+        List<String> regions = settingsStore.get(defaultRegionsKey(region)).orElseGet(ArrayList::new);
         return new ArrayList<>(regions);
+    }
+
+    /**
+     * The name the default regions of a Region are kept under.
+     *
+     * @param region the Region the settings are of
+     */
+    private static String defaultRegionsKey(String region) {
+        return DEFAULT_REGIONS_KEY + ":" + region;
     }
 
     /**
      * Turns the default replication of the account on for the regions the request names.
      *
      * <p>The regions the account already had are left on, so the operation adds rather than
-     * replaces.
+     * replaces. The settings are the ones of the Region the request is in, so each Region
+     * has its own.
+     *
+     * @param region the Region the request is in
+     * @param regions the regions the request names
      */
-    public synchronized List<String> enableDefaultReplicationRegions(List<String> regions) {
+    public synchronized List<String> enableDefaultReplicationRegions(String region,
+                                                                       List<String> regions) {
         requireKnownRegions(regions);
-        List<String> current = defaultReplicationRegions();
-        for (String region : regions) {
-            if (!current.contains(region)) {
-                current.add(region);
+        List<String> current = defaultReplicationRegions(region);
+        for (String target : regions) {
+            if (!current.contains(target)) {
+                current.add(target);
             }
         }
-        settingsStore.put(DEFAULT_REGIONS_KEY, current);
-        return defaultReplicationRegions();
+        settingsStore.put(defaultRegionsKey(region), current);
+        return defaultReplicationRegions(region);
     }
 
     /**
      * Turns the default replication of the account off for the regions the request names.
      *
-     * <p>Only the regions the request names are turned off, so the others stay on.
+     * <p>Only the regions the request names are turned off, so the others stay on. The
+     * settings are the ones of the Region the request is in, so each Region has its own.
+     *
+     * @param region the Region the request is in
+     * @param regions the regions the request names
      */
-    public synchronized List<String> disableDefaultReplicationRegions(List<String> regions) {
+    public synchronized List<String> disableDefaultReplicationRegions(String region,
+                                                                        List<String> regions) {
         requireKnownRegions(regions);
-        List<String> current = defaultReplicationRegions();
+        List<String> current = defaultReplicationRegions(region);
         current.removeAll(regions);
-        settingsStore.put(DEFAULT_REGIONS_KEY, current);
-        return defaultReplicationRegions();
+        settingsStore.put(defaultRegionsKey(region), current);
+        return defaultReplicationRegions(region);
     }
 
     /**
@@ -1500,7 +1522,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         if (named) {
             targets.addAll(replicationRegions);
         } else {
-            targets.addAll(defaultReplicationRegions());
+            targets.addAll(defaultReplicationRegions(region));
         }
         targets.remove(region);
         requireKnownRegions(new ArrayList<>(targets));

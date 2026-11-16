@@ -588,21 +588,28 @@ public class PaymentCryptographyJsonHandler {
         return Map.of("Key", keyObject(key));
     }
 
-    /** The regions the account replicates a new key to by default. */
+    /**
+     * The regions the account replicates a new key to by default.
+     *
+     * <p>The settings are the ones of the Region the request is in, so each Region has its
+     * own.
+     */
     private Map<String, Object> getDefaultKeyReplicationRegions(JsonNode request, String region) {
-        return Map.of("EnabledReplicationRegions", service.defaultReplicationRegions());
+        return Map.of("EnabledReplicationRegions", service.defaultReplicationRegions(region));
     }
 
     /** Turns the default replication of the account on for the regions the request names. */
     private Map<String, Object> enableDefaultKeyReplicationRegions(JsonNode request, String region) {
         return Map.of("EnabledReplicationRegions",
-                service.enableDefaultReplicationRegions(stringsOf(request, "ReplicationRegions")));
+                service.enableDefaultReplicationRegions(region,
+                        stringsOf(request, "ReplicationRegions")));
     }
 
     /** Turns the default replication of the account off for the regions the request names. */
     private Map<String, Object> disableDefaultKeyReplicationRegions(JsonNode request, String region) {
         return Map.of("EnabledReplicationRegions",
-                service.disableDefaultReplicationRegions(stringsOf(request, "ReplicationRegions")));
+                service.disableDefaultReplicationRegions(region,
+                        stringsOf(request, "ReplicationRegions")));
     }
 
     /**
