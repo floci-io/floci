@@ -8,6 +8,7 @@ import org.jboss.logging.Logger;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -70,6 +71,17 @@ public final class CfnCreateOnlyProperties {
         return PROPERTIES.getOrDefault(resourceType, Collections.emptySet());
     }
 
+    /** Schema create-only pointers plus SES's conditional destination-name replacement. */
+    static Set<String> replacementPointers(String resourceType) {
+        Set<String> schemaPointers = getCreateOnlyProperties(resourceType);
+        if (!SES_EVENT_DESTINATION.equals(resourceType)) {
+            return schemaPointers;
+        }
+        Set<String> pointers = new HashSet<>(schemaPointers);
+        pointers.add(SES_DESTINATION_NAME);
+        return pointers;
+    }
+
     /** True when the registry table has an entry for the type, so its pointers are authoritative. */
     public static boolean hasSchema(String resourceType) {
         return PROPERTIES.containsKey(resourceType);
@@ -83,14 +95,12 @@ public final class CfnCreateOnlyProperties {
      * element's subtree.
      */
     public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps) {
-        for (String pointer : getCreateOnlyProperties(resourceType)) {
+        for (String pointer : replacementPointers(resourceType)) {
             if (createOnlyPointerChanged(pointer, oldProps, newProps)) {
                 return true;
             }
         }
-        // The SES schema lists Name as conditionalCreateOnlyProperties: SES cannot rename a destination.
-        return SES_EVENT_DESTINATION.equals(resourceType)
-                && createOnlyPointerChanged(SES_DESTINATION_NAME, oldProps, newProps);
+        return false;
     }
 
     /** {@link #createOnlyValueChanged} for one pointer of the type's table. */
@@ -109,11 +119,8 @@ public final class CfnCreateOnlyProperties {
     /** The subtrees of the new properties that sit under a create-only pointer of the type. */
     public static List<JsonNode> createOnlySubtrees(String resourceType, JsonNode props) {
         List<JsonNode> out = new ArrayList<>();
-        for (String pointer : getCreateOnlyProperties(resourceType)) {
+        for (String pointer : replacementPointers(resourceType)) {
             collect(props, pointer.split("/"), 0, out);
-        }
-        if (SES_EVENT_DESTINATION.equals(resourceType)) {
-            collect(props, SES_DESTINATION_NAME.split("/"), 0, out);
         }
         return out;
     }

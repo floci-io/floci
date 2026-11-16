@@ -16,6 +16,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.ssm.SsmClient;
 
 import java.time.Duration;
 import java.util.List;
@@ -122,6 +123,42 @@ class CloudFormationSesEventDestinationIntegrationTest {
         CfnStackTestSupport.executeAndAwaitUpdate(cfn, stackName, "rename");
         assertEquals(List.of(newName), configurationSets.getEventDestinations(setName, "us-east-1")
                 .stream().map(EventDestination::getName).toList());
+    }
+
+    @Test
+    void changedDynamicDestinationNamePreviewsReplacement() {
+        String setName = stackName + "-set";
+        String oldName = stackName + "-old";
+        String newName = stackName + "-new";
+        String parameter = "/ses/event-destination/" + stackName;
+        String reference = "{{resolve:ssm:" + parameter + "}}";
+        try (SsmClient ssm = AwsTestClients.create(SsmClient.builder(), "test", Region.US_EAST_1)) {
+            try {
+                ssm.putParameter(request -> request.name(parameter).type("String").value(oldName));
+                cfn.createStack(request -> request.stackName(stackName)
+                        .templateBody(template(setName, reference, "SEND", "initial")));
+                CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+
+                ssm.putParameter(request -> request.name(parameter).type("String").value(newName)
+                        .overwrite(true));
+                CfnStackTestSupport.createUpdateChangeSet(cfn, stackName, "rename-dynamic",
+                        template(setName, reference, "BOUNCE", "initial"));
+                assertEquals(List.of("True"), CfnStackTestSupport.replacement(
+                        cfn, stackName, "rename-dynamic", "EventDestination"));
+
+                CfnStackTestSupport.executeAndAwaitUpdate(cfn, stackName, "rename-dynamic");
+                assertEquals(List.of(newName), configurationSets.getEventDestinations(setName, "us-east-1")
+                        .stream().map(EventDestination::getName).toList());
+            } catch (RuntimeException | Error failure) {
+                try {
+                    ssm.deleteParameter(request -> request.name(parameter));
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw failure;
+            }
+            ssm.deleteParameter(request -> request.name(parameter));
+        }
     }
 
     @Test

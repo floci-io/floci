@@ -131,9 +131,9 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
     }
 
     private static void validateDestinationShapes(JsonNode definition) {
-        validateObject(definition, "SnsDestination", Set.of("TopicARN"));
-        validateObject(definition, "KinesisFirehoseDestination", Set.of("IAMRoleARN", "DeliveryStreamARN"));
-        validateObject(definition, "EventBridgeDestination", Set.of("EventBusArn"));
+        validateRequiredObject(definition, "SnsDestination", Set.of("TopicARN"));
+        validateRequiredObject(definition, "KinesisFirehoseDestination", Set.of("IAMRoleARN", "DeliveryStreamARN"));
+        validateRequiredObject(definition, "EventBridgeDestination", Set.of("EventBusArn"));
         JsonNode cloudWatch = validateObject(definition, "CloudWatchDestination",
                 Set.of("DimensionConfigurations"));
         if (cloudWatch == null || !cloudWatch.has("DimensionConfigurations")) {
@@ -148,6 +148,13 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
                 throw invalid("DimensionConfigurations entries must be objects.");
             }
             validateKeys(dimension, Set.of("DimensionName", "DimensionValueSource", "DefaultDimensionValue"));
+        }
+    }
+
+    private static void validateRequiredObject(JsonNode parent, String key, Set<String> members) {
+        JsonNode value = validateObject(parent, key, members);
+        if (value != null) {
+            members.forEach(member -> requiredText(value, member));
         }
     }
 

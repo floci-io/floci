@@ -1562,7 +1562,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             JsonNode digestedBefore = digested(before);
             JsonNode digestedAfter = digested(after);
-            for (String pointer : CfnCreateOnlyProperties.getCreateOnlyProperties(resourceType)) {
+            for (String pointer : CfnCreateOnlyProperties.replacementPointers(resourceType)) {
                 boolean changed = noEvidence(pointer, before)
                         ? writtenPointerChanged(pointer, oldProps, newProps)
                         : CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, digestedBefore, digestedAfter);
