@@ -35,22 +35,9 @@ class StepFunctionsJsonataIntegrationTest {
     @ParameterizedTest
     @ValueSource(ints = {0, 1, 3})
     void existsOfAnIndexedConstructedObjectPathReturnsFalse(int count) throws Exception {
-        String definition = """
-                {
-                    "QueryLanguage": "JSONata",
-                    "StartAt": "Probe",
-                    "States": {
-                        "Probe": {
-                            "Type": "Pass",
-                            "Output": "{% $exists([$states.input.Items.{'ok':true}][0].ok) %}",
-                            "End": true
-                        }
-                    }
-                }
-                """;
-        String machine = createStateMachine("jsonata-constructed-exists-" + count, definition);
-        String input = "{\"Items\":[" + "{},".repeat(count).replaceFirst(",$", "") + "]}";
-        assertFalse(objectMapper.readTree(waitForExecution(startExecution(machine, input))).asBoolean());
+        String execution = startConstructedArrayExecution("exists", count,
+                "{% $exists([$states.input.Items.{'ok':true}][0].ok) %}");
+        assertFalse(objectMapper.readTree(waitForExecution(execution)).asBoolean());
     }
 
     @BeforeAll
@@ -61,25 +48,21 @@ class StepFunctionsJsonataIntegrationTest {
     @ParameterizedTest
     @ValueSource(ints = {0, 1, 3})
     void directIndexedConstructedObjectPathStillFailsAsUndefined(int count) throws Exception {
-        String definition = """
-                {
-                    "QueryLanguage": "JSONata",
-                    "StartAt": "Probe",
-                    "States": {
-                        "Probe": {
-                            "Type": "Pass",
-                            "Output": "{% [$states.input.Items.{'ok':true}][0].ok %}",
-                            "End": true
-                        }
-                    }
-                }
-                """;
-        String machine = createStateMachine("jsonata-constructed-undefined-" + count, definition);
-        String input = "{\"Items\":[" + "{},".repeat(count).replaceFirst(",$", "") + "]}";
-        Response failure = waitForExecutionFailure(startExecution(machine, input));
+        String execution = startConstructedArrayExecution("undefined", count,
+                "{% [$states.input.Items.{'ok':true}][0].ok %}");
+        Response failure = waitForExecutionFailure(execution);
         assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
         assertTrue(failure.jsonPath().getString("cause").contains("returned nothing (undefined)"));
         assertFalse(failure.jsonPath().getString("cause").contains("cannot be cast"));
+    }
+
+    private String startConstructedArrayExecution(String name, int count, String expression) {
+        ObjectNode definition = objectMapper.createObjectNode();
+        definition.put("QueryLanguage", "JSONata").put("StartAt", "Probe");
+        definition.putObject("States").putObject("Probe")
+                .put("Type", "Pass").put("Output", expression).put("End", true);
+        String machine = createStateMachine("jsonata-constructed-" + name + "-" + count, definition.toString());
+        return startExecution(machine, JsonataConstructedArrayFixtures.input(objectMapper, count).toString());
     }
 
     @Test

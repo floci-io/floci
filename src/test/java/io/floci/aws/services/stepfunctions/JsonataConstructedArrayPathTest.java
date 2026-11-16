@@ -18,7 +18,7 @@ class JsonataConstructedArrayPathTest {
     @ParameterizedTest
     @ValueSource(ints = {0, 1, 3})
     void indexedConstructedObjectPathHasNoValueAndExistsIsFalse(int count) throws Exception {
-        JsonNode states = states(count);
+        JsonNode states = JsonataConstructedArrayFixtures.states(mapper, count);
         assertTrue(evaluator.evaluate("{% [$states.input.Items.{'ok':true}][0].ok %}", states).isMissingNode());
         assertFalse(evaluator.evaluate("{% $exists([$states.input.Items.{'ok':true}][0].ok) %}", states).asBoolean());
         assertEquals(mapper.readTree("{}"),
@@ -28,7 +28,7 @@ class JsonataConstructedArrayPathTest {
     @ParameterizedTest
     @ValueSource(ints = {0, 1, 3})
     void groupingTheConstructedArrayAllowsThePropertyRead(int count) throws Exception {
-        JsonNode states = states(count);
+        JsonNode states = JsonataConstructedArrayFixtures.states(mapper, count);
         JsonNode grouped = evaluator.evaluate("{% ([$states.input.Items.{'ok':true}])[0].ok %}", states);
         if (count == 0) {
             assertTrue(grouped.isMissingNode());
@@ -53,12 +53,9 @@ class JsonataConstructedArrayPathTest {
 
     @Test
     void numericAndBooleanSingletonPathsAlsoHaveNoValue() throws Exception {
-        JsonNode states = states(1);
+        JsonNode states = JsonataConstructedArrayFixtures.states(mapper, 1);
         assertTrue(evaluator.evaluate("{% [5][0].$string() %}", states).isMissingNode());
         assertFalse(evaluator.evaluate("{% $exists([true][0].x) %}", states).asBoolean());
     }
 
-    private JsonNode states(int count) throws Exception {
-        return mapper.readTree("{\"input\":{\"Items\":[" + "{},".repeat(count).replaceFirst(",$", "") + "]}}");
-    }
 }
