@@ -2,6 +2,7 @@ package io.floci.aws.services.kms;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -31,7 +32,7 @@ class KmsJson10IntegrationTest {
                 .extract().path("KeyMetadata.KeyId");
 
         String context = "{\"record_id\":\"42\"}";
-        var dataKey = call(JSON_1_0, "GenerateDataKey", """
+        JsonPath dataKey = call(JSON_1_0, "GenerateDataKey", """
                 {"KeyId":"%s","KeySpec":"AES_256","EncryptionContext":%s}
                 """.formatted(keyId, context))
                 .statusCode(200)
