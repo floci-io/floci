@@ -28,6 +28,7 @@ import io.floci.aws.services.eventbridge.model.RedshiftDataParameters;
 import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.firehose.model.Record;
+import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.redshiftdata.RedshiftDataService;
@@ -84,6 +85,7 @@ public class EventBridgeInvoker {
     private final SnsService snsService;
     private final BatchService batchService;
     private final FirehoseService firehoseService;
+    private final KinesisService kinesisService;
     private final EventBridgeService eventBridgeService;
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
@@ -101,16 +103,28 @@ public class EventBridgeInvoker {
 
     @Inject
     public EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
+                              BatchService batchService, FirehoseService firehoseService, KinesisService kinesisService,
+                              EventBridgeService eventBridgeService, EcsService ecsService,
+                              EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
+                              RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                              ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
+                              EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, kinesisService, eventBridgeService,
+                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
+                serviceRegistry, regionResolver, objectMapper, config,
+                apiDestinationClient(ContainerCaBundle.sslContext(config).orElse(null)), appSyncTargetInvoker);
+    }
+
+    public EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
                               BatchService batchService, FirehoseService firehoseService,
                               EventBridgeService eventBridgeService, EcsService ecsService,
                               EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
                               RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                               ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
                               EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
-        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, null, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config,
-                apiDestinationClient(ContainerCaBundle.sslContext(config).orElse(null)), appSyncTargetInvoker);
+                serviceRegistry, regionResolver, objectMapper, config, appSyncTargetInvoker);
     }
 
     // The client API destinations are delivered with: sslContext, when given, adds the extra CAs in
@@ -171,11 +185,24 @@ public class EventBridgeInvoker {
                                RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                                ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
                                EmulatorConfig config, HttpClient httpClient, AppSyncTargetInvoker appSyncTargetInvoker) {
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, null, eventBridgeService,
+                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
+                serviceRegistry, regionResolver, objectMapper, config, httpClient, appSyncTargetInvoker);
+    }
+
+    private EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
+                               BatchService batchService, FirehoseService firehoseService, KinesisService kinesisService,
+                               EventBridgeService eventBridgeService, EcsService ecsService,
+                               EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
+                               RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                               ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
+                               EmulatorConfig config, HttpClient httpClient, AppSyncTargetInvoker appSyncTargetInvoker) {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
         this.batchService = batchService;
         this.firehoseService = firehoseService;
+        this.kinesisService = kinesisService;
         this.eventBridgeService = eventBridgeService;
         this.ecsService = ecsService;
         this.ecsJsonHandler = ecsJsonHandler;
@@ -294,6 +321,24 @@ public class EventBridgeInvoker {
                     firehoseService.putRecord(streamArn.accountId(), streamArn.region(), streamName, record);
                 }
                 LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
+            } else if (AwsArnUtils.isArnFor(arn, "kinesis")
+                    && AwsArnUtils.parse(arn).resource().startsWith("stream/")) {
+                if (kinesisService == null) {
+                    throw new AwsException("ServiceNotAvailableException", "Kinesis delivery is not available.", 400);
+                }
+                AwsArnUtils.Arn streamArn = AwsArnUtils.parse(arn);
+                String partitionKey = target.getKinesisParameters() == null
+                        ? extractJsonPath("$.id", eventJson)
+                        : extractJsonPath(target.getKinesisParameters().partitionKeyPath(), eventJson);
+                if (partitionKey == null || partitionKey.codePointCount(0, partitionKey.length()) < 1
+                        || partitionKey.codePointCount(0, partitionKey.length()) > 256) {
+                    throw new AwsException("InvalidParameterException",
+                            "EventBridge Kinesis partition key is missing or outside 1..256 characters.", 400);
+                }
+                String streamName = streamArn.resource().substring("stream/".length());
+                kinesisService.putRecordForAccount(streamArn.accountId(), streamName,
+                        payload.getBytes(StandardCharsets.UTF_8), partitionKey, streamArn.region());
+                LOG.debugv("EventBridge delivered to Kinesis: {0}", arn);
             } else if (AwsArnUtils.isArnFor(arn, "redshift")
                     || AwsArnUtils.isArnFor(arn, "redshift-serverless")) {
                 deliverToRedshiftData(target, arn, eventJson, ruleArn);

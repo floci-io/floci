@@ -269,6 +269,11 @@ public class EventBridgeHandler {
                 );
                 target.setRoleArn(t.path("RoleArn").asText(null));
                 target.setInputTransformer(InputTransformer.fromJson(t.path("InputTransformer")));
+                JsonNode kinesisParamsNode = t.path("KinesisParameters");
+                if (kinesisParamsNode.isObject()) {
+                    target.setKinesisParameters(
+                            objectMapper.convertValue(kinesisParamsNode, Target.KinesisParameters.class));
+                }
                 JsonNode sqsParamsNode = t.path("SqsParameters");
                 if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
                     String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
@@ -361,6 +366,9 @@ public class EventBridgeHandler {
                 if (t.getInputTransformer().getInputTemplate() != null) {
                     transformerNode.put("InputTemplate", t.getInputTransformer().getInputTemplate());
                 }
+            }
+            if (t.getKinesisParameters() != null) {
+                node.set("KinesisParameters", objectMapper.valueToTree(t.getKinesisParameters()));
             }
             if (t.getSqsParameters() != null && t.getSqsParameters().getMessageGroupId() != null) {
                 node.putObject("SqsParameters").put("MessageGroupId", t.getSqsParameters().getMessageGroupId());

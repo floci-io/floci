@@ -653,6 +653,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                     throw SmithyValidationErrors.validationException(violation);
                 }
             }
+            Target.KinesisParameters kinesisParameters = target.getKinesisParameters();
+            if (kinesisParameters != null) {
+                String path = kinesisParameters.partitionKeyPath();
+                if (path == null || path.codePointCount(0, path.length()) > 256) {
+                    throw SmithyValidationErrors.validationException("Value at 'targets." + (i + 1)
+                            + ".member.kinesisParameters.partitionKeyPath' must be present and at most 256 characters");
+                }
+            }
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
             Integer age = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumEventAgeInSeconds() : null;
             String arn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;
