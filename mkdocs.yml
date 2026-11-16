@@ -220,6 +220,7 @@ nav:
     - DataSync: services/datasync.md
     - AWS Config: services/config.md
     - EMR: services/emr.md
+    - EMR on EKS: services/emr-containers.md
     - EMR Serverless: services/emr-serverless.md
     - WAF v2: services/wafv2.md
     - AWS Network Firewall: services/network-firewall.md

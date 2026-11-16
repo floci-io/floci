@@ -857,6 +857,18 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
             }
         }
+        List<String> instanceSecurityGroupIds;
+        try {
+            RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds, placement.vpcId());
+            // A cluster member's groups are its cluster's.
+            instanceSecurityGroupIds = isBlank(dbClusterIdentifier)
+                    ? RdsSecurityGroups.orVpcDefault(ec2Service, effectiveRegion, vpcSecurityGroupIds,
+                            placement.vpcId())
+                    : vpcSecurityGroupIds;
+        } catch (RuntimeException | Error failure) {
+            releaseProxyPort(proxyPort);
+            throw failure;
+        }
 
         DbEndpoint endpoint;
         DbInstance instance;
@@ -874,7 +886,7 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setDockerVolumeName(instanceDockerVolumeName);
             instance.setContainerStorageResourceId(instanceStorageResourceId);
             instance.setTags(tags);
-            instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+            instance.setVpcSecurityGroupIds(instanceSecurityGroupIds);
             instance.setDbSubnetGroupName(placement.dbSubnetGroupName());
             instance.setVpcId(placement.vpcId());
             instance.setAvailabilityZone(placement.availabilityZone());
@@ -2211,9 +2223,13 @@ public class RdsService implements Resettable, ResourceProvider {
                 request.optionGroupName(), sameRegion ? source.getOptionGroupName() : null);
         String dbSubnetGroupName = firstNonBlank(
                 request.dbSubnetGroupName(), sameRegion ? source.getDbSubnetGroupName() : null);
+        // The source's groups belong to its VPC, so a replica placed in another one gets that VPC's
+        // default group instead.
+        boolean inSourceVpc = sameRegion && (isBlank(request.dbSubnetGroupName()) || Objects.equals(
+                getDbSubnetGroup(request.dbSubnetGroupName(), effectiveRegion).getVpcId(), source.getVpcId()));
         List<String> vpcSecurityGroupIds = request.vpcSecurityGroupIds() != null
                 ? request.vpcSecurityGroupIds()
-                : sameRegion ? source.getVpcSecurityGroupIds() : List.of();
+                : inSourceVpc ? source.getVpcSecurityGroupIds() : List.of();
         boolean autoMinorVersionUpgrade = request.autoMinorVersionUpgrade() != null
                 ? request.autoMinorVersionUpgrade() : source.isAutoMinorVersionUpgrade();
         // Backups stay off on a replica; the source's windows carry over, and encryption follows
@@ -4073,6 +4089,16 @@ public class RdsService implements Resettable, ResourceProvider {
             validateInstanceParameterGroup(dbParameterGroupName, engineName(instance),
                     instance.getEngineVersion(), effectiveRegion);
         }
+        // A new subnet group can move the instance to another VPC, so the groups are checked against that VPC.
+        DbSubnetGroup newSubnetGroup = isBlank(dbSubnetGroupName)
+                ? null : getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+        String vpcIdAfter = newSubnetGroup != null ? newSubnetGroup.getVpcId() : instance.getVpcId();
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds, vpcIdAfter);
+        // The old VPC's groups cannot follow the instance to another one, so it gets the groups the request
+        // names or that VPC's default group. Null keeps the groups it has.
+        List<String> securityGroupIdsAfter = !Objects.equals(vpcIdAfter, instance.getVpcId())
+                ? RdsSecurityGroups.orVpcDefault(ec2Service, effectiveRegion, vpcSecurityGroupIds, vpcIdAfter)
+                : vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty() ? null : vpcSecurityGroupIds;
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (changesParameterGroup) {
             instance.setParameterGroupName(dbParameterGroupName);
@@ -4108,12 +4134,12 @@ public class RdsService implements Resettable, ResourceProvider {
         if (iamEnabled != null) {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
-        if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
-            getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+        if (newSubnetGroup != null) {
             instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setVpcId(newSubnetGroup.getVpcId());
         }
-        if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
-            instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        if (securityGroupIdsAfter != null) {
+            instance.setVpcSecurityGroupIds(securityGroupIdsAfter);
         }
         if (autoMinorVersionUpgrade != null) {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
@@ -4229,6 +4255,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(instanceId, effectiveRegion);
         requireAvailableInstance(instance, instanceId);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, groupIds, instance.getVpcId());
         instance.setVpcSecurityGroupIds(groupIds);
         putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
         LOG.infov("DB instance {0} security groups set to {1}", instanceId, groupIds);
@@ -4236,19 +4263,50 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * The groups AWS's CloudFormation handler gives a standalone DB instance whose template stops
-     * declaring {@code VPCSecurityGroups}: the default security group of its VPC, or none when EC2
-     * has no default group for it.
+     * The default security group of {@code instance}'s VPC, which describe reports for an instance that
+     * keeps no groups: an Aurora member, whose groups are its cluster's, or one stored before RDS gave
+     * one. No group when its VPC is unknown or gone.
      */
-    public List<String> defaultVpcSecurityGroupIds(String region, String instanceId) {
-        String effectiveRegion = effectiveRegion(region);
-        String vpcId = getDbInstance(instanceId, effectiveRegion).getVpcId();
-        if (isBlank(vpcId)) {
+    public List<String> defaultVpcSecurityGroupIds(DbInstance instance) {
+        try {
+            return RdsSecurityGroups.vpcDefault(ec2Service, regionFromArn(instance.getDbInstanceArn()),
+                    instance.getVpcId());
+        } catch (AwsException e) {
+            LOG.debugv("No default security group to report for DB instance {0} in {1}: {2}",
+                    instance.getDbInstanceIdentifier(), instance.getVpcId(), e.getMessage());
             return List.of();
         }
-        return ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId)
-                .map(group -> List.of(group.getGroupId()))
-                .orElse(List.of());
+    }
+
+    /**
+     * The groups AWS's CloudFormation handler gives a standalone DB instance whose template stops
+     * declaring {@code VPCSecurityGroups}: the default security group of the VPC it is in once
+     * {@code dbSubnetGroupName}, when given, is its subnet group, or none when EC2 has no default group
+     * for it.
+     */
+    public List<String> defaultVpcSecurityGroupIds(String region, String instanceId, String dbSubnetGroupName) {
+        String effectiveRegion = effectiveRegion(region);
+        return RdsSecurityGroups.vpcDefault(ec2Service, effectiveRegion,
+                vpcIdAfter(instanceId, dbSubnetGroupName, effectiveRegion));
+    }
+
+    /**
+     * Refuses {@code groupIds} as {@code ModifyDBInstance} would for instance {@code instanceId} given
+     * {@code dbSubnetGroupName}, for CloudFormation, which changes the subnet group and the groups in
+     * separate steps and so checks the groups before the first one.
+     */
+    public void requireVpcSecurityGroupsFit(String region, String instanceId, String dbSubnetGroupName,
+                                            List<String> groupIds) {
+        String effectiveRegion = effectiveRegion(region);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, groupIds,
+                vpcIdAfter(instanceId, dbSubnetGroupName, effectiveRegion));
+    }
+
+    /** The VPC instance {@code instanceId} is in once {@code dbSubnetGroupName}, when given, is its subnet group. */
+    private String vpcIdAfter(String instanceId, String dbSubnetGroupName, String effectiveRegion) {
+        return isBlank(dbSubnetGroupName)
+                ? getDbInstance(instanceId, effectiveRegion).getVpcId()
+                : getDbSubnetGroup(dbSubnetGroupName, effectiveRegion).getVpcId();
     }
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
@@ -7905,10 +7963,8 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setStatus("available");
         endpoint.setVpcId(vpcId);
         endpoint.setVpcSubnetIds(vpcSubnetIds);
-        endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()
-                ? ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId).map(sg -> List.of(sg.getGroupId()))
-                        .orElse(List.of())
-                : vpcSecurityGroupIds);
+        endpoint.setVpcSecurityGroupIds(
+                RdsSecurityGroups.orVpcDefault(ec2Service, effectiveRegion, vpcSecurityGroupIds, vpcId));
         endpoint.setCreatedDate(Instant.now());
         endpoint.setTargetRole(role);
         endpoint.setEndpointNetworkType(networkType);

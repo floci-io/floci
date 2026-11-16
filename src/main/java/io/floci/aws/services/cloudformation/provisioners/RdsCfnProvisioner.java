@@ -438,17 +438,22 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         boolean created = instance == null;
         String caCertificate = resolveOptional(props, "CACertificateIdentifier", engine);
         DbInstanceInPlaceState stateBefore = created ? null : DbInstanceInPlaceState.of(instance);
-        // Worked out before anything changes, so that nothing can fail between the changes a
-        // rollback cannot undo and the groups, which it can.
+        String subnetGroupName = resolveOptional(props, "DBSubnetGroupName", engine);
+        // Worked out and checked against the VPC the update leaves the instance in before anything
+        // changes, so that nothing can fail between the changes a rollback cannot undo and the groups,
+        // which it can.
         List<String> desiredGroups = created ? null
-                : desiredVpcSecurityGroups(vpcSecurityGroups, clusterMember, id, ctx);
+                : desiredVpcSecurityGroups(vpcSecurityGroups, clusterMember, id, subnetGroupName, ctx);
+        if (desiredGroups != null) {
+            rdsService.requireVpcSecurityGroupsFit(ctx.region(), id, subnetGroupName, desiredGroups);
+        }
         if (instance != null) {
             // A null region keeps the default-region lookup sameNameExistingResource made.
             instance = rdsService.modifyDbInstance(
                     id,
                     resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                    resolveOptional(props, "DBSubnetGroupName", engine), null, null, null, null,
+                    subnetGroupName, null, null, null, null,
                     DbInstanceSettings.unchanged().withCaCertificateIdentifier(caCertificate));
         } else {
             instance = rdsService.createDbInstance(
@@ -462,7 +467,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     parseIntProp(props, "AllocatedStorage", engine, 20),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
                     resolveOptional(props, "DBParameterGroupName", engine),
-                    resolveOptional(props, "DBSubnetGroupName", engine),
+                    subnetGroupName,
                     resolveOptional(props, "DBClusterIdentifier", engine),
                     null, false, false, null, Map.of(), vpcSecurityGroups, null, region, true,
                     new DbInstanceSettings(storageEncrypted, null, null, null, null, null)
@@ -510,13 +515,14 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * changes a member's list fails the update, as on AWS, where the handler sends the change to
      * ModifyDBInstance and RDS refuses it for a member. The change is read from the template, as
      * there, so a member a stack created before Floci applied the list still takes it. A list the
-     * previous template declared and this one drops puts a standalone instance on its VPC's default
-     * security group, as AWS's handler does, and leaves them when there is no such group, as there; a
+     * previous template declared and this one drops puts a standalone instance on the default security
+     * group of the VPC {@code subnetGroupName} leaves it in, as AWS's handler does, and leaves them
+     * when there is no such group, as there; a
      * cluster member keeps its groups, as there too. A list the stack never declared leaves groups set
      * outside it alone.
      */
     private List<String> desiredVpcSecurityGroups(List<String> declared, String clusterMember, String id,
-                                                  ProvisionContext ctx) {
+                                                  String subnetGroupName, ProvisionContext ctx) {
         boolean member = clusterMember != null && !clusterMember.isBlank();
         if (!declared.isEmpty()) {
             if (member && ctx.priorProperties() != null && !Set.copyOf(declared).equals(
@@ -529,7 +535,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (!ctx.previouslyDeclared("VPCSecurityGroups") || member) {
             return null;
         }
-        List<String> defaultGroup = rdsService.defaultVpcSecurityGroupIds(ctx.region(), id);
+        List<String> defaultGroup = rdsService.defaultVpcSecurityGroupIds(ctx.region(), id, subnetGroupName);
         return defaultGroup.isEmpty() ? null : defaultGroup;
     }
 
@@ -538,7 +544,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * when an earlier step fails, the engine restores the resource without calling
      * {@link #rollbackUpdate}, so only a change made after every other one can be put back there.
      * What the instance had is saved first, with whether the update changed anything else, for
-     * {@link #rollbackUpdate}.
+     * {@link #rollbackUpdate}, except the groups of an instance the update moved to another VPC: a
+     * rollback does not move it back, and the old VPC's groups cannot go on it in the new one.
      */
     private void reconcileInstanceSecurityGroups(StackResource r, DbInstance instance, List<String> desired,
                                                  DbInstanceInPlaceState stateBefore, ProvisionContext ctx) {
@@ -546,7 +553,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         List<String> groupsBefore = stateBefore.vpcSecurityGroups();
         boolean groupsChange = desired != null && !Set.copyOf(desired).equals(Set.copyOf(groupsBefore));
         ObjectNode saved = MAPPER.createObjectNode().put("region", ctx.region());
-        if (groupsChange) {
+        if (groupsChange && Objects.equals(stateBefore.vpcId(), instance.getVpcId())) {
             ArrayNode priorGroups = saved.putArray("vpcSecurityGroups");
             groupsBefore.forEach(priorGroups::add);
         }
@@ -563,7 +570,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * changes do not reach them. Only the groups have a rollback here.
      */
     private record DbInstanceInPlaceState(String masterPassword, boolean iamAuthentication, String subnetGroup,
-                                          String caCertificate, Set<String> roles, List<String> vpcSecurityGroups) {
+                                          String vpcId, String caCertificate, Set<String> roles,
+                                          List<String> vpcSecurityGroups) {
 
         static DbInstanceInPlaceState of(DbInstance instance) {
             Set<String> roles = new HashSet<>();
@@ -572,7 +580,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             }
             return new DbInstanceInPlaceState(instance.getMasterPassword(),
                     instance.isIamDatabaseAuthenticationEnabled(), instance.getDbSubnetGroupName(),
-                    instance.getCaCertificateIdentifier(), roles, List.copyOf(instance.getVpcSecurityGroupIds()));
+                    instance.getVpcId(), instance.getCaCertificateIdentifier(), roles,
+                    List.copyOf(instance.getVpcSecurityGroupIds()));
         }
 
         /** Whether {@code other} has the same settings and roles, whatever its groups. */

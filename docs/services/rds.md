@@ -457,6 +457,32 @@ Not emulated: Data API requests to a paused cluster wait for the resume, as the 
 describes, and never fail with `DatabaseResumingException`; logical or binlog replication does not
 keep a cluster awake; and parameter group changes do not resume one.
 
+## VPC security groups
+
+`CreateDBInstance` and `ModifyDBInstance` check each id in `VpcSecurityGroupIds` against EC2 before
+anything is stored or a container starts, and refuse the request the way RDS does:
+
+- An id that names no security group of the account and Region fails with `InvalidParameterValue`
+  (`Invalid security group , groupId= sg-..., groupName=.`).
+- A group outside the VPC of the instance's DB subnet group fails with `InvalidParameterCombination`
+  (`The DB instance and EC2 security group are in different VPCs. ...`).
+
+A modify that also names a new `DBSubnetGroupName` checks the groups against that subnet group's VPC.
+Snapshot and point-in-time restores, read replicas, the green instance of a Blue/Green deployment and
+a CloudFormation update of `VPCSecurityGroups` are checked the same way. A request that names no groups
+is not checked.
+
+A standalone instance whose request names no groups gets the default security group of its VPC, as
+RDS documents for `CreateDBInstance` and `CreateDBInstanceReadReplica`. A same-Region read replica
+otherwise takes its source's groups, but only in the source's VPC: in another VPC it gets that VPC's
+default group. A modify that moves an instance to another VPC without naming groups puts it on the
+new VPC's default group, since the old VPC's groups cannot go with it. A cluster member's groups are
+its cluster's, which Floci does not keep, so it keeps none. `DescribeDBInstances` reports the VPC's
+default group for an instance that keeps none, such as a cluster member or an instance stored before
+these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
+before it changes anything, and a rollback leaves the groups of an instance the update moved to
+another VPC, which it does not move back.
+
 ## Modifying a DB instance
 
 `ModifyDBInstance` applies `DBInstanceClass` and `AllocatedStorage`, and

@@ -420,6 +420,7 @@ public interface EmulatorConfig {
         RumStorageConfig rum();
         GuardDutyStorageConfig guardduty();
         EmrServerlessStorageConfig emrserverless();
+        EmrContainersStorageConfig emrcontainers();
 
         ControlTowerStorageConfig controltower();
 
@@ -734,6 +735,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface EmrContainersStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface LakeFormationStorageConfig {
         Optional<String> mode();
 
@@ -882,6 +890,7 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+        EmrContainersServiceConfig emrcontainers();
         Route53ResolverServiceConfig route53resolver();
         NetworkFirewallServiceConfig networkfirewall();
         ServiceCatalogServiceConfig servicecatalog();
@@ -1173,6 +1182,20 @@ public interface EmulatorConfig {
     interface GuardDutyServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface EmrContainersServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * How long a job run stays RUNNING before it completes; 0, the default, completes a job run as
+         * soon as it is submitted. Floci follows the job run states without running Spark on Kubernetes.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_JOB_RUN_DURATION_SECONDS
+         */
+        @WithDefault("0")
+        int jobRunDurationSeconds();
     }
 
     interface EmrServerlessServiceConfig {

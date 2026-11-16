@@ -343,12 +343,23 @@ class DynamoDbPartiQLHandler {
         }
     }
 
+    // An OR reads one partition per branch only when every branch names one.
     private static int hashKeyConditionCount(Cond cond, String pkName) {
         return switch (cond) {
             case Cond.Eq eq when isKeyCondition(eq, pkName) -> 1;
             case Cond.In in when isKeyCondition(in, pkName) -> in.values().size();
-            case Cond.Or or when or.operands().stream()
-                    .allMatch(o -> o instanceof Cond.Eq && isKeyCondition(o, pkName)) -> or.operands().size();
+            case Cond.And and -> and.operands().stream().mapToInt(o -> hashKeyConditionCount(o, pkName)).sum();
+            case Cond.Or or -> {
+                int total = 0;
+                for (Cond operand : or.operands()) {
+                    int count = hashKeyConditionCount(operand, pkName);
+                    if (count == 0) {
+                        yield 0;
+                    }
+                    total += count;
+                }
+                yield total;
+            }
             default -> 0;
         };
     }

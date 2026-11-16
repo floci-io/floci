@@ -459,6 +459,23 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_showsAnInstanceThatKeepsNoGroupsOnItsVpcsDefaultGroup() {
+        DbInstance own = makeInstance("own");
+        own.setVpcSecurityGroupIds(List.of("sg-own"));
+        DbInstance member = makeInstance("member");
+        DbInstance vpcGone = makeInstance("vpc-gone");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(own, member, vpcGone));
+        when(service.defaultVpcSecurityGroupIds(member)).thenReturn(List.of("sg-vpc-default"));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-own</VpcSecurityGroupId>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-vpc-default</VpcSecurityGroupId>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-00000000</VpcSecurityGroupId>"), body);
+        verify(service, never()).defaultVpcSecurityGroupIds(own);
+    }
+
+    @Test
     void describeDbInstances_reportsIncompatibleParametersWhenTheDatabaseRefusedItsGroup() {
         DbInstance refused = makeInstance("refused");
         DbInstance rebooting = makeInstance("rebooting");

@@ -20,6 +20,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
 
@@ -86,6 +87,47 @@ class DynamoDbPartiQLAuthorizationIntegrationTest {
         String key = user("dynamodb:ExecuteStatement", arn(table));
         execute(key, "SELECT * FROM \"" + table + "\"").statusCode(400)
                 .body(containsString("dynamodb:PartiQLSelect"));
+    }
+
+    @Test
+    void batchOfSelectsNeedsOnlyPartiQLSelectOnEachStatementsTable() {
+        String table = table();
+        String other = table();
+        String key = user("dynamodb:PartiQLSelect", arn(table));
+        String select = "SELECT * FROM \"" + table + "\" WHERE pk = 'a'";
+        batch(key, select, select).statusCode(200)
+                .body("Responses[0].Item.pk.S", equalTo("a"));
+        batch(key, select, "SELECT * FROM \"" + other + "\" WHERE pk = 'a'").statusCode(400)
+                .body(containsString("AccessDeniedException"))
+                .body(containsString("dynamodb:PartiQLSelect"));
+        batch(key, select, "UPDATE \"" + table + "\" SET data = 'new' WHERE pk = 'a'").statusCode(400)
+                .body(containsString("dynamodb:PartiQLUpdate"));
+    }
+
+    @Test
+    void batchOperationPermissionDoesNotGrantItsStatements() {
+        String table = table();
+        batch(user("dynamodb:BatchExecuteStatement", "*"), "SELECT * FROM \"" + table + "\" WHERE pk = 'a'")
+                .statusCode(400).body(containsString("dynamodb:PartiQLSelect"));
+    }
+
+    @Test
+    void transactionStatementsAreCheckedOnTheirOwnPartiQLActionWithTheEnclosingOperation() {
+        String table = table();
+        String update = "UPDATE \"" + table + "\" SET data = 'new' WHERE pk = 'a'";
+        transaction(user("dynamodb:ExecuteTransaction", "*"), update).statusCode(400)
+                .body(containsString("dynamodb:PartiQLUpdate"));
+
+        String name = "partiql-" + UUID.randomUUID();
+        UserCredentials credentials = createUser(cleanup, endpoint.getPort(), auth("test", "iam"), name);
+        putUserPolicy(endpoint.getPort(), auth("test", "iam"), name, "in-transaction", """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"dynamodb:PartiQLUpdate",
+                  "Resource":"%s",
+                  "Condition":{"StringEquals":{"dynamodb:EnclosingOperation":"ExecuteTransaction"}}}]}
+                """.formatted(arn(table)));
+        transaction(credentials.accessKeyId(), update).statusCode(200);
+        execute(credentials.accessKeyId(), update).statusCode(400)
+                .body(containsString("dynamodb:PartiQLUpdate"));
     }
 
     @ParameterizedTest
@@ -184,6 +226,16 @@ class DynamoDbPartiQLAuthorizationIntegrationTest {
 
     private ValidatableResponse execute(String key, String statement) {
         return json(key, "ExecuteStatement", Map.of("Statement", statement));
+    }
+
+    private ValidatableResponse batch(String key, String... statements) {
+        return json(key, "BatchExecuteStatement", Map.of("Statements",
+                Arrays.stream(statements).map(statement -> Map.of("Statement", statement)).toList()));
+    }
+
+    private ValidatableResponse transaction(String key, String... statements) {
+        return json(key, "ExecuteTransaction", Map.of("TransactStatements",
+                Arrays.stream(statements).map(statement -> Map.of("Statement", statement)).toList()));
     }
 
     private ValidatableResponse json(String key, String operation, Object body) {
