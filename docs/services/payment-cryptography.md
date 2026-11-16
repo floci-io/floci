@@ -12,6 +12,8 @@
 | `GetKey` | Get a key's attributes, state and check value |
 | `ListKeys` | List the keys of a region |
 | `DeleteKey` | Delete a key |
+| `StartKeyUsage` | Start the use of a key |
+| `StopKeyUsage` | Stop the use of a key |
 | `CreateAlias` | Point an alias name at a key |
 | `GetAlias` | Get the key an alias name points at |
 | `ListAliases` | List the aliases of a region |
@@ -244,8 +246,11 @@
   primary key alone, so a replica takes none and a request that names one is refused. The
   access the policy grants is not enforced: the service's operations are not among the ones
   IAM checks.
-- **Not yet emulated:** the key usage operations, the key restore operation, the
-  multi-party approval operations and the certificate signing request.
+- **Key usage:** `StopKeyUsage` disables the key and records when it stopped, and
+  `StartKeyUsage` enables it again and records when it started. A stopped key stays
+  readable and its material stays where it is, so it can be started again.
+- **Not yet emulated:** the key restore operation, the multi-party approval operations
+  and the certificate signing request.
 
 ## Configuration
 

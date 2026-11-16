@@ -392,6 +392,37 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         return key;
     }
 
+    // ---- key usage -----------------------------------------------------------
+
+    /**
+     * Starts the use of a key, and answers with the key as it now stands.
+     *
+     * <p>The moment the use starts is now, and a key that had been stopped is usable again:
+     * the stop moment is cleared, because a key that is in use has no such moment.
+     */
+    public synchronized PaymentCryptographyKey startKeyUsage(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        current.setEnabled(true);
+        current.setUsageStartTimestamp(Instant.now().getEpochSecond());
+        current.setUsageStopTimestamp(0);
+        storeKey(current);
+        return current;
+    }
+
+    /**
+     * Stops the use of a key, and answers with the key as it now stands.
+     *
+     * <p>A stopped key stays readable, and its material stays where it is: only the use of
+     * it stops, so a key may be started again.
+     */
+    public synchronized PaymentCryptographyKey stopKeyUsage(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        current.setEnabled(false);
+        current.setUsageStopTimestamp(Instant.now().getEpochSecond());
+        storeKey(current);
+        return current;
+    }
+
     // ---- aliases ------------------------------------------------------------
 
     /**

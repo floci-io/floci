@@ -485,6 +485,35 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyIsStoppedAndStartedAgain() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        PaymentCryptographyKey stopped = service.stopKeyUsage(key);
+        assertFalse(stopped.isEnabled(), "the key is still enabled after it was stopped");
+        assertTrue(stopped.getUsageStopTimestamp() > 0, "the stop moment was not recorded");
+
+        PaymentCryptographyKey started = service.startKeyUsage(key);
+        assertTrue(started.isEnabled(), "the key is disabled after it was started");
+        assertTrue(started.getUsageStartTimestamp() > 0, "the start moment was not recorded");
+        assertEquals(0, started.getUsageStopTimestamp(),
+                "a key in use still carries the moment it was stopped");
+    }
+
+    @Test
+    void aDeletedKeyIsNotStartedOrStopped() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.deleteKey(key);
+
+        AwsException start = assertThrows(AwsException.class,
+                () -> service.startKeyUsage(key));
+        assertEquals("ResourceNotFoundException", start.getErrorCode());
+
+        AwsException stop = assertThrows(AwsException.class,
+                () -> service.stopKeyUsage(key));
+        assertEquals("ResourceNotFoundException", stop.getErrorCode());
+    }
+
+    @Test
     void theKeysAreListedAPageAtATime() {
         createKey("us-east-1");
         createKey("us-east-1");

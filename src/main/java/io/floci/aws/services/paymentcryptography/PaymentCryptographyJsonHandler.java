@@ -65,6 +65,8 @@ public class PaymentCryptographyJsonHandler {
             case "GetKey" -> () -> getKey(request, region);
             case "ListKeys" -> () -> listKeys(request, region);
             case "DeleteKey" -> () -> deleteKey(request, region);
+            case "StartKeyUsage" -> () -> startKeyUsage(request, region);
+            case "StopKeyUsage" -> () -> stopKeyUsage(request, region);
             case "CreateAlias" -> () -> createAlias(request, region);
             case "GetAlias" -> () -> getAlias(request, region);
             case "ListAliases" -> () -> listAliases(request, region);
@@ -187,6 +189,20 @@ public class PaymentCryptographyJsonHandler {
      */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
         PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Starts the use of a key. */
+    private Map<String, Object> startKeyUsage(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.startKeyUsage(
+                requiredKey(request, region, KEY_IDENTIFIER));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Stops the use of a key. */
+    private Map<String, Object> stopKeyUsage(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.stopKeyUsage(
+                requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of("Key", keyObject(key));
     }
 
@@ -572,6 +588,9 @@ public class PaymentCryptographyJsonHandler {
         out.put("Exportable", key.isExportable());
         out.put("CreateTimestamp", key.getCreateTimestamp());
         out.put("UsageStartTimestamp", key.getUsageStartTimestamp());
+        if (key.getUsageStopTimestamp() > 0) {
+            out.put("UsageStopTimestamp", key.getUsageStopTimestamp());
+        }
         if (key.getDeletePendingTimestamp() > 0) {
             out.put("DeletePendingTimestamp", key.getDeletePendingTimestamp());
         }

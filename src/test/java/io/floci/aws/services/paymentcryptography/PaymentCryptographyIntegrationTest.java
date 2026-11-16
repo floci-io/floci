@@ -896,6 +896,21 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
     }
+    @Test
+    void aKeyIsStoppedAndStartedAgain() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.UsageStopTimestamp", notNullValue());
+
+        call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(true))
+                    .body("Key.UsageStartTimestamp", notNullValue());
+    }
 
     @Test
     void aKeyThatDoesNotExistIsNotFound() {

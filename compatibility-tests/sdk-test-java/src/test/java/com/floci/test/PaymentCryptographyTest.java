@@ -755,6 +755,18 @@ class PaymentCryptographyTest {
                 .policy("{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\"}]}")))
                 .isInstanceOf(PublicPolicyException.class);
     }
+    @Test
+    void aKeyIsStoppedAndStartedAgain() {
+        Key key = createAesKey();
+
+        Key stopped = client.stopKeyUsage(r -> r.keyIdentifier(key.keyArn())).key();
+        assertThat(stopped.enabled()).isFalse();
+        assertThat(stopped.usageStopTimestamp()).isNotNull();
+
+        Key started = client.startKeyUsage(r -> r.keyIdentifier(key.keyArn())).key();
+        assertThat(started.enabled()).isTrue();
+        assertThat(started.usageStartTimestamp()).isNotNull();
+    }
 
     /**
      * A delete answers with the key it deleted, its state DELETE_PENDING and the
