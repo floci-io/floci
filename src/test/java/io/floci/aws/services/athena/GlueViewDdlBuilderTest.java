@@ -201,8 +201,7 @@ class GlueViewDdlBuilderTest {
             assertTrue(ddl.startsWith("SET TimeZone = 'UTC';\nCREATE SCHEMA"), ddl);
             assertEquals(1, ddl.split("TimeZone", -1).length - 1, ddl);
         }
-        assertTrue(ddlFor(plain).contains(
-                "date_trunc('millisecond', CAST(\"created_at\" AS TIMESTAMP)) AS \"created_at\""));
+        assertTrue(ddlFor(plain).contains("ELSE CAST(\"created_at\" AS TIMESTAMP) END) AS \"created_at\""));
         assertFalse(ddlFor(projectingParquetTable("s3://b/data/", Map.of())).contains("TimeZone"));
     }
 

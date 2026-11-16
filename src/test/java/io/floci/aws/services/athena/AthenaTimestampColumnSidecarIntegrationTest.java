@@ -26,6 +26,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -160,11 +162,47 @@ class AthenaTimestampColumnSidecarIntegrationTest {
                         + " ORDER BY id"));
     }
 
+    /**
+     * A file whose column declared {@code timestamp} holds something else reads as on Athena (engine v3), which goes
+     * by the file's physical type: an INT64 without a logical type is epoch milliseconds, and a string, even an ISO
+     * one, binary or a date fails the query that selects it, and only that query.
+     */
+    @Test
+    void aColumnStoredAsAnotherTypeReadsAsOnAthena() {
+        writeParquet("mismatch/part-0.parquet", "SELECT 1 AS id, CAST(1773480600000 AS BIGINT) AS epoch,"
+                + " '2026-03-14 09:30:00' AS iso, DATE '2026-03-14' AS day, CAST('raw' AS BLOB) AS raw");
+        Table table = parquetTable("mismatch", List.of());
+        table.getStorageDescriptor().setColumns(List.of(column("id", "int"), column("epoch", "timestamp"),
+                column("iso", "timestamp"), column("day", "timestamp"), column("raw", "timestamp")));
+        tables.add(table);
+
+        assertEquals(List.of(Map.of("id", "1")), query("SELECT id FROM " + view("mismatch")));
+        assertEquals(List.of(Map.of("epoch", "2026-03-14 09:30:00")),
+                query("SELECT CAST(epoch AS VARCHAR) AS epoch FROM " + view("mismatch")));
+        RuntimeException iso = assertThrows(RuntimeException.class,
+                () -> query("SELECT iso FROM " + view("mismatch")));
+        assertTrue(iso.getMessage().contains("HIVE_BAD_DATA: Malformed Parquet file. Field iso's type BINARY in parquet"
+                + " file is incompatible with type timestamp(3) defined in table schema"), iso.getMessage());
+        RuntimeException raw = assertThrows(RuntimeException.class,
+                () -> query("SELECT raw FROM " + view("mismatch")));
+        assertTrue(raw.getMessage().contains("HIVE_BAD_DATA: Malformed Parquet file. Field raw's type BINARY"),
+                raw.getMessage());
+        RuntimeException day = assertThrows(RuntimeException.class,
+                () -> query("SELECT day FROM " + view("mismatch")));
+        assertTrue(day.getMessage().contains(
+                "SERIALIZATION_ERROR: Could not serialize column 'day' of type 'timestamp(3)'"), day.getMessage());
+    }
+
     // ---- helpers ----
 
     /** Writes {@link #ROWS} to {@code key} as Parquet, through the sidecar. */
     private void writeParquet(String key) {
-        duck.query("COPY (" + ROWS + ") TO 's3://" + bucket + "/" + key + "' (FORMAT PARQUET)", null);
+        writeParquet(key, ROWS);
+    }
+
+    /** Writes the rows {@code select} gives to {@code key} as Parquet, through the sidecar. */
+    private void writeParquet(String key, String select) {
+        duck.query("COPY (" + select + ") TO 's3://" + bucket + "/" + key + "' (FORMAT PARQUET)", null);
         keys.add(key);
     }
 

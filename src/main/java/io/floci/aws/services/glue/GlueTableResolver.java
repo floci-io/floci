@@ -296,7 +296,7 @@ public final class GlueTableResolver {
             String value = key != null ? partitionValue(table, template, key)
                     : hiveKey != null ? typedKey(table, hiveKey, quote(name))
                     : text != null ? typedTextColumn(quote(name), text.getType())
-                    : parquetTimestamp != null ? parquetTimestamp(quote(name))
+                    : parquetTimestamp != null ? parquetTimestamp(quote(name), name)
                     : quote(name);
             sb.append(value).append(" AS ").append(quote(name));
         }
@@ -360,7 +360,7 @@ public final class GlueTableResolver {
             Column text = textColumns.get(name.toLowerCase(Locale.ROOT));
             String read = "r." + quote(name);
             String value = text != null ? typedTextColumn(read, text.getType())
-                    : parquetTimestamps.containsKey(name.toLowerCase(Locale.ROOT)) ? parquetTimestamp(read)
+                    : parquetTimestamps.containsKey(name.toLowerCase(Locale.ROOT)) ? parquetTimestamp(read, name)
                     : read;
             projected.add(value + " AS " + quote(name));
         }
@@ -543,15 +543,35 @@ public final class GlueTableResolver {
 
     /**
      * A Parquet column declared {@code timestamp} as Athena reads it: the UTC wall-clock time at
-     * millisecond precision ({@link #athenaTimestamp}).
+     * millisecond precision ({@link #athenaTimestamp}). {@code column} is the expression reading it,
+     * {@code name} its declared name.
      *
-     * <p>The column is cast to a plain {@code TIMESTAMP} first, which every timestamp DuckDB reads
+     * <p>A timestamp column is cast to a plain {@code TIMESTAMP}, which every timestamp DuckDB reads
      * from Parquet converts to: a UTC-adjusted one (taken at UTC, the session's zone, see
-     * {@link #readsParquetTimestamps}), MICROS, NANOS and the legacy INT96. A plain {@code CAST},
-     * not a {@code TRY_CAST}: Athena fails a query on a file whose column does not hold a timestamp.
+     * {@link #readsParquetTimestamps}), MICROS, NANOS and the legacy INT96.
+     *
+     * <p>A file whose column holds something else reads as on Athena (engine v3), which goes by the
+     * file's physical type: an INT64 without a logical type is epoch milliseconds, and a string
+     * (even an ISO one, which DuckDB would cast; DuckDB reads one without the UTF8 annotation as a
+     * {@code BLOB}) or a {@code DATE} fails the query. DuckDB raises
+     * neither its own cast's error nor these until it reads a row, and the {@code CASE} on the
+     * column's type folds away when the query is planned, so a query that does not select the column
+     * is unaffected, as on Athena, and a timestamp column pays nothing for it.
+     *
+     * <p>TODO: Athena's messages name the file, which this read does not carry, and Athena may fail
+     * such a query even when no row is selected (unchecked). Other physical types (INT32, DOUBLE,
+     * BOOLEAN, ...) fail with DuckDB's cast error, where {@code main} read them as that type; what
+     * Athena makes of them is unchecked.
      */
-    private static String parquetTimestamp(String column) {
-        return athenaTimestamp("CAST(" + column + " AS TIMESTAMP)");
+    private static String parquetTimestamp(String column, String name) {
+        String type = "typeof(" + column + ")";
+        String binary = "HIVE_BAD_DATA: Malformed Parquet file. Field " + name
+                + "'s type BINARY in parquet file is incompatible with type timestamp(3) defined in table schema";
+        String date = "SERIALIZATION_ERROR: Could not serialize column '" + name + "' of type 'timestamp(3)'";
+        return athenaTimestamp("CASE WHEN " + type + " = 'BIGINT' THEN epoch_ms(TRY_CAST(" + column + " AS BIGINT))"
+                + " WHEN " + type + " IN ('VARCHAR', 'BLOB') THEN error('" + escape(binary) + "')"
+                + " WHEN " + type + " = 'DATE' THEN error('" + escape(date) + "')"
+                + " ELSE CAST(" + column + " AS TIMESTAMP) END");
     }
 
     /**

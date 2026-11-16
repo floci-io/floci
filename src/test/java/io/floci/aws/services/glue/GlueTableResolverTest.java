@@ -210,6 +210,21 @@ class GlueTableResolverTest {
     private static final String PARQUET_FORMAT = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat";
 
     /**
+     * How the view reads Parquet column {@code name} declared {@code timestamp}, through {@code column}: by the file's
+     * physical type, as Athena does, a timestamp truncated to milliseconds, an INT64 as epoch milliseconds, and a
+     * string or a date failing with Athena's error.
+     */
+    private static String parquetTimestamp(String column, String name) {
+        return "date_trunc('millisecond', CASE WHEN typeof(" + column + ") = 'BIGINT' THEN epoch_ms(TRY_CAST(" + column
+                + " AS BIGINT)) WHEN typeof(" + column + ") IN ('VARCHAR', 'BLOB') THEN error('HIVE_BAD_DATA: Malformed"
+                + " Parquet file."
+                + " Field " + name + "''s type BINARY in parquet file is incompatible with type timestamp(3) defined in"
+                + " table schema') WHEN typeof(" + column + ") = 'DATE' THEN error('SERIALIZATION_ERROR: Could not"
+                + " serialize column ''" + name + "'' of type ''timestamp(3)''') ELSE CAST(" + column + " AS TIMESTAMP)"
+                + " END)";
+    }
+
+    /**
      * Athena reads a column declared {@code timestamp} as {@code timestamp(3)}, the UTC wall-clock time truncated to
      * milliseconds, where DuckDB types a Parquet column by what the file stores (a UTC-adjusted one as
      * {@code TIMESTAMP WITH TIME ZONE}, a NANOS one as {@code TIMESTAMP_NS}).
@@ -220,7 +235,7 @@ class GlueTableResolverTest {
                 List.of(column("id", "string"), column("created_at", "TIMESTAMP"), column("day", "date")));
 
         assertThat(GlueTableResolver.buildProjection(table), equalTo("\"id\" AS \"id\", "
-                + "date_trunc('millisecond', CAST(\"created_at\" AS TIMESTAMP)) AS \"created_at\", \"day\" AS \"day\""));
+                + parquetTimestamp("\"created_at\"", "created_at") + " AS \"created_at\", \"day\" AS \"day\""));
         assertThat(GlueTableResolver.readsParquetTimestamps(table), is(true));
     }
 
@@ -244,7 +259,7 @@ class GlueTableResolverTest {
                 List.of(new GlueTableResolver.RegisteredPartition("s3://bucket/events/dt=a", List.of("a"))));
 
         assertThat(select, containsString(
-                "SELECT date_trunc('millisecond', CAST(r.\"created_at\" AS TIMESTAMP)) AS \"created_at\", "
+                "SELECT " + parquetTimestamp("r.\"created_at\"", "created_at") + " AS \"created_at\", "
                         + "p.\"dt\" AS \"dt\" FROM read_parquet("));
     }
 
