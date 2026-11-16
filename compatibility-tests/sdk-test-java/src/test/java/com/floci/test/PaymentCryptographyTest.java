@@ -310,6 +310,36 @@ class PaymentCryptographyTest {
     }
 
     @Test
+    void aRegionOfAnotherPartitionIsRefused() {
+        // A key is replicated within the partition it is in, as the reference says, so a
+        // region of another partition is refused.
+        assertThatThrownBy(() -> client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("cn-north-1")))
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
+                .hasMessageContaining("cn-north-1");
+    }
+
+    @Test
+    void aDefaultRegionOfAnotherPartitionIsRefused() {
+        // The default regions are the regions a new key is replicated to, so they are
+        // within the partition of the region they are the defaults of.
+        assertThatThrownBy(() -> client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("us-gov-west-1")))
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
+                .hasMessageContaining("us-gov-west-1");
+    }
+
+    @Test
     void theRegionOfTheRequestIsNotARegionToReplicateTo() {
         // The key is in the region of the request already, so naming that region is a request
         // that cannot be carried out.

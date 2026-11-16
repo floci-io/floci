@@ -203,10 +203,11 @@
   changed afterwards has a configuration of its own, and says so. Taking the replica
   Regions away is how the replication is turned off for a key, so a key that replicates
   nowhere is not a multi-region key and carries no type at all. A Region a request names
-  has to be a name of a Region this service serves, and the Region of the primary is not
-  one to replicate to, to add or to take away, so a request that cannot be carried out is
-  refused rather than answered as if it had named no Region at all. A refused request
-  leaves no key behind.
+  has to be a name of a Region this service serves, and it has to be a Region of the
+  partition the key is in, as the reference says: a key is replicated within its own
+  partition and account. The Region of the primary is not one to replicate to, to add or
+  to take away, so a request that cannot be carried out is refused rather than answered as
+  if it had named no Region at all. A refused request leaves no key behind.
 - **The default Regions are the ones of the Region they are read in:** each Region has its
   own default Regions, so a key created in a Region takes the default Regions of that
   Region and not the ones of another. A key's own replication takes precedence over the

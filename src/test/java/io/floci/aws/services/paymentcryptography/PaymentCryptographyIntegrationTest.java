@@ -598,6 +598,26 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aReplicationRegionOfAnotherPartitionIsRefused() {
+        // A key is replicated within the partition it is in, as the reference says, so a
+        // Region of another partition is refused.
+        call("CreateKey", """
+                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+                 "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                 "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
+                 "Exportable":true,"ReplicationRegions":["cn-north-1"]}""")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("cn-north-1"));
+
+        call("EnableDefaultKeyReplicationRegions", """
+                {"ReplicationRegions":["us-gov-west-1"]}""")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("us-gov-west-1"));
+    }
+
+    @Test
     void anAliasIsCreatedAndListed() {
         String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
                 .extract().path("Key.KeyArn");

@@ -3,6 +3,7 @@ package io.floci.aws.services.paymentcryptography;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -1246,7 +1247,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     public synchronized List<String> enableDefaultReplicationRegions(String region,
                                                                        List<String> regions) {
-        requireKnownRegions(regions);
+        requireReplicationRegions(region, regions);
         // The region of the request is where the keys made there are primary, so it is not
         // a region they are replicated to.
         requireOtherRegion(region, regions, "enable");
@@ -1296,6 +1297,29 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * The regions a key may be replicated to, or the refusal of the ones it may not.
+     *
+     * <p>A key is replicated within the partition it is in and the account it belongs to, as
+     * the reference says, so a region of another partition is refused. The account is the
+     * one the request is made in, so a request cannot name a region of another account.
+     * The check is in one place, so every operation that names a replication region
+     * refuses the same regions in the same words.
+     *
+     * @param region the region the request is in
+     * @param regions the regions the request names
+     */
+    private static void requireReplicationRegions(String region, List<String> regions) {
+        requireKnownRegions(regions);
+        for (String target : regions) {
+            if (!AwsRegions.partitionFor(region).equals(AwsRegions.partitionFor(target))) {
+                throw new AwsException("ValidationException",
+                        "the region " + target + " is in another partition than the region "
+                                + region + ", and a key is replicated within its own partition", 400);
+            }
+        }
+    }
+
+    /**
      * The refusal of a request that names the region of the request as a region to replicate to.
      *
      * <p>A key is in the region of the request already, so that region is not a region the key
@@ -1329,7 +1353,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             throw new AwsException("ValidationException",
                     "a key that is replicated has to be exportable, and " + key.getArn() + " is not", 400);
         }
-        requireKnownRegions(regions);
+        requireReplicationRegions(region, regions);
         // The key is in its own region already, so naming that region again is a request
         // that cannot be carried out.
         requireOtherRegion(region, regions, "add");
@@ -1550,7 +1574,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             // The region of the request is never a replica of the key made there.
             targets.remove(region);
         }
-        requireKnownRegions(new ArrayList<>(targets));
+        requireReplicationRegions(region, new ArrayList<>(targets));
         return new Replication(targets, !named);
     }
 

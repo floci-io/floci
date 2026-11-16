@@ -145,6 +145,17 @@ create_replicated_key() {
     [[ "$output" == *"moon-west-1"* ]]
 }
 
+@test "Payment Cryptography multi-region: a region of another partition is refused" {
+    # A key is replicated within the partition it is in, as the reference says, so a
+    # region of another partition is refused.
+    run aws_cmd payment-cryptography create-key \
+        --key-attributes 'KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}' \
+        --exportable \
+        --replication-regions cn-north-1
+    assert_failure
+    [[ "$output" == *"cn-north-1"* ]]
+}
+
 @test "Payment Cryptography multi-region: the region of the request is not a region to replicate to" {
     # The key is in the region of the request already, so naming that region is a request
     # that cannot be carried out.

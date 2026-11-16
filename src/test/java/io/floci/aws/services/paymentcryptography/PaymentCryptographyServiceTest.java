@@ -807,6 +807,63 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aRegionOfAnotherPartitionIsRefused() {
+        // A key is replicated within the partition it is in, as the reference says, so a
+        // Region of another partition is refused.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createReplicatedKey("us-east-1", List.of("cn-north-1")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("cn-north-1"), refused.getMessage());
+        assertEquals(0, service.listKeys("us-east-1", null, 10, null).items().size(),
+                "the refused key is in the store");
+    }
+
+    @Test
+    void aDefaultRegionOfAnotherPartitionIsRefused() {
+        // The default Regions are the Regions a new key is replicated to, so they are
+        // within the partition of the Region they are the defaults of.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.enableDefaultReplicationRegions("us-east-1",
+                        List.of("us-gov-west-1")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("us-gov-west-1"), refused.getMessage());
+        assertEquals(List.of(), service.defaultReplicationRegions("us-east-1"));
+    }
+
+    @Test
+    void aRegionOfAnotherPartitionIsRefusedWhenTheRegionsOfAKeyAreChanged() {
+        // The same rule holds when the Regions of a key are changed.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.addKeyReplicationRegions("us-east-1", key.getKeyId(),
+                        List.of("cn-north-1")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals(List.of("us-west-2"),
+                service.findKey("us-east-1", key.getKeyId()).getReplicationRegions(),
+                "the refused Region is in the replication of the key");
+    }
+
+    @Test
+    void aKeyIsReplicatedWithinItsOwnPartition() {
+        // The rule is the partition and not a list of Regions, so a key of one partition is
+        // replicated to another Region of that partition.
+        PaymentCryptographyKey primary = createReplicatedKey("cn-north-1",
+                List.of("cn-northwest-1"));
+
+        assertEquals("PRIMARY", primary.getMultiRegionKeyType());
+        assertEquals("cn-north-1", primary.getPrimaryRegion());
+
+        PaymentCryptographyKey replica = service.findKey("cn-northwest-1", primary.getKeyId());
+        assertNotNull(replica, "the key is not in the region it is replicated to");
+        assertEquals("REPLICA", replica.getMultiRegionKeyType());
+        assertEquals(primary.getKeyMaterialHex(), replica.getKeyMaterialHex());
+    }
+
+    @Test
     void theRegionOfTheRequestIsNotARegionToReplicateTo() {
         // The key is in the region of the request already, so naming that region is a request
         // that cannot be carried out.
