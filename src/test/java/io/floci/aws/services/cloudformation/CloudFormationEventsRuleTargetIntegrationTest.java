@@ -125,7 +125,7 @@ class CloudFormationEventsRuleTargetIntegrationTest {
                         .shardId(shard).shardIteratorType(ShardIteratorType.TRIM_HORIZON)).shardIterator();
                 List<Record> records = kinesis.getRecords(request -> request.shardIterator(iterator)).records();
                 assertEquals(1, records.size());
-                assertEquals("order-7", records.getFirst().partitionKey());
+                assertEquals("\"order-7\"", records.getFirst().partitionKey());
 
                 listTargets("cfn-rule-targets-kinesis", "default")
                         .body("Targets[0].KinesisParameters.PartitionKeyPath", equalTo("$.detail.orderId"));

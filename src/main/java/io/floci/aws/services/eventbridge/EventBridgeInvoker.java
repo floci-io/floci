@@ -327,9 +327,13 @@ public class EventBridgeInvoker {
                     throw new AwsException("ServiceNotAvailableException", "Kinesis delivery is not available.", 400);
                 }
                 AwsArnUtils.Arn streamArn = AwsArnUtils.parse(arn);
-                String partitionKey = target.getKinesisParameters() == null
-                        ? extractJsonPath("$.id", eventJson)
-                        : extractJsonPath(target.getKinesisParameters().partitionKeyPath(), eventJson);
+                String partitionKey;
+                if (target.getKinesisParameters() == null) {
+                    partitionKey = extractJsonPath("$.id", eventJson);
+                } else {
+                    JsonNode selected = extractNode(target.getKinesisParameters().partitionKeyPath(), eventJson);
+                    partitionKey = selected.isMissingNode() ? "{}" : selected.toString();
+                }
                 if (partitionKey == null || partitionKey.codePointCount(0, partitionKey.length()) < 1
                         || partitionKey.codePointCount(0, partitionKey.length()) > 256) {
                     throw new AwsException("InvalidParameterException",

@@ -103,8 +103,26 @@ class EventBridgeKinesisTargetIntegrationTest {
 
         List<Record> records = records();
         assertEquals(1, records.size());
-        assertEquals("order-123", records.getFirst().partitionKey());
+        assertEquals("\"order-123\"", records.getFirst().partitionKey());
         assertEquals("{\"items\":[{\"id\":\"order-123\"}]}", records.getFirst().data().asUtf8String());
+    }
+
+    @Test
+    void partitionKeyPathSerializesNumberAndObjectValues() {
+        assertEquals(0, events.putTargets(request -> request.rule(rule).targets(Target.builder()
+                .id("stream").arn(streamArn)
+                .kinesisParameters(parameters -> parameters.partitionKeyPath("$.detail.key"))
+                .build())).failedEntryCount());
+
+        events.putEvents(request -> request.entries(
+                entry -> entry.source("example.orders").detailType("OrderPlaced").detail("{\"key\":7}"),
+                entry -> entry.source("example.orders").detailType("OrderPlaced")
+                        .detail("{\"key\":{\"order\":\"A\",\"count\":2}}")));
+
+        List<Record> records = records();
+        assertEquals(2, records.size());
+        assertEquals("7", records.get(0).partitionKey());
+        assertEquals("{\"order\":\"A\",\"count\":2}", records.get(1).partitionKey());
     }
 
     @Test
@@ -124,7 +142,7 @@ class EventBridgeKinesisTargetIntegrationTest {
     }
 
     @Test
-    void missingPartitionKeyPathValueDeadLettersWithoutWritingARecord() {
+    void missingPartitionKeyPathValueWritesEmptyJsonObjectWithoutDeadLetter() {
         try (SqsClient sqs = AwsTestClients.create(SqsClient.builder(), ACCOUNT, Region.US_EAST_1)) {
             String queueUrl = sqs.createQueue(request -> request.queueName(rule)).queueUrl();
             try {
@@ -138,11 +156,12 @@ class EventBridgeKinesisTargetIntegrationTest {
                 events.putEvents(request -> request.entries(entry -> entry.source("example.orders")
                         .detailType("OrderPlaced").detail("{\"orderId\":\"missing-key\"}")));
 
-                assertTrue(records().isEmpty());
+                List<Record> records = records();
+                assertEquals(1, records.size());
+                assertEquals("{}", records.getFirst().partitionKey());
                 List<Message> messages = sqs.receiveMessage(request -> request.queueUrl(queueUrl)
                         .messageAttributeNames("All")).messages();
-                assertEquals(1, messages.size());
-                assertEquals(streamArn, messages.getFirst().messageAttributes().get("TARGET_ARN").stringValue());
+                assertTrue(messages.isEmpty());
             } finally {
                 sqs.deleteQueue(request -> request.queueUrl(queueUrl));
             }
@@ -158,19 +177,32 @@ class EventBridgeKinesisTargetIntegrationTest {
                 () -> events.putTargets(request -> request.rule(rule).targets(original.toBuilder()
                         .kinesisParameters(parameters -> parameters.build()).build())));
         assertEquals("ValidationException", error.awsErrorDetails().errorCode());
+        assertTrue(error.getMessage().contains("Member must not be null"));
         assertEquals(List.of(original), events.listTargetsByRule(request -> request.rule(rule)).targets());
     }
 
     @Test
-    void emptyPartitionKeyPathIsRejectedBeforeReplacingTheExistingTarget() {
+    void emptyPartitionKeyPathIsAccepted() {
+        Target original = Target.builder().id("stream").arn(streamArn).build();
+        assertEquals(0, events.putTargets(request -> request.rule(rule).targets(original)).failedEntryCount());
+
+        Target updated = original.toBuilder().kinesisParameters(parameters -> parameters.partitionKeyPath(""))
+                .build();
+        assertEquals(0, events.putTargets(request -> request.rule(rule).targets(updated)).failedEntryCount());
+        assertEquals(List.of(updated), events.listTargetsByRule(request -> request.rule(rule)).targets());
+    }
+
+    @Test
+    void partitionKeyPathLongerThanMaximumIsRejectedWithoutReplacingTheExistingTarget() {
         Target original = Target.builder().id("stream").arn(streamArn).build();
         assertEquals(0, events.putTargets(request -> request.rule(rule).targets(original)).failedEntryCount());
 
         EventBridgeException error = assertThrows(EventBridgeException.class,
                 () -> events.putTargets(request -> request.rule(rule).targets(original.toBuilder()
-                        .kinesisParameters(parameters -> parameters.partitionKeyPath(""))
+                        .kinesisParameters(parameters -> parameters.partitionKeyPath("x".repeat(257)))
                         .build())));
         assertEquals("ValidationException", error.awsErrorDetails().errorCode());
+        assertTrue(error.getMessage().contains("Member must have length less than or equal to 256"));
         assertEquals(List.of(original), events.listTargetsByRule(request -> request.rule(rule)).targets());
     }
 
