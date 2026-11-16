@@ -3119,8 +3119,10 @@ floci populates:
   reads from the Service Reference for every namespace it reads, valued from the tags the type's service
   holds on that resource (`StoredResourceArns.storedTags`); a service that holds none leaves them absent.
   Secrets Manager answers for its secrets, S3 Tables for its table buckets and tables, EventBridge Scheduler for
-  its schedule groups, and CloudFormation for its stacks, stack sets and change sets. Tag keys differing only in
-  case are one condition key holding every value.
+  its schedule groups, CloudFormation for its stacks, stack sets and change sets, and Lambda for its functions,
+  their versions and aliases (the function's tags), event source mappings, web functions, their revisions and
+  endpoints (the web function's tags), MicroVM images and network connectors. Tag keys differing only in case are
+  one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

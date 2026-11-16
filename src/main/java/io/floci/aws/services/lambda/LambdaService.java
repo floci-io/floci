@@ -4297,14 +4297,17 @@ public class LambdaService implements ResourceProvider {
         validateTagKeys(tags);
         EventSourceMapping esm = taggedEventSourceMapping(functionArn);
         if (esm != null) {
-            esm.getTags().putAll(tags);
+            synchronized (esm) {
+                esm.setTags(withTags(esm.getTags(), tags));
+            }
             esmStore.save(esm);
             return;
         }
         TagTarget target = resolveTagTarget(functionArn);
         LambdaFunction fn = getFunction(target.region, target.name);
-        if (fn.getTags() == null) fn.setTags(new HashMap<>());
-        fn.getTags().putAll(tags);
+        synchronized (fn) {
+            fn.setTags(withTags(fn.getTags(), tags));
+        }
         functionStore.save(target.region, fn);
     }
 
@@ -4331,16 +4334,76 @@ public class LambdaService implements ResourceProvider {
     public void untagResource(String functionArn, List<String> tagKeys) {
         EventSourceMapping esm = taggedEventSourceMapping(functionArn);
         if (esm != null) {
-            tagKeys.forEach(esm.getTags()::remove);
+            synchronized (esm) {
+                esm.setTags(withoutTags(esm.getTags(), tagKeys));
+            }
             esmStore.save(esm);
             return;
         }
         TagTarget target = resolveTagTarget(functionArn);
         LambdaFunction fn = getFunction(target.region, target.name);
-        if (fn.getTags() != null) {
-            tagKeys.forEach(fn.getTags()::remove);
+        synchronized (fn) {
+            fn.setTags(withoutTags(fn.getTags(), tagKeys));
         }
         functionStore.save(target.region, fn);
+    }
+
+    /**
+     * A new tag map of {@code current} with {@code added} put in it. A resource's tags are replaced, never changed in
+     * place, so a reader copying them, as {@link #storedTags} does on every request IAM checks, sees one whole set.
+     */
+    private static Map<String, String> withTags(Map<String, String> current, Map<String, String> added) {
+        Map<String, String> next = current == null ? new HashMap<>() : new HashMap<>(current);
+        next.putAll(added);
+        return next;
+    }
+
+    /** A new tag map of {@code current} without {@code keys}, as {@link #withTags} gives one. */
+    private static Map<String, String> withoutTags(Map<String, String> current, List<String> keys) {
+        Map<String, String> next = current == null ? new HashMap<>() : new HashMap<>(current);
+        keys.forEach(next::remove);
+        return next;
+    }
+
+    /**
+     * The tags of the function, or the event source mapping, stored under {@code arn} in the account and Region it
+     * names, matched on the whole ARN and left as they are; a version or alias ARN has its function's, as Lambda keeps
+     * tags on the function alone. Empty for an ARN naming nothing stored, or any other Lambda resource.
+     */
+    public Map<String, String> storedTags(String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String uuid = LambdaArnUtils.eventSourceMappingUuid(parsed);
+        if (uuid != null) {
+            return esmStore == null ? Map.of() : esmStore.readForAccount(parsed.accountId(), uuid)
+                    .filter(esm -> arn.equals(LambdaArnUtils.eventSourceMappingArn(
+                            esm.getRegion(), esm.getAccountId(), esm.getUuid())))
+                    .map(esm -> Map.copyOf(esm.getTags()))
+                    .orElse(Map.of());
+        }
+        String[] function = parsed.resource().split(":", -1);
+        if (function.length < 2 || function.length > 3 || !"function".equals(function[0])
+                || parsed.resource().contains("/")) {
+            return Map.of();
+        }
+        String qualifier = function.length == 3 ? function[2] : null;
+        return functionStore.readForAccount(parsed.accountId(), parsed.region(), function[1], "$LATEST")
+                .filter(fn -> arn.equals(qualifier == null ? fn.getFunctionArn()
+                        : fn.getFunctionArn() + ":" + qualifier))
+                .filter(fn -> qualifier == null || holdsQualifier(parsed, function[1], qualifier))
+                .map(fn -> fn.getTags() == null ? Map.<String, String>of() : Map.copyOf(fn.getTags()))
+                .orElse(Map.of());
+    }
+
+    /** Whether the function holds the version or the alias {@code qualifier} names; {@code $LATEST} it always has. */
+    private boolean holdsQualifier(AwsArnUtils.Arn function, String name, String qualifier) {
+        if ("$LATEST".equals(qualifier)) {
+            return true;
+        }
+        if (functionStore.readForAccount(function.accountId(), function.region(), name, qualifier).isPresent()) {
+            return true;
+        }
+        return aliasStore != null
+                && aliasStore.readForAccount(function.accountId(), function.region(), name, qualifier).isPresent();
     }
 
     private record TagTarget(String region, String name) {}
