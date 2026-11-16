@@ -2527,6 +2527,20 @@ public interface EmulatorConfig {
         /** How long a crawl keeps the crawler RUNNING before it succeeds; 0 = a crawl finishes as soon as it starts. */
         @WithDefault("0")
         int crawlerRunDurationSeconds();
+
+        /**
+         * How a Spark ({@code glueetl}) job run executes: {@code immediate} follows Glue's state machine and runs no
+         * script; {@code docker} runs the job's script in a container of {@link #image()}, which needs a Docker daemon
+         * and about 7 GB of disk for the image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        /** The image a {@code docker} job run uses: AWS's image for running Glue 5.0 jobs locally. */
+        @WithDefault("public.ecr.aws/glue/aws-glue-libs:5")
+        String image();
+
+        Optional<String> dockerNetwork();
     }
 
     interface SesServiceConfig {
