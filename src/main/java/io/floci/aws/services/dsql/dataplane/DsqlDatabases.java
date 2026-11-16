@@ -32,6 +32,14 @@ public class DsqlDatabases {
         public String jdbcUrl() {
             return "jdbc:postgresql://" + host + ":" + port + "/" + database;
         }
+
+        /** Never shows the password, which a logged route would otherwise carry. */
+        @Override
+        public String toString() {
+            return "Backend[host=" + host + ", port=" + port + ", database=" + database + ", superuser=" + superuser
+                    + ", superuserPassword=" + (superuserPassword == null ? "null" : "***") + ", roleNames="
+                    + roleNames + ", credentials=" + credentials + "]";
+        }
     }
 
     @Inject
