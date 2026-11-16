@@ -14,14 +14,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
-import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
 
-import java.time.Duration;
 import java.util.List;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -47,8 +44,7 @@ class CloudFormationSesEventDestinationIntegrationTest {
     void cleanUp() {
         try {
             if (!deleted) {
-                cfn.deleteStack(request -> request.stackName(stackName));
-                await().atMost(Duration.ofSeconds(15)).until(this::stackIsGone);
+                CfnStackWaits.deleteStack(cfn, stackName);
             }
         } finally {
             cfn.close();
@@ -59,9 +55,8 @@ class CloudFormationSesEventDestinationIntegrationTest {
     void eventDestinationFollowsConfigurationSetCreateUpdateAndRemoval() {
         String setName = stackName + "-set";
         String destinationName = stackName + "-events";
-        cfn.createStack(request -> request.stackName(stackName)
-                .templateBody(template(setName, destinationName, "SEND", "initial")));
-        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.createStack(cfn, stackName,
+                template(setName, destinationName, "SEND", "initial"), "CREATE_COMPLETE");
         assertEquals(destinationName, cfn.describeStacks(request -> request.stackName(stackName))
                 .stacks().getFirst().outputs().stream()
                 .filter(output -> "DestinationId".equals(output.outputKey()))
@@ -74,9 +69,8 @@ class CloudFormationSesEventDestinationIntegrationTest {
         assertEquals("initial", destinations.getFirst().getCloudWatchDestination()
                 .getDimensionConfigurations().getFirst().getDefaultDimensionValue());
 
-        cfn.updateStack(request -> request.stackName(stackName)
-                .templateBody(template(setName, destinationName, "BOUNCE", "updated")));
-        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
+        CfnStackWaits.updateStack(cfn, stackName,
+                template(setName, destinationName, "BOUNCE", "updated"), "UPDATE_COMPLETE");
 
         destinations = configurationSets.getEventDestinations(setName, "us-east-1");
         assertEquals(1, destinations.size());
@@ -86,23 +80,20 @@ class CloudFormationSesEventDestinationIntegrationTest {
                 .getDimensionConfigurations().getFirst().getDefaultDimensionValue());
 
         String replacementSet = stackName + "-new-set";
-        cfn.updateStack(request -> request.stackName(stackName)
-                .templateBody(template(replacementSet, destinationName, "BOUNCE", "updated")));
-        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
+        CfnStackWaits.updateStack(cfn, stackName,
+                template(replacementSet, destinationName, "BOUNCE", "updated"), "UPDATE_COMPLETE");
         assertTrue(configurationSets.find(setName, "us-east-1").isEmpty());
         assertEquals(destinationName, configurationSets.getEventDestinations(replacementSet, "us-east-1")
                 .getFirst().getName());
 
-        cfn.updateStack(request -> request.stackName(stackName).templateBody("""
+        CfnStackWaits.updateStack(cfn, stackName, """
                 {"Resources": {"ConfigurationSet": {
                   "Type": "AWS::SES::ConfigurationSet", "Properties": {"Name": "%s"}
                 }}}
-                """.formatted(replacementSet)));
-        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
+                """.formatted(replacementSet), "UPDATE_COMPLETE");
         assertTrue(configurationSets.getEventDestinations(replacementSet, "us-east-1").isEmpty());
 
-        cfn.deleteStack(request -> request.stackName(stackName));
-        await().atMost(Duration.ofSeconds(15)).until(this::stackIsGone);
+        CfnStackWaits.deleteStack(cfn, stackName);
         deleted = true;
     }
 
@@ -111,9 +102,8 @@ class CloudFormationSesEventDestinationIntegrationTest {
         String setName = stackName + "-set";
         String oldName = stackName + "-old";
         String newName = stackName + "-new";
-        cfn.createStack(request -> request.stackName(stackName)
-                .templateBody(template(setName, oldName, "SEND", "initial")));
-        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.createStack(cfn, stackName,
+                template(setName, oldName, "SEND", "initial"), "CREATE_COMPLETE");
 
         CfnStackTestSupport.createUpdateChangeSet(cfn, stackName, "rename",
                 template(setName, newName, "SEND", "initial"));
@@ -135,9 +125,8 @@ class CloudFormationSesEventDestinationIntegrationTest {
         try (SsmClient ssm = AwsTestClients.create(SsmClient.builder(), "test", Region.US_EAST_1)) {
             try {
                 ssm.putParameter(request -> request.name(parameter).type("String").value(oldName));
-                cfn.createStack(request -> request.stackName(stackName)
-                        .templateBody(template(setName, reference, "SEND", "initial")));
-                CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+                CfnStackWaits.createStack(cfn, stackName,
+                        template(setName, reference, "SEND", "initial"), "CREATE_COMPLETE");
 
                 ssm.putParameter(request -> request.name(parameter).type("String").value(newName)
                         .overwrite(true));
@@ -165,13 +154,11 @@ class CloudFormationSesEventDestinationIntegrationTest {
     void dependentFailureRestoresAnInPlaceUpdate() throws JsonProcessingException {
         String setName = stackName + "-set";
         String destinationName = stackName + "-events";
-        cfn.createStack(request -> request.stackName(stackName)
-                .templateBody(template(setName, destinationName, "SEND", "initial")));
-        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.createStack(cfn, stackName,
+                template(setName, destinationName, "SEND", "initial"), "CREATE_COMPLETE");
 
         String update = withBadDependent(template(setName, destinationName, "BOUNCE", "updated"));
-        cfn.updateStack(request -> request.stackName(stackName).templateBody(update));
-        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.updateStack(cfn, stackName, update, "UPDATE_ROLLBACK_COMPLETE");
 
         List<EventDestination> destinations = configurationSets.getEventDestinations(setName, "us-east-1");
         assertEquals(1, destinations.size());
@@ -185,13 +172,11 @@ class CloudFormationSesEventDestinationIntegrationTest {
     void dependentFailureRemovesAReplacementAndKeepsThePriorDestination() throws JsonProcessingException {
         String setName = stackName + "-set";
         String destinationName = stackName + "-events";
-        cfn.createStack(request -> request.stackName(stackName)
-                .templateBody(template(setName, destinationName, "SEND", "initial")));
-        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.createStack(cfn, stackName,
+                template(setName, destinationName, "SEND", "initial"), "CREATE_COMPLETE");
 
         String update = withBadDependent(template(setName, destinationName + "-new", "BOUNCE", "updated"));
-        cfn.updateStack(request -> request.stackName(stackName).templateBody(update));
-        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.updateStack(cfn, stackName, update, "UPDATE_ROLLBACK_COMPLETE");
 
         List<EventDestination> destinations = configurationSets.getEventDestinations(setName, "us-east-1");
         assertEquals(1, destinations.size());
@@ -240,8 +225,7 @@ class CloudFormationSesEventDestinationIntegrationTest {
                           }
                         }
                         """.formatted(setName, topicArn, roleArn, streamArn);
-                cfn.createStack(request -> request.stackName(stackName).templateBody(template));
-                CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+                CfnStackWaits.createStack(cfn, stackName, template, "CREATE_COMPLETE");
 
                 List<EventDestination> destinations = configurationSets.getEventDestinations(setName, "us-east-1");
                 assertEquals(2, destinations.size());
@@ -304,13 +288,5 @@ class CloudFormationSesEventDestinationIntegrationTest {
                   }
                 }
                 """.formatted(setName, destinationName, eventType, defaultValue);
-    }
-
-    private boolean stackIsGone() {
-        try {
-            return cfn.describeStacks(request -> request.stackName(stackName)).stacks().isEmpty();
-        } catch (CloudFormationException expected) {
-            return expected.statusCode() == 400;
-        }
     }
 }
