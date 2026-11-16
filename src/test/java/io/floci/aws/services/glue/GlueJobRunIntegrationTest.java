@@ -11,10 +11,10 @@ import org.junit.jupiter.api.Test;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class GlueJobRunIntegrationTest {

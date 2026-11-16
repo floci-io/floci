@@ -185,11 +185,12 @@ With `FLOCI_SERVICES_GLUE_RUNNER_MODE=docker`, `StartJobRun` runs the script of 
 script gets the job's `DefaultArguments` with the run's `Arguments` over them, plus `--JOB_NAME` and `--JOB_RUN_ID`, so
 `awsglue.utils.getResolvedOptions` reads them. Its AWS calls reach Floci with the credentials of the job's `Role`.
 
-The run is `RUNNING` while the script runs, then `SUCCEEDED` when it exits with 0 or `FAILED` with an `ErrorMessage` when it
-does not or cannot start; `TIMEOUT` when the job's `Timeout` passes; `STOPPED` after `BatchStopJobRun`. Python shell, streaming
-and Ray jobs, and jobs whose script is not in S3, keep the simulation above. The image is large (AWS asks for at least 7 GB of
-disk) and needs a Docker daemon, which is why the mode is off by default. Without it, or when Floci restarts, a run that was
-executing is `FAILED`.
+The run is `RUNNING` while the script runs (or `WAITING` while `JobRunQueuingEnabled` is set and `MaxConcurrentRuns` is in use,
+starting once a slot frees), then `SUCCEEDED` when it exits with 0 or `FAILED` with an `ErrorMessage` when it does not or cannot
+start; `TIMEOUT` when the job's `Timeout` passes; `STOPPED` after `BatchStopJobRun`. Python shell, streaming and Ray jobs, and
+jobs whose script is not in S3, keep the simulation above. The image is large (AWS asks for at least 7 GB of disk) and needs a
+Docker daemon (mount `/var/run/docker.sock` when running Floci itself in a container), which is why the mode is off by default.
+Without it, or when Floci restarts, a run that was executing or waiting is `FAILED`.
 
 #### Crawlers
 

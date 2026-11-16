@@ -1,6 +1,7 @@
 package io.floci.aws.services.glue;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -31,10 +32,11 @@ public interface GlueScriptRunner {
      * What a run needs: its id and its job's name; its account and Region; the job's role, whose credentials the
      * script gets; the S3 location of the script; the script's arguments, in the order they go on its command
      * line ({@code --name value} pairs, {@code --JOB_NAME} among them); the image and Docker network to run it in
-     * (a null network is the global default); and how long it may run ({@link Duration#ZERO} for no limit).
+     * (a null network is the global default); when the run started; and how long it may run ({@link Duration#ZERO}
+     * for no limit).
      */
     record Run(String runId, String jobName, String accountId, String region, String role, String scriptLocation,
-               List<String> arguments, String image, String dockerNetwork, Duration timeout) {
+               List<String> arguments, String image, String dockerNetwork, Instant startedOn, Duration timeout) {
     }
 
     /** What a run tells the service, and asks it, while it goes. */

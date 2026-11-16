@@ -2537,7 +2537,7 @@ public interface EmulatorConfig {
         String runnerMode();
 
         /** The image a {@code docker} job run uses: AWS's image for running Glue 5.0 jobs locally. */
-        @WithDefault("public.ecr.aws/glue/aws-glue-libs:5")
+        @WithDefault("public.ecr.aws/glue/aws-glue-libs:5") // partition-literal: configurable; ECR Public exists only in the commercial partition
         String image();
 
         Optional<String> dockerNetwork();

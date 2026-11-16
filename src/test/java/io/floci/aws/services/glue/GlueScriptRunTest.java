@@ -368,6 +368,104 @@ class GlueScriptRunTest {
         assertEquals("Floci stopped the job run before its script ended", ended.getErrorMessage());
     }
 
+    @Test
+    void aStreamingJobKeepsTheSimulationEvenWithGlueEtlAndS3Script() {
+        Job job = new Job();
+        job.setName("stream");
+        job.setRole(ROLE);
+        JobCommand command = new JobCommand();
+        command.setName("glueetl");
+        command.setScriptLocation(SCRIPT);
+        job.setCommand(command);
+        job.setJobMode("STREAMING");
+        glueService.createJob(job, null, REGION);
+
+        JobRun run = service.startJobRun("stream", null, new JobRun());
+
+        assertEquals("SUCCEEDED", run.getJobRunState());
+        assertTrue(queued.isEmpty());
+        assertTrue(runner.requests.isEmpty());
+    }
+
+    @Test
+    void aResetIgnoresAnInFlightScriptRunOutcome() {
+        createJob("etl", "glueetl", SCRIPT, null, null);
+        JobRun run = service.startJobRun("etl", null, new JobRun());
+        runner.onRun = () -> {
+            service.beforeReset();
+            runStore.clear();
+            bookkeeping.clear();
+        };
+
+        runQueued();
+
+        assertTrue(runStore.get(run.getId()).isEmpty());
+        assertTrue(bookkeeping.get(run.getId()).isEmpty());
+    }
+
+    @Test
+    void aRunnerErrorStillEndsTheRunFailedAndFreesCapacity() {
+        createJob("etl", "glueetl", SCRIPT, null, null);
+        runner.error = new AssertionError("unexpected linkage error");
+
+        JobRun run = service.startJobRun("etl", null, new JobRun());
+        assertThrows(AssertionError.class, this::runQueued);
+
+        JobRun ended = service.getJobRun("etl", run.getId());
+        assertEquals("FAILED", ended.getJobRunState());
+        assertEquals("unexpected linkage error", ended.getErrorMessage());
+        assertTrue(service.hasCapacity("etl"));
+    }
+
+    @Test
+    void queuedRunsWaitInWaitingUntilAConcurrencySlotFrees() {
+        createJob("etl", "glueetl", SCRIPT, null, null);
+        JobRun queuing = new JobRun();
+        queuing.setJobRunQueuingEnabled(true);
+
+        JobRun first = service.startJobRun("etl", null, queuing);
+        JobRun second = service.startJobRun("etl", null, queuing);
+        JobRun third = service.startJobRun("etl", null, queuing);
+
+        assertEquals("RUNNING", first.getJobRunState());
+        assertEquals("WAITING", state("etl", second.getId()));
+        assertEquals("WAITING", state("etl", third.getId()));
+        assertEquals(1, queued.size());
+
+        // Finishing the first run launches only the second, keeping the third in WAITING.
+        runQueued();
+        assertEquals("SUCCEEDED", state("etl", first.getId()));
+        assertEquals("RUNNING", state("etl", second.getId()));
+        assertEquals("WAITING", state("etl", third.getId()));
+        assertEquals(1, queued.size());
+
+        // Stopping the second run frees the slot and launches the third.
+        service.batchStopJobRun("etl", List.of(second.getId()));
+        assertEquals("STOPPED", state("etl", second.getId()));
+        assertEquals("RUNNING", state("etl", third.getId()));
+        assertEquals(2, queued.size());
+
+        runQueued();
+        assertEquals("STOPPED", state("etl", second.getId()));
+        assertEquals("SUCCEEDED", state("etl", third.getId()));
+    }
+
+    @Test
+    void aWaitingRunLeftByAnEarlierProcessFailsWhenReadAfterRestart() {
+        createJob("etl", "glueetl", SCRIPT, null, null);
+        JobRun queuing = new JobRun();
+        queuing.setJobRunQueuingEnabled(true);
+        service.startJobRun("etl", null, queuing);
+        JobRun waitingRun = service.startJobRun("etl", null, queuing);
+        assertEquals("WAITING", waitingRun.getJobRunState());
+
+        GlueJobRunService restarted = new GlueJobRunService(runStore, bookkeeping, glueService, 0, clock,
+                regionResolver, runner, queued::add, "glue-image:5", null);
+        JobRun read = restarted.getJobRun("etl", waitingRun.getId());
+
+        assertEquals("FAILED", read.getJobRunState());
+    }
+
     private static Map<String, String> pairs(List<String> arguments) {
         Map<String, String> map = new LinkedHashMap<>();
         for (int i = 0; i + 1 < arguments.size(); i += 2) {
@@ -382,10 +480,18 @@ class GlueScriptRunTest {
         GlueScriptRunner.Outcome outcome = Outcome.exitedWith(0);
         Boolean cancelledSeen;
         RuntimeException failure;
+        Error error;
+        Runnable onRun;
 
         @Override
         public Outcome run(Run run, Progress progress) {
             requests.add(run);
+            if (onRun != null) {
+                onRun.run();
+            }
+            if (error != null) {
+                throw error;
+            }
             if (failure != null) {
                 throw failure;
             }

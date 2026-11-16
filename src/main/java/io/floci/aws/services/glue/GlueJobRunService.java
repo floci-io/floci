@@ -5,6 +5,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -49,10 +50,11 @@ import java.util.concurrent.RejectedExecutionException;
  * removing a deleted job's runs must not interleave.
  */
 @ApplicationScoped
-public class GlueJobRunService {
+public class GlueJobRunService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(GlueJobRunService.class);
 
+    static final String STATE_WAITING = "WAITING";
     static final String STATE_RUNNING = "RUNNING";
     static final String STATE_SUCCEEDED = "SUCCEEDED";
     static final String STATE_STOPPED = "STOPPED";
@@ -68,6 +70,7 @@ public class GlueJobRunService {
     private static final String LOG_GROUP_NAME = "/aws-glue/jobs";
     private static final String RUNNER_DOCKER = "docker";
     private static final String SPARK_COMMAND = "glueetl";
+    private static final String MODE_STREAMING = "STREAMING";
     private static final String JOB_LANGUAGE_ARGUMENT = "--job-language";
     private static final String SCALA = "scala";
 
@@ -88,6 +91,10 @@ public class GlueJobRunService {
     // Script runs a thread is running, read and written only inside this service's synchronized methods; one not
     // here that has not ended was left by a restart.
     private final Set<String> executing = new HashSet<>();
+    // Script runs queued in WAITING in this process; one not here was left by a restart.
+    private final Set<String> waiting = new HashSet<>();
+    // Raised by each reset so an in-flight script thread from before it writes nothing back after the wipe.
+    private long generation;
 
     @Inject
     public GlueJobRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config,
@@ -182,7 +189,6 @@ public class GlueJobRunService {
         run.setJobRunQueuingEnabled(queuingEnabled);
         run.setStartedOn(now);
         run.setLastModifiedOn(now);
-        run.setJobRunState(STATE_RUNNING);
         run.setArguments(overrides.getArguments());
         run.setAllocatedCapacity(firstNonNull(overrides.getAllocatedCapacity(), job.getAllocatedCapacity()));
         run.setTimeout(timeout);
@@ -197,14 +203,21 @@ public class GlueJobRunService {
         run.setGlueVersion(job.getGlueVersion());
         run.setLogGroupName(LOG_GROUP_NAME);
         run.setExecutionTime(0);
-        runStore.put(run.getId(), run);
         Map<String, String> arguments = scriptArguments(job, run);
         boolean script = scriptRunner != null && runsScript(job, arguments);
+        boolean queuedWaiting = script && queuingEnabled && active >= maxConcurrentRuns(job);
+        run.setJobRunState(queuedWaiting ? STATE_WAITING : STATE_RUNNING);
+        runStore.put(run.getId(), run);
         JobRunBookkeeping bookkeeping = new JobRunBookkeeping();
         bookkeeping.setOriginRunId(originRunId != null ? originRunId : run.getId());
         bookkeeping.setWorkflowRunId(workflowRunId);
         bookkeeping.setScriptRun(script);
         bookkeepingStore.put(run.getId(), bookkeeping);
+        if (queuedWaiting) {
+            waiting.add(run.getId());
+            LOG.infov("Queued Glue job run {0} for job {1} in WAITING", run.getId(), jobName);
+            return run;
+        }
         if (script) {
             launch(run, job, arguments);
         }
@@ -259,11 +272,15 @@ public class GlueJobRunService {
                         "Job run " + runId + " is not running; its state is " + run.getJobRunState()));
                 continue;
             }
+            waiting.remove(runId);
             complete(run, STATE_STOPPED, clock.instant(), null);
             if (scriptRunner != null) {
                 scriptRunner.stop(runId);
             }
             stopped.add(new StoppedRun(jobName, runId));
+        }
+        if (!stopped.isEmpty() && scriptRunner != null) {
+            promoteWaitingRuns(jobName);
         }
         return new StopResult(stopped, errors);
     }
@@ -328,6 +345,7 @@ public class GlueJobRunService {
     /** Runs belong to their job: deleting the job removes them, as it does on AWS. */
     public synchronized void deleteRuns(String jobName) {
         for (JobRun run : runsOf(jobName)) {
+            waiting.remove(run.getId());
             if (scriptRunner != null) {
                 scriptRunner.stop(run.getId());
             }
@@ -336,16 +354,34 @@ public class GlueJobRunService {
         }
     }
 
-    /** Whether the job is a Spark job whose script is in S3, which is what a container can run. */
+    /**
+     * A reset has begun: runs' threads from before it write nothing more, so the storage wipe that follows
+     * leaves none of their runs behind. Container teardown has already stopped their containers.
+     */
+    @Override
+    public synchronized void beforeReset() {
+        generation++;
+        executing.clear();
+        waiting.clear();
+        nextCompletionOrder = 0;
+    }
+
+    @Override
+    public void clear() {
+        // Runs and bookkeeping live in storage, which the reset has already wiped.
+    }
+
+    /** Whether the job is a Spark batch job whose script is in S3, which is what a container can run. */
     private static boolean runsScript(Job job, Map<String, String> arguments) {
-        // The container runs a Python script; a Scala job's is not one, so it keeps the simulation.
+        // The container runs a Python batch Spark script; streaming and Scala jobs keep the simulation.
         return job.getCommand() != null && SPARK_COMMAND.equals(job.getCommand().getName())
+                && !MODE_STREAMING.equalsIgnoreCase(job.getJobMode())
                 && job.getCommand().getScriptLocation() != null
                 && job.getCommand().getScriptLocation().startsWith("s3://")
                 && !SCALA.equalsIgnoreCase(arguments.get(JOB_LANGUAGE_ARGUMENT));
     }
 
-    /** The job's defaults, then the run's own, which replace them, then the two the Glue library reads. */
+    /** The job's defaults, then the run's own, then non-overridable defaults, then the two the Glue library reads. */
     private static Map<String, String> scriptArguments(Job job, JobRun run) {
         Map<String, String> arguments = new LinkedHashMap<>();
         if (job.getDefaultArguments() != null) {
@@ -353,6 +389,9 @@ public class GlueJobRunService {
         }
         if (run.getArguments() != null) {
             arguments.putAll(run.getArguments());
+        }
+        if (job.getNonOverridableArguments() != null) {
+            arguments.putAll(job.getNonOverridableArguments());
         }
         arguments.put("--JOB_NAME", job.getName());
         arguments.put("--JOB_RUN_ID", run.getId());
@@ -364,10 +403,11 @@ public class GlueJobRunService {
         GlueScriptRunner.Run request = new GlueScriptRunner.Run(run.getId(), job.getName(),
                 regionResolver.getAccountId(), regionResolver.getRegion(), job.getRole(),
                 job.getCommand().getScriptLocation(), GlueScriptRunner.argumentList(arguments), image,
-                dockerNetwork, timeout);
+                dockerNetwork, run.getStartedOn(), timeout);
         executing.add(run.getId());
+        long launchedIn = generation;
         try {
-            runExecutor.execute(() -> execute(request));
+            runExecutor.execute(() -> execute(request, launchedIn));
         } catch (RejectedExecutionException e) {
             // Floci is shutting down.
             executing.remove(run.getId());
@@ -375,29 +415,40 @@ public class GlueJobRunService {
         }
     }
 
-    private void execute(GlueScriptRunner.Run request) {
-        GlueScriptRunner.Outcome outcome;
+    private void execute(GlueScriptRunner.Run request, long launchedIn) {
+        GlueScriptRunner.Outcome outcome = null;
         try {
             // This thread is in no request, so the run's account and Region are set for the store it reads.
             outcome = scriptRunner.run(request, () -> RequestScopes.callAs(request.accountId(), request.region(),
-                    () -> cancelled(request.runId())));
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Glue job run {0} could not run", request.runId());
-            outcome = GlueScriptRunner.Outcome.couldNotStart(e.getMessage());
+                    () -> cancelled(request.runId(), launchedIn)));
+        } catch (Throwable t) {
+            LOG.warnv(t, "Glue job run {0} could not run", request.runId());
+            String message = t.getMessage() != null ? t.getMessage() : t.getClass().getSimpleName();
+            outcome = GlueScriptRunner.Outcome.couldNotStart(message);
+            if (t instanceof Error err) {
+                throw err;
+            }
+        } finally {
+            GlueScriptRunner.Outcome ended = outcome != null
+                    ? outcome
+                    : GlueScriptRunner.Outcome.couldNotStart("Job run execution failed unexpectedly");
+            // Floci's shutdown interrupts this thread; its flag would fail the store's write, and it ends here anyway.
+            Thread.interrupted();
+            RequestScopes.runAs(request.accountId(), request.region(),
+                    () -> ended(request.runId(), ended, launchedIn));
         }
-        GlueScriptRunner.Outcome ended = outcome;
-        // Floci's shutdown interrupts this thread; its flag would fail the store's write, and it ends here anyway.
-        Thread.interrupted();
-        RequestScopes.runAs(request.accountId(), request.region(), () -> ended(request.runId(), ended));
     }
 
-    /** Whether the run is over or gone, as after BatchStopJobRun or deleting its job: its script must not start. */
-    private synchronized boolean cancelled(String runId) {
-        return runStore.get(runId).map(GlueJobRunService::isTerminal).orElse(true);
+    /** Whether the run is over or gone, as after BatchStopJobRun, deleting its job, or a reset. */
+    private synchronized boolean cancelled(String runId, long launchedIn) {
+        return launchedIn != generation || runStore.get(runId).map(GlueJobRunService::isTerminal).orElse(true);
     }
 
-    /** The script's container ended: settles the run, unless a stop, or deleting its job, settled it first. */
-    private synchronized void ended(String runId, GlueScriptRunner.Outcome outcome) {
+    /** The script's container ended: settles the run, unless a stop, reset, or deleting its job settled it first. */
+    private synchronized void ended(String runId, GlueScriptRunner.Outcome outcome, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
         executing.remove(runId);
         JobRun run = runStore.get(runId).orElse(null);
         if (run == null || isTerminal(run)) {
@@ -417,6 +468,66 @@ public class GlueJobRunService {
         } else {
             complete(run, STATE_FAILED, now, "The job script exited with code " + outcome.exitCode());
         }
+        promoteWaitingRuns(run.getJobName());
+    }
+
+    private void promoteWaitingRuns(String jobName) {
+        if (scriptRunner == null) {
+            return;
+        }
+        Job job;
+        try {
+            job = glueService.getJob(jobName);
+        } catch (AwsException e) {
+            // The job was deleted while its run was ending.
+            return;
+        }
+        List<JobRun> runs = runsOf(jobName);
+        long running = 0;
+        List<JobRun> queued = new ArrayList<>();
+        for (JobRun candidate : runs) {
+            settle(candidate);
+            if (STATE_RUNNING.equals(candidate.getJobRunState())) {
+                running++;
+            } else if (STATE_WAITING.equals(candidate.getJobRunState())) {
+                queued.add(candidate);
+            }
+        }
+        if (queued.isEmpty()) {
+            return;
+        }
+        queued.sort(Comparator.comparing(JobRun::getStartedOn).thenComparing(JobRun::getId));
+        int limit = maxConcurrentRuns(job);
+        for (JobRun next : queued) {
+            if (running >= limit) {
+                break;
+            }
+            waiting.remove(next.getId());
+            Instant now = clock.instant();
+            next.setJobRunState(STATE_RUNNING);
+            next.setStartedOn(now);
+            next.setLastModifiedOn(now);
+            Map<String, String> arguments = scriptArguments(job, next);
+            if (!runsScript(job, arguments)) {
+                JobRunBookkeeping entry = bookkeepingOf(next.getId());
+                entry.setScriptRun(false);
+                bookkeepingStore.put(next.getId(), entry);
+                runStore.put(next.getId(), next);
+                settle(next);
+                if (!isTerminal(next)) {
+                    running++;
+                }
+                continue;
+            }
+            runStore.put(next.getId(), next);
+            launch(next, job, arguments);
+            if (isTerminal(next)) {
+                // RejectedExecutionException means Floci is shutting down.
+                break;
+            }
+            running++;
+            LOG.infov("Promoted queued Glue job run {0} for job {1} to RUNNING", next.getId(), jobName);
+        }
     }
 
     private JobRun settle(JobRun run) {
@@ -424,6 +535,12 @@ public class GlueJobRunService {
             return run;
         }
         if (bookkeepingOf(run.getId()).isScriptRun()) {
+            if (STATE_WAITING.equals(run.getJobRunState())) {
+                if (!waiting.contains(run.getId())) {
+                    complete(run, STATE_FAILED, clock.instant(), "Floci restarted while the job run was waiting");
+                }
+                return run;
+            }
             // The script's end settles the run, not a clock; one no thread runs was left by a restart.
             if (!executing.contains(run.getId())) {
                 complete(run, STATE_FAILED, clock.instant(), "Floci restarted while the job run was running");
