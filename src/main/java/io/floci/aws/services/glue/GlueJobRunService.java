@@ -204,7 +204,16 @@ public class GlueJobRunService implements Resettable {
         run.setLogGroupName(LOG_GROUP_NAME);
         run.setExecutionTime(0);
         Map<String, String> arguments = scriptArguments(job, run);
-        boolean script = scriptRunner != null && runsScript(job, arguments);
+        boolean eligible = scriptRunner != null && runsScript(job, arguments);
+        boolean script = false;
+        if (eligible) {
+            if (scriptRunner.isAvailable()) {
+                script = true;
+            } else {
+                LOG.warnv("Docker is not reachable; falling back to simulated Glue job run {0} for job {1}",
+                        run.getId(), jobName);
+            }
+        }
         boolean queuedWaiting = script && queuingEnabled && active >= maxConcurrentRuns(job);
         run.setJobRunState(queuedWaiting ? STATE_WAITING : STATE_RUNNING);
         runStore.put(run.getId(), run);

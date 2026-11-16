@@ -13,6 +13,11 @@ import java.util.Map;
  */
 public interface GlueScriptRunner {
 
+    /** Whether the runner's execution backend (such as the Docker daemon) is reachable right now. */
+    default boolean isAvailable() {
+        return true;
+    }
+
     /**
      * Runs {@code run} and returns how it ended. Blocks until then, so the caller runs it off the request
      * thread. A run {@code progress} reports as cancelled before its container starts never starts it.

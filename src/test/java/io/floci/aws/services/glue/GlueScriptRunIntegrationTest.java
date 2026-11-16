@@ -54,6 +54,8 @@ class GlueScriptRunIntegrationTest {
 
     @BeforeEach
     void runnerEndsWithExitZero() {
+        cancelledSeen.clear();
+        when(runner.isAvailable()).thenReturn(true);
         when(runner.run(any(), any())).thenAnswer(invocation -> {
             GlueScriptRunner.Progress progress = invocation.getArgument(1);
             cancelledSeen.add(progress.cancelled());
@@ -121,6 +123,18 @@ class GlueScriptRunIntegrationTest {
     @Test
     void aPythonShellJobKeepsTheSimulationAndNeverReachesTheRunner() {
         String jobName = startRun("us-east-1", "pythonshell");
+
+        String runId = call("us-east-1", "StartJobRun", "{ \"JobName\": \"" + jobName + "\" }")
+                .statusCode(200).extract().path("JobRunId");
+
+        assertThat(state("us-east-1", jobName, runId), equalTo("SUCCEEDED"));
+        assertThat(cancelledSeen, equalTo(List.of()));
+    }
+
+    @Test
+    void fallsBackToSimulationWhenDockerIsUnavailable() {
+        when(runner.isAvailable()).thenReturn(false);
+        String jobName = startRun("us-east-1", "glueetl");
 
         String runId = call("us-east-1", "StartJobRun", "{ \"JobName\": \"" + jobName + "\" }")
                 .statusCode(200).extract().path("JobRunId");

@@ -116,6 +116,17 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
     }
 
     @Override
+    public boolean isAvailable() {
+        try {
+            lifecycleManager.getDockerClient().pingCmd().exec();
+            return true;
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "Docker daemon is not reachable for Glue script execution");
+            return false;
+        }
+    }
+
+    @Override
     public Outcome run(Run run, Progress progress) {
         Instant startedOn = run.startedOn() != null ? run.startedOn() : clock.instant();
         Instant deadline = run.timeout().isZero() ? null : startedOn.plus(run.timeout());

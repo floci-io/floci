@@ -309,7 +309,7 @@ class DockerGlueScriptRunnerTest {
 
     @Test
     void timeoutDuringPreparationDoesNotStartTheContainer() {
-        DockerGlueScriptRunner runner = runner(container("script", true, null));
+        DockerGlueScriptRunner runner = runner(container("script", false, 0L));
         inS3("glue-demo", "scripts/job.py", "pass");
         when(lifecycle.create(any())).thenAnswer(pulling -> {
             clock.advance(Duration.ofMinutes(31));
@@ -471,6 +471,15 @@ class DockerGlueScriptRunnerTest {
 
         verify(lifecycle).removeIfExistsStrict("c1", true);
         verify(lifecycle).removeIfExistsStrict("c2", true);
+    }
+
+    @Test
+    void isAvailableReflectsDockerDaemonReachability() {
+        DockerGlueScriptRunner runner = runner(container("script", false, 0L));
+        assertTrue(runner.isAvailable());
+
+        when(docker.pingCmd().exec()).thenThrow(new IllegalStateException("daemon unreachable"));
+        assertFalse(runner.isAvailable());
     }
 
     private GlueScriptRunner.Run request(Duration timeout) {

@@ -189,8 +189,10 @@ The run is `RUNNING` while the script runs (or `WAITING` while `JobRunQueuingEna
 starting once a slot frees), then `SUCCEEDED` when it exits with 0 or `FAILED` with an `ErrorMessage` when it does not or cannot
 start; `TIMEOUT` when the job's `Timeout` passes; `STOPPED` after `BatchStopJobRun`. Python shell, streaming and Ray jobs, and
 jobs whose script is not in S3, keep the simulation above. The image is large (AWS asks for at least 7 GB of disk) and needs a
-Docker daemon (mount `/var/run/docker.sock` when running Floci itself in a container), which is why the mode is off by default.
-Without it, or when Floci restarts, a run that was executing or waiting is `FAILED`.
+Docker daemon (explicitly mount `/var/run/docker.sock` when running Floci in a container or Testcontainers wrapper with
+`FLOCI_SERVICES_GLUE_RUNNER_MODE=docker`), which is why the mode is off by default. When the Docker daemon is unreachable at
+start, runs fall back to the simulation above; if Docker fails mid-run or Floci restarts while a run is executing or waiting,
+the run is `FAILED`.
 
 #### Crawlers
 

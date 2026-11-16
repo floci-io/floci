@@ -466,6 +466,18 @@ class GlueScriptRunTest {
         assertEquals("FAILED", read.getJobRunState());
     }
 
+    @Test
+    void fallsBackToSimulationWhenRunnerIsUnavailable() {
+        createJob("etl", "glueetl", SCRIPT, null, null);
+        runner.available = false;
+
+        JobRun run = service.startJobRun("etl", null, new JobRun());
+
+        assertEquals("SUCCEEDED", run.getJobRunState());
+        assertTrue(queued.isEmpty());
+        assertTrue(runner.requests.isEmpty());
+    }
+
     private static Map<String, String> pairs(List<String> arguments) {
         Map<String, String> map = new LinkedHashMap<>();
         for (int i = 0; i + 1 < arguments.size(); i += 2) {
@@ -478,10 +490,16 @@ class GlueScriptRunTest {
         final List<Run> requests = new ArrayList<>();
         final List<String> stopped = new ArrayList<>();
         GlueScriptRunner.Outcome outcome = Outcome.exitedWith(0);
+        boolean available = true;
         Boolean cancelledSeen;
         RuntimeException failure;
         Error error;
         Runnable onRun;
+
+        @Override
+        public boolean isAvailable() {
+            return available;
+        }
 
         @Override
         public Outcome run(Run run, Progress progress) {
