@@ -58,7 +58,7 @@ public class SidecarSchemaCompiler {
             Map.entry("AWSByte", "base64"));
 
     private static final Pattern DIRECTIVE_USE = Pattern.compile("@(\\w+)");
-    private static final Pattern SCALAR_DEFINITION = Pattern.compile("\\bscalar\\s+([_A-Za-z][_0-9A-Za-z]*)");
+    private static final Pattern GRAPHQL_NAME = Pattern.compile("[_A-Za-z][_0-9A-Za-z]*");
 
     private final GraphqlSidecarClient sidecarClient;
 
@@ -113,12 +113,75 @@ public class SidecarSchemaCompiler {
     }
 
     private List<String> declaredScalars(String sdl) {
-        Matcher matcher = SCALAR_DEFINITION.matcher(stripIgnoredTokens(sdl));
+        String clean = stripIgnoredTokens(sdl);
         List<String> declaredScalars = new ArrayList<>();
-        while (matcher.find()) {
-            declaredScalars.add(matcher.group(1));
+        int braces = 0;
+        int parentheses = 0;
+        int brackets = 0;
+        String previousTopLevelToken = "";
+        int index = 0;
+        while (index < clean.length()) {
+            char current = clean.charAt(index);
+            if (current == '{') {
+                braces++;
+                index++;
+            } else if (current == '}') {
+                braces--;
+                index++;
+            } else if (current == '(') {
+                parentheses++;
+                index++;
+            } else if (current == ')') {
+                parentheses--;
+                index++;
+            } else if (current == '[') {
+                brackets++;
+                index++;
+            } else if (current == ']') {
+                brackets--;
+                index++;
+            } else if (isGraphqlNameStart(current)) {
+                int tokenStart = index++;
+                while (index < clean.length() && isGraphqlNamePart(clean.charAt(index))) {
+                    index++;
+                }
+                String token = clean.substring(tokenStart, index);
+                if (braces == 0 && parentheses == 0 && brackets == 0) {
+                    if (token.equals("scalar") && !previousTopLevelToken.equals("extend")) {
+                        int nameStart = skipIgnored(clean, index);
+                        Matcher name = GRAPHQL_NAME.matcher(clean);
+                        name.region(nameStart, clean.length());
+                        if (name.lookingAt()) {
+                            declaredScalars.add(name.group());
+                        }
+                    }
+                    previousTopLevelToken = token;
+                }
+            } else {
+                if (braces == 0 && parentheses == 0 && brackets == 0
+                        && !Character.isWhitespace(current) && current != ',') {
+                    previousTopLevelToken = String.valueOf(current);
+                }
+                index++;
+            }
         }
         return declaredScalars;
+    }
+
+    private int skipIgnored(String sdl, int index) {
+        while (index < sdl.length()
+                && (Character.isWhitespace(sdl.charAt(index)) || sdl.charAt(index) == ',')) {
+            index++;
+        }
+        return index;
+    }
+
+    private boolean isGraphqlNameStart(char value) {
+        return value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z';
+    }
+
+    private boolean isGraphqlNamePart(char value) {
+        return isGraphqlNameStart(value) || value >= '0' && value <= '9';
     }
 
     /** Replaces GraphQL comments and string tokens while preserving whitespace and line breaks. */
