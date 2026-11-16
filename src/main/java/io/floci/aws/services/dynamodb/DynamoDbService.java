@@ -1614,6 +1614,7 @@ public class DynamoDbService {
         if (items == null) return new QueryResult(List.of(), 0, 0, null, List.of());
 
         List<JsonNode> results = new ArrayList<>();
+        List<JsonNode> partition = new ArrayList<>();
 
         if (keyConditions != null) {
             String partitionKeyValue = extractComparisonValue(keyConditions.get(pkName));
@@ -1621,6 +1622,7 @@ public class DynamoDbService {
                 boolean partitionKeyMatches = pkNames.stream().allMatch(name -> item.has(name)
                         && matchesAttributeValue(item.get(name), extractComparisonValue(keyConditions.get(name))));
                 if (!partitionKeyMatches) continue;
+                partition.add(item);
                 if (skName != null && keyConditions.has(skName)) {
                     JsonNode skCondition = keyConditions.get(skName);
                     if (matchesKeyCondition(item.get(skName), skCondition)) {
@@ -1632,7 +1634,7 @@ public class DynamoDbService {
             }
         } else if (keyConditionExpression != null) {
             results = queryWithExpression(items, accessPath, partitionKeyValuePlaceholder,
-                    keyConditionExpression, expressionAttrValues, exprAttrNames);
+                    keyConditionExpression, expressionAttrValues, exprAttrNames, partition);
         }
 
         // Filter out items without GSI key attributes (sparse index behavior).
@@ -1700,7 +1702,7 @@ public class DynamoDbService {
         if (included > 0) {
             JsonNode last = evaluatedItems.get(included - 1);
             boolean rangeEnded = stoppedByLimit && included == evaluatedItems.size()
-                    && endsKeyRange(items, accessPath, last, (a, b) -> direction * keyOrder.compare(a, b),
+                    && endsKeyRange(partition, accessPath, last, (a, b) -> direction * keyOrder.compare(a, b),
                             () -> keyRangeInclusiveEnd(accessPath, keyConditions, keyConditionExpression,
                                     exprAttrNames, expressionAttrValues, direction > 0));
             if (!rangeEnded) {
@@ -5053,12 +5055,11 @@ public class DynamoDbService {
     // A read that stops at Limit on its last match leaves out LastEvaluatedKey when the partition
     // holds another item past it, which the key condition then excludes. A table read also leaves
     // it out on the condition's inclusive bound, as no other item can share that key.
-    private boolean endsKeyRange(ConcurrentSkipListMap<String, JsonNode> items, DynamoDbAccessPath accessPath,
-                                 JsonNode last, Comparator<JsonNode> readOrder, Supplier<JsonNode> inclusiveEnd) {
+    private static boolean endsKeyRange(List<JsonNode> partition, DynamoDbAccessPath accessPath, JsonNode last,
+                                        Comparator<JsonNode> readOrder, Supplier<JsonNode> inclusiveEnd) {
         List<String> partitionKeys = accessPath.partitionKeyNames();
         Set<String> keyAttributes = accessPath.keyAttributeNames();
-        String partitionKeyValue = extractScalarValue(last.get(accessPath.partitionKeyName()));
-        for (JsonNode item : queryCandidates(items, accessPath, partitionKeyValue)) {
+        for (JsonNode item : partition) {
             if (compareKeyAttributes(item, last, partitionKeys) == 0
                     && keyAttributes.stream().allMatch(key -> hasNonNullAttribute(item, key))
                     && readOrder.compare(item, last) > 0) {
@@ -5099,7 +5100,8 @@ public class DynamoDbService {
                                                 String partitionKeyValuePlaceholder,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
-                                                JsonNode exprAttrNames) {
+                                                JsonNode exprAttrNames,
+                                                List<JsonNode> partition) {
         List<JsonNode> results = new ArrayList<>();
         String partitionKeyName = accessPath.partitionKeyName();
         String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
@@ -5112,6 +5114,7 @@ public class DynamoDbService {
                     && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
             }
+            partition.add(item);
             if (keyCondition == null) {
                 keyCondition = ExpressionEvaluator.parse(expression);
             }
