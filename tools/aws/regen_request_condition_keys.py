@@ -2,7 +2,16 @@
 """Regenerate src/main/resources/aws/request-condition-keys.json from AWS's Service Reference and botocore.
 
 Some service condition keys take their value from the request, or from the resource the request acts on before
-it. `SERVICES` names, for each namespace, the keys read and where:
+it. `BY_NAME` names the namespaces whose keys are read by name: each of the namespace's own keys of type String or
+ARN that an action takes is read from the operation's top-level request member named after the key, ignoring case,
+when that member is a string carried in the body or form, the rule regen_iam_condition_keys.py applies to iam:. An
+action whose request has no such member does not carry the key, so it is not read for that action:
+
+- `emr-containers`: a StartJobRun or CreateManagedEndpoint request is checked with the execution role it names as
+  `emr-containers:ExecutionRoleArn` (`executionRoleArn`). StartJobRun's `emr-containers:JobTemplateArn` is not read:
+  the request names its template by `jobTemplateId`, not by a member named after the key.
+
+`SERVICES` names, for each other namespace, the keys read and where:
 
 - `eks`: a CreateCluster or UpdateClusterConfig request is checked with the access configuration and endpoint
   flags it names in its JSON body, as `eks:authenticationMode`, `eks:bootstrapClusterCreatorAdminPermissions`,
@@ -34,7 +43,7 @@ The table comes from two sources:
   gives where each request carries the value.
 
 `actions` holds every action that takes a key a namespace reads, with the ones it takes. `members` holds, for
-every action and key read from the request, the paths of the request members named as `SERVICES` gives, as the
+every action and key read from the request, the paths of the request members named as `SERVICES` or `BY_NAME` gives, as the
 request carries them: dotted for a nested one, `*` for each element of a list or map in a JSON body, and in an XML
 body the elements botocore names, a list's own by the name of its member (`ChangeBatch.Changes.Change.Action`).
 A Query request is read as a flat form, so its member must be top-level; an XML request is read from its body, so
@@ -70,6 +79,10 @@ from regen_query_services import latest_model_dir, load_model
 OUTPUT = Path(__file__).resolve().parents[2] / "src/main/resources/aws/request-condition-keys.json"
 REFERENCE = "https://servicereference.us-east-1.amazonaws.com/"
 FLAT_PROTOCOLS = ("query", "ec2")
+
+# The namespaces whose keys are read by name, with their botocore models, and the key types read that way.
+BY_NAME = {"emr-containers": "emr-containers"}
+BY_NAME_TYPES = {"String", "ARN"}
 
 # For each namespace: its botocore model, each key read from the request with the name of the member that
 # carries it, each key read from the stored resource, and the actions that take a key their request does not
@@ -127,8 +140,13 @@ def url(namespace: str) -> str:
 
 def action_keys(namespace: str, reference: dict) -> dict[str, list[str]]:
     """Every action of the namespace that takes a key it reads, with the ones it takes."""
-    service = SERVICES[namespace]
-    read = set(service["request"]) | set(service["stored"])
+    if namespace in BY_NAME:
+        read = {key["Name"] for key in reference.get("ConditionKeys", [])
+                if key["Name"].startswith(f"{namespace}:") and key.get("Types")
+                and set(key["Types"]) <= BY_NAME_TYPES}
+    else:
+        service = SERVICES[namespace]
+        read = set(service["request"]) | set(service["stored"])
     resource_keys = _resource_keys([reference])
     found = {}
     for action in sorted(reference["Actions"], key=lambda entry: entry["Name"]):
@@ -160,6 +178,9 @@ def member_shapes(namespace: str, model: dict | None,
 def _located(namespace: str, model: dict | None, actions: dict[str, list[str]]):
     """Each (action, key, path, shape) of a key the namespace reads from its requests, the path as `members` gives
     it and the shape botocore gives the member (None for a namespace botocore does not model)."""
+    if namespace in BY_NAME:
+        yield from _located_by_name(namespace, model, actions)
+        return
     service = SERVICES[namespace]
     protocol = model.get("metadata", {}).get("protocol") if model is not None else None
     for action, keys in sorted(actions.items()):
@@ -184,6 +205,27 @@ def _located(namespace: str, model: dict | None, actions: dict[str, list[str]]):
             for path in paths:
                 carried, shape = carried_member(model, operation["input"]["shape"], path, protocol == "rest-xml")
                 yield action, key, carried, shape
+
+
+def _located_by_name(namespace: str, model: dict, actions: dict[str, list[str]]):
+    """Each (action, key, path, shape) of a `BY_NAME` namespace: the top-level string member of the action's request
+    named after the key, ignoring case, that the body or form carries rather than the URI or a header."""
+    xml = model["metadata"]["protocol"] == "rest-xml"
+    for action, keys in sorted(actions.items()):
+        if not action.startswith(f"{namespace}:"):
+            continue
+        operation = model["operations"].get(action.split(":", 1)[1])
+        if operation is None or "input" not in operation:
+            continue
+        members = model["shapes"][operation["input"]["shape"]].get("members", {})
+        for key in keys:
+            local = key.split(":", 1)[1].lower()
+            name = next((member for member in sorted(members) if member.lower() == local), None)
+            if (name is None or "location" in members[name]
+                    or model["shapes"][members[name]["shape"]].get("type") != "string"):
+                continue
+            carried, shape = carried_member(model, operation["input"]["shape"], name, xml)
+            yield action, key, carried, shape
 
 
 def carried_member(model: dict, shape: str, path: str, xml: bool) -> tuple[str, str]:
@@ -239,6 +281,8 @@ def validate(document: dict) -> list[str]:
         problems.append(f"route53:ChangeResourceRecordSets does not give {record_name} the shape DNSName")
     if document.get("protocols", {}).get("route53") != "rest-xml":
         problems.append("route53 is not read as rest-xml")
+    if members.get("emr-containers:StartJobRun", {}).get("emr-containers:ExecutionRoleArn") != ["executionRoleArn"]:
+        problems.append("emr-containers:StartJobRun does not read emr-containers:ExecutionRoleArn from executionRoleArn")
     return problems
 
 
@@ -252,7 +296,7 @@ def _reference(namespace: str, source_dir: Path | None) -> dict:
 
 def _actions(source_dir: Path | None) -> dict[str, list[str]]:
     actions = {}
-    for namespace in SERVICES:
+    for namespace in (*SERVICES, *BY_NAME):
         actions.update(action_keys(namespace, _reference(namespace, source_dir)))
     return dict(sorted(actions.items()))
 
@@ -261,8 +305,9 @@ def _members(actions: dict[str, list[str]], botocore_data: Path | None) -> tuple
     """The `members`, `memberShapes` and `protocols` sections botocore gives, and its provenance."""
     data, provenance = resolve_botocore_data(botocore_data)
     members, shapes, protocols = {}, {}, {}
-    for namespace, service in SERVICES.items():
-        model = service["model"] and load_model(latest_model_dir(data, service["model"]))
+    models = {**{namespace: service["model"] for namespace, service in SERVICES.items()}, **BY_NAME}
+    for namespace, name in models.items():
+        model = name and load_model(latest_model_dir(data, name))
         members.update(request_members(namespace, model, actions))
         shapes.update(member_shapes(namespace, model, actions))
         if model:

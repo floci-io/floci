@@ -3305,6 +3305,13 @@ floci populates:
   given a JSON null is absent, never the cluster's stored value. The actions, members and protocol come from
   the same `request-condition-keys.json`. A boolean member given anything but a boolean or its text is refused
   before it is read (see [EKS](eks.md)), so the key never misses a value the cluster takes.
+- `emr-containers:ExecutionRoleArn`: the `executionRoleArn` a `StartJobRun` or `CreateManagedEndpoint`
+  request names, the key the
+  [EMR on EKS Development Guide](https://docs.aws.amazon.com/emr/latest/EMR-on-EKS-DevelopmentGuide/iam-execution-role.html)
+  gives for restricting the roles a job runs as. Its members come from the same `request-condition-keys.json`,
+  where an `emr-containers` key is read from the request member named after it: a role a job template
+  supplies is not in the request, so it is absent then. `emr-containers:JobTemplateArn` is not populated, as
+  `StartJobRun` names its template by `jobTemplateId` rather than by a member named after the key.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

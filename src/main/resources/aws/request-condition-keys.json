@@ -22,6 +22,13 @@
       "eks:endpointPrivateAccess",
       "eks:endpointPublicAccess"
     ],
+    "emr-containers:CreateManagedEndpoint": [
+      "emr-containers:ExecutionRoleArn"
+    ],
+    "emr-containers:StartJobRun": [
+      "emr-containers:ExecutionRoleArn",
+      "emr-containers:JobTemplateArn"
+    ],
     "lambda:CreateWebFunction": [
       "lambda:Request/WebFunctionAuthType"
     ],
@@ -90,6 +97,16 @@
         "resourcesVpcConfig.endpointPublicAccess"
       ]
     },
+    "emr-containers:CreateManagedEndpoint": {
+      "emr-containers:ExecutionRoleArn": [
+        "executionRoleArn"
+      ]
+    },
+    "emr-containers:StartJobRun": {
+      "emr-containers:ExecutionRoleArn": [
+        "executionRoleArn"
+      ]
+    },
     "lambda:CreateWebFunction": {
       "lambda:Request/WebFunctionAuthType": [
         "endpointConfig.authType"
@@ -134,6 +151,12 @@
       "resourcesVpcConfig.endpointPrivateAccess": "BoxedBoolean",
       "resourcesVpcConfig.endpointPublicAccess": "BoxedBoolean"
     },
+    "emr-containers:CreateManagedEndpoint": {
+      "executionRoleArn": "IAMRoleArn"
+    },
+    "emr-containers:StartJobRun": {
+      "executionRoleArn": "IAMRoleArn"
+    },
     "lambda:CreateWebFunction": {
       "endpointConfig.authType": "AuthType"
     },
@@ -154,6 +177,7 @@
   },
   "protocols": {
     "eks": "rest-json",
+    "emr-containers": "rest-json",
     "lambda": "rest-json",
     "redshift": "query",
     "route53": "rest-xml"

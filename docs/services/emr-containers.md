@@ -97,8 +97,9 @@ tags. An ARN of another Region than the request's names no resource, as for ever
 **IAM.** With IAM enforcement on, each operation is checked as its `emr-containers:` action on the resource its
 path names, from AWS's Service Reference: `StartJobRun` and `CreateManagedEndpoint` also need `iam:PassRole` on
 the request's `executionRoleArn`, and the create operations and `StartJobRun` need `emr-containers:TagResource`
-for the request's `tags`. A role or tags a job template supplies are not part of the request, so they are not
-checked that way.
+for the request's `tags`. The request's `executionRoleArn` is also its `emr-containers:ExecutionRoleArn`
+condition key, so a policy can restrict the roles a job runs as. A role or tags a job template supplies are not
+part of the request, so they are not checked that way, and `emr-containers:JobTemplateArn` is not populated.
 
 **Idempotency.** A create request with a `clientToken` already used for that kind of resource answers the
 resource it created, as EMR Serverless does; the model declares no error for a token reused with other

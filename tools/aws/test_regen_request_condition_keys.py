@@ -118,6 +118,51 @@ def test_an_xml_member_the_body_does_not_nest_fails(model, problem):
         request_members("route53", model, ROUTE53_ACTIONS)
 
 
+def by_name_model(role_member="executionRoleArn", role=None, role_type="string"):
+    """An EMR on EKS StartJobRun request whose role member is named after the key, as botocore models it."""
+    return {"metadata": {"protocol": "rest-json"},
+            "operations": {"StartJobRun": {"input": {"shape": "Input"}}}, "shapes": {
+                "Input": {"members": {role_member: {"shape": "IAMRoleArn", **(role or {})},
+                                      "jobTemplateId": {"shape": "ResourceIdString"},
+                                      "virtualClusterId": {"shape": "ResourceIdString", "location": "uri"}}},
+                "IAMRoleArn": {"type": role_type}, "ResourceIdString": {"type": "string"}}}
+
+
+BY_NAME_ACTIONS = {"emr-containers:StartJobRun": ["emr-containers:ExecutionRoleArn",
+                                                  "emr-containers:JobTemplateArn"]}
+
+
+def test_a_by_name_key_is_read_from_the_member_named_after_it_ignoring_case():
+    assert request_members("emr-containers", by_name_model(), BY_NAME_ACTIONS) == {
+        "emr-containers:StartJobRun": {"emr-containers:ExecutionRoleArn": ["executionRoleArn"]}}
+    assert member_shapes("emr-containers", by_name_model(), BY_NAME_ACTIONS) == {
+        "emr-containers:StartJobRun": {"executionRoleArn": "IAMRoleArn"}}
+
+
+@pytest.mark.parametrize("model", [
+    by_name_model(role_member="roleArn"),
+    by_name_model(role={"location": "header"}),
+    by_name_model(role_type="structure"),
+])
+def test_a_by_name_key_without_a_string_member_in_the_body_is_not_read(model):
+    assert request_members("emr-containers", model, BY_NAME_ACTIONS) == {}
+
+
+def test_a_by_name_namespace_keeps_its_own_string_and_arn_keys():
+    reference = {"Name": "emr-containers",
+                 "ConditionKeys": [{"Name": "aws:TagKeys", "Types": ["ArrayOfString"]},
+                                   {"Name": "emr-containers:ExecutionRoleArn", "Types": ["ARN"]},
+                                   {"Name": "emr-containers:JobTemplateArn", "Types": ["ARN"]},
+                                   {"Name": "emr-containers:Retries", "Types": ["Numeric"]}],
+                 "Resources": [{"Name": "virtualCluster"}],
+                 "Actions": [{"Name": "StartJobRun",
+                              "ActionConditionKeys": ["aws:TagKeys", "emr-containers:ExecutionRoleArn",
+                                                      "emr-containers:JobTemplateArn", "emr-containers:Retries"],
+                              "Resources": [{"Name": "virtualCluster"}]},
+                             {"Name": "DescribeJobRun", "Resources": [{"Name": "virtualCluster"}]}]}
+    assert action_keys("emr-containers", reference) == BY_NAME_ACTIONS
+
+
 def test_the_vendored_table_covers_its_namespaces():
     document = json.loads(OUTPUT.read_text())
     assert validate(document) == []
@@ -132,7 +177,11 @@ def test_the_vendored_table_covers_its_namespaces():
         "route53:ChangeResourceRecordSets"]
     assert document["memberShapes"]["route53:ChangeResourceRecordSets"][
         "ChangeBatch.Changes.Change.ResourceRecordSet.Name"] == "DNSName"
-    assert document["protocols"] == {"eks": "rest-json", "lambda": "rest-json",
+    assert document["members"]["emr-containers:StartJobRun"] == {
+        "emr-containers:ExecutionRoleArn": ["executionRoleArn"]}
+    assert document["members"]["emr-containers:CreateManagedEndpoint"] == {
+        "emr-containers:ExecutionRoleArn": ["executionRoleArn"]}
+    assert document["protocols"] == {"eks": "rest-json", "emr-containers": "rest-json", "lambda": "rest-json",
                                      "redshift": "query", "route53": "rest-xml"}
 
 
