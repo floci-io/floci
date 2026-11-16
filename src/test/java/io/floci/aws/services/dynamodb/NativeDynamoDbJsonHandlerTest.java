@@ -3363,6 +3363,31 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"ExclusiveStartTableName":"ab"}             | 1 validation error detected: Value 'ab' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"ExclusiveStartTableName":"😀😀"}           | 2 validation errors detected: Value '😀😀' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '😀😀' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":""}               | 2 validation errors detected: Value '' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":"arn:aws:dynamodb:eu-west-2:123456789012:table/abc"} | 1 validation error detected: Value 'arn:aws:dynamodb:eu-west-2:123456789012:table/abc' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":"ab","Limit":0}   | 2 validation errors detected: Value '0' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1; Value 'ab' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"ExclusiveStartTableName":"a!","Limit":101} | 3 validation errors detected: Value '101' at 'limit' failed to satisfy constraint: Member must have value less than or equal to 100; Value 'a!' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'a!' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            """)
+    void listTablesChecksItsStartNameBesideItsLimit(String request, String message) throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ListTables", mapper.readTree(request), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"ExclusiveStartTableName\":\"Aaa\"}", "{\"ExclusiveStartTableName\":null}"})
+    void listTablesAcceptsAStartNameNoTableHasAndANullOne(String request) throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("ListTables", mapper.readTree(request), "eu-west-1");
+        assertTrue(response.getEntity().toString().contains("Users"), response.getEntity().toString());
+    }
+
+    @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             PutItem    | {"TableName":"Missing","Item":{},"ReturnValues":"ALL_NEW"} | 1 validation error detected: ReturnValues can only be ALL_OLD or NONE
             DeleteItem | {"TableName":"Missing","Key":{},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
