@@ -77,6 +77,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
@@ -519,7 +520,7 @@ public class IotService {
     public record RegisteredDevice(String accountId, String region, IotCertificate certificate) {
     }
 
-    public record ConnectionPolicies(List<String> documents, Map<String, String> variables, String region, String accountId) {
+    public record ConnectionPolicies(Supplier<List<String>> documents, Map<String, String> variables, String region, String accountId) {
     }
 
     private record CertificateLocation(String accountId, String key) {
@@ -602,34 +603,25 @@ public class IotService {
     }
 
     public ConnectionPolicies devicePolicies(RegisteredDevice device, String clientId, String sourceIp, String domainName) {
-        return new ConnectionPolicies(attachedPolicyDocuments(device.certificate().getCertificateArn(), device.region(), device.accountId()),
+        return new ConnectionPolicies(() -> attachedPolicyDocuments(device.certificate().getCertificateArn(), device.region(), device.accountId()),
                 connectionVariables(device, clientId, sourceIp, domainName), device.region(), device.accountId());
     }
 
     public ConnectionPolicies authorizerPolicies(List<String> documents, String clientId, String sourceIp, String domainName) {
         // ponytail: the broker has no request context, so a custom-auth client connects to the default account and region.
-        return new ConnectionPolicies(documents, basicConnectionVariables(clientId, sourceIp, domainName),
+        return new ConnectionPolicies(() -> documents, basicConnectionVariables(clientId, sourceIp, domainName),
                 regionResolver.getDefaultRegion(), regionResolver.getDefaultAccountId());
     }
 
-    /**
-     * Decides an IoT action on {@code resource} ({@code client/<id>}, {@code topic/<topic>} or
-     * {@code topicfilter/<filter>}) against the documents as they are written, with the
-     * connection's variables offered as condition keys. The {@code ${...}} placeholders are the
-     * evaluator's to resolve, from that same context, because the developer guide gives IoT no
-     * policy language of its own: its policies "follow the same conventions as IAM policies" and
-     * "the same policy evaluation logic", and a variable is one "that can be used in AWS IoT Core
-     * policies in the Resource or Condition block", which is where that resolver substitutes and
-     * the only place AWS says a variable has meaning.
-     */
     public boolean isAllowed(ConnectionPolicies policies, String action, String resource) {
-        if (policies.documents().isEmpty()) {
+        List<String> documents = policies.documents().get();
+        if (documents.isEmpty()) {
             return false;
         }
         Map<String, List<String>> conditionContext = new LinkedHashMap<>();
         policies.variables().forEach((key, value) -> conditionContext.put(key, List.of(value)));
         String arn = AwsArnUtils.Arn.of("iot", policies.region(), policies.accountId(), resource).toString();
-        return policyEvaluator.evaluate(CallerContext.of(policies.documents()), null, action, arn, conditionContext)
+        return policyEvaluator.evaluate(CallerContext.of(documents), null, action, arn, conditionContext)
                 == IamPolicyEvaluator.Decision.ALLOW;
     }
 

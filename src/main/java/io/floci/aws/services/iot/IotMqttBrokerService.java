@@ -763,7 +763,6 @@ public class IotMqttBrokerService implements Resettable {
         fanOut(topic, payload, message.qosLevel().value(), userProperties(message.properties()));
     }
 
-    /** As on AWS IoT: MQTT 3.1.1 is closed, MQTT 5 gets PUBACK 0x87 at QoS 1 and DISCONNECT 0x87 at QoS 0. */
     private void refusePublish(ClientSession session, MqttPublishMessage message) {
         if (session.endpoint().protocolVersion() == 5 && message.qosLevel() == MqttQoS.AT_LEAST_ONCE) {
             session.endpoint().publishAcknowledge(message.messageId(), MqttPubAckReasonCode.NOT_AUTHORIZED, MqttProperties.NO_PROPERTIES);

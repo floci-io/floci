@@ -20,6 +20,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -181,6 +182,31 @@ class IotMqttTopicAuthorizationIntegrationTest {
                 closeV3(subscriber);
             }
             closeV3(publisher);
+        }
+    }
+
+    @Test
+    void aNewDefaultPolicyVersionAppliesToAnEstablishedSession() throws Exception {
+        String prefix = "revoke/" + System.nanoTime();
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
+        String policy = device.attachNewPolicy(receiveOnly("*"), cleanup);
+        MqttClient subscriber = connectV3(device, "sub-" + System.nanoTime());
+        MqttClient publisher = connectPlain("pub-" + System.nanoTime());
+        try {
+            BlockingQueue<String> received = new LinkedBlockingQueue<>();
+            subscriber.subscribe(prefix + "/+", 1, (topic, message) -> received.add(topic));
+            given().contentType("application/json").body(Map.of("policyDocument", receiveOnly(prefix + "/kept")))
+                    .queryParam("setAsDefault", true)
+                    .when().post("/policies/" + policy + "/version").then().statusCode(200);
+
+            publisher.publish(prefix + "/revoked", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+            publisher.publish(prefix + "/kept", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+
+            assertEquals(prefix + "/kept", received.poll(10, TimeUnit.SECONDS));
+            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
+        } finally {
+            closeV3(publisher);
+            closeV3(subscriber);
         }
     }
 

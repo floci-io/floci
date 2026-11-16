@@ -217,13 +217,13 @@ The connection is admitted when all of these hold, otherwise the broker answers 
 
 The connection carries these condition keys: `iot:ClientId`, `aws:SourceIp`, `iot:DomainName` (the server name the client sent in the TLS handshake, absent when it dialled an IP address), `iot:Connection.Thing.IsAttached` and, only when the client id names a thing attached to the certificate with `AttachThingPrincipal`, `iot:Connection.Thing.ThingName`, `iot:Connection.Thing.ThingTypeName` and `iot:Connection.Thing.Attributes[name]`. They are also what the policy's own `${...}` resolves against, in the `Resource` and `Condition` elements and nowhere else, read by the same resolver as an IAM policy's variables: key names are case-insensitive, `${*}`, `${?}` and `${$}` stand for those three characters, and a variable with no value, the certificate variables `iot:Certificate.*` among them, leaves a `Resource` pattern matching no resource and a `Condition` value null. A document that does not declare `"Version": "2012-10-17"` has no variables at all, `${iot:ClientId}` there being the literal text it looks like.
 
-Differences from AWS: AWS rejects an unregistered, inactive or expired certificate during the TLS handshake and closes an MQTT 3.1.1 connection it does not authorize without a `CONNACK`; Floci completes the handshake and always answers with the return code, so the reason is visible to the client. Deactivating the certificate or detaching the policy takes effect on the next connect; established sessions are not dropped and keep the policies they connected with. Policies attached to thing groups are not consulted, and exclusive thing attachment (`thingPrincipalType`) is not modelled: the thing is always the one named by the client id.
+Differences from AWS: AWS rejects an unregistered, inactive or expired certificate during the TLS handshake and closes an MQTT 3.1.1 connection it does not authorize without a `CONNACK`; Floci completes the handshake and always answers with the return code, so the reason is visible to the client. Deactivating the certificate or detaching the policy takes effect on the next connect; established sessions are not dropped. A policy change does apply to an established session's next publish, subscribe and delivery, see [Topic authorization](#topic-authorization). Policies attached to thing groups are not consulted, and exclusive thing attachment (`thingPrincipalType`) is not modelled: the thing is always the one named by the client id.
 
 #### Topic authorization
 
 A session admitted on 8883 by its certificate, or on 1883 or `/mqtt` by a custom authorizer, is
-authorized per packet against the policies it connected with: the certificate's attached policies,
-or the authorizer's returned ones. The resources are
+authorized per packet against the policies attached to its certificate at that moment, or against
+the policies the authorizer returned at connect. The resources are
 `arn:aws:iot:<region>:<account>:topicfilter/<filter>` for `iot:Subscribe` and
 `arn:aws:iot:<region>:<account>:topic/<topic>` for `iot:Publish` and `iot:Receive`, reserved
 `$aws/` topics included, and the condition keys and policy variables are those of the connect, so
