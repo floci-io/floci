@@ -993,6 +993,45 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Athena holds on a workgroup and a data catalog, so an allow
+     * on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void anAthenaResourceTagConditionReadsTheTagsOfTheWorkgroupAndTheDataCatalog() {
+        String workGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "data");
+        String otherWorkGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "web");
+        String catalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "data");
+        String otherCatalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "web");
+
+        User user = user("res-athena-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"athena:GetWorkGroup\",\"athena:GetDataCatalog\"],"
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + workGroup + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + otherWorkGroup
+                + "\"}"), "athena:GetWorkGroup");
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + catalog + "\"}").statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + otherCatalog
+                + "\"}"), "athena:GetDataCatalog");
+    }
+
+    /** An Athena workgroup or {@code LAMBDA} data catalog of the name, tagged with the team, deleted afterwards. */
+    private String athenaTagged(String operation, String name, String team) {
+        String body = "CreateWorkGroup".equals(operation) ? "{\"Name\":\"" + name + "\""
+                : "{\"Name\":\"" + name + "\",\"Type\":\"LAMBDA\"";
+        adminJson("athena", "AmazonAthena." + operation).body(body + ",\"Tags\":[{\"Key\":\"team\",\"Value\":\""
+                + team + "\"}]}").post("/").then().statusCode(200);
+        if ("CreateWorkGroup".equals(operation)) {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteWorkGroup")
+                    .body("{\"WorkGroup\":\"" + name + "\"}").post("/"));
+        } else {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteDataCatalog")
+                    .body("{\"Name\":\"" + name + "\"}").post("/"));
+        }
+        return name;
+    }
+
+    /**
      * An Athena catalog read is checked on the catalog its {@code CatalogName} names, and Floci reads the metadata of
      * none but the account's Glue Data Catalog: a catalog of another type is refused, so a grant on it does not reach
      * the Glue data, nor does one on a Glue catalog reach {@code AwsDataCatalog}'s grant.
