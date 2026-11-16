@@ -95,8 +95,8 @@ class CodeBuildRunnerSourceFailureTest {
         subnet.setSubnetId("subnet-1");
         subnet.setVpcId("vpc-1");
         when(ec2.describeSubnets("us-east-1", List.of("subnet-1"), Map.of())).thenReturn(List.of(subnet));
-        when(ec2.allocateVpcPrivateIp("us-east-1", "subnet-1")).thenReturn(Optional.of("10.0.1.20"));
-        when(ec2.attachContainerToVpc("us-east-1", "vpc-1", "subnet-1", "container", "10.0.1.20"))
+        when(ec2.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-1")).thenReturn(Optional.of("10.0.1.20"));
+        when(ec2.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-1", "container", "10.0.1.20"))
                 .thenReturn(Optional.of("10.0.1.20"));
         Fixture fixture = fixture(false, ec2);
         // StartBuild copied the project's vpcConfig onto the build; the project has since been updated.
@@ -115,7 +115,7 @@ class CodeBuildRunnerSourceFailureTest {
 
         assertTrue(heldDuringCopy.get(), "the build's address holds its subnet and VPC while it runs");
         // The address is given back right after the container is removed, on the build's thread.
-        verify(ec2, timeout(5_000)).releaseVpcPrivateIp("us-east-1", "subnet-1", "10.0.1.20");
+        verify(ec2, timeout(5_000)).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-1", "10.0.1.20");
         assertFalse(fixture.runner().hasSubnetDependency("us-east-1", "subnet-1"));
     }
 

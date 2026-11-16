@@ -115,7 +115,7 @@ class EcsContainerManagerTaskAddressTest {
                 container("sidecar", List.of()), container("web", List.of(new PortMapping(80, 80, "tcp")))),
                 List.of(), REGION);
 
-        verify(ec2Service).attachContainerToVpc(REGION, "vpc-1", "subnet-1", "web-id", "10.0.0.10");
+        verify(ec2Service).attachContainerToVpc("000000000000", REGION, "vpc-1", "subnet-1", "web-id", "10.0.0.10");
     }
 
     @Test
@@ -123,7 +123,7 @@ class EcsContainerManagerTaskAddressTest {
         manager.startTask(taskWithEni(), taskDefinition(NetworkMode.awsvpc,
                 container("sidecar", List.of()), container("web", List.of())), List.of(), REGION);
 
-        verify(ec2Service).attachContainerToVpc(REGION, "vpc-1", "subnet-1", "sidecar-id", "10.0.0.10");
+        verify(ec2Service).attachContainerToVpc("000000000000", REGION, "vpc-1", "subnet-1", "sidecar-id", "10.0.0.10");
     }
 
     @Test
@@ -134,7 +134,7 @@ class EcsContainerManagerTaskAddressTest {
         manager.startTask(task, taskDefinition(NetworkMode.bridge,
                 container("web", List.of(new PortMapping(80, 80, "tcp")))), List.of(), REGION);
 
-        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any());
+        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -159,7 +159,7 @@ class EcsContainerManagerTaskAddressTest {
                 container("web", List.of(new PortMapping(80, 80, "tcp")))), List.of(), REGION);
 
         assertEquals("eni-1", task.getNetworkInterfaceId());
-        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any());
+        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any(), any());
     }
 
     @ParameterizedTest

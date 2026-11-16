@@ -48,18 +48,18 @@ class VpcContainerLeasesTest {
         subnet.setSubnetId("subnet-1");
         subnet.setVpcId("vpc-1");
         when(ec2.describeSubnets(REGION, List.of("subnet-1"), Map.of())).thenReturn(List.of(subnet));
-        when(ec2.allocateVpcPrivateIp(REGION, "subnet-1")).thenReturn(Optional.of("10.0.1.20"));
+        when(ec2.allocateVpcPrivateIp(ACCOUNT, REGION, "subnet-1")).thenReturn(Optional.of("10.0.1.20"));
         leases = new VpcContainerLeases(ec2, "Test resource", () -> docker);
     }
 
     @Test
     void anAttachThatFailsGivesTheLeasedAddressBack() {
-        when(ec2.attachContainerToVpc(REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
+        when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
                 .thenThrow(new IllegalStateException("docker refused"));
 
         assertThrows(IllegalStateException.class, () -> leases.join(ACCOUNT, REGION, null, "subnet-1", "c1", "r1"));
 
-        verify(ec2).releaseVpcPrivateIp(REGION, "subnet-1", "10.0.1.20");
+        verify(ec2).releaseVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.20");
         assertFalse(leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"));
     }
 
@@ -67,12 +67,12 @@ class VpcContainerLeasesTest {
     void aSubnetOutsideTheVpcTheResourceNamesIsNotJoined() {
         assertTrue(leases.join(ACCOUNT, REGION, "vpc-other", "subnet-1", "c1", "r1").isEmpty());
 
-        verify(ec2, never()).allocateVpcPrivateIp(anyString(), anyString());
+        verify(ec2, never()).allocateVpcPrivateIp(anyString(), anyString(), anyString());
     }
 
     @Test
     void anAddressDockerCouldNotConfirmFreeIsGivenBackOnceTheContainerIsGone() {
-        when(ec2.attachContainerToVpc(REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
+        when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
                 .thenReturn(Optional.of("10.0.1.20"));
         assertEquals("10.0.1.20", leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "r1")
                 .orElseThrow().address());
@@ -92,6 +92,6 @@ class VpcContainerLeasesTest {
 
         inspect.set(new NotFoundException("gone"));
         assertFalse(leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"));
-        verify(ec2).releaseVpcPrivateIp(REGION, "subnet-1", "10.0.1.20");
+        verify(ec2).releaseVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.20");
     }
 }

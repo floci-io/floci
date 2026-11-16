@@ -1529,8 +1529,11 @@ anyway: the network's IPAM pool is the whole VPC CIDR and each subnet allocates 
 out of its own slice of it.
 
 An address a subnet picks on its own is never one that an instance, network interface or NAT
-gateway in the subnet already holds. Default subnet ids are the same in every account, so those
-subnets share a network, and what any account holds there counts.
+gateway of the account in the subnet already holds. Each account's VPC has a network of its own,
+the default VPC included, whose id every account shares: a network for any account but the
+default one carries the account in its name. As two accounts' default VPCs declare the same
+`172.31.0.0/16`, the second one's network takes a range from `fallback-pool`, as overlapping
+CIDRs do.
 
 The declared CIDR is used verbatim whenever it can be. It cannot be when it is absent, malformed,
 outside RFC 1918, or already claimed on the Docker daemon, including by another Floci VPC, since

@@ -1174,8 +1174,8 @@ public class EcsContainerManager {
                 .filter(def -> def.getPortMappings() != null && !def.getPortMappings().isEmpty())
                 .findFirst()
                 .orElse(definitions.getFirst());
-        ec2Service.attachContainerToVpc(region, vpcId,
-                task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
+        ec2Service.attachContainerToVpc(AwsArnUtils.accountOrDefault(task.getTaskArn(), regionResolver.getAccountId()),
+                region, vpcId, task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
                 containerIds.get(holder.getName()), task.getPrivateIpAddress());
     }
 
