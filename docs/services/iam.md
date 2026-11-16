@@ -1792,6 +1792,26 @@ templates are registered by AWS out of band, with no API, so
 `PolicyTemplateArn` is kept as given and resolved against nothing, and `LimitExceeded` is modeled
 with no published quota behind it, so no limit is enforced.
 
+Whoever holds a request carries a grant over it. The customer page's note reads "By default, IAM
+principals who initiate a delegation request are automatically granted permissions to manage that
+specific request. They can associate it with their account, view request details, reject a request,
+forward it to an administrator for approval, release the exchange token to the product provider
+after admin approval, and list delegation requests that they own." So the identity a request records
+as its owner may read it, forward it with `UpdateDelegationRequest`, reject it and release its token
+without a policy naming any of them. Listing is granted the way the note words it, "delegation
+requests that they own": the grant allows `ListDelegationRequests` under an `ArnEquals` condition on
+`iam:DelegationRequestOwner`, the key the Service Reference publishes on that action, held to the
+owner's own ARN. An owner therefore names itself in `OwnerId` and is answered with its own requests,
+while naming another owner, or naming none, is refused. The account's whole listing is the separate
+permission the same page's table describes as "List delegation requests for your account", which an
+administrator grants.
+Two things that note leaves out and Floci leaves out with it: approving, because the same page lists
+`iam:AcceptDelegationRequest` among the permissions an administrator grants, and associating, which
+is the one ability nothing here can grant, a request recording no owner until it is claimed and so
+naming nobody to grant it to beforehand. The grant is read where an identity's policies are
+assembled, so a simulation and an access report see it exactly as a request does, and it names the
+requests that identity owns rather than the family.
+
 Permission boundaries are registered out of band too, and those Floci can be handed. The partner
 guide says long-term permissions "limit the permissions of any roles that are created or managed
 through temporary access" and are "implemented as IAM permissions boundaries", registered by
@@ -3037,6 +3057,10 @@ floci populates:
     `CreateServiceSpecificCredential`. A numeric key matches the `Numeric` operators.
   - `iam:OrganizationsPolicyId` from `OrganizationsPolicyId` on
     `GenerateOrganizationsAccessReport`.
+  - `iam:DelegationRequestOwner` from `OwnerId` on `ListDelegationRequests`, which is how the
+    owner grant scopes a holder's listing to its own requests. The seven other delegation
+    actions the Service Reference lists the key on read it from the stored request rather than
+    from a parameter, so they stay in `notRead`.
 
   The table's `fromTarget` entries read `iam:PermissionsBoundary` from the role or user the
   request names in `RoleName` or `UserName`: its stored boundary, on the 15 actions on an

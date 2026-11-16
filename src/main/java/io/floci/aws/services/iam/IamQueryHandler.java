@@ -3179,13 +3179,14 @@ public class IamQueryHandler {
                 IamUser user = requireMatchingArn(iamService.getUser(parsed.name()).getArn(), arn,
                         iamService.getUser(parsed.name()));
                 // The report lists "every AWS service that the resource could access using
-                // permissions policies", so a permission the account applies to its users without
-                // attaching it counts: a user with no policies of their own still reaches IAM
-                // while the password policy allows self-service. It is added to the documents the
-                // service list is read from rather than to policiesForIdentity, since it is no
-                // policy of the user's and has no name or ARN to report as one.
+                // permissions policies", so a permission applied to a user without being attached
+                // counts: a user with no policies of their own still reaches IAM while the
+                // password policy allows self-service, and still reaches the delegation requests
+                // it owns. These are added to the documents the service list is read from rather
+                // than to policiesForIdentity, since they are no policies of the user's and have
+                // no name or ARN to report as one.
                 List<String> documents = new ArrayList<>(identityPolicyDocuments(accountId, arn));
-                documents.addAll(iamService.accountLevelUserGrants(accountId));
+                documents.addAll(iamService.implicitUserGrants(accountId, arn));
                 yield new AccessAdvisorTarget(documents, List.of(entityOf(user)));
             }
             case "role" -> {

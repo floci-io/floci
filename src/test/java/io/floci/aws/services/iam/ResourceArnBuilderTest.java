@@ -211,8 +211,13 @@ class ResourceArnBuilderTest {
     @Test
     void iamNamesTheDelegationRequestABlockOfActionsActsOn() {
         String id = "dr-0123456789abcdef01234567";
+        // The forward is in this block now. AWS's "Managing Permissions for Delegation Requests"
+        // lists iam:UpdateDelegationRequest among the permissions an administrator grants, as
+        // "Forward a delegation request to an administrator for approval", so it is authorizable
+        // and names the request its id names, where this suite used to pin it at the wildcard on
+        // the belief that AWS published no action for it.
         for (String action : List.of("AssociateDelegationRequest", "AcceptDelegationRequest",
-                "RejectDelegationRequest", "GetDelegationRequest")) {
+                "RejectDelegationRequest", "GetDelegationRequest", "UpdateDelegationRequest")) {
             assertEquals("arn:aws:iam::000000000000:delegation-request/" + id,
                     resourceOf(builder, "Action=" + action + "&DelegationRequestId=" + id), action);
         }
@@ -223,9 +228,6 @@ class ResourceArnBuilderTest {
         // IAM assigns the id, so the create names no resource to authorize against.
         assertEquals("*", resourceOf(builder,
                 "Action=CreateDelegationRequest&Description=d&RequestorWorkflowId=w"));
-        // AWS publishes no authorizable action for the update at all, so it carries no type.
-        assertEquals("*", resourceOf(builder,
-                "Action=UpdateDelegationRequest&DelegationRequestId=dr-0123456789abcdef01234567"));
     }
 
     /**

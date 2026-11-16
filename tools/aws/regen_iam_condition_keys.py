@@ -44,6 +44,7 @@ BY_HAND = {
     ("iam:CreateDelegationRequest", "iam:TemplateArn"): "Permissions.PolicyTemplateArn",
     ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialAgeDays"): "CredentialAgeDays",
     ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialServiceName"): "ServiceName",
+    ("iam:ListDelegationRequests", "iam:DelegationRequestOwner"): "OwnerId",
 }
 # The botocore types a BY_HAND member may have for each key type; the context value is the member's text.
 BY_HAND_TYPES = {"String": {"string", "integer"}, "ARN": {"string"}, "Numeric": {"integer", "long"}}
