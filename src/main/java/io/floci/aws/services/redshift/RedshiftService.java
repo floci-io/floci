@@ -2,8 +2,6 @@ package io.floci.aws.services.redshift;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -15,6 +13,7 @@ import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageJson;
 import io.floci.aws.services.dynamodb.backend.DynamoDbStreamReader;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -2180,19 +2179,6 @@ public class RedshiftService implements ManagedSecretRotator {
     /** Separates the Region from the name in a {@link #regionalKey}. */
     private static final String KEY_SEPARATOR = "::";
 
-    /** Copies records through their JSON form, with the settings the file storages read and write them with. */
-    private static final ObjectMapper RECORD_COPIES = new ObjectMapper().registerModule(new JavaTimeModule())
-            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-
-    /**
-     * A copy of a stored record, through its JSON form as the storage keeps it, so a record copied to a second Region
-     * is a record of its own there, as it would be read back from disk.
-     */
-    @SuppressWarnings("unchecked")
-    private static <V> V copyOf(V record) {
-        return RECORD_COPIES.convertValue(record, (Class<V>) record.getClass());
-    }
-
     /**
      * Moves the cluster parameter groups, subnet groups, snapshot schedules and snapshot copy grants stored before
      * they became Regional from their bare name onto {@link #regionalKey} keys. They recorded no Region, and every
@@ -2284,7 +2270,7 @@ public class RedshiftService implements ManagedSecretRotator {
                     continue;
                 }
                 if (store.getForAccount(entry.accountId(), regionalKey(region, recordName)).isEmpty()) {
-                    V copy = copyOf(entry.value());
+                    V copy = StorageJson.copy(entry.value());
                     forRegion.accept(copy, region);
                     store.putForAccount(entry.accountId(), regionalKey(region, recordName), copy);
                 }
