@@ -576,20 +576,19 @@ public class NativeDynamoDbJsonHandler {
         String exclusiveStart = request.has("ExclusiveStartTableName")
                 ? request.get("ExclusiveStartTableName").asText() : null;
 
+        List<String> violations = new ArrayList<>();
         if (limit != null) {
-            if (limit < 1) {
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + limit
-                        + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value greater than or equal to 1");
-            }
-            if (limit > 100) {
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + limit
-                        + "' at 'limit' failed to satisfy constraint: "
-                        + "Member must have value less than or equal to 100");
+            addIfPresent(violations, SmithyValidationErrors.outOfRange("limit", limit, 1, 100));
+        }
+        if (exclusiveStart != null) {
+            addIfPresent(violations,
+                    SmithyValidationErrors.lengthOutOfRange("exclusiveStartTableName", exclusiveStart, 3, 255));
+            if (!INDEX_NAME_CHARS.matcher(exclusiveStart).matches()) {
+                violations.add(SmithyValidationErrors.pattern("exclusiveStartTableName", exclusiveStart,
+                        "[a-zA-Z0-9_.-]+"));
             }
         }
+        throwValidationErrors(violations);
 
         DynamoDbService.ListTablesResult result = dynamoDbService.listTables(region, limit, exclusiveStart);
 
