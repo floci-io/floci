@@ -104,9 +104,20 @@ also applies when termination protection is enabled.
 `AddJobFlowSteps` rejects a `TERMINATING` or `TERMINATED` cluster without adding steps or changing its
 termination status, and answers an unknown cluster with `ValidationException` "Specified job flow ID
 does not exist.", as AWS does.
-Instance groups and fleets report `RUNNING` from the cluster's creation until it is `TERMINATED`. Then
-they report `TERMINATED` with zero running or provisioned capacity; their requested and target
-capacities remain recorded. `ListInstances` numbers the synthetic IDs and addresses of the `MASTER`
+Instance groups and fleets follow their cluster's state, Floci's reading, as no source says when theirs apply:
+`PROVISIONING` while it is `STARTING`, with nothing running or provisioned yet (the guide's events end an instance
+fleet's provisioning with "Provisioning for instance fleet ... is complete ... The instance fleet now has On-Demand
+capacity of Num"), `BOOTSTRAPPING` while it is, with every instance up for its bootstrap actions, `RUNNING` while it
+runs or waits, and `TERMINATING` as it ends; one added later takes the state the cluster's others are in. Once it is
+`TERMINATED` they report `TERMINATED` with zero running or provisioned capacity; their requested and target
+capacities remain recorded, and a group that ended while it was provisioned counts the instances it asked for as
+terminated, which `ListInstances` lists so, as an ended fleet's targets are. `ListInstances` gives each instance
+its group's or fleet's state, `PROVISIONING`,
+`BOOTSTRAPPING`, `RUNNING` (while its cluster ends too) or `TERMINATED`, lists one being provisioned though none runs
+yet, and its `InstanceStates` filter keeps the instances in the states it names. A cluster terminated while it is
+`STARTING` keeps the instances it was provisioning listed, still `PROVISIONING` and with none of them running, until
+it is `TERMINATED`, so the same instances are listed throughout. `ListInstances` numbers the
+synthetic IDs and addresses of the `MASTER`
 group's or fleet's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
 `DescribeCluster`'s `MasterPublicDnsName` says, while the others resize, and every other instance's private
 address is `10.<group>.0.<n>`, its group's or fleet's number in the cluster and its own in it, so it too stays while

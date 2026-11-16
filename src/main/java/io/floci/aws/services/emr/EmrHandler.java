@@ -330,8 +330,7 @@ public class EmrHandler {
         ArrayNode arr = response.putArray("Instances");
         boolean terminated = EmrClusterLifecycle.isTerminated(cluster.getState());
         List<String> states = stringList(request.path("InstanceStates"));
-        if ((!states.isEmpty() && !states.contains(terminated ? "TERMINATED" : "RUNNING"))
-                || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
+        if (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now())) {
             return Response.ok(response).build();
         }
         String groupId = text(request, "InstanceGroupId");
@@ -353,7 +352,8 @@ public class EmrHandler {
             if (set != primary) {
                 next += set.count();
             }
-            if (!set.matches(groupId, groupTypes, fleetId, fleetType)) {
+            if (!set.matches(groupId, groupTypes, fleetId, fleetType)
+                    || !states.isEmpty() && !states.contains(set.state())) {
                 continue;
             }
             if (skip >= set.count()) {
@@ -399,27 +399,61 @@ public class EmrHandler {
         for (EmrInstanceGroup group : groups) {
             int count = listedInstanceCount(group, terminated);
             listed.add(new ListedInstances(group.getId(), null, group.getInstanceGroupType(), group.getInstanceType(),
-                    EmrService.groupNumber(groups, group), count, group.getMarket(), count));
+                    EmrService.groupNumber(groups, group), count, group.getMarket(), count,
+                    instanceState(group.getState(), beingProvisioned(group), terminated)));
         }
         List<EmrInstanceFleet> fleets = cluster.getInstanceFleets();
         for (EmrInstanceFleet fleet : fleets) {
-            // An ended fleet has no capacity provisioned any more; its targets, which it can no longer change, say what
-            // it ran.
-            long onDemand = terminated ? fleet.getTargetOnDemandCapacity() : fleet.getProvisionedOnDemandCapacity();
-            long spot = terminated ? fleet.getTargetSpotCapacity() : fleet.getProvisionedSpotCapacity();
+            // An ended fleet has no capacity provisioned any more, and one being provisioned none yet: its targets,
+            // which an ended one can no longer change, say what it ran, or what it is being provisioned with.
+            boolean provisioning = beingProvisioned(fleet);
+            boolean targets = terminated || provisioning;
+            long onDemand = targets ? fleet.getTargetOnDemandCapacity() : fleet.getProvisionedOnDemandCapacity();
+            long spot = targets ? fleet.getTargetSpotCapacity() : fleet.getProvisionedSpotCapacity();
             listed.add(new ListedInstances(null, fleet.getId(), fleet.getInstanceFleetType(),
                     fleet.getInstanceTypes().isEmpty() ? null : fleet.getInstanceTypes().getFirst(),
-                    EmrService.fleetNumber(fleets, fleet), onDemand + spot, "ON_DEMAND", onDemand));
+                    EmrService.fleetNumber(fleets, fleet), onDemand + spot, "ON_DEMAND", onDemand,
+                    instanceState(fleet.getState(), provisioning, terminated)));
         }
         return listed;
     }
 
+    // The state ListInstances gives the instances of a group or fleet in groupState, InstanceState's: being
+    // provisioned, bootstrapped, running, as they still are while their cluster ends, or gone.
+    private static String instanceState(String groupState, boolean provisioning, boolean terminated) {
+        if (terminated || EmrClusterLifecycle.TERMINATED.equals(groupState)) {
+            return "TERMINATED";
+        }
+        if (provisioning) {
+            return EmrClusterLifecycle.PROVISIONING;
+        }
+        return EmrClusterLifecycle.BOOTSTRAPPING.equals(groupState) ? groupState : "RUNNING";
+    }
+
+    /**
+     * Whether a group's instances are still being provisioned: while it is PROVISIONING, and while its cluster ends
+     * before any of them ran, TERMINATING with none running. Those it asks for stay listed, the instances ListInstances
+     * showed being provisioned, until they have ended, with none of them counted as running.
+     */
+    static boolean beingProvisioned(EmrInstanceGroup group) {
+        return EmrClusterLifecycle.PROVISIONING.equals(group.getState())
+                || EmrClusterLifecycle.TERMINATING.equals(group.getState()) && group.getRunningInstanceCount() == 0;
+    }
+
+    /** Whether a fleet's capacity is still being provisioned, as {@link #beingProvisioned(EmrInstanceGroup)}. */
+    static boolean beingProvisioned(EmrInstanceFleet fleet) {
+        return EmrClusterLifecycle.PROVISIONING.equals(fleet.getState())
+                || EmrClusterLifecycle.TERMINATING.equals(fleet.getState())
+                && fleet.getProvisionedOnDemandCapacity() + fleet.getProvisionedSpotCapacity() == 0;
+    }
+
     /**
      * The instances ListInstances lists for one instance group or fleet: {@code count} of them, with addresses numbered
-     * {@code number}, those after the first {@code spotAfter} on the spot market and the others on {@code market}.
+     * {@code number}, those after the first {@code spotAfter} on the spot market and the others on {@code market}, each
+     * in {@code state}.
      */
     record ListedInstances(String groupId, String fleetId, String type, String instanceType, int number, long count,
-                           String market, long spotAfter) {
+                           String market, long spotAfter, String state) {
 
         String marketOf(long ordinal) {
             return ordinal <= spotAfter ? market : "SPOT";
@@ -441,6 +475,10 @@ public class EmrHandler {
     static int listedInstanceCount(EmrInstanceGroup group, boolean terminated) {
         if (terminated && group.getTerminatedInstanceCount() > 0) {
             return group.getTerminatedInstanceCount();
+        }
+        // Being provisioned, none of them runs yet, and each is listed.
+        if (beingProvisioned(group)) {
+            return group.getRequestedInstanceCount();
         }
         return group.getRunningInstanceCount();
     }
@@ -953,7 +991,7 @@ public class EmrHandler {
         if (set.instanceType() != null) {
             node.put("InstanceType", set.instanceType());
         }
-        node.putObject("Status").put("State", terminated ? "TERMINATED" : "RUNNING");
+        node.putObject("Status").put("State", set.state());
         return node;
     }
 
