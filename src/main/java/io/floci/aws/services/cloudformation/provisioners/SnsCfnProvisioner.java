@@ -325,6 +325,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionSubscription(StackResource r, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String topicArn = ctx.engine().resolve(props.path("TopicArn"));
         String protocol = ctx.engine().resolve(props.path("Protocol"));
         String endpoint = ctx.engine().resolve(props.path("Endpoint"));
@@ -350,8 +354,14 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         }
 
         String subscriptionArn;
-        if (ctx.isUpdate() && matchesPriorSubscription(topicArn, protocol, endpoint, ctx)) {
+        // TopicArn, Protocol and Endpoint are create-only in the registry, so the engine's change decides
+        // whether this update replaces the subscription; the displaced one is removed once it commits.
+        boolean inPlace = ctx.isUpdate() && !ctx.changes(SUBSCRIPTION, props).requiresReplacement();
+        boolean created = true;
+        if (inPlace) {
             subscriptionArn = ctx.priorPhysicalId();
+            // A subscription removed outside the stack is not updated or adopted: NotFound before any write.
+            snsService.getSubscriptionAttributes(subscriptionArn, ctx.region());
             // Validate the firehose role before changing other attributes, including a removed role.
             if (attributes.containsKey("SubscriptionRoleArn") || ctx.previouslyDeclared("SubscriptionRoleArn")) {
                 snsService.setSubscriptionAttribute(subscriptionArn, "SubscriptionRoleArn",
@@ -373,19 +383,16 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             desired.forEach((name, value) ->
                     snsService.setSubscriptionAttribute(subscriptionArn, name, value, ctx.region()));
         } else {
-            Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, ctx.region(), attributes);
-            subscriptionArn = sub.getSubscriptionArn();
+            SnsService.SubscriptionCreation creation =
+                    snsService.subscribeWithStatus(topicArn, protocol, endpoint, ctx.region(), attributes);
+            subscriptionArn = creation.subscription().getSubscriptionArn();
+            created = creation.created();
         }
         r.setPhysicalId(subscriptionArn);
         r.getAttributes().put("Arn", subscriptionArn);
-    }
-
-    private boolean matchesPriorSubscription(String topicArn, String protocol, String endpoint,
-                                             ProvisionContext ctx) {
-        Map<String, String> prior = snsService.getSubscriptionAttributes(ctx.priorPhysicalId(), ctx.region());
-        return Objects.equals(topicArn, prior.get("TopicArn"))
-                && Objects.equals(protocol, prior.get("Protocol"))
-                && Objects.equals(endpoint, prior.get("Endpoint"));
+        // A subscription the update only adopted, because another one already had these values, is not
+        // deleted by a rollback.
+        ReplacementCleanup.record(r, ctx, attributesBefore, ctx.isUpdate() && !inPlace, created);
     }
 
     /**
@@ -421,7 +428,8 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         switch (resourceType) {
             case TOPIC -> CfnDeletes.safeDelete("topic", physicalId,
                     () -> snsService.deleteTopic(physicalId, region), "NotFound");
-            case SUBSCRIPTION -> snsService.unsubscribe(physicalId, region);
+            case SUBSCRIPTION -> CfnDeletes.safeDelete("subscription", physicalId,
+                    () -> snsService.unsubscribe(physicalId, region), "NotFound");
             // No entity to remove. The topics keep the last policy written, the same choice
             // SqsCfnProvisioner makes for AWS::SQS::QueuePolicy.
             case TOPIC_POLICY -> { }
