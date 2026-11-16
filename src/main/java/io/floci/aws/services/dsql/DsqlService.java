@@ -219,6 +219,7 @@ public class DsqlService implements Resettable {
     public DsqlCluster deleteCluster(String region, String identifier) {
         DsqlCluster cluster = getCluster(region, identifier);
         String accountId = regionResolver.getAccountId();
+        boolean failed;
         synchronized (lockFor(cluster.getArn())) {
             if (cluster.isDeletionProtectionEnabled()) {
                 throw new AwsException("ValidationException", "Can't delete cluster: Deletion protection is enabled."
@@ -228,10 +229,11 @@ public class DsqlService implements Resettable {
             if (DELETING.equals(cluster.getStatus())) {
                 return cluster;
             }
+            failed = FAILED.equals(cluster.getStatus());
             cluster.setStatus(DELETING);
             clusters.put(key(region, identifier), cluster);
         }
-        dataPlane.deprovision(cluster, roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
+        dataPlane.deprovision(cluster, failed, roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
             clusters.deleteForAccount(accountId, key(region, identifier));
             locks.remove(cluster.getArn());
             LOG.infov("Deleted DSQL cluster {0} in {1}", identifier, region);
@@ -377,7 +379,9 @@ public class DsqlService implements Resettable {
             String region = cluster.getRegion();
             String identifier = cluster.getIdentifier();
             if (DELETING.equals(cluster.getStatus())) {
-                dataPlane.deprovision(cluster, roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
+                // Whether it had FAILED is not kept, so its deletion waits for the server as any other.
+                dataPlane.deprovision(cluster, false,
+                        roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
                     clusters.deleteForAccount(accountId, key(region, identifier));
                     locks.remove(cluster.getArn());
                 });
@@ -394,7 +398,7 @@ public class DsqlService implements Resettable {
     public void clear() {
         for (DsqlCluster cluster : clusters.scanAllAccounts()) {
             // The clusters go with the storage, so their roles are not saved.
-            dataPlane.deprovision(cluster, roles -> { }, () -> { });
+            dataPlane.deprovision(cluster, false, roles -> { }, () -> { });
         }
         clusters.clear();
         locks.clear();

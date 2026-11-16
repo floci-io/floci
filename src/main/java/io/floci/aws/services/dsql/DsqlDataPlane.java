@@ -95,9 +95,11 @@ public class DsqlDataPlane {
      * deletion drops are set on the cluster and handed to {@code persistPendingRoles} to be saved
      * before anything is dropped, so a deletion finished later drops the same ones. When they cannot
      * be found or removed, the cluster stays as it is, and the next start of Floci finishes its
-     * deletion.
+     * deletion; unless the cluster {@code failed} and its backend lets that deletion finish anyway,
+     * as AWS deletes a FAILED cluster, with a warning naming what may remain on the server.
      */
-    public void deprovision(DsqlCluster cluster, Consumer<List<String>> persistPendingRoles, Runnable onGone) {
+    public void deprovision(DsqlCluster cluster, boolean failed, Consumer<List<String>> persistPendingRoles,
+                            Runnable onGone) {
         if (mock) {
             onGone.run();
             return;
@@ -113,16 +115,28 @@ public class DsqlDataPlane {
                 roles = databases.rolesToDrop(cluster);
             } catch (SQLException | RuntimeException e) {
                 LOG.warnv(e, "The roles of DSQL cluster {0} could not be listed", cluster.getIdentifier());
+                if (failed && finishesAnyway(cluster)) {
+                    onGone.run();
+                }
                 return;
             }
             if (!roles.isEmpty()) {
                 cluster.setPendingBackendRoles(roles);
                 persistPendingRoles.accept(roles);
             }
-            if (stop(cluster, true)) {
+            if (stop(cluster, true) || (failed && finishesAnyway(cluster))) {
                 onGone.run();
             }
         });
+    }
+
+    /** Whether a FAILED cluster's deletion finishes although its server was not cleaned up. */
+    private boolean finishesAnyway(DsqlCluster cluster) {
+        return databases.leftoversOfFailed(cluster).map(leftovers -> {
+            LOG.warnv("DSQL cluster {0} failed and its server could not be cleaned up; it is deleted anyway,"
+                    + " and its {1} may remain on the server", cluster.getIdentifier(), leftovers);
+            return true;
+        }).orElse(false);
     }
 
     /**

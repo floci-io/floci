@@ -13,7 +13,8 @@ import static io.restassured.RestAssured.given;
 
 /**
  * A superuser password the external server refuses fails each cluster's start, and nothing else:
- * the cluster is FAILED and Floci goes on answering.
+ * the cluster is FAILED and Floci goes on answering. Deleting it finishes although the server
+ * cannot be cleaned up, as AWS deletes a FAILED cluster.
  */
 @QuarkusTest
 @TestProfile(DsqlExternalBackendWrongPasswordProfile.class)
@@ -32,15 +33,12 @@ class DsqlExternalBackendWrongPasswordIntegrationTest {
     @Test
     void wrongSuperuserPasswordFailsTheClusterOnly() {
         DsqlClusterFixture cluster = new DsqlClusterFixture(httpPort, endpoint);
-        try {
-            cluster.createAndAwait(dockerClient, "FAILED");
+        cluster.createAndAwait(dockerClient, "FAILED");
 
-            given().port(httpPort).get("/_floci/health").then().statusCode(200);
-            cluster.listClusters();
-        } finally {
-            // Nothing was created on the server; with its roles unlisted, the deletion stays DELETING
-            // until Floci starts again, which in-memory storage never does.
-            cluster.requestDelete();
-        }
+        given().port(httpPort).get("/_floci/health").then().statusCode(200);
+        cluster.listClusters();
+
+        // GetCluster answers ResourceNotFound (404) once the deletion is done.
+        cluster.delete();
     }
 }

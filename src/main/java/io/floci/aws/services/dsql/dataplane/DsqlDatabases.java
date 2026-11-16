@@ -11,6 +11,7 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 /**
  * The database behind each cluster. Which one it is, a PostgreSQL container per cluster or a
@@ -65,6 +66,14 @@ public class DsqlDatabases {
     /** Stops the cluster's database and, with {@code dropData}, removes its data. */
     public void stop(DsqlCluster cluster, boolean dropData) {
         strategy.stop(cluster, dropData);
+    }
+
+    /**
+     * What may stay behind when a FAILED cluster's deletion cannot clean up, if the deletion
+     * finishes anyway; empty when it waits and is retried instead.
+     */
+    public Optional<String> leftoversOfFailed(DsqlCluster cluster) {
+        return strategy.leftoversOfFailed(cluster);
     }
 
     /** A superuser connection to the cluster's database, for what the endpoint checks itself. */

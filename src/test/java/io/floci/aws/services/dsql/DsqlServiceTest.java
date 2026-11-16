@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
@@ -54,9 +55,9 @@ class DsqlServiceTest {
         // A database that is ready at once and gone at once, as with floci.services.dsql.mock.
         readyAtOnce(dataPlane);
         doAnswer(call -> {
-            call.<Runnable>getArgument(2).run();
+            call.<Runnable>getArgument(3).run();
             return null;
-        }).when(dataPlane).deprovision(any(), any(), any());
+        }).when(dataPlane).deprovision(any(), anyBoolean(), any(), any());
         when(principals.caller()).thenReturn(CallerArns.accountRoot(ROOT, ACCOUNT));
         when(principals.exists(anyString())).thenAnswer(call -> call.getArgument(0, String.class).endsWith(":root"));
     }
@@ -263,8 +264,8 @@ class DsqlServiceTest {
         after.onStart(null);
 
         verify(dataPlane).provision(argThat(cluster -> kept.getIdentifier().equals(cluster.getIdentifier())), any());
-        verify(dataPlane).deprovision(argThat(cluster -> deleting.getIdentifier().equals(cluster.getIdentifier())), any(),
-                any());
+        verify(dataPlane).deprovision(argThat(cluster -> deleting.getIdentifier().equals(cluster.getIdentifier())),
+                anyBoolean(), any(), any());
         assertEquals(DsqlService.ACTIVE, after.getCluster(REGION, kept.getIdentifier()).getStatus());
         assertThrows(AwsException.class, () -> after.getCluster(REGION, deleting.getIdentifier()));
     }
@@ -299,9 +300,9 @@ class DsqlServiceTest {
         DsqlDataPlane stopping = mock(DsqlDataPlane.class);
         readyAtOnce(stopping);
         doAnswer(call -> {
-            call.<Consumer<List<String>>>getArgument(1).accept(List.of("dabc_app", "dabc_admin", "dsqlowner_abc"));
+            call.<Consumer<List<String>>>getArgument(2).accept(List.of("dabc_app", "dabc_admin", "dsqlowner_abc"));
             return null;
-        }).when(stopping).deprovision(any(), any(), any());
+        }).when(stopping).deprovision(any(), anyBoolean(), any(), any());
         DsqlService before = service(storage, stopping);
         DsqlCluster cluster = before.createCluster(REGION, false, null, null, null, null, null, null, false);
 

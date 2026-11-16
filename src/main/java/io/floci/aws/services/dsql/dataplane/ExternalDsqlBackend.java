@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -168,6 +169,18 @@ public class ExternalDsqlBackend implements DsqlBackend {
             throw new IllegalStateException("The database and roles of DSQL cluster " + cluster.getIdentifier()
                     + " could not be dropped: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * A FAILED cluster's server may be one Floci cannot reach, so its deletion finishes anyway, as
+     * on AWS; its database and recorded roles may stay on the server.
+     */
+    @Override
+    public Optional<String> leftoversOfFailed(DsqlCluster cluster) {
+        Names names = new Names(cluster.getIdentifier());
+        List<String> pending = cluster.getPendingBackendRoles();
+        List<String> roles = pending == null || pending.isEmpty() ? List.of(names.admin(), names.owner()) : pending;
+        return Optional.of("database " + names.database() + " and roles " + String.join(", ", roles));
     }
 
     /** The password of a backend role: base64url, unpadded, of HMAC-SHA256 keyed by the cluster's secret. */
