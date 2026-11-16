@@ -18,6 +18,7 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -53,9 +54,9 @@ class DsqlServiceTest {
         // A database that is ready at once and gone at once, as with floci.services.dsql.mock.
         readyAtOnce(dataPlane);
         doAnswer(call -> {
-            call.<Runnable>getArgument(1).run();
+            call.<Runnable>getArgument(2).run();
             return null;
-        }).when(dataPlane).deprovision(any(), any());
+        }).when(dataPlane).deprovision(any(), any(), any());
         when(principals.caller()).thenReturn(CallerArns.accountRoot(ROOT, ACCOUNT));
         when(principals.exists(anyString())).thenAnswer(call -> call.getArgument(0, String.class).endsWith(":root"));
     }
@@ -262,9 +263,79 @@ class DsqlServiceTest {
         after.onStart(null);
 
         verify(dataPlane).provision(argThat(cluster -> kept.getIdentifier().equals(cluster.getIdentifier())), any());
-        verify(dataPlane).deprovision(argThat(cluster -> deleting.getIdentifier().equals(cluster.getIdentifier())), any());
+        verify(dataPlane).deprovision(argThat(cluster -> deleting.getIdentifier().equals(cluster.getIdentifier())), any(),
+                any());
         assertEquals(DsqlService.ACTIVE, after.getCluster(REGION, kept.getIdentifier()).getStatus());
         assertThrows(AwsException.class, () -> after.getCluster(REGION, deleting.getIdentifier()));
+    }
+
+    @Test
+    void getClusterResponseNeverCarriesTheBackendSecret() throws Exception {
+        DsqlCluster cluster = cluster();
+        cluster.setBackendSecret("c2VjcmV0");
+        cluster.setPendingBackendRoles(List.of("dabc_admin"));
+        DsqlController controller = new DsqlController(service, new RegionResolver(REGION, ACCOUNT));
+
+        String got = mapper.writeValueAsString(controller.getCluster(null, cluster.getIdentifier()).getEntity());
+        String listed = mapper.writeValueAsString(controller.listClusters(null, null, null).getEntity());
+
+        for (String json : List.of(got, listed)) {
+            assertTrue(json.contains(cluster.getIdentifier()), json);
+            assertFalse(json.contains("backendSecret"), json);
+            assertFalse(json.contains("c2VjcmV0"), json);
+            assertFalse(json.contains("pendingBackendRoles"), json);
+            assertFalse(json.contains("dabc_admin"), json);
+        }
+    }
+
+    /**
+     * Deleting a cluster saves the roles its deletion drops before any is dropped, so a deletion
+     * the stop interrupts drops the same roles on the next start.
+     */
+    @Test
+    void aDeletionKeepsTheRolesItDropsInStorage() {
+        AccountAwareStorageBackend<DsqlCluster> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
+        DsqlDataPlane stopping = mock(DsqlDataPlane.class);
+        readyAtOnce(stopping);
+        doAnswer(call -> {
+            call.<Consumer<List<String>>>getArgument(1).accept(List.of("dabc_app", "dabc_admin", "dsqlowner_abc"));
+            return null;
+        }).when(stopping).deprovision(any(), any(), any());
+        DsqlService before = service(storage, stopping);
+        DsqlCluster cluster = before.createCluster(REGION, false, null, null, null, null, null, null, false);
+
+        before.deleteCluster(REGION, cluster.getIdentifier());
+
+        DsqlCluster stored = storage.getForAccount(ACCOUNT, REGION + "::" + cluster.getIdentifier()).orElseThrow();
+        assertEquals(List.of("dabc_app", "dabc_admin", "dsqlowner_abc"), stored.getPendingBackendRoles());
+        assertEquals(DsqlService.DELETING, stored.getStatus());
+    }
+
+    /** The secret the backend generated while it started is saved with the cluster. */
+    @Test
+    void theBackendSecretIsSavedOnceTheDatabaseStarts() {
+        AccountAwareStorageBackend<DsqlCluster> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, ACCOUNT);
+        DsqlDataPlane starting = mock(DsqlDataPlane.class);
+        doAnswer(call -> {
+            // A copy, as storage that serializes would hand back, so only an explicit save keeps it.
+            storage.putForAccount(ACCOUNT, REGION + "::" + call.<DsqlCluster>getArgument(0).getIdentifier(),
+                    copy(call.getArgument(0)));
+            call.<DsqlCluster>getArgument(0).setBackendSecret("c2VjcmV0");
+            call.<Consumer<Boolean>>getArgument(1).accept(true);
+            return null;
+        }).when(starting).provision(any(), any());
+        DsqlService started = service(storage, starting);
+
+        DsqlCluster cluster = started.createCluster(REGION, false, null, null, null, null, null, null, false);
+
+        assertEquals("c2VjcmV0", storage.getForAccount(ACCOUNT, REGION + "::" + cluster.getIdentifier())
+                .orElseThrow().getBackendSecret());
+    }
+
+    private DsqlCluster copy(DsqlCluster cluster) {
+        return new ObjectMapper().findAndRegisterModules().convertValue(cluster, DsqlCluster.class);
     }
 
     /** Makes {@code plane} start every cluster's database at once. */

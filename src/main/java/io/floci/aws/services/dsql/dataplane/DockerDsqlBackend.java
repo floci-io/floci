@@ -46,7 +46,7 @@ public class DockerDsqlBackend implements DsqlBackend {
 
     @Inject
     public DockerDsqlBackend(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
-                         ContainerDetector containerDetector, EmulatorConfig config) {
+                             ContainerDetector containerDetector, EmulatorConfig config) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;

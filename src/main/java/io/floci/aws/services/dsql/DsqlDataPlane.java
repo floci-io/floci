@@ -11,6 +11,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.sql.SQLException;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -78,17 +80,24 @@ public class DsqlDataPlane {
             }
             if (!ready) {
                 // Deleted while it started, or unreachable: no database is left running for it.
-                stop(cluster, deleted);
+                if (deleted) {
+                    drop(cluster);
+                } else {
+                    stop(cluster, false);
+                }
             }
             onReady.accept(ready);
         });
     }
 
     /**
-     * Stops the cluster's database and drops its data, then runs {@code onGone}. When Docker cannot
-     * remove them, the cluster stays as it is, and the next start of Floci finishes its deletion.
+     * Stops the cluster's database and drops its data, then runs {@code onGone}. The roles the
+     * deletion drops are set on the cluster and handed to {@code persistPendingRoles} to be saved
+     * before anything is dropped, so a deletion finished later drops the same ones. When they cannot
+     * be found or removed, the cluster stays as it is, and the next start of Floci finishes its
+     * deletion.
      */
-    public void deprovision(DsqlCluster cluster, Runnable onGone) {
+    public void deprovision(DsqlCluster cluster, Consumer<List<String>> persistPendingRoles, Runnable onGone) {
         if (mock) {
             onGone.run();
             return;
@@ -99,10 +108,38 @@ public class DsqlDataPlane {
             endpoint.unregister(cluster);
         }
         Thread.ofVirtual().name("dsql-stop-" + cluster.getIdentifier()).start(() -> {
+            List<String> roles;
+            try {
+                roles = databases.rolesToDrop(cluster);
+            } catch (SQLException | RuntimeException e) {
+                LOG.warnv(e, "The roles of DSQL cluster {0} could not be listed", cluster.getIdentifier());
+                return;
+            }
+            if (!roles.isEmpty()) {
+                cluster.setPendingBackendRoles(roles);
+                persistPendingRoles.accept(roles);
+            }
             if (stop(cluster, true)) {
                 onGone.run();
             }
         });
+    }
+
+    /**
+     * Drops the cluster's database and roles, best effort, for a cluster that goes without a deletion
+     * of its own: one deleted while it started, or one of in-memory storage when Floci stops. With
+     * its roles unlisted, the backend drops the ones it always knows.
+     */
+    private void drop(DsqlCluster cluster) {
+        try {
+            List<String> roles = databases.rolesToDrop(cluster);
+            if (!roles.isEmpty()) {
+                cluster.setPendingBackendRoles(roles);
+            }
+        } catch (SQLException | RuntimeException e) {
+            LOG.warnv(e, "The roles of DSQL cluster {0} could not be listed", cluster.getIdentifier());
+        }
+        stop(cluster, true);
     }
 
     private boolean stop(DsqlCluster cluster, boolean dropData) {
@@ -125,7 +162,11 @@ public class DsqlDataPlane {
         }
         endpoint.stop();
         for (DsqlCluster cluster : running.values()) {
-            stop(cluster, memoryStorage);
+            if (memoryStorage) {
+                drop(cluster);
+            } else {
+                stop(cluster, false);
+            }
         }
         running.clear();
     }

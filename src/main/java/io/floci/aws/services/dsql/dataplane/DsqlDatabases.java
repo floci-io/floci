@@ -34,11 +34,11 @@ public class DsqlDatabases {
     }
 
     @Inject
-    public DsqlDatabases(DockerDsqlBackend docker, EmulatorConfig config) {
-        this.strategy = select(config.services().dsql().backend(), docker);
+    public DsqlDatabases(DockerDsqlBackend docker, ExternalDsqlBackend external, EmulatorConfig config) {
+        this.strategy = select(config.services().dsql().backend(), docker, external);
     }
 
-    private static DsqlBackend select(String configured, DockerDsqlBackend docker) {
+    private static DsqlBackend select(String configured, DockerDsqlBackend docker, ExternalDsqlBackend external) {
         EmulatorConfig.DsqlServiceConfig.Backend kind;
         try {
             kind = EmulatorConfig.DsqlServiceConfig.Backend.valueOf(configured.trim().toUpperCase(Locale.ROOT));
@@ -48,7 +48,7 @@ public class DsqlDatabases {
         }
         return switch (kind) {
             case DOCKER -> docker;
-            case EXTERNAL -> new UnavailableBackend();
+            case EXTERNAL -> external;
         };
     }
 
@@ -71,23 +71,5 @@ public class DsqlDatabases {
     public static Connection superuser(Backend backend) throws SQLException {
         String password = backend.superuserPassword() == null ? "" : backend.superuserPassword();
         return DriverManager.getConnection(backend.jdbcUrl(), backend.superuser(), password);
-    }
-
-    /** Stands in for the external backend until it exists. */
-    private static final class UnavailableBackend implements DsqlBackend {
-        @Override
-        public Backend start(DsqlCluster cluster) {
-            throw new UnsupportedOperationException("The external DSQL backend is not implemented yet");
-        }
-
-        @Override
-        public List<String> rolesToDrop(DsqlCluster cluster) {
-            return List.of();
-        }
-
-        @Override
-        public void stop(DsqlCluster cluster, boolean dropData) {
-            throw new UnsupportedOperationException("The external DSQL backend is not implemented yet");
-        }
     }
 }

@@ -150,7 +150,8 @@ public class DsqlService implements Resettable {
             }
             clusters.put(key(region, identifier), cluster);
             LOG.infov("Created DSQL cluster {0} in {1}", identifier, region);
-            dataPlane.provision(cluster, ready -> markReady(accountId, region, identifier, ready));
+            dataPlane.provision(cluster,
+                    ready -> markReady(accountId, region, identifier, cluster.getBackendSecret(), ready));
             return cluster;
         }
     }
@@ -230,7 +231,7 @@ public class DsqlService implements Resettable {
             cluster.setStatus(DELETING);
             clusters.put(key(region, identifier), cluster);
         }
-        dataPlane.deprovision(cluster, () -> {
+        dataPlane.deprovision(cluster, roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
             clusters.deleteForAccount(accountId, key(region, identifier));
             locks.remove(cluster.getArn());
             LOG.infov("Deleted DSQL cluster {0} in {1}", identifier, region);
@@ -376,14 +377,15 @@ public class DsqlService implements Resettable {
             String region = cluster.getRegion();
             String identifier = cluster.getIdentifier();
             if (DELETING.equals(cluster.getStatus())) {
-                dataPlane.deprovision(cluster, () -> {
+                dataPlane.deprovision(cluster, roles -> savePendingRoles(accountId, region, identifier, roles), () -> {
                     clusters.deleteForAccount(accountId, key(region, identifier));
                     locks.remove(cluster.getArn());
                 });
             } else if (!FAILED.equals(cluster.getStatus())) {
                 cluster.setDatabaseReady(false);
                 clusters.putForAccount(accountId, key(region, identifier), cluster);
-                dataPlane.provision(cluster, ready -> markReady(accountId, region, identifier, ready));
+                dataPlane.provision(cluster,
+                        ready -> markReady(accountId, region, identifier, cluster.getBackendSecret(), ready));
             }
         }
     }
@@ -391,7 +393,8 @@ public class DsqlService implements Resettable {
     @Override
     public void clear() {
         for (DsqlCluster cluster : clusters.scanAllAccounts()) {
-            dataPlane.deprovision(cluster, () -> { });
+            // The clusters go with the storage, so their roles are not saved.
+            dataPlane.deprovision(cluster, roles -> { }, () -> { });
         }
         clusters.clear();
         locks.clear();
@@ -399,12 +402,27 @@ public class DsqlService implements Resettable {
 
     // ── Internals ─────────────────────────────────────────────────────────────
 
+    /** Saves the roles a deletion is about to drop, with the cluster still DELETING. */
+    private void savePendingRoles(String accountId, String region, String identifier, List<String> roles) {
+        clusters.getForAccount(accountId, key(region, identifier)).ifPresent(found -> {
+            synchronized (lockFor(found.getArn())) {
+                DsqlCluster cluster = clusters.getForAccount(accountId, key(region, identifier)).orElse(null);
+                if (cluster == null) {
+                    return;
+                }
+                cluster.setPendingBackendRoles(List.copyOf(roles));
+                clusters.putForAccount(accountId, key(region, identifier), cluster);
+            }
+        });
+    }
+
     /**
      * Records whether the cluster's database came up. A cluster being created becomes ACTIVE or
      * FAILED; one still waiting for its peers stays PENDING_SETUP until peering, unless its database
      * failed.
      */
-    private void markReady(String accountId, String region, String identifier, boolean ready) {
+    private void markReady(String accountId, String region, String identifier, String backendSecret,
+                           boolean ready) {
         clusters.getForAccount(accountId, key(region, identifier)).ifPresent(found -> {
             synchronized (lockFor(found.getArn())) {
                 DsqlCluster cluster = clusters.getForAccount(accountId, key(region, identifier)).orElse(null);
@@ -412,6 +430,10 @@ public class DsqlService implements Resettable {
                     return;
                 }
                 cluster.setDatabaseReady(ready);
+                // The secret the backend generated as it started, kept so its passwords stay the same.
+                if (cluster.getBackendSecret() == null) {
+                    cluster.setBackendSecret(backendSecret);
+                }
                 if (CREATING.equals(cluster.getStatus()) || (!ready && PENDING_SETUP.equals(cluster.getStatus()))) {
                     cluster.setStatus(ready ? ACTIVE : FAILED);
                 }
