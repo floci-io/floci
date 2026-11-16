@@ -5,6 +5,14 @@
 
 Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, and channel namespaces.
 
+## Regions
+
+GraphQL APIs and custom domain names are Regional, as on AWS: each is listed and reached only in the Region it was
+created in, and so are an API's data sources, resolvers, functions, types, API keys, channel namespaces and merged-API
+associations. Another Region's is answered for as one that doesn't exist. A domain name stays unique across the account's Regions:
+creating one that another Region holds is refused. An API's endpoint, `/v1/apis/{apiId}/graphql`, names no
+Region, so a query reaches the API whatever Region it is signed for, or none with an API key, and runs in the API's.
+
 ## OIDC issuer network policy
 
 AppSync OIDC authentication uses the shared JWT issuer policy. By default, issuer discovery and
@@ -265,7 +273,7 @@ Configured modes are the API default `authenticationType` plus `additionalAuthen
 | Mode | Emulator notes |
 |---|---|
 | API_KEY | Lookup by `ApiKey.id`, which is the key value (`da2-…`). Identity is absent (not `{}`). Default key expiry is 7 days when `expires` is omitted; stored `expires` is rounded down to the nearest hour. Create/UpdateApiKey require `expires` between 1 and 365 days from now (`ApiKeyValidityOutOfBoundsException`, 400). `deletes` is `expires` plus 60 days. |
-| AWS_IAM | Verifies a real header-signed SigV4 request (`appsync` service, fixed `/v1/apis/{apiId}/graphql` canonical path, 5-minute clock skew): the `Credential=` access key must resolve to a secret via `IamService`, and the signature must match. The legacy `test`/`test` pair is still emulator ALLOW, but it must be signed with secret `test` like any other key, and it is not a bypass. A temporary (`ASIA...`) credential must also present the `X-Amz-Security-Token` header issued with it, and a long-term key must present none, as on AWS. The `test` key takes any token. An unknown key is 403 and an unsigned one 401, and neither becomes the account-root identity. The checks run in AppSync's order. The scope's region is not checked, because Floci takes the request's region from it. Known keys additionally evaluate `appsync:GraphQL`. |
+| AWS_IAM | Verifies a real header-signed SigV4 request (`appsync` service, fixed `/v1/apis/{apiId}/graphql` canonical path, 5-minute clock skew): the `Credential=` access key must resolve to a secret via `IamService`, and the signature must match. The legacy `test`/`test` pair is still emulator ALLOW, but it must be signed with secret `test` like any other key, and it is not a bypass. A temporary (`ASIA...`) credential must also present the `X-Amz-Security-Token` header issued with it, and a long-term key must present none, as on AWS. The `test` key takes any token. An unknown key is 403 and an unsigned one 401, and neither becomes the account-root identity. The checks run in AppSync's order. The scope's region is not checked: the query runs in its API's Region, whatever Region it is signed for. Known keys additionally evaluate `appsync:GraphQL`. |
 | Cognito / OIDC | JWT signature is verified, not just decoded. Cognito checks the token against the issuing user pool's own RS256 signing key (`alg`, `kid`, issuer, audience/`clientId`, expiry); OIDC checks it against the configured issuer's published JWKS (via OIDC discovery), the same way the HTTP API JWT authorizer does. Both fail closed: an unreachable issuer, unsupported algorithm (including `none`), unmatched `kid`, or bad signature is 401. OIDC as the sole mode still skips the token's own `iss` claim check, but the signature is always verified against the configured issuer's keys. OIDC identity is `{sub, issuer, claims}` (no `sourceIp`). |
 | Lambda | AppSync `isAuthorized` contract via `LambdaService.invoke` (not an API Gateway policy document). |
 
