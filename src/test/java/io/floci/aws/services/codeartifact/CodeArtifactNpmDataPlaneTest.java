@@ -639,11 +639,8 @@ class CodeArtifactNpmDataPlaneTest {
 
         byte[] content = "fresh bytes".getBytes(StandardCharsets.UTF_8);
         String oversizedReadme = "x".repeat(1_000_001);
-        String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
-                + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
-                + "\"integrity\":\"" + npmIntegrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
-                + "\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
+        String envelope = npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, null,
+                "\"readme\":\"" + oversizedReadme + "\"");
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 envelope);
@@ -681,11 +678,8 @@ class CodeArtifactNpmDataPlaneTest {
 
         byte[] content = "fresh bytes".getBytes(StandardCharsets.UTF_8);
         String oversizedReadme = "x".repeat(1_000_001);
-        String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
-                + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
-                + "\"integrity\":\"" + npmIntegrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
-                + "\"content_type\":\"application/octet-stream\",\"data\":\""
-                + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
+        String envelope = npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, null,
+                "\"readme\":\"" + oversizedReadme + "\"");
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
                 envelope);
