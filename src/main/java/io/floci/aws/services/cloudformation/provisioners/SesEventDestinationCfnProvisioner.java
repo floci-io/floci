@@ -39,19 +39,22 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
             rollbackUpdate(resource);
             ctx = ctx.withPriorPhysicalId(resource.getPhysicalId());
         }
-        JsonNode props = ctx.engine().resolveNodeOmittingNoValue(properties);
-        if (props == null || !props.isObject()) {
+        JsonNode resolved = ctx.engine().resolveNodeOmittingNoValue(properties);
+        if (resolved == null || !resolved.isObject()) {
             throw invalid("Properties must be an object.");
         }
-        validateKeys(props, Set.of("ConfigurationSetName", "EventDestination"));
+        CfnPropertyTypes.rejectUnknownMembers(TYPE, resolved);
+        if (resolved.has("Id")) {
+            throw invalid("Unknown property: Id");
+        }
+        rejectNullDestinationBlocks(resolved.path("EventDestination"));
+        JsonNode props = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(TYPE, resolved);
         String set = requiredText(props, "ConfigurationSetName");
         JsonNode definition = props.path("EventDestination");
         if (!definition.isObject()) {
             throw invalid("EventDestination must be an object.");
         }
-        validateKeys(definition, Set.of("Name", "Enabled", "MatchingEventTypes", "CloudWatchDestination",
-                "KinesisFirehoseDestination", "SnsDestination", "EventBridgeDestination"));
-        validateDestinationShapes(definition);
+        validateNonblankRequiredValues(definition);
         String explicitName = optionalText(definition, "Name");
         Address prior = priorAddress(resource, ctx);
         String name = explicitName != null && !explicitName.isBlank() ? explicitName
@@ -77,8 +80,7 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
                 snapshot.put("created", true);
                 resource.getAttributes().put(UPDATE_ATTR, snapshot.toString());
                 if (prior != null) {
-                    resource.getAttributes().put(CLEANUP_ATTR, address(prior)
-                            .put("retainable", true).put("attempts", 0).toString());
+                    CfnLifecycleRecords.setCleanup(resource, CLEANUP_ATTR, address(prior), true);
                 }
             }
         }
@@ -130,44 +132,52 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
         }
     }
 
-    private static void validateDestinationShapes(JsonNode definition) {
-        validateRequiredObject(definition, "SnsDestination", Set.of("TopicARN"));
-        validateRequiredObject(definition, "KinesisFirehoseDestination", Set.of("IAMRoleARN", "DeliveryStreamARN"));
-        validateRequiredObject(definition, "EventBridgeDestination", Set.of("EventBusArn"));
-        JsonNode cloudWatch = validateObject(definition, "CloudWatchDestination",
-                Set.of("DimensionConfigurations"));
-        if (cloudWatch == null || !cloudWatch.has("DimensionConfigurations")) {
+    private static void rejectNullDestinationBlocks(JsonNode definition) {
+        if (!definition.isObject()) {
             return;
         }
-        JsonNode dimensions = cloudWatch.get("DimensionConfigurations");
-        if (!dimensions.isArray()) {
+        for (String key : new String[] {"SnsDestination", "KinesisFirehoseDestination",
+                "EventBridgeDestination", "CloudWatchDestination"}) {
+            if (definition.path(key).isNull()) {
+                throw invalid(key + " must be an object.");
+            }
+        }
+        if (definition.path("CloudWatchDestination").path("DimensionConfigurations").isNull()) {
             throw invalid("DimensionConfigurations must be an array.");
         }
-        for (JsonNode dimension : dimensions) {
-            if (!dimension.isObject()) {
-                throw invalid("DimensionConfigurations entries must be objects.");
+        JsonNode dimensions = definition.path("CloudWatchDestination").path("DimensionConfigurations");
+        if (dimensions.isArray()) {
+            for (JsonNode dimension : dimensions) {
+                if (dimension.isNull()) {
+                    throw invalid("DimensionConfigurations entries must be objects.");
+                }
             }
-            validateKeys(dimension, Set.of("DimensionName", "DimensionValueSource", "DefaultDimensionValue"));
         }
     }
 
-    private static void validateRequiredObject(JsonNode parent, String key, Set<String> members) {
-        JsonNode value = validateObject(parent, key, members);
-        if (value != null) {
-            members.forEach(member -> requiredText(value, member));
+    private static void validateNonblankRequiredValues(JsonNode definition) {
+        // HandlerReader checks schema types and missing members; these reject blank strings and nulls it omits.
+        if (!definition.has("MatchingEventTypes")) {
+            throw invalid("MatchingEventTypes is required.");
         }
-    }
-
-    private static JsonNode validateObject(JsonNode parent, String key, Set<String> allowed) {
-        JsonNode value = parent.get(key);
-        if (value == null) {
-            return null;
+        if (definition.path("SnsDestination").isObject()) {
+            requiredText(definition.get("SnsDestination"), "TopicARN");
         }
-        if (!value.isObject()) {
-            throw invalid(key + " must be an object.");
+        if (definition.path("KinesisFirehoseDestination").isObject()) {
+            requiredText(definition.get("KinesisFirehoseDestination"), "IAMRoleARN");
+            requiredText(definition.get("KinesisFirehoseDestination"), "DeliveryStreamARN");
         }
-        validateKeys(value, allowed);
-        return value;
+        if (definition.path("EventBridgeDestination").isObject()) {
+            requiredText(definition.get("EventBridgeDestination"), "EventBusArn");
+        }
+        JsonNode dimensions = definition.path("CloudWatchDestination").path("DimensionConfigurations");
+        if (dimensions.isArray()) {
+            for (JsonNode dimension : dimensions) {
+                requiredText(dimension, "DimensionName");
+                requiredText(dimension, "DimensionValueSource");
+                requiredText(dimension, "DefaultDimensionValue");
+            }
+        }
     }
 
     private static void rename(ObjectNode node, String from, String to) {
@@ -226,18 +236,8 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
 
     private void deletePending(StackResource resource) {
         ObjectNode pending = read(resource, CLEANUP_ATTR);
-        if (pending == null) {
-            return;
-        }
-        if (!retained(resource, pending)) {
-            delete(address(pending));
-        }
-        resource.getAttributes().remove(CLEANUP_ATTR);
-    }
-
-    private static boolean retained(StackResource resource, JsonNode pending) {
-        return pending.path("retainable").asBoolean()
-                && "Retain".equals(resource.getUpdateReplacePolicy());
+        CfnLifecycleRecords.deletePending(resource, CLEANUP_ATTR, pending, true,
+                record -> delete(address(record)));
     }
 
     @Override
@@ -286,7 +286,7 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
     @Override
     public String updateCleanupPhysicalId(StackResource resource) {
         ObjectNode pending = read(resource, CLEANUP_ATTR);
-        return pending == null || retained(resource, pending) ? null : pending.path("name").asText();
+        return CfnLifecycleRecords.cleanupPhysicalId(resource, pending);
     }
 
     @Override
@@ -300,20 +300,8 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
 
     private UpdateCleanupResult completePending(StackResource resource) {
         ObjectNode pending = read(resource, CLEANUP_ATTR);
-        if (pending == null) {
-            return retainsFailedUpdateState(resource) ? new UpdateCleanupResult(true, true, null, 0, null)
-                    : UpdateCleanupResult.notApplicable();
-        }
-        String name = pending.path("name").asText();
-        try {
-            deletePending(resource);
-            return new UpdateCleanupResult(true, true, name, 0, null);
-        } catch (RuntimeException failure) {
-            int attempts = pending.path("attempts").asInt() + 1;
-            pending.put("attempts", attempts);
-            resource.getAttributes().put(CLEANUP_ATTR, pending.toString());
-            return new UpdateCleanupResult(true, false, name, attempts, failure.getMessage());
-        }
+        return CfnLifecycleRecords.completePending(resource, CLEANUP_ATTR, UPDATE_ATTR, pending, true,
+                record -> delete(address(record)));
     }
 
     @Override
@@ -331,18 +319,9 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
     }
 
     private static ObjectNode read(StackResource resource, String attribute) {
-        String raw = resource.getAttributes().get(attribute);
-        if (raw == null) {
-            return null;
-        }
-        try {
-            if (MAPPER.readTree(raw) instanceof ObjectNode object) {
-                return object;
-            }
-            throw new IllegalStateException("SES event destination lifecycle record must be an object");
-        } catch (JsonProcessingException failure) {
-            throw new IllegalStateException("Invalid SES event destination lifecycle record", failure);
-        }
+        return CfnLifecycleRecords.read(resource, attribute,
+                "Invalid SES event destination lifecycle record",
+                "SES event destination lifecycle record must be an object");
     }
 
     private static String requiredText(JsonNode node, String key) {
@@ -362,14 +341,6 @@ public class SesEventDestinationCfnProvisioner implements CfnResourceProvisioner
             throw invalid(key + " must be a string.");
         }
         return value.textValue();
-    }
-
-    private static void validateKeys(JsonNode node, Set<String> allowed) {
-        node.fieldNames().forEachRemaining(key -> {
-            if (!allowed.contains(key)) {
-                throw invalid("Unknown property: " + key);
-            }
-        });
     }
 
     private static AwsException invalid(String message) {

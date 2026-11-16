@@ -101,7 +101,7 @@ class SesEventDestinationCfnProvisionerTest {
     void rejectsMissingAndBlankSnsTopicArnBeforeCallingSes() {
         ObjectNode missing = properties("first", "events", true);
         missing.withObject("EventDestination").putObject("SnsDestination");
-        assertInvalidWithoutSesCall(missing);
+        assertSchemaInvalidWithoutSesCall(missing);
 
         ObjectNode blank = properties("first", "events", true);
         blank.withObject("EventDestination").putObject("SnsDestination").put("TopicARN", " ");
@@ -113,7 +113,7 @@ class SesEventDestinationCfnProvisionerTest {
         ObjectNode missing = properties("first", "events", true);
         missing.withObject("EventDestination").putObject("KinesisFirehoseDestination")
                 .put("IAMRoleARN", "arn:aws:iam::000000000000:role/ses");
-        assertInvalidWithoutSesCall(missing);
+        assertSchemaInvalidWithoutSesCall(missing);
 
         ObjectNode blank = properties("first", "events", true);
         blank.withObject("EventDestination").putObject("KinesisFirehoseDestination")
@@ -126,7 +126,7 @@ class SesEventDestinationCfnProvisionerTest {
     void rejectsMissingAndBlankEventBusArnBeforeCallingSes() {
         ObjectNode missing = properties("first", "events", true);
         missing.withObject("EventDestination").putObject("EventBridgeDestination");
-        assertInvalidWithoutSesCall(missing);
+        assertSchemaInvalidWithoutSesCall(missing);
 
         ObjectNode blank = properties("first", "events", true);
         blank.withObject("EventDestination").putObject("EventBridgeDestination").put("EventBusArn", " ");
@@ -137,18 +137,18 @@ class SesEventDestinationCfnProvisionerTest {
     void rejectsMissingConfigurationSetNameAndNonObjectDestinationsBeforeCallingSes() {
         ObjectNode missingSet = properties("first", "events", true);
         missingSet.remove("ConfigurationSetName");
-        assertInvalidWithoutSesCall(missingSet);
+        assertSchemaInvalidWithoutSesCall(missingSet);
 
         ObjectNode blankSet = properties("first", "events", true).put("ConfigurationSetName", " ");
         assertInvalidWithoutSesCall(blankSet);
 
         ObjectNode nonObjectDestination = properties("first", "events", true)
                 .put("EventDestination", "events");
-        assertInvalidWithoutSesCall(nonObjectDestination);
+        assertSchemaInvalidWithoutSesCall(nonObjectDestination);
 
         ObjectNode nonObjectBlock = properties("first", "events", true);
         nonObjectBlock.withObject("EventDestination").put("SnsDestination", "topic");
-        assertInvalidWithoutSesCall(nonObjectBlock);
+        assertSchemaInvalidWithoutSesCall(nonObjectBlock);
     }
 
     @Test
@@ -156,12 +156,64 @@ class SesEventDestinationCfnProvisionerTest {
         ObjectNode nonArray = properties("first", "events", true);
         nonArray.withObject("EventDestination").putObject("CloudWatchDestination")
                 .put("DimensionConfigurations", "dimension");
-        assertInvalidWithoutSesCall(nonArray);
+        assertSchemaInvalidWithoutSesCall(nonArray);
 
         ObjectNode nonObjectEntry = properties("first", "events", true);
         nonObjectEntry.withObject("EventDestination").putObject("CloudWatchDestination")
                 .putArray("DimensionConfigurations").add("dimension");
-        assertInvalidWithoutSesCall(nonObjectEntry);
+        assertSchemaInvalidWithoutSesCall(nonObjectEntry);
+    }
+
+    @Test
+    void rejectsSchemaRequiredDestinationMembersBeforeCallingSes() {
+        ObjectNode missingEvents = properties("first", "events", true);
+        missingEvents.withObject("EventDestination").remove("MatchingEventTypes");
+        assertSchemaInvalidWithoutSesCall(missingEvents);
+
+        ObjectNode missingDimensionName = properties("first", "events", true);
+        missingDimensionName.withObject("EventDestination").putObject("CloudWatchDestination")
+                .putArray("DimensionConfigurations").addObject()
+                .put("DimensionValueSource", "messageTag")
+                .put("DefaultDimensionValue", "unknown");
+        assertSchemaInvalidWithoutSesCall(missingDimensionName);
+    }
+
+    @Test
+    void rejectsNullRequiredMembersAndDimensionEntriesBeforeCallingSes() {
+        ObjectNode nullEvents = properties("first", "events", true);
+        nullEvents.withObject("EventDestination").putNull("MatchingEventTypes");
+        assertInvalidWithoutSesCall(nullEvents);
+
+        ObjectNode nullTopic = properties("first", "events", true);
+        nullTopic.withObject("EventDestination").putObject("SnsDestination").putNull("TopicARN");
+        assertInvalidWithoutSesCall(nullTopic);
+
+        ObjectNode nullDimensionName = properties("first", "events", true);
+        nullDimensionName.withObject("EventDestination").putObject("CloudWatchDestination")
+                .putArray("DimensionConfigurations").addObject()
+                .put("DimensionValueSource", "messageTag")
+                .put("DefaultDimensionValue", "unknown")
+                .putNull("DimensionName");
+        assertInvalidWithoutSesCall(nullDimensionName);
+
+        ObjectNode nullDimensionEntry = properties("first", "events", true);
+        nullDimensionEntry.withObject("EventDestination").putObject("CloudWatchDestination")
+                .putArray("DimensionConfigurations").addNull();
+        assertInvalidWithoutSesCall(nullDimensionEntry);
+    }
+
+    @Test
+    void rejectsReadOnlySchemaIdBeforeCallingSes() {
+        ObjectNode props = properties("first", "events", true).put("Id", "read-only");
+        assertInvalidWithoutSesCall(props);
+    }
+
+    private void assertSchemaInvalidWithoutSesCall(ObjectNode props) {
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), props, context(null)));
+        assertEquals("InvalidRequest", failure.getErrorCode());
+        assertEquals(400, failure.getHttpStatus());
+        verifyNoInteractions(configurationSets);
     }
 
     private void assertInvalidWithoutSesCall(ObjectNode props) {

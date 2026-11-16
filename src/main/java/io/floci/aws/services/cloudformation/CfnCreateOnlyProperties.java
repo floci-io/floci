@@ -20,23 +20,24 @@ public final class CfnCreateOnlyProperties {
 
     private static final Logger LOG = Logger.getLogger(CfnCreateOnlyProperties.class);
     private static final String RESOURCE_NAME = "cloudformation/create-only-properties.json";
-    private static final String SES_EVENT_DESTINATION = "AWS::SES::ConfigurationSetEventDestination";
-    private static final String SES_DESTINATION_NAME = "EventDestination/Name";
-    private static final Map<String, Set<String>> PROPERTIES = load();
+    private static final String CONDITIONAL_RESOURCE_NAME =
+            "cloudformation/conditional-create-only-properties.json";
+    private static final Map<String, Set<String>> PROPERTIES = load(RESOURCE_NAME);
+    private static final Map<String, Set<String>> CONDITIONAL_PROPERTIES = load(CONDITIONAL_RESOURCE_NAME);
 
     private CfnCreateOnlyProperties() {
     }
 
-    private static Map<String, Set<String>> load() {
-        try (InputStream in = CfnCreateOnlyProperties.class.getClassLoader().getResourceAsStream(RESOURCE_NAME)) {
+    private static Map<String, Set<String>> load(String resourceName) {
+        try (InputStream in = CfnCreateOnlyProperties.class.getClassLoader().getResourceAsStream(resourceName)) {
             if (in == null) {
-                LOG.warnv("Resource {0} not found on classpath", RESOURCE_NAME);
+                LOG.warnv("Resource {0} not found on classpath", resourceName);
                 return Collections.emptyMap();
             }
             ObjectMapper mapper = new ObjectMapper();
             return mapper.readValue(in, new TypeReference<Map<String, Set<String>>>() {});
         } catch (Exception e) {
-            LOG.warnv(e, "Failed to load {0}", RESOURCE_NAME);
+            LOG.warnv(e, "Failed to load {0}", resourceName);
             return Collections.emptyMap();
         }
     }
@@ -71,14 +72,15 @@ public final class CfnCreateOnlyProperties {
         return PROPERTIES.getOrDefault(resourceType, Collections.emptySet());
     }
 
-    /** Schema create-only pointers plus SES's conditional destination-name replacement. */
+    /** Schema pointers that require replacement, including conditionally create-only paths. */
     static Set<String> replacementPointers(String resourceType) {
         Set<String> schemaPointers = getCreateOnlyProperties(resourceType);
-        if (!SES_EVENT_DESTINATION.equals(resourceType)) {
+        Set<String> conditionalPointers = CONDITIONAL_PROPERTIES.get(resourceType);
+        if (conditionalPointers == null || conditionalPointers.isEmpty()) {
             return schemaPointers;
         }
         Set<String> pointers = new HashSet<>(schemaPointers);
-        pointers.add(SES_DESTINATION_NAME);
+        pointers.addAll(conditionalPointers);
         return pointers;
     }
 
