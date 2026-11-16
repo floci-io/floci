@@ -567,6 +567,7 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+      shell-less-backend: false
     memorydb:
       enabled: true
       mock: false

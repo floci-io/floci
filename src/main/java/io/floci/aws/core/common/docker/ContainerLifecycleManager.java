@@ -57,6 +57,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -148,6 +149,16 @@ public class ContainerLifecycleManager {
         return createAndStart(spec, platform, false);
     }
 
+    /**
+     * Creates a container, runs {@code beforeStart} against its id, then starts it, for a launch
+     * that must put files into the container before the process inside it runs. The container is
+     * removed again if the setup or the start fails.
+     */
+    public ContainerInfo createAndStart(ContainerSpec spec, Consumer<String> beforeStart) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image());
+        return createAndStart(spec, resolvedImage, null, false, beforeStart);
+    }
+
     /** Starts a disposable container, reclaiming its anonymous volumes if startup fails. */
     public ContainerInfo createAndStartEphemeral(ContainerSpec spec) {
         return createAndStart(spec, true);
@@ -165,18 +176,21 @@ public class ContainerLifecycleManager {
 
     private ContainerInfo createAndStart(ContainerSpec spec, boolean removeAnonymousVolumes) {
         String resolvedImage = imageCacheService.ensureImageExists(spec.image());
-        return createAndStart(spec, resolvedImage, null, removeAnonymousVolumes);
+        return createAndStart(spec, resolvedImage, null, removeAnonymousVolumes, null);
     }
 
     private ContainerInfo createAndStart(ContainerSpec spec, String platform, boolean removeAnonymousVolumes) {
         String resolvedImage = imageCacheService.ensureImageExists(spec.image(), platform);
-        return createAndStart(spec, resolvedImage, platform, removeAnonymousVolumes);
+        return createAndStart(spec, resolvedImage, platform, removeAnonymousVolumes, null);
     }
 
     private ContainerInfo createAndStart(ContainerSpec spec, String resolvedImage, String platform,
-                                         boolean removeAnonymousVolumes) {
+                                         boolean removeAnonymousVolumes, Consumer<String> beforeStart) {
         String containerId = create(spec, resolvedImage, platform, removeAnonymousVolumes);
         try {
+            if (beforeStart != null) {
+                beforeStart.accept(containerId);
+            }
             return withPublishedHostPorts(startCreated(containerId, spec), spec);
         } catch (RuntimeException failure) {
             removeFailedContainer(containerId, failure, removeAnonymousVolumes);

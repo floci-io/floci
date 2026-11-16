@@ -205,10 +205,14 @@ public class ValkeyClusterFormation {
         private final OutputStream out;
 
         RespClient(String host, int port) throws IOException {
+            this(host, port, READ_TIMEOUT_MS);
+        }
+
+        RespClient(String host, int port, int readTimeoutMs) throws IOException {
             socket = new Socket();
             socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
             socket.setTcpNoDelay(true);
-            socket.setSoTimeout(READ_TIMEOUT_MS);
+            socket.setSoTimeout(readTimeoutMs);
             in = socket.getInputStream();
             out = socket.getOutputStream();
         }
