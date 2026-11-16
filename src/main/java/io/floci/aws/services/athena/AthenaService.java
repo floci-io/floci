@@ -67,6 +67,13 @@ public class AthenaService {
     private static final Logger LOG = Logger.getLogger(AthenaService.class);
     private static final Pattern DECIMAL_TYPE = Pattern.compile("DECIMAL\\((\\d+),\\s*(\\d+)\\)",
             Pattern.CASE_INSENSITIVE);
+
+    /**
+     * A timestamp as DuckDB writes it to a result CSV: the seconds, then an optional fraction. Anything
+     * else ({@code infinity}, a BC date) is not one {@link #athenaTimestamp} pads.
+     */
+    private static final Pattern DUCKDB_TIMESTAMP = Pattern.compile(
+            "(\\d{4,}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})(?:\\.(\\d+))?");
     public static final String DEFAULT_CATALOG = "AwsDataCatalog";
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
@@ -1342,16 +1349,20 @@ public class AthenaService {
             }
 
             String[] headers = CsvParser.parseLine(headerLine).toArray(String[]::new);
+            List<String> athenaTypes = new ArrayList<>();
             for (int i = 0; i < headers.length; i++) {
-                columns.add(columnInfo(headers[i], i < columnTypes.size() ? columnTypes.get(i) : "VARCHAR"));
+                ResultSet.ColumnInfo column = columnInfo(headers[i],
+                        i < columnTypes.size() ? columnTypes.get(i) : "VARCHAR");
+                columns.add(column);
+                athenaTypes.add(column.getType());
             }
 
             // Header row is included in GetQueryResults per AWS spec
-            rows.add(toRow(headers));
+            rows.add(toRow(headers, List.of()));
 
             String line;
             while ((line = reader.readLine()) != null) {
-                rows.add(toRow(CsvParser.parseLine(line).toArray(String[]::new)));
+                rows.add(toRow(CsvParser.parseLine(line).toArray(String[]::new), athenaTypes));
             }
         } catch (Exception e) {
             LOG.debugv("CSV parse error: {0}", e.getMessage());
@@ -1400,12 +1411,44 @@ public class AthenaService {
         return type;
     }
 
-    private ResultSet.Row toRow(String[] values) {
+    /** One result row, each value rendered as Athena renders a value of its column's type. */
+    private ResultSet.Row toRow(String[] values, List<String> athenaTypes) {
         List<ResultSet.Datum> data = new ArrayList<>();
-        for (String v : values) {
-            data.add(new ResultSet.Datum(v));
+        for (int i = 0; i < values.length; i++) {
+            String type = i < athenaTypes.size() ? athenaTypes.get(i) : "varchar";
+            data.add(new ResultSet.Datum("timestamp".equals(type) ? athenaTimestamp(values[i]) : values[i]));
         }
         return new ResultSet.Row(data);
+    }
+
+    /**
+     * A {@code timestamp} value as Athena renders it: with at least three fractional digits.
+     *
+     * <p>DuckDB writes the shortest form, {@code 2026-03-14 09:30:00}, where Athena writes
+     * {@code 2026-03-14 09:30:00.000}. A timestamp's rendering follows its precision, and on Athena
+     * nearly every timestamp has precision 3: a Hive table's columns, {@code CAST(... AS timestamp)},
+     * {@code current_timestamp}, and what {@code date_trunc} and interval arithmetic make of them.
+     * DuckDB's types don't carry that precision through expressions, so every {@code timestamp}
+     * result is padded alike. A value with more digits keeps them.
+     *
+     * <p>TODO: a literal has the precision it is written with, so Athena renders
+     * {@code TIMESTAMP '2026-03-14 09:30:00'} without a fraction, and this pads it. An Iceberg
+     * table's {@code timestamp} is {@code timestamp(6)} on Athena, which presumably renders six
+     * digits (unchecked). The result CSV object itself is written by floci-duck and keeps DuckDB's
+     * form, as does {@code CAST(ts AS varchar)} inside a query.
+     */
+    static String athenaTimestamp(String value) {
+        if (value == null) {
+            return null;
+        }
+        Matcher timestamp = DUCKDB_TIMESTAMP.matcher(value);
+        if (!timestamp.matches()) {
+            return value;
+        }
+        String fraction = timestamp.group(2) == null ? "" : timestamp.group(2);
+        return fraction.length() >= 3
+                ? value
+                : timestamp.group(1) + "." + fraction + "000".substring(fraction.length());
     }
 
     private String extractBucket(String s3Path) {

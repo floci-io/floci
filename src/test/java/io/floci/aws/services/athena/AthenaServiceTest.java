@@ -214,6 +214,36 @@ class AthenaServiceTest {
                         .map(ResultSet.ColumnInfo::getType).toList());
     }
 
+    /**
+     * Athena (engine v3) renders a timestamp column as {@code 2026-03-14 09:30:00.000}; DuckDB writes
+     * {@code 2026-03-14 09:30:00}. Every timestamp variant is padded to milliseconds, a longer
+     * fraction is kept, and other types, a timestamp with a time zone among them, are left alone.
+     */
+    @Test
+    void getQueryResultsRendersTimestampsWithAtLeastMilliseconds() throws Exception {
+        String query = "SELECT ts, ts_ms, ts_us, ts_tz, s FROM times";
+        when(duckClient.query(eq("DESCRIBE " + query), any(), any())).thenReturn(List.of(
+                Map.of("column_name", "ts", "column_type", "TIMESTAMP"),
+                Map.of("column_name", "ts_ms", "column_type", "TIMESTAMP_MS"),
+                Map.of("column_name", "ts_us", "column_type", "TIMESTAMP"),
+                Map.of("column_name", "ts_tz", "column_type", "TIMESTAMP WITH TIME ZONE"),
+                Map.of("column_name", "s", "column_type", "VARCHAR")));
+
+        ResultSet results = results(query, "ts,ts_ms,ts_us,ts_tz,s\n"
+                + "2026-03-14 09:30:00,2026-11-12 20:22:54.3,2026-11-12 20:22:54.385678,"
+                + "2026-03-14 09:30:00+00,2026-03-14 09:30:00\n"
+                + ",infinity,,,\n");
+
+        assertEquals(List.of(
+                List.of("ts", "ts_ms", "ts_us", "ts_tz", "s"),
+                List.of("2026-03-14 09:30:00.000", "2026-11-12 20:22:54.300", "2026-11-12 20:22:54.385678",
+                        "2026-03-14 09:30:00+00", "2026-03-14 09:30:00"),
+                List.of("", "infinity", "", "", "")),
+                results.getRows().stream()
+                        .map(row -> row.getData().stream().map(ResultSet.Datum::getVarCharValue).toList())
+                        .toList());
+    }
+
     @Test
     void getQueryResultsReportsVarcharWhenTheTypesCannotBeDescribed() throws Exception {
         when(duckClient.query(anyString(), any(), any())).thenThrow(new IllegalStateException("not describable"));
@@ -223,6 +253,10 @@ class AthenaServiceTest {
     }
 
     private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {
+        return results(query, csv).getMetadata().getColumnInfo();
+    }
+
+    private ResultSet results(String query, String csv) throws Exception {
         String id = service.startQueryExecution(query, "primary", null,
                 new ResultConfiguration("s3://athena-results/"));
         awaitState(id, QueryExecutionState.SUCCEEDED);
@@ -232,7 +266,7 @@ class AthenaServiceTest {
         when(s3Service.listObjects(eq("athena-results"), anyString(), any(), anyInt())).thenReturn(List.of(result));
         when(s3Service.getObject("athena-results", key)).thenReturn(result);
 
-        return service.getQueryResults(id).getMetadata().getColumnInfo();
+        return service.getQueryResults(id);
     }
 
     private void awaitState(String id, QueryExecutionState expected) throws InterruptedException {
