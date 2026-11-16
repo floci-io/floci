@@ -10,6 +10,7 @@ import org.eclipse.paho.mqttv5.client.IMqttToken;
 import org.eclipse.paho.mqttv5.client.MqttAsyncClient;
 import org.eclipse.paho.mqttv5.client.MqttCallback;
 import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
+import org.eclipse.paho.mqttv5.client.persist.MemoryPersistence;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
 import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
 import org.junit.jupiter.api.Test;
@@ -235,12 +236,13 @@ class IotMqttTopicAuthorizationIntegrationTest {
             }
             client.close();
         } catch (MqttException ignored) {
+            // Safe to ignore teardown close errors on partially-connected or already closed clients.
         }
     }
 
     private static MqttAsyncClient connectV5(IotDeviceIdentity device, String clientId, MqttCallback callback) throws Exception {
         MqttAsyncClient client = new MqttAsyncClient("ssl://127.0.0.1:" + IotMqttTlsProfile.TLS_PORT, clientId,
-                new org.eclipse.paho.mqttv5.client.persist.MemoryPersistence());
+                new MemoryPersistence());
         client.setCallback(callback);
         client.connect(mqtt5Options(device.sslContext(TLS_DIR).getSocketFactory())).waitForCompletion(10_000);
         return client;
@@ -253,6 +255,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
             }
             client.close();
         } catch (org.eclipse.paho.mqttv5.common.MqttException ignored) {
+            // Safe to ignore teardown close errors on partially-connected or already closed clients.
         }
     }
 
