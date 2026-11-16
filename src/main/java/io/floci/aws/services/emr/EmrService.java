@@ -130,9 +130,6 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     static final String SPARK_RUNTIME_HDFS_RELEASE = "emr-7.5.0";
     // Separates a security configuration key's Region from its name.
     private static final String KEY_SEPARATOR = "::";
-    // A key of a Region's configuration: a name may hold "::" itself, so a key stored before is told apart by its
-    // missing Region rather than by the separator alone.
-    private static final Pattern REGIONAL_KEY = Pattern.compile("[a-z]{2}(-[a-z]+)+-\\d+" + KEY_SEPARATOR);
 
     private final AccountAwareStorageBackend<EmrCluster> clusterStore;
     // A security configuration is Regional: keyed by Region and name (securityConfigurationKey).
@@ -890,11 +887,21 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private void migrateLegacySecurityConfigurations() {
         // Built only if a configuration is still stored under its bare name.
         Supplier<Map<String, Set<String>>> regionsUsing = new MemoizedSupplier<>(this::securityConfigurationUses);
-        secConfigStore.migrateLegacyEntriesToRegions(key -> !REGIONAL_KEY.matcher(key).lookingAt(),
+        secConfigStore.migrateLegacyEntriesToRegions(key -> !isRegionalKey(key),
                 regionResolver.getDefaultRegion(),
                 (accountId, sc) -> regionsUsing.get().getOrDefault(accountId + "/" + sc.getName(), Set.of()),
                 (region, sc) -> sc.getName() == null ? null : securityConfigurationKey(region, sc.getName()),
                 StorageJson::copy);
+    }
+
+    /**
+     * Whether {@code key} is a Region's configuration's, {@code <Region>::<name>}. A name may hold "::" itself, so a key
+     * stored before is told apart by what precedes the first one: a Region {@link RegionResolver#isKnownRegion}
+     * admits, as {@code RegionScopedStorage} tells its keys apart.
+     */
+    private static boolean isRegionalKey(String key) {
+        int separator = key.indexOf(KEY_SEPARATOR);
+        return separator > 0 && RegionResolver.isKnownRegion(key.substring(0, separator));
     }
 
     /** The Regions where each account's clusters name each security configuration, by account and name. */

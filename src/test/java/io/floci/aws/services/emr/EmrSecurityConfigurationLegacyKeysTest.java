@@ -34,6 +34,8 @@ class EmrSecurityConfigurationLegacyKeysTest {
         configurations.put("unused", configuration("unused"));
         // A name may hold the separator itself: it is still a key stored before.
         configurations.put("team::prod", configuration("team::prod"));
+        // A key already of a Region, any Region a partition publishes, stays where it is.
+        configurations.put("eusc-de-east-1::sovereign", configuration("sovereign"));
         String clusterId = fixture.service.runJobFlow(cluster("secured", true), CLUSTER_REGION).getId();
         AccountAwareStorageBackend<EmrCluster> clusters = fixture.storage.create("emr", "emr-clusters.json",
                 new TypeReference<Map<String, EmrCluster>>() {});
@@ -43,8 +45,9 @@ class EmrSecurityConfigurationLegacyKeysTest {
 
         EmrService restarted = fixture.restartImmediate().service;
 
-        assertEquals(Set.of(REGION + "::used", REGION + "::unused", REGION + "::team::prod", CLUSTER_REGION + "::used"),
-                configurations.keysForAccount(ACCOUNT));
+        assertEquals(Set.of(REGION + "::used", REGION + "::unused", REGION + "::team::prod", CLUSTER_REGION + "::used",
+                "eusc-de-east-1::sovereign"), configurations.keysForAccount(ACCOUNT));
+        assertEquals(Set.of("sovereign"), names(restarted.listSecurityConfigurations("eusc-de-east-1")));
         assertEquals(Set.of("used", "unused", "team::prod"), names(restarted.listSecurityConfigurations(REGION)));
         assertEquals(Set.of("used"), names(restarted.listSecurityConfigurations(CLUSTER_REGION)));
         assertEquals(Set.of(), names(restarted.listSecurityConfigurations("eu-west-1")));
