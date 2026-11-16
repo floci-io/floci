@@ -491,6 +491,11 @@ class PaymentCryptographyServiceTest {
         PaymentCryptographyKey stopped = service.stopKeyUsage(key);
         assertFalse(stopped.isEnabled(), "the key is still enabled after it was stopped");
         assertTrue(stopped.getUsageStopTimestamp() > 0, "the stop moment was not recorded");
+        // The reference says a stopped key is deactivated rather than deleted, so the key is
+        // still there and its state is unchanged.
+        assertEquals("CREATE_COMPLETE", stopped.getKeyState());
+        assertNotNull(service.findKey("us-east-1", key.getKeyId()),
+                "a stopped key is not in the store");
 
         PaymentCryptographyKey started = service.startKeyUsage(key);
         assertTrue(started.isEnabled(), "the key is disabled after it was started");
