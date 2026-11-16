@@ -44,20 +44,20 @@ class SidecarSchemaCompilerTest {
     @Test
     void enumValuesNamedScalarAndAwsScalarDoNotSuppressInjection() {
         for (String scalarName : List.of("AWSDateTime", "AWSDate")) {
-            String sdl = "enum Choice { scalar " + scalarName + " }\\n"
+            String sdl = "enum Choice { scalar " + scalarName + " }\n"
                     + "type Query { value: " + scalarName + " }";
 
             String prepared = compiler.withDirectivesAndScalars(sdl);
             String injected = prepared.substring(0, prepared.lastIndexOf(sdl));
 
-            assertEquals(1, count(injected, "scalar " + scalarName + "\\n"));
+            assertEquals(1, count(injected, "scalar " + scalarName + "\n"));
             assertTrue(prepared.endsWith(sdl));
         }
     }
 
     @Test
     void commaBetweenScalarKeywordAndNameIsIgnored() {
-        String sdl = "scalar, AWSDateTime\\ntype Query { time: AWSDateTime }";
+        String sdl = "scalar, AWSDateTime\ntype Query { time: AWSDateTime }";
 
         String prepared = compiler.withDirectivesAndScalars(sdl);
         String injected = prepared.substring(0, prepared.lastIndexOf(sdl));
