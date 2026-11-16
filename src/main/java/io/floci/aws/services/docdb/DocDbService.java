@@ -18,6 +18,7 @@ import io.floci.aws.services.docdb.model.DocDbInstanceSettings;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
+import io.floci.aws.services.rds.RdsSecurityGroups;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -334,14 +335,7 @@ public class DocDbService {
             if (ec2Service == null) {
                 throw new IllegalStateException("DocDbService was built without an Ec2Service");
             }
-            for (String groupId : securityGroups) {
-                boolean known = ec2Service.describeSecurityGroups(region, List.of(groupId), List.of(), Map.of())
-                        .stream().anyMatch(sg -> groupId.equals(sg.getGroupId()));
-                if (!known) {
-                    throw new AwsException("InvalidParameterValue",
-                            "Invalid security group , groupId= " + groupId + ", groupName=.", 400);
-                }
-            }
+            RdsSecurityGroups.requireInVpc(ec2Service, region, securityGroups, null);
         } else if (create) {
             securityGroups = List.of(Ec2Service.defaultSecurityGroupId(region));
         }

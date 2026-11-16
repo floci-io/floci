@@ -3473,9 +3473,13 @@ public class RdsQueryHandler {
     }
 
     private String vpcSecurityGroupsXml(DbInstance i) {
-        List<String> groupIds = i.getVpcSecurityGroupIds().isEmpty()
-                ? List.of("sg-00000000")
-                : i.getVpcSecurityGroupIds();
+        List<String> groupIds = i.getVpcSecurityGroupIds();
+        if (groupIds.isEmpty()) {
+            groupIds = service.defaultVpcSecurityGroupIds(i);
+        }
+        if (groupIds.isEmpty()) {
+            groupIds = List.of("sg-00000000");
+        }
         XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
         for (String groupId : groupIds) {
             xml.start("VpcSecurityGroupMembership")
