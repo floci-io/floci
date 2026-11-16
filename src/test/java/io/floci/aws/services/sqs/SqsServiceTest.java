@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -2127,16 +2128,19 @@ class SqsServiceTest {
         sqsService = spy(sqsService);
         CountDownLatch terminalWriteReady = new CountDownLatch(1);
         CountDownLatch releaseTerminalWrite = new CountDownLatch(1);
-        CountDownLatch terminalWriteFinished = new CountDownLatch(1);
+        CompletableFuture<Void> terminalWriteFinished = new CompletableFuture<>();
         AtomicReference<Boolean> cancellationObserved = new AtomicReference<>();
         doAnswer(invocation -> {
             cancellationObserved.set(invocation.getArgument(2));
             terminalWriteReady.countDown();
             try {
                 assertTrue(releaseTerminalWrite.await(5, TimeUnit.SECONDS));
-                return invocation.callRealMethod();
-            } finally {
-                terminalWriteFinished.countDown();
+                invocation.callRealMethod();
+                terminalWriteFinished.complete(null);
+                return null;
+            } catch (Throwable failure) {
+                terminalWriteFinished.completeExceptionally(failure);
+                throw failure;
             }
         }).when(sqsService).finishMoveTask(any(), anyLong(),
                 anyBoolean());
@@ -2158,7 +2162,7 @@ class SqsServiceTest {
             sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
             assertEquals("CANCELLING", moveTaskStatus(dlqArn, taskHandle));
             releaseTerminalWrite.countDown();
-            assertTrue(terminalWriteFinished.await(5, TimeUnit.SECONDS));
+            terminalWriteFinished.get(5, TimeUnit.SECONDS);
             assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
         } finally {
             releaseTerminalWrite.countDown();
