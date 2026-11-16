@@ -141,10 +141,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
     void aSubscriberReceivesOnlyTheTopicsItsPolicyAllowsReceiveOn() throws Exception {
         String prefix = "receive/" + System.nanoTime();
         IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
-        device.attachNewPolicy("{\"Version\":\"2012-10-17\",\"Statement\":["
-                + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Connect\",\"iot:Subscribe\"],\"Resource\":\"*\"},"
-                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Receive\",\"Resource\":\"arn:aws:iot:*:*:topic/" + prefix + "/ok\"}]}",
-                cleanup);
+        device.attachNewPolicy(receiveOnly(prefix + "/ok"), cleanup);
         MqttClient subscriber = connectV3(device, "sub-" + System.nanoTime());
         MqttClient publisher = connectPlain("pub-" + System.nanoTime());
         try {
@@ -161,6 +158,37 @@ class IotMqttTopicAuthorizationIntegrationTest {
             closeV3(publisher);
             closeV3(subscriber);
         }
+    }
+
+    @Test
+    void retainedMessagesAreDeliveredOnlyOnTopicsThePolicyAllowsReceiveOn() throws Exception {
+        String prefix = "retained/" + System.nanoTime();
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
+        device.attachNewPolicy(receiveOnly(prefix + "/ok"), cleanup);
+        MqttClient publisher = connectPlain("pub-" + System.nanoTime());
+        MqttClient subscriber = null;
+        try {
+            publisher.publish(prefix + "/denied", "x".getBytes(StandardCharsets.UTF_8), 1, true);
+            publisher.publish(prefix + "/ok", "x".getBytes(StandardCharsets.UTF_8), 1, true);
+            subscriber = connectV3(device, "sub-" + System.nanoTime());
+            BlockingQueue<String> received = new LinkedBlockingQueue<>();
+            subscriber.subscribe(prefix + "/+", 1, (topic, message) -> received.add(topic));
+
+            assertEquals(prefix + "/ok", received.poll(10, TimeUnit.SECONDS));
+            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
+        } finally {
+            if (subscriber != null) {
+                closeV3(subscriber);
+            }
+            closeV3(publisher);
+        }
+    }
+
+    private static String receiveOnly(String topic) {
+        String resource = topic.equals("*") ? "*" : "arn:aws:iot:*:*:topic/" + topic;
+        return "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Connect\",\"iot:Subscribe\"],\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Receive\",\"Resource\":\"" + resource + "\"}]}";
     }
 
     private IotDeviceIdentity thingDevice(String thing) {
