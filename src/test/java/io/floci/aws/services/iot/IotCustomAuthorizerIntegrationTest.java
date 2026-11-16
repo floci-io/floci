@@ -37,6 +37,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -288,6 +289,48 @@ class IotCustomAuthorizerIntegrationTest {
         assertEquals(base64("deny"), takeEvent().path("protocolData").path("mqtt").path("password").asText());
     }
 
+    @Test
+    void aWebSocketClientReceivesOnlyTheTopicsTheAuthorizerPoliciesAllow() throws Exception {
+        String clientId = "cauth-receive-" + System.nanoTime();
+        String prefix = "cauth/" + System.nanoTime();
+        answerWithTopicPolicy(clientId, prefix);
+        MqttClient subscriber = connectV3(ws(""), clientId, clientId + "?" + NAME_PARAM + authorizer, "allow", Map.of());
+        MqttClient publisher = new MqttClient(tcp(), "cauth-publisher-" + System.nanoTime(), new MemoryPersistence());
+        publisher.connect();
+        try {
+            BlockingQueue<String> received = new LinkedBlockingQueue<>();
+            subscriber.subscribe(prefix + "/#", 1, (topic, message) -> received.add(topic));
+
+            publisher.publish(prefix + "/someone-else/events", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+            publisher.publish(prefix + "/" + clientId + "/events", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+
+            assertEquals(prefix + "/" + clientId + "/events", received.poll(10, TimeUnit.SECONDS));
+            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
+        } finally {
+            publisher.disconnect();
+            publisher.close();
+            subscriber.disconnect();
+            subscriber.close();
+        }
+    }
+
+    @Test
+    void mqtt3PublishOutsideTheAuthorizerPoliciesClosesTheWebSocketConnection() throws Exception {
+        String clientId = "cauth-publish-" + System.nanoTime();
+        String prefix = "cauth/" + System.nanoTime();
+        answerWithTopicPolicy(clientId, prefix);
+        MqttClient client = connectV3(ws(""), clientId, clientId + "?" + NAME_PARAM + authorizer, "allow", Map.of());
+        try {
+            client.publish(prefix + "/" + clientId + "/events", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+
+            assertThrows(MqttException.class,
+                    () -> client.publish(prefix + "/someone-else/events", "x".getBytes(StandardCharsets.UTF_8), 1, false));
+            assertFalse(client.isConnected());
+        } finally {
+            client.close();
+        }
+    }
+
     // Helpers
 
     private MqttClient connectV3(String url, String clientId, String username, String password, Map<String, String> headers)
@@ -352,6 +395,18 @@ class IotCustomAuthorizerIntegrationTest {
         List<String> protocols = new ArrayList<>();
         event.path("protocols").forEach(protocol -> protocols.add(protocol.asText()));
         return protocols;
+    }
+
+    private void answerWithTopicPolicy(String clientId, String prefix) {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Connect\",\"Resource\":\"arn:aws:iot:us-east-1:000000000000:client/" + clientId + "\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Subscribe\",\"Resource\":\"arn:aws:iot:us-east-1:000000000000:topicfilter/" + prefix + "/*\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Publish\",\"iot:Receive\"],"
+                + "\"Resource\":\"arn:aws:iot:us-east-1:000000000000:topic/" + prefix + "/${iot:ClientId}/*\"}]}";
+        String answer = "{\"isAuthenticated\": true, \"principalId\": \"itprincipal\", \"policyDocuments\": ["
+                + MAPPER.valueToTree(policy) + "]}";
+        when(lambdaService.invokeArn(eq(FUNCTION_ARN), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, null, answer.getBytes(StandardCharsets.UTF_8), null, "id"));
     }
 
     private static String allow(String clientId) {

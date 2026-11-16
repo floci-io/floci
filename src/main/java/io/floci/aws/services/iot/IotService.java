@@ -519,6 +519,9 @@ public class IotService {
     public record RegisteredDevice(String accountId, String region, IotCertificate certificate) {
     }
 
+    public record ConnectionPolicies(List<String> documents, Map<String, String> variables, String region, String accountId) {
+    }
+
     private record CertificateLocation(String accountId, String key) {
     }
 
@@ -586,9 +589,7 @@ public class IotService {
         if (clientId == null || clientId.isBlank() || !"ACTIVE".equals(certificate.getStatus()) || !isWithinValidity(certificate)) {
             return false;
         }
-        List<String> documents = attachedPolicyDocuments(certificate.getCertificateArn(), device.region(), device.accountId());
-        return isConnectAllowed(documents, connectionVariables(device, clientId, sourceIp, domainName),
-                device.region(), device.accountId(), clientId);
+        return isAllowed(devicePolicies(device, clientId, sourceIp, domainName), "iot:Connect", "client/" + clientId);
     }
 
     /**
@@ -597,29 +598,38 @@ public class IotService {
      * variables do not resolve.
      */
     public boolean isConnectAllowedBy(List<String> documents, String clientId, String sourceIp, String domainName) {
+        return isAllowed(authorizerPolicies(documents, clientId, sourceIp, domainName), "iot:Connect", "client/" + clientId);
+    }
+
+    public ConnectionPolicies devicePolicies(RegisteredDevice device, String clientId, String sourceIp, String domainName) {
+        return new ConnectionPolicies(attachedPolicyDocuments(device.certificate().getCertificateArn(), device.region(), device.accountId()),
+                connectionVariables(device, clientId, sourceIp, domainName), device.region(), device.accountId());
+    }
+
+    public ConnectionPolicies authorizerPolicies(List<String> documents, String clientId, String sourceIp, String domainName) {
         // ponytail: the broker has no request context, so a custom-auth client connects to the default account and region.
-        return isConnectAllowed(documents, basicConnectionVariables(clientId, sourceIp, domainName),
-                regionResolver.getDefaultRegion(), regionResolver.getDefaultAccountId(), clientId);
+        return new ConnectionPolicies(documents, basicConnectionVariables(clientId, sourceIp, domainName),
+                regionResolver.getDefaultRegion(), regionResolver.getDefaultAccountId());
     }
 
     /**
-     * Decides {@code iot:Connect} for the client ARN against the documents as they are written,
-     * with the connection's variables offered as condition keys. The {@code ${...}} placeholders
-     * are the evaluator's to resolve, from that same context, because the developer guide gives
-     * IoT no policy language of its own: its policies "follow the same conventions as IAM
-     * policies" and "the same policy evaluation logic", and a variable is one "that can be used
-     * in AWS IoT Core policies in the Resource or Condition block", which is where that resolver
-     * substitutes and the only place AWS says a variable has meaning.
+     * Decides an IoT action on {@code resource} ({@code client/<id>}, {@code topic/<topic>} or
+     * {@code topicfilter/<filter>}) against the documents as they are written, with the
+     * connection's variables offered as condition keys. The {@code ${...}} placeholders are the
+     * evaluator's to resolve, from that same context, because the developer guide gives IoT no
+     * policy language of its own: its policies "follow the same conventions as IAM policies" and
+     * "the same policy evaluation logic", and a variable is one "that can be used in AWS IoT Core
+     * policies in the Resource or Condition block", which is where that resolver substitutes and
+     * the only place AWS says a variable has meaning.
      */
-    private boolean isConnectAllowed(List<String> documents, Map<String, String> variables, String region, String accountId,
-                                     String clientId) {
-        if (documents.isEmpty()) {
+    public boolean isAllowed(ConnectionPolicies policies, String action, String resource) {
+        if (policies.documents().isEmpty()) {
             return false;
         }
         Map<String, List<String>> conditionContext = new LinkedHashMap<>();
-        variables.forEach((key, value) -> conditionContext.put(key, List.of(value)));
-        String clientArn = AwsArnUtils.Arn.of("iot", region, accountId, "client/" + clientId).toString();
-        return policyEvaluator.evaluate(CallerContext.of(documents), null, "iot:Connect", clientArn, conditionContext)
+        policies.variables().forEach((key, value) -> conditionContext.put(key, List.of(value)));
+        String arn = AwsArnUtils.Arn.of("iot", policies.region(), policies.accountId(), resource).toString();
+        return policyEvaluator.evaluate(CallerContext.of(policies.documents()), null, action, arn, conditionContext)
                 == IamPolicyEvaluator.Decision.ALLOW;
     }
 

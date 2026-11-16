@@ -1,0 +1,269 @@
+package io.floci.aws.services.iot;
+
+import io.floci.aws.testing.IotMqttTlsProfile;
+import io.floci.aws.testing.PartitionCleanup;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.eclipse.paho.mqttv5.client.IMqttToken;
+import org.eclipse.paho.mqttv5.client.MqttAsyncClient;
+import org.eclipse.paho.mqttv5.client.MqttCallback;
+import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
+import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
+import org.eclipse.paho.mqttv5.common.MqttMessage;
+import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+@QuarkusTest
+@TestProfile(IotMqttTlsProfile.class)
+class IotMqttTopicAuthorizationIntegrationTest {
+
+    private static final Path TLS_DIR = Path.of(IotMqttTlsProfile.TLS_DIR);
+    private static final int NOT_AUTHORIZED = 0x87;
+    private static final String THING_TOPICS_ONLY = "{\"Version\":\"2012-10-17\",\"Statement\":["
+            + "{\"Effect\":\"Allow\",\"Action\":\"iot:Connect\",\"Resource\":\"arn:aws:iot:*:*:client/${iot:Connection.Thing.ThingName}\"},"
+            + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Publish\",\"iot:Receive\"],"
+            + "\"Resource\":\"arn:aws:iot:*:*:topic/things/${iot:Connection.Thing.ThingName}/*\"},"
+            + "{\"Effect\":\"Allow\",\"Action\":\"iot:Subscribe\","
+            + "\"Resource\":\"arn:aws:iot:*:*:topicfilter/things/${iot:Connection.Thing.ThingName}/*\"}]}";
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @Test
+    void aDeviceSubscribesPublishesAndReceivesOnItsOwnThingTopics() throws Exception {
+        String thing = "a" + System.nanoTime();
+        IotDeviceIdentity device = thingDevice(thing);
+        byte[] payload = "own".getBytes(StandardCharsets.UTF_8);
+
+        MqttClient client = connectV3(device, thing);
+        try {
+            CompletableFuture<byte[]> received = new CompletableFuture<>();
+            client.subscribe("things/" + thing + "/#", 1, (topic, message) -> received.complete(message.getPayload()));
+            client.publish("things/" + thing + "/telemetry", payload, 1, false);
+
+            assertArrayEquals(payload, received.get(10, TimeUnit.SECONDS));
+        } finally {
+            closeV3(client);
+        }
+    }
+
+    @Test
+    void mqtt3SubscribeToAnotherThingsTopicClosesTheConnection() throws Exception {
+        String thing = "a" + System.nanoTime();
+        MqttClient client = connectV3(thingDevice(thing), thing);
+        try {
+            assertThrows(MqttException.class, () -> client.subscribe("things/b" + thing + "/#", 1));
+            assertFalse(client.isConnected());
+        } finally {
+            closeV3(client);
+        }
+    }
+
+    @Test
+    void mqtt3PublishToAnotherThingsTopicClosesTheConnectionUndelivered() throws Exception {
+        String thing = "a" + System.nanoTime();
+        String otherTopic = "things/b" + thing + "/telemetry";
+        MqttClient listener = connectPlain("listener-" + System.nanoTime());
+        MqttClient client = connectV3(thingDevice(thing), thing);
+        try {
+            BlockingQueue<String> received = new LinkedBlockingQueue<>();
+            listener.subscribe(otherTopic, 1, (topic, message) -> received.add(topic));
+
+            assertThrows(MqttException.class, () -> client.publish(otherTopic, "x".getBytes(StandardCharsets.UTF_8), 1, false));
+
+            assertFalse(client.isConnected());
+            assertNull(received.poll(1, TimeUnit.SECONDS));
+        } finally {
+            closeV3(client);
+            closeV3(listener);
+        }
+    }
+
+    @Test
+    void mqtt5DeniedSubscribeAndQos1PublishAreAnsweredNotAuthorizedAndTheSessionStays() throws Exception {
+        String thing = "a" + System.nanoTime();
+        DisconnectRecorder recorder = new DisconnectRecorder();
+        MqttAsyncClient client = connectV5(thingDevice(thing), thing, recorder);
+        try {
+            IMqttToken subscribe = client.subscribe("things/b" + thing + "/#", 1);
+            subscribe.waitForCompletion(10_000);
+            assertEquals(NOT_AUTHORIZED, subscribe.getReasonCodes()[0]);
+
+            IMqttToken publish = client.publish("things/b" + thing + "/telemetry", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+            publish.waitForCompletion(10_000);
+            assertEquals(NOT_AUTHORIZED, publish.getReasonCodes()[0]);
+
+            IMqttToken own = client.subscribe("things/" + thing + "/#", 1);
+            own.waitForCompletion(10_000);
+            assertEquals(1, own.getReasonCodes()[0]);
+            assertTrue(client.isConnected());
+        } finally {
+            closeV5(client);
+        }
+    }
+
+    @Test
+    void mqtt5DeniedQos0PublishIsDisconnectedNotAuthorized() throws Exception {
+        String thing = "a" + System.nanoTime();
+        DisconnectRecorder recorder = new DisconnectRecorder();
+        MqttAsyncClient client = connectV5(thingDevice(thing), thing, recorder);
+        try {
+            client.publish("things/b" + thing + "/telemetry", "x".getBytes(StandardCharsets.UTF_8), 0, false);
+
+            MqttDisconnectResponse disconnect = recorder.disconnects.poll(10, TimeUnit.SECONDS);
+            assertEquals(NOT_AUTHORIZED, disconnect.getReturnCode());
+        } finally {
+            closeV5(client);
+        }
+    }
+
+    @Test
+    void aSubscriberReceivesOnlyTheTopicsItsPolicyAllowsReceiveOn() throws Exception {
+        String prefix = "receive/" + System.nanoTime();
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
+        device.attachNewPolicy("{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Connect\",\"iot:Subscribe\"],\"Resource\":\"*\"},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"iot:Receive\",\"Resource\":\"arn:aws:iot:*:*:topic/" + prefix + "/ok\"}]}",
+                cleanup);
+        MqttClient subscriber = connectV3(device, "sub-" + System.nanoTime());
+        MqttClient publisher = connectPlain("pub-" + System.nanoTime());
+        try {
+            BlockingQueue<String> received = new LinkedBlockingQueue<>();
+            subscriber.subscribe(prefix + "/+", 1, (topic, message) -> received.add(topic));
+
+            publisher.publish(prefix + "/denied", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+            publisher.publish(prefix + "/ok", "x".getBytes(StandardCharsets.UTF_8), 1, false);
+
+            assertEquals(prefix + "/ok", received.poll(10, TimeUnit.SECONDS));
+            assertNull(received.poll(500, TimeUnit.MILLISECONDS));
+            assertTrue(subscriber.isConnected());
+        } finally {
+            closeV3(publisher);
+            closeV3(subscriber);
+        }
+    }
+
+    private IotDeviceIdentity thingDevice(String thing) {
+        IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
+        device.attachNewPolicy(THING_TOPICS_ONLY, cleanup);
+        given().contentType("application/json").body("{}").when().post("/things/" + thing).then().statusCode(200);
+        cleanup.register(() -> given().when().delete("/things/" + thing).then().statusCode(200));
+        given().header("x-amzn-principal", device.certificateArn).when().put("/things/" + thing + "/principals").then().statusCode(200);
+        cleanup.register(() -> given().header("x-amzn-principal", device.certificateArn)
+                .when().delete("/things/" + thing + "/principals").then().statusCode(200));
+        return device;
+    }
+
+    private static MqttClient connectV3(IotDeviceIdentity device, String clientId) throws Exception {
+        MqttConnectOptions options = v3Options();
+        options.setSocketFactory(device.sslContext(TLS_DIR).getSocketFactory());
+        return connect("ssl://127.0.0.1:" + IotMqttTlsProfile.TLS_PORT, clientId, options);
+    }
+
+    private static MqttClient connectPlain(String clientId) throws Exception {
+        return connect("tcp://127.0.0.1:" + IotMqttTlsProfile.PLAIN_PORT, clientId, v3Options());
+    }
+
+    private static MqttClient connect(String uri, String clientId, MqttConnectOptions options) throws Exception {
+        MqttClient client = new MqttClient(uri, clientId, new MemoryPersistence());
+        client.setTimeToWait(10_000);
+        try {
+            client.connect(options);
+        } catch (MqttException e) {
+            client.close();
+            throw e;
+        }
+        return client;
+    }
+
+    private static MqttConnectOptions v3Options() {
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
+        options.setCleanSession(true);
+        options.setConnectionTimeout(10);
+        options.setAutomaticReconnect(false);
+        return options;
+    }
+
+    private static void closeV3(MqttClient client) {
+        try {
+            if (client.isConnected()) {
+                client.disconnect();
+            }
+            client.close();
+        } catch (MqttException ignored) {
+        }
+    }
+
+    private static MqttAsyncClient connectV5(IotDeviceIdentity device, String clientId, MqttCallback callback) throws Exception {
+        MqttAsyncClient client = new MqttAsyncClient("ssl://127.0.0.1:" + IotMqttTlsProfile.TLS_PORT, clientId,
+                new org.eclipse.paho.mqttv5.client.persist.MemoryPersistence());
+        client.setCallback(callback);
+        MqttConnectionOptions options = new MqttConnectionOptions();
+        options.setCleanStart(true);
+        options.setConnectionTimeout(10);
+        options.setAutomaticReconnect(false);
+        options.setSocketFactory(device.sslContext(TLS_DIR).getSocketFactory());
+        client.connect(options).waitForCompletion(10_000);
+        return client;
+    }
+
+    private static void closeV5(MqttAsyncClient client) {
+        try {
+            if (client.isConnected()) {
+                client.disconnect().waitForCompletion(5_000);
+            }
+            client.close();
+        } catch (org.eclipse.paho.mqttv5.common.MqttException ignored) {
+        }
+    }
+
+    private static final class DisconnectRecorder implements MqttCallback {
+        final BlockingQueue<MqttDisconnectResponse> disconnects = new LinkedBlockingQueue<>();
+
+        @Override
+        public void disconnected(MqttDisconnectResponse response) {
+            disconnects.add(response);
+        }
+
+        @Override
+        public void mqttErrorOccurred(org.eclipse.paho.mqttv5.common.MqttException exception) {
+        }
+
+        @Override
+        public void messageArrived(String topic, MqttMessage message) {
+        }
+
+        @Override
+        public void deliveryComplete(IMqttToken token) {
+        }
+
+        @Override
+        public void connectComplete(boolean reconnect, String serverUri) {
+        }
+
+        @Override
+        public void authPacketArrived(int reasonCode, MqttProperties properties) {
+        }
+    }
+}

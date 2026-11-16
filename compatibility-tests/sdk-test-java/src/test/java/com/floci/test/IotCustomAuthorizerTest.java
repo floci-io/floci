@@ -288,6 +288,11 @@ class IotCustomAuthorizerTest {
                     big = json.loads(policy)
                     big["Statement"][1]["Resource"] = [ARN_PREFIX + ":topic/big/%040d" % i for i in range(60)]
                     return response([json.dumps(big)])
+                if secret == "scoped":
+                    scoped = json.loads(policy)
+                    scoped["Statement"][1]["Resource"] = [ARN_PREFIX + ":topic/" + NAME_PREFIX + "/scoped/*",
+                                                          ARN_PREFIX + ":topicfilter/" + NAME_PREFIX + "/scoped/*"]
+                    return response([json.dumps(scoped)])
                 if secret == "objpolicy":
                     return response([json.loads(policy)])
                 return {"isAuthenticated": False}
@@ -651,6 +656,22 @@ class IotCustomAuthorizerTest {
         String payload = "hello-" + version.name();
         try (Session session = open(version, target(namedUsername(authorizer), "allow-me"))) {
             assertThat(session.roundTrip(topic, payload)).isEqualTo(payload);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
+    @DisplayName("the returned policies decide publish, subscribe and receive")
+    void mqttTopicOutsideTheReturnedPolicyIsRefused(Mqtt version) throws Exception {
+        String allowed = prefix + "/scoped/" + version.name().toLowerCase();
+        String outside = prefix + "/outside/" + version.name().toLowerCase();
+        try (Session session = open(version, target(namedUsername(authorizer), "scoped"))) {
+            assertThat(session.roundTrip(allowed, "inside")).isEqualTo("inside");
+            if (version == Mqtt.V3_1_1) {
+                assertThat(catchThrowable(() -> session.roundTrip(outside, "outside"))).isInstanceOf(MqttException.class);
+            } else {
+                assertThat(session.roundTrip(outside, "outside")).isNull();
+            }
         }
     }
 
