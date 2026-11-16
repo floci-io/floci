@@ -179,6 +179,8 @@ public class PaymentCryptographyKey {
     public boolean isUsingDefaultReplicationRegions() { return usingDefaultReplicationRegions; }
     public void setUsingDefaultReplicationRegions(boolean usingDefaultReplicationRegions) {
         this.usingDefaultReplicationRegions = usingDefaultReplicationRegions;
-    }    public Map<String, String> getTags() { return tags; }
+    }
+
+    public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
 }
