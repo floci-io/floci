@@ -126,6 +126,11 @@ floci:
     strict-claiming: false
     reject-unknown-service-scope: true
 
+  dns:
+    # Tests run natively; with the bridge listener on, a runner allowed to bind port 53 would change
+    # how every container a test launches resolves names.
+    bridge-listener-enabled: false
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"

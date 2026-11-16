@@ -337,6 +337,17 @@ floci:
     # with a certificate covering those suffixes and their regional wildcards.
     spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
 
+    # When Floci runs natively: a resolver on 127.0.0.1:<port> answering the same names as the
+    # embedded DNS server (Cloud Map <service>.<namespace>, Route 53 private zones), for the host's
+    # own resolver to point at; other names are refused. Unset starts no listener. In Docker,
+    # publish port 53/udp instead.
+    # host-port: 5354                             # FLOCI_DNS_HOST_PORT
+
+    # When Floci runs natively on a host with a docker0 bridge: also listen on that bridge's
+    # address, port 53, and give it to the containers Floci launches as their resolver. Port 53
+    # needs root or CAP_NET_BIND_SERVICE; without it Floci logs how to grant it.
+    bridge-listener-enabled: true                 # FLOCI_DNS_BRIDGE_LISTENER_ENABLED
+
   auth:
     validate-signatures: false
     presign-secret: local-emulator-secret
