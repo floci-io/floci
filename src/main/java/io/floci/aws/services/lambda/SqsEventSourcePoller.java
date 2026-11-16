@@ -446,7 +446,7 @@ public class SqsEventSourcePoller implements Resettable {
         attrs.put("ApproximateFirstReceiveTimestamp",
                 String.valueOf(msg.getFirstReceiveTimestamp() != null
                         ? msg.getFirstReceiveTimestamp().toEpochMilli()
-                        : System.currentTimeMillis()));
+                        : clockMs.getAsLong()));
         if (msg.getSequenceNumber() > 0) {
             attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
         }

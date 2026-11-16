@@ -86,6 +86,8 @@ class SqsEventSourcePollerTest {
 
     @Test
     void buildSqsEventIncludesAllRequiredAttributes() throws Exception {
+        AtomicLong clock = new AtomicLong(1000L);
+        poller.setClockForTest(clock::get);
         Instant firstReceived = Instant.parse("2026-01-15T10:31:00Z");
         Message msg = new Message();
         msg.setBody("{\"key\":\"value\"}");
@@ -439,6 +441,8 @@ class SqsEventSourcePollerTest {
 
     @Test
     void firstReceiveTimestampRemainsStableAcrossRetries() throws Exception {
+        AtomicLong clock = new AtomicLong(1000L);
+        poller.setClockForTest(clock::get);
         Instant firstReceived = Instant.parse("2026-01-15T10:31:00Z");
         Message msg = new Message();
         msg.setBody("retry-body");
@@ -451,7 +455,7 @@ class SqsEventSourcePollerTest {
         esm.setRegion("us-east-1");
 
         String firstCall = poller.buildSqsEvent(List.of(msg), esm);
-        Thread.sleep(10);
+        clock.addAndGet(10L);
         String secondCall = poller.buildSqsEvent(List.of(msg), esm);
 
         JsonNode firstTs = OBJECT_MAPPER.readTree(firstCall)
@@ -462,6 +466,22 @@ class SqsEventSourcePollerTest {
         assertEquals(String.valueOf(firstReceived.toEpochMilli()), firstTs.asText());
         assertEquals(firstTs.asText(), secondTs.asText(),
                 "ApproximateFirstReceiveTimestamp must not change between retries");
+    }
+
+    @Test
+    void missingFirstReceiveTimestampUsesPollerClock() throws Exception {
+        AtomicLong clock = new AtomicLong(1000L);
+        poller.setClockForTest(clock::get);
+        Message msg = message("clock-fallback");
+        msg.setFirstReceiveTimestamp(null);
+
+        JsonNode first = OBJECT_MAPPER.readTree(poller.buildSqsEvent(List.of(msg), esm()));
+        clock.addAndGet(10L);
+        JsonNode second = OBJECT_MAPPER.readTree(poller.buildSqsEvent(List.of(msg), esm()));
+
+        assertEquals("1000", first.at("/Records/0/attributes/ApproximateFirstReceiveTimestamp").asText());
+        assertEquals("1010", second.at("/Records/0/attributes/ApproximateFirstReceiveTimestamp").asText());
+        assertNull(msg.getFirstReceiveTimestamp());
     }
 
     // ──────────────────────────── FilterCriteria ────────────────────────────
