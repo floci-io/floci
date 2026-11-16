@@ -473,6 +473,40 @@ class AccountAwareStorageBackendTest {
     }
 
     /**
+     * A legacy entry is copied to each other Region its account's resources name it in, keeping a record already
+     * there, and then moves to the default Region; one no resource names moves only. The default Region named too
+     * gets the moved entry, not a copy.
+     */
+    @Test
+    void migrateLegacyEntriesToRegionsCopiesEachToTheRegionsUsingItThenMovesItToTheDefaultRegion() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("123456789012/used", "used");
+        raw.put("123456789012/unused", "unused");
+        raw.put("123456789012/eu-west-1::used", "already there");
+        raw.put("gen0", "default-account");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        List<String> asked = new ArrayList<>();
+
+        storage.migrateLegacyEntriesToRegions(key -> !key.contains("::"), "us-east-1",
+                (account, value) -> {
+                    asked.add(account + " " + value);
+                    return value.equals("used") ? Set.of("us-east-1", "eu-central-1", "eu-west-1") : Set.of();
+                },
+                (region, value) -> region + "::" + value, value -> value + " (copy)");
+
+        assertEquals(List.of("000000000000 default-account", "123456789012 unused", "123456789012 used"),
+                asked.stream().sorted().toList());
+        assertEquals(Map.of(
+                        "123456789012/us-east-1::used", "used",
+                        "123456789012/eu-central-1::used", "used (copy)",
+                        "123456789012/eu-west-1::used", "already there",
+                        "123456789012/us-east-1::unused", "unused",
+                        "000000000000/us-east-1::default-account", "default-account"),
+                raw.keys().stream().collect(Collectors.toMap(key -> key, key -> raw.get(key).orElseThrow())));
+    }
+
+    /**
      * {@code get} and {@code getForAccountMigratingLegacy} both migrate a pre-multi-account entry, and
      * both delete the legacy key once they have copied it. Unless they hold the same monitor, two readers
      * resolving that key from different account contexts each copy it into their own partition and the two

@@ -3230,7 +3230,7 @@ public class GlueService {
     public void tagResource(String arn, Map<String, String> tags, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            schemaRegistryService.tagResource(arn, tags);
+            schemaRegistryService.tagResource(arn, tags, region);
         } else {
             validateResourceExists(arn);
             resourceGroupsTaggingService.tagResources(List.of(arn), tags, region);
@@ -3240,7 +3240,7 @@ public class GlueService {
     public void untagResource(String arn, List<String> tagKeys, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            schemaRegistryService.untagResource(arn, tagKeys);
+            schemaRegistryService.untagResource(arn, tagKeys, region);
         } else {
             validateResourceExists(arn);
             resourceGroupsTaggingService.untagResources(List.of(arn), tagKeys, region);
@@ -3250,7 +3250,7 @@ public class GlueService {
     public Map<String, String> getTags(String arn, String region) {
         validateArn(arn);
         if (arn.contains(":registry/") || arn.contains(":schema/")) {
-            return schemaRegistryService.getTags(arn);
+            return schemaRegistryService.getTags(arn, region);
         } else {
             validateResourceExists(arn);
             return resourceGroupsTaggingService.getTagsForResource(region, arn);

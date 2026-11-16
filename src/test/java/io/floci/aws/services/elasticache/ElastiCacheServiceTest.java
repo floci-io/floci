@@ -234,7 +234,8 @@ class ElastiCacheServiceTest {
 
         Field locksField = ElastiCacheService.class.getDeclaredField("parameterGroupLocks");
         locksField.setAccessible(true);
-        Object monitor = ((ConcurrentHashMap<?, ?>) locksField.get(service)).get(name);
+        // Each group's monitor is keyed by its Region and name, as the group is.
+        Object monitor = ((ConcurrentHashMap<?, ?>) locksField.get(service)).get("us-east-1::" + name);
         ExecutorService pool = Executors.newSingleThreadExecutor();
         AtomicReference<Thread> writer = new AtomicReference<>();
         try {
