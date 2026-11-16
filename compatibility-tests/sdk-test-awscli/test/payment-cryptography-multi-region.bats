@@ -9,6 +9,7 @@
 setup() {
     load 'test_helper/common-setup'
     KEY_ARN=""
+    DEFAULT_REGIONS=""
 }
 
 teardown() {
@@ -16,8 +17,14 @@ teardown() {
         aws_cmd payment-cryptography delete-key --key-identifier "$KEY_ARN" \
             --delete-key-in-days 7 >/dev/null 2>&1 || true
     fi
+    # The account's own default regions are put back, so a run against an account that
+    # already had one does not take it away.
     aws_cmd payment-cryptography disable-default-key-replication-regions \
         --replication-regions us-west-2 >/dev/null 2>&1 || true
+    if [ -n "$DEFAULT_REGIONS" ] && [ "$DEFAULT_REGIONS" != "None" ]; then
+        aws_cmd payment-cryptography enable-default-key-replication-regions \
+            --replication-regions $DEFAULT_REGIONS >/dev/null 2>&1 || true
+    fi
 }
 
 # The key that leaves the service, replicated to the regions named.
@@ -30,6 +37,11 @@ create_replicated_key() {
 }
 
 @test "Payment Cryptography multi-region: the default replication regions are read and set" {
+    # The account's own default regions are read before the test changes them, so the
+    # teardown can put them back.
+    DEFAULT_REGIONS=$(aws_cmd payment-cryptography get-default-key-replication-regions \
+        --query 'EnabledReplicationRegions' --output text 2>/dev/null || true)
+
     run aws_cmd payment-cryptography get-default-key-replication-regions
     assert_success
     [ -n "$(json_get "$output" '.EnabledReplicationRegions')" ]

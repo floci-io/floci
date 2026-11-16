@@ -141,6 +141,10 @@ class PaymentCryptographyTest {
 
     @Test
     void aKeyIsReplicatedToTheRegionsTheAccountReplicatesToByDefault() {
+        // The account's own default regions are read before the test changes them, so the
+        // cleanup can put them back.
+        List<String> before = client.getDefaultKeyReplicationRegions(r -> { })
+                .enabledReplicationRegions();
         EnableDefaultKeyReplicationRegionsResponse enabled = client.enableDefaultKeyReplicationRegions(r -> r
                 .replicationRegions("us-west-2"));
         try {
@@ -169,6 +173,9 @@ class PaymentCryptographyTest {
                     .isEqualTo(KeyReplicationState.SYNCHRONIZED);
         } finally {
             client.disableDefaultKeyReplicationRegions(r -> r.replicationRegions("us-west-2"));
+            for (String region : before) {
+                client.enableDefaultKeyReplicationRegions(r -> r.replicationRegions(region));
+            }
         }
     }
 
@@ -448,6 +455,8 @@ class PaymentCryptographyTest {
 
         assertThat(imported.key().multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
         assertThat(imported.key().primaryRegion()).isEqualTo("us-east-1");
+        // The imported key is cleaned up with the others, so it does not stay behind.
+        keyArns.add(imported.key().keyArn());
     }
 
     @Test
