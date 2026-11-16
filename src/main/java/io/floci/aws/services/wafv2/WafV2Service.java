@@ -7,7 +7,6 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsPartition;
 import io.floci.aws.core.common.AwsPartitions;
-import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -483,7 +482,7 @@ public class WafV2Service {
         String scope = parsed.resource().startsWith("global/") ? "CLOUDFRONT" : "REGIONAL";
         try {
             String home = homeRegion(scope, regionResolver.getRegion());
-            return parsed.region().equals(home) && parsed.partition().equals(AwsRegions.partitionFor(home))
+            return parsed.region().equals(home) && parsed.partition().equals(regionResolver.partitionForRegion(home))
                     ? Optional.of(parsed) : Optional.empty();
         } catch (AwsException e) {
             return Optional.empty();
