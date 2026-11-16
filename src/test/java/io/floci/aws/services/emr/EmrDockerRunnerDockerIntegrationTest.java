@@ -530,14 +530,7 @@ class EmrDockerRunnerDockerIntegrationTest {
                 .toList();
     }
 
-    /** What a job wrote under {@code prefix}: its part files, in key order, one after the other. */
     private String partFiles(String prefix) {
-        StringBuilder text = new StringBuilder();
-        for (S3Object object : s3.listObjectsV2(request -> request.bucket(bucket).prefix(prefix)).contents()) {
-            if (object.key().substring(prefix.length()).startsWith("part-")) {
-                text.append(s3.getObjectAsBytes(request -> request.bucket(bucket).key(object.key())).asUtf8String());
-            }
-        }
-        return text.toString();
+        return S3TestClients.partFiles(s3, bucket, prefix);
     }
 }

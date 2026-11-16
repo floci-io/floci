@@ -1,10 +1,11 @@
 name: Nightly checks
 
 # Runs the test classes named *NightlyIntegrationTest: checks that pull or push images too large, or run too long,
-# for every pull request's shards. Each such class skips unless the JVM has -Dfloci.nightly=true, so the CI shards,
-# which pick every *Test class, see it skip at no cost; this workflow sets the property. It runs once a day on
-# main, on demand, and on a pull request that adds or changes a nightly check, so the check is seen to pass before
-# it merges. GitHub-hosted runners only, which a public repository runs at no charge.
+# for every pull request's shards. Each such class skips unless the JVM has -Dnightly.checks.enabled=true, so the
+# CI shards, which pick every *Test class, see it skip at no cost; this workflow sets the property. Its name is
+# outside floci.*, whose names Floci's configuration validates: a Quarkus test given -Dfloci.nightly refuses to
+# start. It runs once a day on main, on demand, and on a pull request that adds or changes a nightly check, so the
+# check is seen to pass before it merges. GitHub-hosted runners only, which a public repository runs at no charge.
 on:
   schedule:
     # 08:00 UTC, after Nightly (23:00 America/Chicago) and away from the daytime merges' CI runs.
@@ -93,7 +94,7 @@ jobs:
           ./mvnw surefire:test -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/nightly.txt"
           -Dsurefire.failIfNoTests=true
-          -Dfloci.nightly=true
+          -Dnightly.checks.enabled=true
 
       - name: Image prefetch results
         if: always() && steps.list.outputs.count != '0'
