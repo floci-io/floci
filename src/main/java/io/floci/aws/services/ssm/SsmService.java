@@ -1515,7 +1515,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
      * The accounts the document of that name in the owner's account and Region is shared with; empty when there is no
      * such document.
      */
-    public List<String> documentSharedWith(String ownerAccountId, String name, String region) {
+    List<String> documentSharedWith(String ownerAccountId, String name, String region) {
         String key = regionKey(region, name);
         if (AccountAwareStorageBackend.readInAccount(documentStore, ownerAccountId, key).isEmpty()) {
             return List.of();

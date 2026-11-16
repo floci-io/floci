@@ -54,8 +54,8 @@ class SsmSharedDocumentAssociationIntegrationTest {
                 try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
                         Region.US_EAST_1)) {
                     assertDoesNotThrow(() -> associate(user, arn(shared)));
-                    SsmException denied = assertThrows(SsmException.class, () -> associate(user, arn(unshared)));
-                    assertEquals("AccessDeniedException", denied.awsErrorDetails().errorCode());
+                    SsmException missing = assertThrows(SsmException.class, () -> associate(user, arn(unshared)));
+                    assertEquals("InvalidDocument", missing.awsErrorDetails().errorCode());
                 }
             } finally {
                 owner.deleteDocument(r -> r.name(shared).force(true));

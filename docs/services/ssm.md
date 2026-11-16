@@ -37,7 +37,7 @@ association and the `document/<name>` its `Name` gives.
 
 `CreateAssociation` also runs a document another account shared with the caller through
 `ModifyDocumentPermission`, given in `Name` by its ARN. With IAM enforcement on, the caller's policy must allow
-that ARN, and the share stands in for the owner's grant: a document the owner did not share is refused.
+that ARN. A document the owner did not share is `InvalidDocument`.
 
 `GetParameters` returns successful parameters alphabetically by `Name`, preserving
 the selected versions and labels.
