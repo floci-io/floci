@@ -3,6 +3,7 @@ package io.floci.aws.services.appsync.graphql;
 import io.floci.aws.services.appsync.GraphqlSidecarClient;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -37,6 +38,31 @@ class SidecarSchemaCompilerTest {
         String prepared = compiler.withDirectivesAndScalars(sdl);
 
         assertEquals(1, count(prepared.substring(0, prepared.lastIndexOf(sdl)), "scalar AWSDateTime"));
+        assertTrue(prepared.endsWith(sdl));
+    }
+
+    @Test
+    void enumValuesNamedScalarAndAwsScalarDoNotSuppressInjection() {
+        for (String scalarName : List.of("AWSDateTime", "AWSDate")) {
+            String sdl = "enum Choice { scalar " + scalarName + " }\\n"
+                    + "type Query { value: " + scalarName + " }";
+
+            String prepared = compiler.withDirectivesAndScalars(sdl);
+            String injected = prepared.substring(0, prepared.lastIndexOf(sdl));
+
+            assertEquals(1, count(injected, "scalar " + scalarName + "\\n"));
+            assertTrue(prepared.endsWith(sdl));
+        }
+    }
+
+    @Test
+    void commaBetweenScalarKeywordAndNameIsIgnored() {
+        String sdl = "scalar, AWSDateTime\\ntype Query { time: AWSDateTime }";
+
+        String prepared = compiler.withDirectivesAndScalars(sdl);
+        String injected = prepared.substring(0, prepared.lastIndexOf(sdl));
+
+        assertEquals(0, count(injected, "scalar AWSDateTime"));
         assertTrue(prepared.endsWith(sdl));
     }
 
