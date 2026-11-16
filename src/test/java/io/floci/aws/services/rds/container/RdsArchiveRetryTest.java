@@ -263,7 +263,8 @@ class RdsArchiveRetryTest {
                   *information_schema.schemata*) printf 'a\\\\nb\\nplain\\n' ;;
                   *CONCAT*QUOTE*) printf '\\047u\\\\nser\\047@\\047%%\\047\\n' ;;
                   *QUOTE*) printf '\\047r\\\\nole\\047\\n' ;;
-                  *SHOW*GRANTS*) printf 'GRANT USAGE ON *.* TO %s\\n' "${last#SHOW GRANTS FOR }" ;;
+                  *SHOW*GRANTS*) printf 'GRANT USAGE ON *.* TO %s\\nREVOKE SELECT ON mysql.* FROM %s\\nSET DEFAULT ROLE r FOR %s\\n' \\
+                      "${last#SHOW GRANTS FOR }" "${last#SHOW GRANTS FOR }" "${last#SHOW GRANTS FOR }" ;;
                   *SHOW*) printf '%s\\n' "$last" ;;
                 esac
                 """);
@@ -287,6 +288,9 @@ class RdsArchiveRetryTest {
         // Each GRANT ends with one ';', after the whole name, not after the line the newline split.
         assertTrue(output.contains("GRANT USAGE ON *.* TO 'r\nole';\n"), output);
         assertTrue(output.contains("GRANT USAGE ON *.* TO 'u\nser'@'%';\n"), output);
+        // MariaDB's SET DEFAULT ROLE and MySQL's partial REVOKE are statements of their own, not GRANT tails.
+        assertTrue(output.contains("GRANT USAGE ON *.* TO 'u\nser'@'%';\nREVOKE SELECT ON mysql.* FROM 'u\nser'@'%';\n"
+                + "SET DEFAULT ROLE r FOR 'u\nser'@'%';\n"), output);
     }
 
     @Test

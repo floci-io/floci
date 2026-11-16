@@ -1405,8 +1405,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 $ACCOUNTS
                 EOF
                 while IFS= read -r grantee; do
-                  # A statement ends where the next GRANT begins, not at every line: a name with a newline spans two.
-                  if [ -n "$grantee" ]; then unesc "$grantee"; SQL "SHOW GRANTS FOR $R" | awk 'BEGIN{ORS=""} /^GRANT /{if(NR>1)print ";\\n"} NR>1&&!/^GRANT /{print "\\n"} {print} END{if(NR)print ";\\n"}'; fi
+                  # A statement ends where the next GRANT, REVOKE or SET DEFAULT ROLE begins, not at every line: a name with a newline spans two.
+                  if [ -n "$grantee" ]; then unesc "$grantee"; SQL "SHOW GRANTS FOR $R" | awk 'BEGIN{ORS=""} /^(GRANT|REVOKE|SET DEFAULT ROLE) /{if(NR>1)print ";\\n"} NR>1&&!/^(GRANT|REVOKE|SET DEFAULT ROLE) /{print "\\n"} {print} END{if(NR)print ";\\n"}'; fi
                 done <<EOF
                 $ROLES
                 $ACCOUNTS
