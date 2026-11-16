@@ -34,9 +34,9 @@ import java.util.Optional;
  * versions and executions, and an activity; CodeBuild, for the project a build belongs to and the tags of a project or
  * a report group; Athena, for the workgroup and the data catalog a request naming none uses and the tags of a
  * workgroup or a data catalog; Redshift Serverless, for the tags of a namespace, a workgroup or a snapshot; DynamoDB,
- * for the tags of a table and its indexes); looked up lazily by {@code ResourceArnBuilder} and
- * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
- * ARN is of, so IAM never depends on that service directly.</p>
+ * for the tags of a table and its indexes; ECR, for the tags of a repository); looked up lazily by
+ * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
+ * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

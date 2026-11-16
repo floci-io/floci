@@ -71,6 +71,7 @@ public class EcrService implements ResourceProvider, Resettable {
             "(?:[a-z0-9]+(?:(?:\\.|_|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+"
                     + "(?:(?:\\.|_|__|-+)[a-z0-9]+)*)*/?|ROOT)");
     private static final Pattern REGISTRY_ID = Pattern.compile("[0-9]{12}");
+    private static final String REPOSITORY_RESOURCE = "repository/";
     private static final Pattern LAYER_DIGEST = Pattern.compile("[a-zA-Z0-9-_+.]+:[a-fA-F0-9]+");
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** ECR's imageTag rule, which the service model bounds at 300 characters. */
@@ -106,6 +107,9 @@ public class EcrService implements ResourceProvider, Resettable {
     private final EcrLayerUploads layerUploads = new EcrLayerUploads(this::discardUpload);
     private final Set<String> inFlightImmutableTags = ConcurrentHashMap.newKeySet();
     private final KeyedWriteLocks<String> repositoryWriteLocks = new KeyedWriteLocks<>();
+    // Held while a repository's tags are copied, changed and put in place of the map it held, which is never changed.
+    // The copy is put one entry at a time, as the map always was, so ListTagsForResource keeps the order it listed.
+    private final Object tagLock = new Object();
 
     @Inject
     public EcrService(StorageFactory factory,
@@ -1676,26 +1680,54 @@ public class EcrService implements ResourceProvider, Resettable {
     }
 
     public void tagResource(String repoName, String registryId, Map<String, String> tags, String region) {
-        Repository repo = requireRepo(repoName, registryId, region);
-        if (tags != null) {
-            repo.getTags().putAll(tags);
+        synchronized (tagLock) {
+            Repository repo = requireRepo(repoName, registryId, region);
+            if (tags != null) {
+                Map<String, String> updated = new HashMap<>();
+                repo.getTags().forEach(updated::put);
+                tags.forEach(updated::put);
+                repo.setTags(updated);
+            }
+            repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
         }
-        repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
     }
 
     public void untagResource(String repoName, String registryId, List<String> tagKeys, String region) {
-        Repository repo = requireRepo(repoName, registryId, region);
-        if (tagKeys != null) {
-            for (String k : tagKeys) {
-                repo.getTags().remove(k);
+        synchronized (tagLock) {
+            Repository repo = requireRepo(repoName, registryId, region);
+            if (tagKeys != null) {
+                Map<String, String> updated = new HashMap<>();
+                repo.getTags().forEach(updated::put);
+                tagKeys.forEach(updated::remove);
+                repo.setTags(updated);
             }
+            repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
         }
-        repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
     }
 
     public Map<String, String> listTagsForResource(String repoName, String registryId, String region) {
         Repository repo = requireRepo(repoName, registryId, region);
         return repo.getTags();
+    }
+
+    /**
+     * The tags of the repository stored under {@code arn} in the account and Region it names, a pre-multi-account one
+     * of the default account read in place, matched on the whole ARN; empty for an ARN naming nothing stored.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "ecr")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        if (!resource.startsWith(REPOSITORY_RESOURCE)) {
+            return Map.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(repoStore, parsed.accountId(),
+                        key(parsed.region(), parsed.accountId(), resource.substring(REPOSITORY_RESOURCE.length())))
+                .filter(repo -> arn.equals(repo.getRepositoryArn()))
+                .map(Repository::getTags)
+                .orElse(Map.of());
     }
 
     public Repository putLifecyclePolicy(String repoName, String registryId, String policyText, String region) {
