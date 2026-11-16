@@ -1392,11 +1392,6 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBSnapshotState",
                     "DBSnapshot " + snapshotId + " is not in an available state.", 400);
         }
-        if ((engineVersion == null || engineVersion.isBlank())
-                && (optionGroupName == null || optionGroupName.isBlank())) {
-            throw new AwsException("InvalidParameterCombination",
-                    "At least one snapshot attribute must be specified.", 400);
-        }
         if (engineVersion != null && !engineVersion.isBlank()) {
             snapshot.setEngineVersion(engineVersion);
         }
