@@ -25,6 +25,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -370,11 +371,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     public synchronized PaymentCryptographyKey deleteKey(PaymentCryptographyKey key) {
         // A replica is read-only: only the primary may be deleted.
-        if ("REPLICA".equals(key.getMultiRegionKeyType())) {
-            throw new AwsException("ValidationException",
-                    "the key " + key.getArn() + " is a replica of a key in "
-                            + key.getPrimaryRegion() + ", and only the primary may be deleted", 400);
-        }
+        requireNotReplica(key, "only the primary may be deleted");
         long now = Instant.now().getEpochSecond();
         key.setKeyState("DELETE_PENDING");
         key.setEnabled(false);
@@ -389,11 +386,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         // and it goes with the key: a record left behind would be a key that was deleted
         // and still there.
         keyStore.delete(key.getKeyId());
-        for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
-            if (key.getKeyId().equals(alias.getKeyId())) {
-                aliasStore.delete(aliasKey(alias.getAliasName(), alias.getRegion()));
-            }
-        }
+        // The aliases that name the key go with it, in every region: a replica shares the
+        // identifier of its primary, so these are the aliases of the replicas too.
+        deleteAliasesOf(null, key.getKeyId());
         return key;
     }
 
@@ -521,10 +516,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     public synchronized void tag(PaymentCryptographyKey key, Map<String, String> tags) {
         PaymentCryptographyKey current = liveKey(key);
-        requirePrimary(current);
+        requireNotReplica(current, "a replica is read-only");
         current.getTags().putAll(tags);
         storeKey(current);
-        replicateMetadata(current);
+        refreshReplicas(current, current.getReplicationRegions());
     }
 
     /**
@@ -569,24 +564,26 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     public synchronized void untag(PaymentCryptographyKey key, List<String> tagKeys) {
         PaymentCryptographyKey current = liveKey(key);
-        requirePrimary(current);
+        requireNotReplica(current, "a replica is read-only");
         for (String tagKey : tagKeys) {
             current.getTags().remove(tagKey);
         }
         storeKey(current);
-        replicateMetadata(current);
+        refreshReplicas(current, current.getReplicationRegions());
     }
 
     /**
-     * The change of a primary's metadata, carried over to its replicas.
+     * The replicas of a primary brought up to date with it.
      *
      * <p>A replica is a copy of the primary's material and metadata, and a change to the
-     * primary's metadata is replicated to the replicas, as the reference says.
+     * primary's metadata is replicated to the replicas, as the reference says. The copy is
+     * in one place, so every change to a primary reaches its replicas the same way.
      *
      * @param primary the key the change was made on
+     * @param regions the regions the replicas are in
      */
-    private void replicateMetadata(PaymentCryptographyKey primary) {
-        for (String target : primary.getReplicationRegions()) {
+    private void refreshReplicas(PaymentCryptographyKey primary, Collection<String> regions) {
+        for (String target : regions) {
             PaymentCryptographyKey replica = findKeyRecord(keyStore, target, primary.getKeyId());
             if (replica == null) {
                 continue;
@@ -595,23 +592,27 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             replica.setKeyState(primary.getKeyState());
             replica.setEnabled(primary.isEnabled());
             replica.setUsingDefaultReplicationRegions(primary.isUsingDefaultReplicationRegions());
+            replica.setPrimaryRegion(primary.getPrimaryRegion());
+            replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
             keyStore.put(storageKey(target, replica.getKeyId()), replica);
         }
     }
 
     /**
-     * The primary of a key, which is the only one whose own metadata may be changed.
+     * The refusal of a request that names a replica.
      *
-     * <p>A replica is read-only: a change to the primary's metadata is made on the primary
-     * and reaches the replica, so a change made on the replica itself is refused.
+     * <p>A replica is read-only: only the primary may be deleted, replicated further or
+     * changed, so a change made on the replica itself is refused. The check is in one place,
+     * so every operation that names a replica refuses it in the same words.
      *
      * @param key the key the request names
+     * @param what what the request wanted to do with the key, for the message
      */
-    private void requirePrimary(PaymentCryptographyKey key) {
+    private static void requireNotReplica(PaymentCryptographyKey key, String what) {
         if ("REPLICA".equals(key.getMultiRegionKeyType())) {
             throw new AwsException("ValidationException",
                     "the key " + key.getArn() + " is a replica of a key in "
-                            + key.getPrimaryRegion() + ", and a replica is read-only", 400);
+                            + key.getPrimaryRegion() + ", and " + what, 400);
         }
     }
 
@@ -1381,22 +1382,15 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         // default regions.
         key.setUsingDefaultReplicationRegions(false);
         storeKey(key);
+        // A region the key did not replicate into gets a replica of the key, and a replica
+        // that is already there keeps its own region and its own ARN and takes the primary's
+        // metadata, so it does not report regions the primary has left behind.
         for (String target : added) {
-            PaymentCryptographyKey replica = findKeyRecord(keyStore, target, key.getKeyId());
-            if (replica == null) {
+            if (findKeyRecord(keyStore, target, key.getKeyId()) == null) {
                 keyStore.put(storageKey(target, key.getKeyId()), replicaOf(key, target));
-                continue;
             }
-            // A replica that is already there keeps its own region and its own ARN, and takes
-            // the primary's new list of regions, so it does not report regions the primary
-            // has left behind. It takes the primary's tags too: a replica is a copy of the
-            // primary's material and metadata.
-            replica.setReplicationRegions(new ArrayList<>(added));
-            replica.setPrimaryRegion(key.getPrimaryRegion());
-            replica.setUsingDefaultReplicationRegions(false);
-            replica.setTags(new LinkedHashMap<>(key.getTags()));
-            keyStore.put(storageKey(target, replica.getKeyId()), replica);
         }
+        refreshReplicas(key, added);
         return key;
     }
 
@@ -1442,31 +1436,26 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         // The replicas that are left carry the regions the primary has now, so none of them
         // reports a region the primary has left behind. They carry the primary's tags too: a
         // replica is a copy of the primary's material and metadata.
-        for (String target : left) {
-            PaymentCryptographyKey replica = findKeyRecord(keyStore, target, key.getKeyId());
-            if (replica == null) {
-                continue;
-            }
-            replica.setReplicationRegions(new ArrayList<>(left));
-            replica.setPrimaryRegion(key.getPrimaryRegion());
-            replica.setTags(new LinkedHashMap<>(key.getTags()));
-            keyStore.put(storageKey(target, replica.getKeyId()), replica);
-        }
+        refreshReplicas(key, left);
         return key;
     }
 
     /**
-     * The aliases that name a key in a region, gone with the key.
+     * The aliases that name a key, gone with the key.
      *
      * <p>An alias that names a key that is not there cannot be resolved, so it goes when the
-     * key does, as it does when the key itself is deleted.
+     * key does, as it does when the key itself is deleted. A replica shares the identifier
+     * of its primary, so the aliases that name the replica are the ones that name the key.
      *
-     * @param region the region the aliases are in
+     * @param region the region the aliases are in, or null for the aliases of every region
      * @param keyId the key the aliases name
      */
     private void deleteAliasesOf(String region, String keyId) {
         for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
-            if (region.equals(alias.getRegion()) && keyId.equals(alias.getKeyId())) {
+            if (region != null && !region.equals(alias.getRegion())) {
+                continue;
+            }
+            if (keyId.equals(alias.getKeyId())) {
                 aliasStore.delete(aliasKey(alias.getAliasName(), alias.getRegion()));
             }
         }
@@ -1483,11 +1472,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         if (key == null) {
             throw new AwsException("ResourceNotFoundException", "Key not found: " + keyIdentifier, 400);
         }
-        if ("REPLICA".equals(key.getMultiRegionKeyType())) {
-            throw new AwsException("ValidationException",
-                    "the key " + key.getArn() + " is a replica of a key in "
-                            + key.getPrimaryRegion() + ", and only the primary may be replicated", 400);
-        }
+        requireNotReplica(key, "only the primary may be replicated");
         return key;
     }
 
