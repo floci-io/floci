@@ -12,6 +12,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DsqlRoleNamesTest {
 
@@ -255,14 +256,55 @@ class DsqlRoleNamesTest {
         assertEquals(expected, DsqlStatements.rewriteQuery(sql, NAMES).sql());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', value = {
+        "\\zz|\\",
+        "x\\|\\",
+        "a\\0000|\\",
+        "a\\+110000|\\",
+        "\\D83D|\\",
+        "\\D83Dx|\\",
+        "\\DE00\\D83D|\\",
+        "\\D83D\\D83D\\DE00|\\",
+        "a|a",
+        "a|+",
+        "a|'",
+        "a|\"",
+        "a|` `",
+    })
+    void whatPostgresqlRefusesIsFlaggedMalformed(String raw, String escape) {
+        assertTrue(DsqlStatements.unicodeUnescaped(raw, escape.charAt(0)).malformed(), raw + " UESCAPE " + escape);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', value = {
+        "SET ROLE U&\"\\zz\"",
+        "SET ROLE U&\"a\\0000\"",
+        "SET ROLE U&\"\\D83D\"",
+        "SET ROLE U&\"a\" UESCAPE 'a'",
+        "SET ROLE U&\"a\" UESCAPE '+'",
+        "SET ROLE U&'\\zz'",
+        "CREATE ROLE U&\"x\\",
+        "GRANT SELECT ON t TO U&\"\\+110000\"",
+    })
+    void aMalformedUnicodeEscapedNameIsLeftForPostgresqlToRefuse(String sql) {
+        String rewritten = DsqlStatements.rewriteQuery(sql, NAMES).sql();
+
+        assertFalse(rewritten.contains("dx_"), rewritten);
+        assertTrue(rewritten.contains(sql.substring(sql.indexOf("U&"))), rewritten);
+    }
+
     @Test
     void unicodeEscapesDecodeAsPostgresqlDecodesThem() {
-        assertEquals("d\u00e4t", DsqlStatements.unicodeUnescaped("d\\00e4t", '\\'));
-        assertEquals("\ud83d\ude00", DsqlStatements.unicodeUnescaped("\\+01F600", '\\'));
-        assertEquals("\ud83d\ude00", DsqlStatements.unicodeUnescaped("\\D83D\\DE00", '\\'));
-        assertEquals("a!b", DsqlStatements.unicodeUnescaped("a!!b", '!'));
-        assertEquals("\\zz", DsqlStatements.unicodeUnescaped("\\zz", '\\'), "a malformed escape is kept");
-        assertEquals("x\\0061", DsqlStatements.unicodeUnescaped("x\\0061", '!'));
+        assertEquals(new DsqlStatements.Unescaped("d\u00e4t", false), DsqlStatements.unicodeUnescaped("d\\00e4t", '\\'));
+        assertEquals(new DsqlStatements.Unescaped("\ud83d\ude00", false),
+                DsqlStatements.unicodeUnescaped("\\+01F600", '\\'));
+        assertEquals(new DsqlStatements.Unescaped("\ud83d\ude00", false),
+                DsqlStatements.unicodeUnescaped("\\D83D\\DE00", '\\'));
+        assertEquals(new DsqlStatements.Unescaped("a!b", false), DsqlStatements.unicodeUnescaped("a!!b", '!'));
+        assertEquals(new DsqlStatements.Unescaped("x\\0061", false), DsqlStatements.unicodeUnescaped("x\\0061", '!'));
+        assertEquals(new DsqlStatements.Unescaped("\\zz", true), DsqlStatements.unicodeUnescaped("\\zz", '\\'),
+                "a malformed escape is kept, and flagged");
         List<DsqlStatements.Token> tokens = DsqlStatements.tokenize("SELECT U&\"a\"\"b\" UESCAPE '!', 1");
         assertEquals("a\"b", tokens.get(1).value());
         assertEquals("U&\"a\"\"b\" UESCAPE '!'", tokens.get(1).text());

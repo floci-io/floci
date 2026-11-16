@@ -142,6 +142,10 @@ public final class DsqlStatements {
         boolean changed = false;
         for (int index : roleNamePositions(tokens)) {
             Token token = tokens.get(index);
+            if (token.malformed()) {
+                // Left as written, so PostgreSQL refuses it as it would without Floci.
+                continue;
+            }
             boolean string = token.type() == Type.STRING;
             String logical = string ? token.value() : identifier(token);
             // A string constant names a role exactly, as a quoted identifier does.
@@ -866,7 +870,16 @@ public final class DsqlStatements {
 
     enum Type { WORD, QUOTED_IDENTIFIER, STRING, NUMBER, SYMBOL }
 
-    record Token(Type type, String text, String value, int start, int end) {
+    /**
+     * One token. {@code malformed} marks a {@code U&} identifier or string PostgreSQL refuses (a bad
+     * escape, code point or {@code UESCAPE} character, or a missing closing quote), whose
+     * {@code value} is only a best-effort decoding.
+     */
+    record Token(Type type, String text, String value, int start, int end, boolean malformed) {
+        Token(Type type, String text, String value, int start, int end) {
+            this(type, text, value, start, end, false);
+        }
+
         String upper() {
             return text.toUpperCase(Locale.ROOT);
         }
@@ -987,12 +1000,14 @@ public final class DsqlStatements {
      * The {@code U&"..."} identifier or {@code U&'...'} string at {@code start}, with the
      * {@code UESCAPE 'c'} clause that may follow it, added to {@code tokens} as one token whose value
      * has its escapes decoded, as PostgreSQL decodes them: so {@code sys.U&"run\005frole\005fddl"}
-     * names {@code sys.run_role_ddl}. The index after the token.
+     * names {@code sys.run_role_ddl}. A token PostgreSQL would refuse is marked malformed. The index
+     * after the token.
      */
     private static int unicodeEscaped(String sql, int start, List<Token> tokens) {
         char quote = sql.charAt(start + 2);
         int i = start + 3;
         StringBuilder raw = new StringBuilder();
+        boolean closed = false;
         while (i < sql.length()) {
             char d = sql.charAt(i);
             if (d == quote && i + 1 < sql.length() && sql.charAt(i + 1) == quote) {
@@ -1000,6 +1015,7 @@ public final class DsqlStatements {
                 i += 2;
             } else if (d == quote) {
                 i++;
+                closed = true;
                 break;
             } else {
                 raw.append(d);
@@ -1012,8 +1028,10 @@ public final class DsqlStatements {
             escape = sql.charAt(clauseEnd - 2);
             i = clauseEnd;
         }
+        Unescaped decoded = unicodeUnescaped(raw.toString(), escape);
         Type type = quote == '"' ? Type.QUOTED_IDENTIFIER : Type.STRING;
-        tokens.add(new Token(type, sql.substring(start, i), unicodeUnescaped(raw.toString(), escape), start, i));
+        tokens.add(new Token(type, sql.substring(start, i), decoded.value(), start, i,
+                !closed || decoded.malformed()));
         return i;
     }
 
@@ -1065,35 +1083,73 @@ public final class DsqlStatements {
         return i;
     }
 
+    /** A {@code U&} body decoded, and whether PostgreSQL would refuse it. */
+    record Unescaped(String value, boolean malformed) {
+    }
+
     /**
      * {@code raw} with {@code escape} followed by four hex digits, or by {@code +} and six, read as
-     * that code point, and a doubled {@code escape} as itself. A malformed escape, which PostgreSQL
-     * refuses with the statement, is kept as written.
+     * that code point, and a doubled {@code escape} as itself, as PostgreSQL decodes it. What
+     * PostgreSQL refuses makes the result malformed: an escape character that is a hex digit,
+     * {@code +}, a quote or white space; an escape followed by anything else; code point 0 or one
+     * past U+10FFFF; and a UTF-16 surrogate not in a high-low pair. The value then keeps such an
+     * escape as written, a best effort that only the guard against internal routine calls reads.
      */
-    static String unicodeUnescaped(String raw, char escape) {
+    static Unescaped unicodeUnescaped(String raw, char escape) {
+        boolean malformed = (escape < 128 && Character.digit(escape, 16) >= 0) || escape == '+' || escape == '\''
+                || escape == '"' || Character.isWhitespace(escape);
         StringBuilder value = new StringBuilder(raw.length());
+        int pendingHigh = -1;
         int i = 0;
         while (i < raw.length()) {
             char c = raw.charAt(i);
-            if (c != escape) {
-                value.append(c);
-                i++;
-            } else if (i + 1 < raw.length() && raw.charAt(i + 1) == escape) {
+            int codePoint = -1;
+            int length = 1;
+            if (c == escape && i + 1 < raw.length() && raw.charAt(i + 1) == escape) {
                 value.append(escape);
                 i += 2;
-            } else if (i + 1 < raw.length() && raw.charAt(i + 1) == '+' && hexCodePoint(raw, i + 2, 6) >= 0) {
-                value.appendCodePoint(hexCodePoint(raw, i + 2, 6));
-                i += 8;
-            } else if (hexCodePoint(raw, i + 1, 4) >= 0) {
-                // A surrogate pair is two escapes, each appended as the UTF-16 unit it is.
-                value.append((char) hexCodePoint(raw, i + 1, 4));
-                i += 5;
+                malformed |= pendingHigh >= 0;
+                pendingHigh = -1;
+                continue;
+            } else if (c == escape && i + 1 < raw.length() && raw.charAt(i + 1) == '+') {
+                codePoint = hexCodePoint(raw, i + 2, 6);
+                length = 8;
+            } else if (c == escape) {
+                codePoint = hexCodePoint(raw, i + 1, 4);
+                length = 5;
             } else {
                 value.append(c);
                 i++;
+                malformed |= pendingHigh >= 0;
+                pendingHigh = -1;
+                continue;
             }
+            if (codePoint <= 0) {
+                malformed = true;
+                value.append(c);
+                i++;
+                pendingHigh = -1;
+                continue;
+            }
+            if (codePoint <= Character.MAX_VALUE && Character.isHighSurrogate((char) codePoint)) {
+                malformed |= pendingHigh >= 0;
+                pendingHigh = codePoint;
+            } else if (codePoint <= Character.MAX_VALUE && Character.isLowSurrogate((char) codePoint)) {
+                if (pendingHigh < 0) {
+                    malformed = true;
+                } else {
+                    value.appendCodePoint(Character.toCodePoint((char) pendingHigh, (char) codePoint));
+                }
+                pendingHigh = -1;
+            } else {
+                malformed |= pendingHigh >= 0;
+                pendingHigh = -1;
+                value.appendCodePoint(codePoint);
+            }
+            i += length;
         }
-        return value.toString();
+        malformed |= pendingHigh >= 0;
+        return new Unescaped(value.toString(), malformed);
     }
 
     /** The code point written as {@code digits} hex digits at {@code from}, or -1 if they are not that. */
