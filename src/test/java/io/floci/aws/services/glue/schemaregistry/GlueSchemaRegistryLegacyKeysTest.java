@@ -8,6 +8,8 @@ import io.floci.aws.services.glue.schemaregistry.model.Schema;
 import io.floci.aws.services.glue.schemaregistry.model.SchemaId;
 import io.floci.aws.services.glue.schemaregistry.model.SchemaVersion;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.List;
@@ -74,12 +76,14 @@ class GlueSchemaRegistryLegacyKeysTest {
                 .getSchemaVersionId());
     }
 
-    @Test
-    void aSchemaOfAnotherRegionThanItsRegistryKeepsACopyOfItsRegistryThere() {
+    /** The copy's ARN names its Region whether the registry was stored with an ARN or, the default Region's, without. */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void aSchemaOfAnotherRegionThanItsRegistryKeepsACopyOfItsRegistryThere(boolean storedWithAnArn) {
         InMemoryStorage<String, Registry> registries = new InMemoryStorage<>();
         InMemoryStorage<String, Schema> schemas = new InMemoryStorage<>();
         Registry home = new Registry("orders");
-        home.setRegistryArn("arn:aws:glue:" + DEFAULT + ":" + ACCOUNT + ":registry/orders");
+        home.setRegistryArn(storedWithAnArn ? "arn:aws:glue:" + DEFAULT + ":" + ACCOUNT + ":registry/orders" : null);
         home.setDescription("orders");
         registries.put("orders", home);
         // Every Region saw every registry, so a schema of it could be created in another Region.

@@ -1134,7 +1134,8 @@ public class GlueSchemaRegistryService {
             }
             String key = registryKey(region, schema.getRegistryName());
             Registry copy = getInAccount(registryStore, entry.accountId(), key)
-                    .orElseGet(() -> copyIn(registry.value(), region));
+                    .orElseGet(() -> copyIn(registry.value(), region,
+                            entry.accountId() != null ? entry.accountId() : regionResolver.getAccountId()));
             putInAccount(registryStore, entry.accountId(), key, copy);
             schema.setRegistryArn(copy.getRegistryArn());
             // A record already under the new key is the newer one, which the move keeps.
@@ -1152,14 +1153,16 @@ public class GlueSchemaRegistryService {
         }
     }
 
-    /** {@code registry} as a registry of {@code region}, its ARN naming that Region. */
-    private static Registry copyIn(Registry registry, String region) {
+    /**
+     * {@code registry} as a registry of {@code region}, its ARN naming that Region: in the account its own ARN names, or
+     * {@code accountId}, the account holding it, for one stored without an ARN.
+     */
+    private static Registry copyIn(Registry registry, String region, String accountId) {
         Registry copy = StorageJson.copy(registry);
         String arn = registry.getRegistryArn();
-        if (AwsArnUtils.isArn(arn)) {
-            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-            copy.setRegistryArn(AwsArnUtils.Arn.of("glue", region, parsed.accountId(), parsed.resource()).toString());
-        }
+        String account = AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).accountId() : accountId;
+        copy.setRegistryArn(AwsArnUtils.Arn.of("glue", region, account, "registry/" + registry.getRegistryName())
+                .toString());
         return copy;
     }
 
