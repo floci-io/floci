@@ -1517,10 +1517,11 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
      */
     public List<String> documentSharedWith(String ownerAccountId, String name, String region) {
         String key = regionKey(region, name);
-        if (inAccount(documentStore, ownerAccountId, key).isEmpty()) {
+        if (AccountAwareStorageBackend.readInAccount(documentStore, ownerAccountId, key).isEmpty()) {
             return List.of();
         }
-        return inAccount(documentPermissionStore, ownerAccountId, key).map(List::copyOf).orElse(List.of());
+        return AccountAwareStorageBackend.readInAccount(documentPermissionStore, ownerAccountId, key)
+                .map(List::copyOf).orElse(List.of());
     }
 
     /**
@@ -1539,7 +1540,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
             return getDocument(nameOrArn, region);
         }
         if (!"ssm".equals(arn.service()) || !arn.resource().startsWith(DOCUMENT_PREFIX)
-                || !arn.region().equals(region)) {
+                || !arn.region().equals(region) || !arn.partition().equals(regionResolver.partitionForRegion(region))) {
             return getDocument(nameOrArn, region);
         }
         String name = arn.resource().substring(DOCUMENT_PREFIX.length());
@@ -1550,17 +1551,9 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         if (!documentSharedWith(arn.accountId(), name, region).contains(caller)) {
             throw new AwsException("InvalidDocument", "Document " + nameOrArn + " does not exist.", 400);
         }
-        return inAccount(documentStore, arn.accountId(), regionKey(region, name))
+        return AccountAwareStorageBackend.readInAccount(documentStore, arn.accountId(), regionKey(region, name))
                 .orElseThrow(() -> new AwsException("InvalidDocument", "Document " + nameOrArn + " does not exist.",
                         400));
-    }
-
-    /** The entry of the key in the account's partition of an account-aware store. */
-    private <V> Optional<V> inAccount(StorageBackend<String, V> store, String accountId, String key) {
-        if (store instanceof AccountAwareStorageBackend<V> aware) {
-            return aware.getForAccount(accountId, key);
-        }
-        return accountId.equals(regionResolver.getAccountId()) ? store.get(key) : Optional.empty();
     }
 
     public SsmDocument getDocument(String name, String region) {
@@ -1849,7 +1842,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
                         "The specified association does not exist.", 400));
 
         if (documentVersion != null) {
-            validateDocumentVersion(getDocument(association.getName(), region), documentVersion);
+            validateDocumentVersion(associatedDocument(association.getName(), region), documentVersion);
         }
 
         if (associationName != null) association.setAssociationName(associationName);
@@ -2119,7 +2112,8 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
         return !parsed.accountId().isEmpty() && !parsed.accountId().equals(accountId)
                 && parsed.resource().startsWith(DOCUMENT_PREFIX)
-                && inAccount(documentStore, parsed.accountId(),
+                && parsed.partition().equals(regionResolver.partitionForRegion(parsed.region()))
+                && AccountAwareStorageBackend.readInAccount(documentStore, parsed.accountId(),
                         regionKey(parsed.region(), parsed.resource().substring(DOCUMENT_PREFIX.length()))).isPresent();
     }
 
