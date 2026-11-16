@@ -608,17 +608,17 @@ class SesCfnProvisionerTest {
     }
 
     @Test
-    void declaringTheExistingGeneratedNameNeedsNoReplacementOrRollbackWork() throws Exception {
+    void declaringTheExistingGeneratedNameIsACustomNameThatCannotBeReplaced() throws Exception {
         StackResource resource = configurationSetResource(null);
         JsonNode previous = props("{}");
         provisioner.provision(resource, previous, context(null));
         String generated = resource.getPhysicalId();
 
-        provisioner.provision(resource, props("{\"Name\":\"" + generated + "\"}"),
-                configurationSetUpdateContext(generated, previous));
+        AwsException error = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource, props("{\"Name\":\"" + generated + "\"}"),
+                        configurationSetUpdateContext(generated, previous)));
 
-        assertFalse(provisioner.hasReplacementUpdate(resource));
-        assertTrue(provisioner.rollbackUpdate(resource));
+        assertTrue(error.getMessage().contains("custom-named resource requires replacing"));
         assertEquals(generated, resource.getPhysicalId());
         verify(ses, never()).deleteConfigurationSet(any(), any());
     }
