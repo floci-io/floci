@@ -534,6 +534,34 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aReplicaAnswersWithTheKindOfTheKeyAndItsPrimaryRegion() {
+        // The replication status and the defaults flag are the primary's alone, as the
+        // reference's own answer shows.
+        String arn = call("CreateKey", """
+                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+                 "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                 "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
+                 "Exportable":true,"ReplicationRegions":["us-west-2"]}""")
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("Key.MultiRegionKeyType", equalTo("PRIMARY"))
+                .body("Key.PrimaryRegion", equalTo("us-east-1"))
+                .body("Key.ReplicationStatus.'us-west-2'.Status", equalTo("SYNCHRONIZED"))
+                .body("Key.UsingDefaultReplicationRegions", equalTo(false));
+
+        String replicaArn = arn.replace(":us-east-1:", ":us-west-2:");
+        callIn("us-west-2", "GetKey", "{\"KeyIdentifier\":\"" + replicaArn + "\"}")
+                .then().statusCode(200)
+                .body("Key.MultiRegionKeyType", equalTo("REPLICA"))
+                .body("Key.PrimaryRegion", equalTo("us-east-1"))
+                .body("Key.ReplicationStatus", nullValue())
+                .body("Key.UsingDefaultReplicationRegions", nullValue());
+    }
+
+    @Test
     void aReplicationRegionThatIsNotANameIsRefused() {
         // The replication regions are names, so a request that names something else is
         // refused rather than answered as if it had named no region at all. The shape check

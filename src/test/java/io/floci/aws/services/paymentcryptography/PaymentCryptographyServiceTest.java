@@ -30,11 +30,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PaymentCryptographyServiceTest {
 
     private PaymentCryptographyService service;
+    /** The store the keys live in, for the tests that write a record themselves. */
+    private InMemoryStorage<String, PaymentCryptographyKey> store;
 
     @BeforeEach
     void setUp() {
+        store = new InMemoryStorage<>();
         service = new PaymentCryptographyService(
-                new InMemoryStorage<>(),
+                store,
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 new PaymentCryptographyRequestContext());
@@ -1154,6 +1157,44 @@ class PaymentCryptographyServiceTest {
 
         PaymentCryptographyKey imported = importTr31("us-west-2", protection.getKeyId(), export);
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+    }
+
+    @Test
+    void aReplicaThatIsAlreadyThereTakesThePrimariesTags() {
+        // A replica is a copy of the primary's material and metadata, so a replica that is
+        // already there takes the primary's tags when the replication changes.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey primary = service.findKey("us-east-1", key.getKeyId());
+        primary.getTags().put("owner", "team");
+        store.put("us-east-1\u0000" + key.getKeyId(), primary);
+        // A replica whose tags are not the primary's, as a record written before the tags
+        // were replicated may hold.
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+        replica.setTags(new LinkedHashMap<>(Map.of("owner", "other")));
+        store.put("us-west-2\u0000" + key.getKeyId(), replica);
+
+        service.addKeyReplicationRegions("us-east-1", key.getKeyId(), List.of("us-west-1"));
+
+        PaymentCryptographyKey after = service.findKey("us-west-2", key.getKeyId());
+        assertEquals("team", after.getTags().get("owner"), "the replica kept the tags it had");
+    }
+
+    @Test
+    void aReplicaThatIsLeftBehindTakesThePrimariesTags() {
+        // The same holds for the replicas that survive a removal of a region.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        service.addKeyReplicationRegions("us-east-1", key.getKeyId(), List.of("us-west-1"));
+        PaymentCryptographyKey primary = service.findKey("us-east-1", key.getKeyId());
+        primary.getTags().put("owner", "team");
+        store.put("us-east-1\u0000" + key.getKeyId(), primary);
+        PaymentCryptographyKey replica = service.findKey("us-west-1", key.getKeyId());
+        replica.setTags(new LinkedHashMap<>(Map.of("owner", "other")));
+        store.put("us-west-1\u0000" + key.getKeyId(), replica);
+
+        service.removeKeyReplicationRegions("us-east-1", key.getKeyId(), List.of("us-west-2"));
+
+        PaymentCryptographyKey after = service.findKey("us-west-1", key.getKeyId());
+        assertEquals("team", after.getTags().get("owner"), "the replica kept the tags it had");
     }
 
     private PaymentCryptographyKey createReplicatedKey(String region, List<String> regions) {

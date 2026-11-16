@@ -215,9 +215,15 @@
   key leaves the service from the Region of a replica as well as from the primary's, and
   it carries the primary's tags, so a change to them reaches it. The alias names are the
   Region's own, and an alias that names a replica goes with it when the replica does.
+  A replica answers with the kind of the key and the Region of its primary, and the
+  replication status and the defaults flag are the primary's alone, as the reference's
+  own answer shows.
 - **Not checked:** the permission to create a key in the Region a key is replicated to.
   The permission is checked in the Region of the request, which is the Region the
   replication is asked in.
+- **The replication is in sync at once:** the service does not model the progress of a
+  replication, so the status of a replica that is there is `SYNCHRONIZED` right away,
+  where the reference answers `IN_PROGRESS` until the replication has finished.
 - **Not yet emulated:** the resource policy operations, the key usage operations, the key
   restore operation, the multi-party approval operations and the certificate signing
   request.

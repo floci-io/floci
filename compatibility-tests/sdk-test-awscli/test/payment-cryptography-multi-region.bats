@@ -14,8 +14,12 @@
 setup() {
     load 'test_helper/common-setup'
     KEY_ARN=""
-    DEFAULT_REGIONS=""
     SETTINGS_REGION="us-west-2"
+    # The default regions of the region the tests change are read before any test runs, so
+    # the teardown can put them back as they were.
+    DEFAULT_REGIONS=$(aws_cmd_in "$SETTINGS_REGION" payment-cryptography \
+        get-default-key-replication-regions --query 'EnabledReplicationRegions' \
+        --output text 2>/dev/null || true)
 }
 
 teardown() {
@@ -23,13 +27,22 @@ teardown() {
         aws_cmd payment-cryptography delete-key --key-identifier "$KEY_ARN" \
             --delete-key-in-days 7 >/dev/null 2>&1 || true
     fi
-    # The default regions of the region the test changed are put back, so a run against an
-    # account that already had one does not take it away.
-    aws_cmd_in "$SETTINGS_REGION" payment-cryptography disable-default-key-replication-regions \
-        --replication-regions us-east-2 >/dev/null 2>&1 || true
+    # The default regions of the region the tests changed are put back as they were: the
+    # ones the tests turned on are turned off, and the ones that were on are turned on
+    # again, so a run against an account that already had one does not take it away.
+    local now
+    now=$(aws_cmd_in "$SETTINGS_REGION" payment-cryptography \
+        get-default-key-replication-regions --query 'EnabledReplicationRegions' \
+        --output text 2>/dev/null || true)
+    for region in $now; do
+        aws_cmd_in "$SETTINGS_REGION" payment-cryptography disable-default-key-replication-regions \
+            --replication-regions "$region" >/dev/null 2>&1 || true
+    done
     if [ -n "$DEFAULT_REGIONS" ] && [ "$DEFAULT_REGIONS" != "None" ]; then
-        aws_cmd_in "$SETTINGS_REGION" payment-cryptography enable-default-key-replication-regions \
-            --replication-regions $DEFAULT_REGIONS >/dev/null 2>&1 || true
+        for region in $DEFAULT_REGIONS; do
+            aws_cmd_in "$SETTINGS_REGION" payment-cryptography enable-default-key-replication-regions \
+                --replication-regions "$region" >/dev/null 2>&1 || true
+        done
     fi
 }
 
@@ -51,12 +64,8 @@ create_replicated_key() {
 }
 
 @test "Payment Cryptography multi-region: the default replication regions are read and set" {
-    # The default regions of the region are read before the test changes them, so the
-    # teardown can put them back.
-    DEFAULT_REGIONS=$(aws_cmd_in "$SETTINGS_REGION" payment-cryptography \
-        get-default-key-replication-regions --query 'EnabledReplicationRegions' \
-        --output text 2>/dev/null || true)
-
+    # The default regions of the region were read in the setup, so the teardown can put
+    # them back as they were.
     run aws_cmd_in "$SETTINGS_REGION" payment-cryptography get-default-key-replication-regions
     assert_success
     [ -n "$(json_get "$output" '.EnabledReplicationRegions')" ]

@@ -398,14 +398,19 @@ public class PaymentCryptographyJsonHandler {
         if (key.getMultiRegionKeyType() != null) {
             out.put("MultiRegionKeyType", key.getMultiRegionKeyType());
             out.put("PrimaryRegion", key.getPrimaryRegion());
-            Map<String, Object> status = new LinkedHashMap<>();
-            for (String target : key.getReplicationRegions()) {
-                // The model's replication states are IN_PROGRESS, DELETE_IN_PROGRESS, FAILED
-                // and SYNCHRONIZED. A replica that is there is a key that is in sync.
-                status.put(target, Map.of("Status", "SYNCHRONIZED", "StatusMessage", ""));
+            if ("PRIMARY".equals(key.getMultiRegionKeyType())) {
+                // The replication status and the defaults flag belong to the primary: a
+                // replica answers with the kind of the key and its primary Region alone,
+                // as the reference's own answer shows.
+                Map<String, Object> status = new LinkedHashMap<>();
+                for (String target : key.getReplicationRegions()) {
+                    // The model's replication states are IN_PROGRESS, DELETE_IN_PROGRESS, FAILED
+                    // and SYNCHRONIZED. A replica that is there is a key that is in sync.
+                    status.put(target, Map.of("Status", "SYNCHRONIZED"));
+                }
+                out.put("ReplicationStatus", status);
+                out.put("UsingDefaultReplicationRegions", key.isUsingDefaultReplicationRegions());
             }
-            out.put("ReplicationStatus", status);
-            out.put("UsingDefaultReplicationRegions", key.isUsingDefaultReplicationRegions());
         }
         return out;
     }

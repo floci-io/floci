@@ -1365,10 +1365,12 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             }
             // A replica that is already there keeps its own region and its own ARN, and takes
             // the primary's new list of regions, so it does not report regions the primary
-            // has left behind.
+            // has left behind. It takes the primary's tags too: a replica is a copy of the
+            // primary's material and metadata.
             replica.setReplicationRegions(new ArrayList<>(added));
             replica.setPrimaryRegion(key.getPrimaryRegion());
             replica.setUsingDefaultReplicationRegions(false);
+            replica.setTags(new LinkedHashMap<>(key.getTags()));
             keyStore.put(storageKey(target, replica.getKeyId()), replica);
         }
         return key;
@@ -1414,7 +1416,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             deleteAliasesOf(target, key.getKeyId());
         }
         // The replicas that are left carry the regions the primary has now, so none of them
-        // reports a region the primary has left behind.
+        // reports a region the primary has left behind. They carry the primary's tags too: a
+        // replica is a copy of the primary's material and metadata.
         for (String target : left) {
             PaymentCryptographyKey replica = findKeyRecord(keyStore, target, key.getKeyId());
             if (replica == null) {
@@ -1422,6 +1425,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             }
             replica.setReplicationRegions(new ArrayList<>(left));
             replica.setPrimaryRegion(key.getPrimaryRegion());
+            replica.setTags(new LinkedHashMap<>(key.getTags()));
             keyStore.put(storageKey(target, replica.getKeyId()), replica);
         }
         return key;
