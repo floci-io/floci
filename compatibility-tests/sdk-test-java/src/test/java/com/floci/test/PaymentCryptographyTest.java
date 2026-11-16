@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
@@ -14,6 +15,7 @@ import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyCl
 import software.amazon.awssdk.services.paymentcryptography.model.AddKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Alias;
 import software.amazon.awssdk.services.paymentcryptography.model.As2805KeyVariant;
+import software.amazon.awssdk.services.paymentcryptography.model.CreateKeyRequest;
 import software.amazon.awssdk.services.paymentcryptography.model.DeriveKeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.EnableDefaultKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.ExportKeyResponse;
@@ -51,6 +53,7 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -154,15 +157,7 @@ class PaymentCryptographyTest {
             assertThat(defaults.enabledReplicationRegions()).contains("us-west-2");
 
             // A key created while the default is on takes it.
-            Key key = client.createKey(r -> r
-                    .keyAttributes(a -> a
-                            .keyAlgorithm(KeyAlgorithm.AES_256)
-                            .keyClass(KeyClass.SYMMETRIC_KEY)
-                            .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                            .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                    .exportable(true))
-                    .key();
-            keyArns.add(key.keyArn());
+            Key key = createAesKey();
 
             assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
             assertThat(key.primaryRegion()).isEqualTo("us-east-1");
@@ -181,16 +176,7 @@ class PaymentCryptographyTest {
 
     @Test
     void theReplicationRegionsOfAKeyCanBeChanged() {
-        Key key = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true)
-                .replicationRegions("us-west-2"))
-                .key();
-        keyArns.add(key.keyArn());
+        Key key = createReplicatedKey("us-west-2");
 
         assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
         assertThat(key.replicationStatus()).containsKey("us-west-2");
@@ -211,47 +197,21 @@ class PaymentCryptographyTest {
     void aRegionTheKeyAlreadyReplicatesIntoIsRefused() {
         // Adding a region the key already replicates into changes nothing, and a request
         // that cannot be carried out is refused rather than answered with what it already was.
-        Key key = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true)
-                .replicationRegions("us-west-2"))
-                .key();
-        keyArns.add(key.keyArn());
+        Key key = createReplicatedKey("us-west-2");
 
-        assertThatThrownBy(() -> client.addKeyReplicationRegions(r -> r
+        assertRefusedWithValidationException(() -> client.addKeyReplicationRegions(r -> r
                 .keyIdentifier(key.keyArn())
-                .replicationRegions("us-west-2")))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"))
-                .hasMessageContaining("already replicates into");
+                .replicationRegions("us-west-2")), "already replicates into");
     }
 
     @Test
     void aRegionTheKeyDoesNotReplicateIntoIsRefused() {
         // There is nothing to take away from a region the key does not replicate into.
-        Key key = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true)
-                .replicationRegions("us-west-2"))
-                .key();
-        keyArns.add(key.keyArn());
+        Key key = createReplicatedKey("us-west-2");
 
-        assertThatThrownBy(() -> client.removeKeyReplicationRegions(r -> r
+        assertRefusedWithValidationException(() -> client.removeKeyReplicationRegions(r -> r
                 .keyIdentifier(key.keyArn())
-                .replicationRegions("us-west-1")))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"))
-                .hasMessageContaining("does not replicate into");
+                .replicationRegions("us-west-1")), "does not replicate into");
     }
 
     @Test
@@ -259,16 +219,7 @@ class PaymentCryptographyTest {
         // Taking the replica regions away is how the replication is turned off for a key, so
         // a key that replicates nowhere is not a multi-region key and says so by carrying no
         // type at all.
-        Key key = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true)
-                .replicationRegions("us-west-2"))
-                .key();
-        keyArns.add(key.keyArn());
+        Key key = createReplicatedKey("us-west-2");
 
         assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
 
@@ -283,94 +234,50 @@ class PaymentCryptographyTest {
 
     @Test
     void aKeyThatIsReplicatedHasToBeExportable() {
-        assertThatThrownBy(() -> client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(false)
-                .replicationRegions("us-west-2")))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"))
-                .hasMessageContaining("exportable");
+        assertRefusedWithValidationException(
+                () -> client.createKey(replicatedKeyRequest(false, "us-west-2")),
+                "exportable");
     }
 
     @Test
     void aNameThatIsNotARegionIsRefused() {
         // A Region a request names has to be a name of a Region this service serves, and a
         // name that is not one of those is refused.
-        assertThatThrownBy(() -> client.enableDefaultKeyReplicationRegions(r -> r
-                .replicationRegions("moon-west-1")))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"))
-                .hasMessageContaining("moon-west-1");
+        assertRefusedWithValidationException(() -> client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("moon-west-1")), "moon-west-1");
     }
 
     @Test
     void aRegionOfAnotherPartitionIsRefused() {
         // A key is replicated within the partition it is in, as the reference says, so a
         // region of another partition is refused.
-        assertThatThrownBy(() -> client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true)
-                .replicationRegions("cn-north-1")))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"))
-                .hasMessageContaining("cn-north-1");
+        assertRefusedWithValidationException(
+                () -> client.createKey(replicatedKeyRequest(true, "cn-north-1")),
+                "cn-north-1");
     }
 
     @Test
     void aDefaultRegionOfAnotherPartitionIsRefused() {
         // The default regions are the regions a new key is replicated to, so they are
         // within the partition of the region they are the defaults of.
-        assertThatThrownBy(() -> client.enableDefaultKeyReplicationRegions(r -> r
-                .replicationRegions("us-gov-west-1")))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"))
-                .hasMessageContaining("us-gov-west-1");
+        assertRefusedWithValidationException(() -> client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("us-gov-west-1")), "us-gov-west-1");
     }
 
     @Test
     void theRegionOfTheRequestIsNotARegionToReplicateTo() {
         // The key is in the region of the request already, so naming that region is a request
         // that cannot be carried out.
-        assertThatThrownBy(() -> client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true)
-                .replicationRegions("us-east-1")))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"))
-                .hasMessageContaining("us-east-1");
+        assertRefusedWithValidationException(
+                () -> client.createKey(replicatedKeyRequest(true, "us-east-1")),
+                "us-east-1");
     }
 
     @Test
     void aKeyWhoseRegionsAreChangedHasAConfigurationOfItsOwn() {
         // A key that took the account's default regions says so, and a key whose regions are
         // changed afterwards has a configuration of its own, so it says the other thing.
-        Key key = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true)
-                .replicationRegions("us-west-2"))
-                .key();
-        keyArns.add(key.keyArn());
+        Key key = createReplicatedKey("us-west-2");
 
         assertThat(key.usingDefaultReplicationRegions()).isFalse();
 
@@ -418,6 +325,85 @@ class PaymentCryptographyTest {
                 .key();
         keyArns.add(key.keyArn());
         return key;
+    }
+
+    /**
+     * The request that creates a key of the data the cipher protects, replicated to the
+     * regions named.
+     *
+     * @param exportable whether the key may leave the service
+     * @param regions the regions the key is replicated to
+     */
+    private static Consumer<CreateKeyRequest.Builder> replicatedKeyRequest(boolean exportable,
+                                                                          String... regions) {
+        return r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(exportable)
+                .replicationRegions(regions);
+    }
+
+    /**
+     * A key of the data the cipher protects, replicated to the regions named.
+     *
+     * @param regions the regions the key is replicated to
+     */
+    private static Key createReplicatedKey(String... regions) {
+        Key key = client.createKey(replicatedKeyRequest(true, regions)).key();
+        keyArns.add(key.keyArn());
+        return key;
+    }
+
+    /**
+     * The error a request the service refuses carries.
+     *
+     * @param call the request the service refuses
+     * @param message the words the refusal carries
+     */
+    private static void assertRefusedWithValidationException(ThrowingCallable call, String message) {
+        assertThatThrownBy(call)
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
+                .hasMessageContaining(message);
+    }
+
+    /**
+     * The export of a key under an AS2805 cryptogram.
+     *
+     * @param key the key that leaves
+     * @param encryptionKey the key the cryptogram is wrapped under
+     * @return the export
+     */
+    private static ExportKeyResponse exportAs2805(Key key, Key encryptionKey) {
+        return client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+    }
+
+    /**
+     * The import of a cryptogram that carries a key.
+     *
+     * @param encryptionKey the key the cryptogram is wrapped under
+     * @param cryptogram the cryptogram that carries the key
+     * @param exportable whether the key that comes in may leave the service
+     * @return the import
+     */
+    private static ImportKeyResponse importAs2805(Key encryptionKey, String cryptogram,
+                                                   boolean exportable) {
+        return client.importKey(r -> r
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())
+                        .wrappedKeyCryptogram(cryptogram)
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
+                        .exportable(exportable))));
     }
 
     /** The key identifier of an ARN: the part after the last slash. */
@@ -547,24 +533,14 @@ class PaymentCryptographyTest {
         Key encryptionKey = createKeyEncryptionKey();
         Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
 
-        ExportKeyResponse exported = client.exportKey(r -> r
-                .exportKeyIdentifier(key.keyArn())
-                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
-                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
-                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+        ExportKeyResponse exported = exportAs2805(key, encryptionKey);
 
         assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
                 .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
         assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
 
-        ImportKeyResponse imported = client.importKey(r -> r
-                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
-                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
-                        .wrappingKeyIdentifier(encryptionKey.keyArn())
-                        .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
-                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
-                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
-                        .exportable(true))));
+        ImportKeyResponse imported = importAs2805(encryptionKey, exported.wrappedKey().keyMaterial(),
+                true);
 
         assertThat(imported.key().keyArn()).isNotBlank();
         assertThat(imported.key().keyAttributes().keyUsage())
@@ -583,20 +559,10 @@ class PaymentCryptographyTest {
         Key encryptionKey = createKeyEncryptionKey();
         Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
 
-        ExportKeyResponse exported = client.exportKey(r -> r
-                .exportKeyIdentifier(key.keyArn())
-                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
-                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
-                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+        ExportKeyResponse exported = exportAs2805(key, encryptionKey);
 
-        ImportKeyResponse imported = client.importKey(r -> r
-                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
-                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
-                        .wrappingKeyIdentifier(encryptionKey.keyArn())
-                        .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
-                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
-                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
-                        .exportable(false))));
+        ImportKeyResponse imported = importAs2805(encryptionKey, exported.wrappedKey().keyMaterial(),
+                false);
 
         assertThat(imported.key().exportable()).isFalse();
         // The key came into the service, so the cleanup has to take it away again.
@@ -645,14 +611,12 @@ class PaymentCryptographyTest {
         Key encryptionKey = createKeyEncryptionKey();
         Key key = createTdesKey();
 
-        assertThatThrownBy(() -> client.exportKey(r -> r
+        assertRefusedWithValidationException(() -> client.exportKey(r -> r
                 .exportKeyIdentifier(key.keyArn())
                 .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
                         .as2805KeyVariant(As2805KeyVariant.TERMINAL_MAJOR_KEY_VARIANT_00)
-                        .wrappingKeyIdentifier(encryptionKey.keyArn())))))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"));
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())))),
+                "AS2805 variant");
     }
 
     @Test
@@ -1028,12 +992,10 @@ class PaymentCryptographyTest {
         // The block is signed with the key the export parameters issue, and the block's
         // signature is an RSA one, so a signing key that is not an RSA_2048 one cannot
         // sign it.
-        assertThatThrownBy(() -> client.getParametersForExport(r -> r
+        assertRefusedWithValidationException(() -> client.getParametersForExport(r -> r
                 .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
-                .signingKeyAlgorithm(KeyAlgorithm.ECC_NIST_P256)))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"));
+                .signingKeyAlgorithm(KeyAlgorithm.ECC_NIST_P256)),
+                "RSA_2048");
     }
 
     @Test

@@ -54,10 +54,13 @@ aws_cmd_in() {
     aws --endpoint-url "$FLOCI_ENDPOINT" --region "$region" --output json "$@" 2>&1
 }
 
+# The attributes of the key the tests create.
+KEY_ATTRIBUTES='KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}'
+
 # The key that leaves the service, replicated to the regions named.
 create_replicated_key() {
     aws_cmd payment-cryptography create-key \
-        --key-attributes 'KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}' \
+        --key-attributes "$KEY_ATTRIBUTES" \
         --exportable \
         --replication-regions "$1" \
         --query 'Key.KeyArn' --output text
@@ -129,7 +132,7 @@ create_replicated_key() {
 @test "Payment Cryptography multi-region: a key that is replicated has to be exportable" {
     # The model asks for the flag, and the CLI writes a false one as the negated flag.
     run aws_cmd payment-cryptography create-key \
-        --key-attributes 'KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}' \
+        --key-attributes "$KEY_ATTRIBUTES" \
         --no-exportable \
         --replication-regions us-west-2
     assert_failure
@@ -149,7 +152,7 @@ create_replicated_key() {
     # A key is replicated within the partition it is in, as the reference says, so a
     # region of another partition is refused.
     run aws_cmd payment-cryptography create-key \
-        --key-attributes 'KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}' \
+        --key-attributes "$KEY_ATTRIBUTES" \
         --exportable \
         --replication-regions cn-north-1
     assert_failure
@@ -160,7 +163,7 @@ create_replicated_key() {
     # The key is in the region of the request already, so naming that region is a request
     # that cannot be carried out.
     run aws_cmd payment-cryptography create-key \
-        --key-attributes 'KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}' \
+        --key-attributes "$KEY_ATTRIBUTES" \
         --exportable \
         --replication-regions us-east-1
     assert_failure
