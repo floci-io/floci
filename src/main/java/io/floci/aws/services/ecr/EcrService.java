@@ -652,13 +652,14 @@ public class EcrService implements ResourceProvider, Resettable {
         String key = key(region, account, repositoryName);
         Repository repo = repoStore.get(key).orElseThrow(() -> notFound(repositoryName, account));
 
-        // Check whether the registry has any tagged images for this repo.
+        // Check whether the registry has any images for this repo, tagged or not.
         // A test double with no HTTP client means no backing registry exists,
         // so there is nothing to clean up. Any failure against a real client
         // aborts the delete: an unreachable registry cannot prove the repo
         // empty (non-force must not bypass RepositoryNotEmptyException) and
         // force must not orphan pullable images behind deleted metadata.
         List<String> tags;
+        boolean untaggedImages = false;
         boolean registryAvailable = true;
         if (registryManager.httpClient() == null) {
             // Test double without an HTTP layer (Mockito default): no backing
@@ -666,7 +667,11 @@ public class EcrService implements ResourceProvider, Resettable {
             tags = List.of();
             registryAvailable = false;
         } else try {
-            tags = listTagsOrThrow(account, region, repositoryName);
+            String internal = resolveRegistryRepoNameStrict(account, region, repositoryName);
+            tags = registryManager.httpClient().listTagsStrict(internal);
+            if (tags.isEmpty() && !force) {
+                untaggedImages = holdsImage(account, region, repositoryName, internal);
+            }
         } catch (Exception e) {
             if (isRegistryUnreachable(e)) {
                 throw new AwsException("ServerException",
@@ -679,7 +684,7 @@ public class EcrService implements ResourceProvider, Resettable {
                             + e.getMessage(),
                     500);
         }
-        if (!tags.isEmpty() && !force) {
+        if ((!tags.isEmpty() || untaggedImages) && !force) {
             throw new AwsException("RepositoryNotEmptyException",
                     "The repository with name '" + repositoryName
                             + "' in registry with id '" + account + "' cannot be deleted because it still contains images",
@@ -698,8 +703,8 @@ public class EcrService implements ResourceProvider, Resettable {
         String metaPrefix = key + "::";
         synchronized (imageMetaStore) {
             pendingImagePushes.keySet().removeIf(k -> k.startsWith(metaPrefix));
-            for (ImageMetadata meta : imageMetaStore.scan(k -> k.startsWith(metaPrefix))) {
-                imageMetaStore.delete(metaPrefix + meta.getDigest());
+            for (ImageMetadata meta : storedImageRecords(account, metaPrefix)) {
+                removeImagePush(account, region, repositoryName, meta.getDigest());
             }
         }
         if (!hasRepositories()) {
@@ -1934,13 +1939,48 @@ public class EcrService implements ResourceProvider, Resettable {
     }
 
     /**
-     * Lists tags and propagates registry failures. Used by force-delete to
-     * distinguish "registry unreachable" (skip cleanup) from "registry
-     * available but listing failed" (abort deletion).
+     * Whether the registry still holds a manifest of the repository, for a repository with no tags.
+     * The registry cannot list manifests, so candidates come from the push record every manifest
+     * write leaves in {@code imageMetaStore}, plus a push whose record could not be written yet
+     * ({@code pendingImagePushes}); one counts only while the registry has its manifest.
      */
-    private List<String> listTagsOrThrow(String account, String region, String repoName) throws Exception {
-        return registryManager.httpClient()
-                .listTagsStrict(resolveRegistryRepoNameStrict(account, region, repoName));
+    private boolean holdsImage(String account, String region, String repositoryName, String internal)
+            throws IOException, InterruptedException {
+        String metaPrefix = key(region, account, repositoryName) + "::";
+        Set<String> digests = new LinkedHashSet<>();
+        synchronized (imageMetaStore) {
+            storedImageRecords(account, metaPrefix).forEach(meta -> digests.add(meta.getDigest()));
+            pendingImagePushes.forEach((k, meta) -> {
+                if (k.startsWith(metaPrefix)) {
+                    digests.add(meta.getDigest());
+                }
+            });
+        }
+        for (String digest : digests) {
+            if (registryManager.httpClient().headManifestDigestStrict(internal, digest, null) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The push records of one repository in {@code account}. A record written before the store was
+     * account-aware sits under its bare key; its key names the account, so it is moved to the
+     * account's partition here, as {@link #recordImagePush} and {@link #removeImagePush} do for one digest.
+     */
+    private List<ImageMetadata> storedImageRecords(String account, String metaPrefix) {
+        synchronized (imageMetaStore) {
+            if (imageMetaStore instanceof AccountAwareStorageBackend<ImageMetadata> aware) {
+                for (ImageMetadata legacy : aware.scanRaw(
+                        k -> !AccountAwareStorageBackend.hasAccountPrefix(k) && k.startsWith(metaPrefix))) {
+                    String digest = legacy.getDigest();
+                    aware.getForAccountMigratingLegacy(account, metaPrefix + digest, m -> digest.equals(m.getDigest()));
+                }
+                return aware.scanForAccount(account, k -> k.startsWith(metaPrefix));
+            }
+            return imageMetaStore.scan(k -> k.startsWith(metaPrefix));
+        }
     }
 
     /**
