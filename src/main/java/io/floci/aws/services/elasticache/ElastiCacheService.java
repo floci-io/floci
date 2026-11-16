@@ -419,8 +419,20 @@ public class ElastiCacheService implements ResourceProvider {
             // derived from configuration and need no Docker, so the group is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            handle = containerManager.tryStart(groupId, image, request.region());
-            if (seed != null) {
+            // With the shell-less backend the snapshot is placed in the data directory before the
+            // server starts; otherwise it is loaded into the running server below.
+            String startupSeed = seed != null && containerManager.isShellLessBackend() ? seed.rdbBase64() : null;
+            try {
+                handle = startupSeed == null
+                        ? containerManager.tryStart(groupId, image, request.region())
+                        : containerManager.tryStart(groupId, image, request.region(), startupSeed);
+            } catch (ElastiCacheContainerManager.SnapshotRestoreException e) {
+                LOG.warnv(e, "Failed to restore snapshot {0} into replication group {1}",
+                        seed.snapshotName(), groupId);
+                throw new AwsException("InvalidSnapshotState", "Failed to restore snapshot " + seed.snapshotName()
+                        + " into replication group " + groupId + ": " + e.getMessage(), 400);
+            }
+            if (seed != null && (startupSeed == null || handle == null)) {
                 loadSnapshot(groupId, handle, seed);
             }
 

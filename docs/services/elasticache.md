@@ -367,6 +367,8 @@ cluster or a group without a running backend is refused, as is seeding a cluster
 group. Automatic snapshots, `CopySnapshot` and `FinalSnapshotIdentifier` are not modeled. To
 reload the dataset, the backend runs with `--enable-debug-command local`, which allows `DEBUG`
 only for connections from inside its own container; clients always connect through the proxy.
+With [`shell-less-backend`](#images-with-no-shell-or-cli) the snapshot file is placed before the
+server starts instead, and `DEBUG` is not enabled.
 
 ## Engine version and backend image
 
@@ -395,6 +397,64 @@ describe responses report the stored request metadata.
 Memcached uses the separate `floci.services.elasticache.default-memcached-image`
 (`FLOCI_SERVICES_ELASTICACHE_DEFAULT_MEMCACHED_IMAGE`) setting, default `memcached:1.6`.
 
+### Images with no shell or CLI
+
+By default Floci starts the backend through the image's `VALKEY_EXTRA_FLAGS` hook and takes and
+restores snapshots with the `valkey-cli` or `redis-cli` inside the container, which only images
+built like `valkey/valkey` provide. An image that has no shell and no CLI, such as a distroless
+Redis-compatible image, needs the other path, which is selected by
+`floci.services.elasticache.shell-less-backend` (`FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND`).
+It is `false` by default and is never inferred from the image name, so which path runs is always the
+one you configured. MemoryDB is not affected by it.
+
+With `shell-less-backend` set to `true`:
+
+- The server flags are passed as container arguments (`--port 6379 --protected-mode no
+  --loglevel verbose`, plus the cluster-mode flags for a cluster-mode group) instead of the
+  `VALKEY_EXTRA_FLAGS` environment variable. The image's own default arguments are replaced by
+  these, and the image must accept them.
+- `CreateSnapshot` runs `SAVE`, reads `CONFIG GET dir` and `CONFIG GET dbfilename` over the RESP
+  connection to the backend, and copies the file out of the container through the Docker archive
+  API. No command is executed inside the container.
+- `CreateReplicationGroup` with `SnapshotName` places the snapshot file in the container's data
+  directory (the image's working directory, which is where a server started without `--dir` keeps
+  its data) before the server starts, so the server loads it itself. No `DEBUG` command is used and
+  `--enable-debug-command` is not passed. If the file cannot be placed, or the server cannot start
+  with it, the new group's container is removed and the create fails with `InvalidSnapshotState`;
+  the group the snapshot came from and the snapshot are not touched.
+- `floci.services.elasticache.shell-less-backend-dbfilename`
+  (`FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME`, default `dump.rdb`) names the file
+  the server loads from its data directory at startup. A restore places the snapshot under this
+  name, and a snapshot falls back to it when the server does not report `dbfilename`. Set it to the
+  name your image's server uses.
+
+An image used this way has to:
+
+- accept the server flags above as arguments, including the cluster-mode flags
+  (`--cluster-enabled`, `--cluster-announce-*`) for a cluster-mode group;
+- answer `SAVE`, `CONFIG GET dir` and `CONFIG GET dbfilename`, write its snapshot to a file in its
+  data directory and load a file of that name from there at startup (Floci checks `dir`, and
+  `dbfilename` when the server reports one, after a restore);
+- support ACL users with access strings (`ACL SETUSER`, `AUTH`), because the proxy enforces user
+  groups through the backend's ACL and passes the backend's `-NOPERM` replies on to the client.
+  An image without ACL support works only for groups with no user group.
+
+The backend's port is published the way it is for the default image, so the container is reached
+only through the proxy in the usual setup. A snapshot of a group that has user groups, taken once
+a user has connected, is refused because Floci's own connection to the backend is not
+authenticated; the default path has the same limit.
+
+For example, with the KiviDB image, whose server keeps its snapshot as `dump.kdb`:
+
+```bash
+FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE=ghcr.io/kividbio/kividb:v1.2.2
+FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND=true
+FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME=dump.kdb
+```
+
+A snapshot is a file in the server's own format, so it restores into a backend of the same kind:
+do not restore a snapshot taken from one engine into another.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -403,6 +463,8 @@ Memcached uses the separate `floci.services.elasticache.default-memcached-image`
 | `FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT` | `6379` | First host port in the ElastiCache proxy range |
 | `FLOCI_SERVICES_ELASTICACHE_PROXY_MAX_PORT` | `6399` | Last host port in the ElastiCache proxy range |
 | `FLOCI_SERVICES_ELASTICACHE_DEFAULT_IMAGE` | `valkey/valkey:8` | Docker image for Redis/Valkey containers |
+| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND` | `false` | Start and snapshot the backend for an image with no shell or CLI: [see above](#images-with-no-shell-or-cli) |
+| `FLOCI_SERVICES_ELASTICACHE_SHELL_LESS_BACKEND_DBFILENAME` | `dump.rdb` | Snapshot file name the server loads at startup, used with the setting above |
 
 ### Docker Compose
 
