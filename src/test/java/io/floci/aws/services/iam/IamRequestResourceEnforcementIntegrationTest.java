@@ -1530,6 +1530,51 @@ class IamRequestResourceEnforcementIntegrationTest {
         }
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Redshift Serverless holds on a namespace and a workgroup, so
+     * an allow on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void aRedshiftServerlessResourceTagConditionReadsTheTagsOfTheNamespaceAndTheWorkgroup() {
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
+        String tagged = "res-tag-rss-" + suffix();
+        String other = "res-tag-rss-" + suffix();
+        taggedWorkgroup(tagged, "data");
+        taggedWorkgroup(other, "web");
+
+        User user = user("res-rss-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"redshift-serverless:GetNamespace\","
+                + "\"redshift-serverless:GetWorkgroup\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        redshiftServerless(user, "GetNamespace", "{\"namespaceName\":\"" + tagged + "-ns\"}").statusCode(200);
+        refusedJson(redshiftServerless(user, "GetNamespace", "{\"namespaceName\":\"" + other + "-ns\"}"),
+                "redshift-serverless:GetNamespace");
+        redshiftServerless(user, "GetWorkgroup", "{\"workgroupName\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(redshiftServerless(user, "GetWorkgroup", "{\"workgroupName\":\"" + other + "\"}"),
+                "redshift-serverless:GetWorkgroup");
+    }
+
+    /** Creates a serverless workgroup and its namespace as the admin, both tagged with the team. */
+    private void taggedWorkgroup(String name, String team) {
+        String tags = ",\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]";
+        adminJson("redshift-serverless", "RedshiftServerless.CreateNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\",\"adminUsername\":\"admin\","
+                        + "\"adminUserPassword\":\"Secret123!\"" + tags + "}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\"}").post("/"));
+        adminJson("redshift-serverless", "RedshiftServerless.CreateWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\",\"namespaceName\":\"" + name + "-ns\"" + tags + "}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\"}").post("/"));
+    }
+
+    private static ValidatableResponse redshiftServerless(User user, String operation, String body) {
+        return user.json("redshift-serverless", "RedshiftServerless." + operation, "1.1").body(body).post("/").then();
+    }
+
     /** Creates a serverless workgroup and its namespace as the admin and gives the workgroup's ARN. */
     private String createWorkgroup(String name) {
         adminJson("redshift-serverless", "RedshiftServerless.CreateNamespace")
