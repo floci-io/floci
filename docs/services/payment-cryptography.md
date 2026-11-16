@@ -30,15 +30,15 @@
 | `GetDefaultKeyReplicationRegions` | The Regions the account replicates a new key to |
 | `EnableDefaultKeyReplicationRegions` | Replicate every new key to the Regions named |
 | `DisableDefaultKeyReplicationRegions` | Stop replicating every new key to the Regions named |
-| `AssociateMpaTeam` | Associate a Multi-Party Approval team with a protected operation |
-| `GetMpaTeamAssociation` | The Multi-Party Approval team of a protected operation |
-| `DisassociateMpaTeam` | Remove the Multi-Party Approval team of a protected operation |
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
 | `PutResourcePolicy` | Attach or replace the resource-based policy of a key |
 | `GetResourcePolicy` | Get the resource-based policy of a key |
 | `DeleteResourcePolicy` | Remove the resource-based policy of a key |
+| `AssociateMpaTeam` | Associate a Multi-Party Approval team with a protected operation |
+| `GetMpaTeamAssociation` | The Multi-Party Approval team of a protected operation |
+| `DisassociateMpaTeam` | Remove the Multi-Party Approval team of a protected operation |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
