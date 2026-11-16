@@ -5325,7 +5325,7 @@ class Ec2ServiceTest {
         assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
                 () -> fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), null,
                         null, List.of("10.50.1.20"), List.of(), List.of(), 2)).getErrorCode());
-        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString(), anyString());
     }
 
     @Test

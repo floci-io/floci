@@ -444,23 +444,24 @@ public class Ec2ContainerManager {
      * @param region      AWS region (for CloudWatch log group naming)
      */
     public void launch(Instance instance, String dockerImage, String publicKey, String region) {
-        launch(instance, ResolvedAmiImage.minimal(dockerImage), publicKey, region, Set.of());
+        launch(instance, ResolvedAmiImage.minimal(dockerImage), publicKey, region);
     }
 
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region) {
-        launch(instance, image, publicKey, region, Set.of());
+        launch(instance, image, publicKey, region, Ec2PortForwardManager.DesiredPorts.NONE);
     }
 
     /**
      * @param appPorts TCP ports opened by the instance's security groups to publish on the host
-     *                 via socat sidecars once the container is running (empty for none)
+     *                 via socat sidecars once the container is running ({@code DesiredPorts.NONE} for none)
      */
-    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region, Set<Integer> appPorts) {
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
+                       Ec2PortForwardManager.DesiredPorts appPorts) {
         launch(instance, image, publicKey, region, appPorts, List.of(), Map.of());
     }
 
     public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region,
-                       Set<Integer> appPorts, List<SecurityGroup> groups,
+                       Ec2PortForwardManager.DesiredPorts appPorts, List<SecurityGroup> groups,
                        Map<String, List<String>> prefixLists) {
         instance.setState(InstanceState.pending());
 
@@ -594,7 +595,7 @@ public class Ec2ContainerManager {
                 installInstanceConnectTrustAnchor(containerId, instanceId);
 
                 // Publish security-group TCP ingress ports on the host via socat sidecars.
-                if (appPorts != null && !appPorts.isEmpty()) {
+                if (appPorts != null && !appPorts.ports().isEmpty()) {
                     portForwardManager.reconcile(instance, appPorts);
                 }
 
