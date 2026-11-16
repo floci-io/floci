@@ -118,6 +118,11 @@ public class DockerDsqlBackend implements DsqlBackend {
         }
     }
 
+    @Override
+    public List<String> rolesToDrop(DsqlCluster cluster) {
+        return List.of();
+    }
+
     private String containerName(DsqlCluster cluster) {
         return ContainerStorageHelper.dockerName(config, "dsql-" + cluster.getIdentifier());
     }

@@ -39,6 +39,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -430,16 +431,91 @@ public class DsqlEndpoint {
      * superuser is never one, as DSQL never lets {@code dbowner} in.
      */
     private static boolean mapped(DsqlDatabases.Backend backend, String principal, String role) throws SQLException {
+        // The view names roles as clients know them; the backend role is the one the session logs in as.
         try (Connection connection = DsqlDatabases.superuser(backend);
              PreparedStatement query = connection.prepareStatement("SELECT 1 FROM sys.iam_pg_role_mappings m"
                      + " JOIN pg_roles r ON r.oid = m.pg_role_oid WHERE m.arn = ? AND m.pg_role_name = ?"
-                     + " AND NOT r.rolsuper")) {
+                     + " AND r.rolname = ? AND NOT r.rolsuper")) {
             query.setString(1, principal);
             query.setString(2, role);
+            query.setString(3, backend.roleNames().toBackend(role));
             try (ResultSet rows = query.executeQuery()) {
                 return rows.next();
             }
         }
+    }
+
+    /**
+     * Gets the cluster's database ready for a session to log in as {@code backendRole}: where the
+     * database wants passwords, the role's password is set again, so a password changed on the
+     * server does not lock Floci out. False, with the cause logged, when the database could not be
+     * asked; a role that does not exist or cannot log in is left for the database to refuse.
+     */
+    boolean prepareLogin(DsqlDatabases.Backend backend, String backendRole) {
+        if (backend.credentials().passwordFor(backendRole) == null) {
+            return true;
+        }
+        try {
+            setLoginPassword(backend, backendRole);
+            return true;
+        } catch (SQLException e) {
+            LOG.warnv("Could not set the password of a DSQL cluster role before a login: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Sets the password of {@code backendRole}, as its SCRAM verifier so the password itself never
+     * reaches the server, when the role exists, can log in, is no superuser and has another
+     * password; true when it did. PostgreSQL aborts one of two concurrent updates of a role with
+     * "tuple concurrently updated", even to the same value, so a password already set is left as it
+     * is, and a change is made under an advisory lock on the role, checked again once it is held.
+     */
+    static boolean setLoginPassword(DsqlDatabases.Backend backend, String backendRole) throws SQLException {
+        String verifier = backend.credentials().verifierFor(backendRole);
+        if (verifier == null) {
+            return false;
+        }
+        try (Connection connection = DsqlDatabases.superuser(backend)) {
+            if (!needsPassword(connection, backendRole, verifier)) {
+                return false;
+            }
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
+                    lock.setString(1, backendRole);
+                    lock.execute();
+                }
+                boolean changed = needsPassword(connection, backendRole, verifier);
+                if (changed) {
+                    try (Statement statement = connection.createStatement()) {
+                        statement.execute("ALTER ROLE " + quoteIdentifier(backendRole) + " PASSWORD "
+                                + PostgresWire.quoteLiteral(verifier));
+                    }
+                }
+                connection.commit();
+                return changed;
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
+            }
+        }
+    }
+
+    /** Whether {@code backendRole} exists, can log in, is no superuser, and has a password other than {@code verifier}. */
+    private static boolean needsPassword(Connection connection, String backendRole, String verifier)
+            throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("SELECT rolpassword FROM pg_authid"
+                + " WHERE rolname = ? AND rolcanlogin AND NOT rolsuper")) {
+            query.setString(1, backendRole);
+            try (ResultSet rows = query.executeQuery()) {
+                return rows.next() && !verifier.equals(rows.getString(1));
+            }
+        }
+    }
+
+    private static String quoteIdentifier(String identifier) {
+        return '"' + identifier.replace("\"", "\"\"") + '"';
     }
 
     /**
