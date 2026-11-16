@@ -24,7 +24,6 @@ import io.floci.aws.services.ecs.model.HealthCheck;
 import io.floci.aws.services.ecs.model.KeyValuePair;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.LogConfiguration;
-import io.floci.aws.services.ecs.model.MountPoint;
 import io.floci.aws.services.ecs.model.NetworkConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.PortMapping;
@@ -33,7 +32,6 @@ import io.floci.aws.services.ecs.model.RuntimePlatform;
 import io.floci.aws.services.ecs.model.Secret;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.ecs.model.UpdateServiceRequest;
-import io.floci.aws.services.ecs.model.Volume;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -268,10 +266,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
         request.setFamily(family);
         request.setContainerDefinitions(parseContainerDefinitions(props.get("ContainerDefinitions"), ctx));
-        JsonNode volumes = ctx.engine().resolveNode(props.path("Volumes"));
-        validateCfnVolumes(volumes);
+        JsonNode volumes = props.path("Volumes");
         request.setVolumes(ecsJsonHandler.parseVolumes(normalizeCfnEcsArray(volumes)));
-        validateMountSources(request.getContainerDefinitions(), request.getVolumes());
+        EcsJsonHandler.validateMountSources(request.getContainerDefinitions(), request.getVolumes());
         request.setNetworkMode(parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode")));
         request.setCpu(ctx.resolveOptional(props, "Cpu"));
         request.setMemory(ctx.resolveOptional(props, "Memory"));
@@ -582,63 +579,6 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
         return new HealthCheck(toStringList(node.path("Command")), optionalInt(node, "Interval"),
                 optionalInt(node, "Timeout"), optionalInt(node, "Retries"), optionalInt(node, "StartPeriod"));
-    }
-
-    private static void validateMountSources(List<ContainerDefinition> containers, List<Volume> volumes) {
-        for (ContainerDefinition container : containers) {
-            for (MountPoint mount : container.getMountPoints()) {
-                String source = mount.sourceVolume();
-                if (source != null && !source.isBlank()
-                        && volumes.stream().noneMatch(volume -> source.equals(volume.name()))) {
-                    throw new AwsException("InvalidParameterException",
-                            "Mount point sourceVolume must reference a task definition volume: " + source, 400);
-                }
-            }
-        }
-    }
-
-    private static void validateCfnVolumes(JsonNode node) {
-        if (node == null || !node.isArray()) {
-            return;
-        }
-        for (JsonNode item : node) {
-            if (!item.isObject()) {
-                continue;
-            }
-            JsonNode efs = item.path("EFSVolumeConfiguration");
-            String name = item.path("Name").asText(null);
-            if ((efs.isObject() || item.path("S3FilesVolumeConfiguration").isObject()
-                    || item.path("ConfiguredAtLaunch").asBoolean(false))
-                    && (name == null || name.isBlank())) {
-                throw new AwsException("InvalidParameterException",
-                        "EFS, S3 Files, and configured-at-launch volumes require a name.", 400);
-            }
-            JsonNode authorization = efs.path("AuthorizationConfig");
-            if (efs.isObject()) {
-                String accessPointId = authorization.path("AccessPointId").asText(null);
-                String transitEncryption = efs.path("TransitEncryption").asText(null);
-                String iam = authorization.path("IAM").asText(null);
-                if (((accessPointId != null && !accessPointId.isBlank()) || "ENABLED".equals(iam))
-                        && !"ENABLED".equals(transitEncryption)) {
-                    throw new AwsException("InvalidParameterException",
-                            "Transit encryption must be ENABLED when EFS access point or IAM authorization is used.",
-                            400);
-                }
-            }
-            int configurationCount = efs.isObject() ? 1 : 0;
-            for (String member : List.of("Host", "DockerVolumeConfiguration",
-                    "FSxWindowsFileServerVolumeConfiguration", "S3FilesVolumeConfiguration", "ConfiguredAtLaunch")) {
-                if (item.hasNonNull(member)) {
-                    if (!"ConfiguredAtLaunch".equals(member) || item.path(member).asBoolean()) {
-                        configurationCount++;
-                    }
-                }
-            }
-            if (configurationCount > 1) {
-                throw new AwsException("InvalidParameterException",
-                        "A task definition volume can specify only one volume configuration.", 400);
-            }
-        }
     }
 
     private static ArrayNode normalizeCfnEcsArray(JsonNode node) {
