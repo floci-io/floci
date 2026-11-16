@@ -902,29 +902,12 @@ public final class DsqlStatements {
         int i = 0;
         int n = sql.length();
         while (i < n) {
+            i = skipSpaceAndComments(sql, i);
+            if (i >= n) {
+                break;
+            }
             char c = sql.charAt(i);
-            if (Character.isWhitespace(c)) {
-                i++;
-            } else if (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-') {
-                // PostgreSQL ends the comment at either line break.
-                while (i < n && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
-                    i++;
-                }
-            } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
-                int depth = 1;
-                i += 2;
-                while (i < n && depth > 0) {
-                    if (sql.startsWith("/*", i)) {
-                        depth++;
-                        i += 2;
-                    } else if (sql.startsWith("*/", i)) {
-                        depth--;
-                        i += 2;
-                    } else {
-                        i++;
-                    }
-                }
-            } else if ((c == 'U' || c == 'u') && i + 2 < n && sql.charAt(i + 1) == '&'
+            if ((c == 'U' || c == 'u') && i + 2 < n && sql.charAt(i + 1) == '&'
                     && (sql.charAt(i + 2) == '"' || sql.charAt(i + 2) == '\'')) {
                 i = unicodeEscaped(sql, i, tokens);
             } else if (c == '\'' || ((c == 'E' || c == 'e') && i + 1 < n && sql.charAt(i + 1) == '\'')) {
@@ -1057,6 +1040,7 @@ public final class DsqlStatements {
             if (Character.isWhitespace(sql.charAt(i))) {
                 i++;
             } else if (sql.startsWith("--", i)) {
+                // PostgreSQL ends the comment at either line break.
                 while (i < sql.length() && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
                     i++;
                 }

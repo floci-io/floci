@@ -221,4 +221,40 @@ class DsqlStatementsTest {
         assertEquals("SELECT $f$ ; $f$", statements.get(1).sql());
         assertEquals("SELECT \"x;y\"", statements.get(2).sql());
     }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "a /* x /* y */ z */ b|a@0-1,b@20-21",
+        "a /* x /* y */ b|a@0-1",
+        "a /* never closed|a@0-1",
+        "a /*|a@0-1",
+        "a -- to the end|a@0-1",
+        "a --|a@0-1",
+        "a - b|a@0-1,-@2-3,b@4-5",
+        "a / b|a@0-1,/@2-3,b@4-5",
+        "a/**/b|a@0-1,b@5-6",
+        "a/*/ b*/c|a@0-1,c@8-9",
+    })
+    void tokenizeSkipsWhitespaceAndCommentsAndKeepsTheTokenPositions(String sql, String expected) {
+        StringBuilder actual = new StringBuilder();
+        for (DsqlStatements.Token token : DsqlStatements.tokenize(sql)) {
+            if (actual.length() > 0) {
+                actual.append(',');
+            }
+            actual.append(token.text()).append('@').append(token.start()).append('-').append(token.end());
+        }
+
+        assertEquals(expected, actual.toString());
+    }
+
+    @Test
+    void tokenizeEndsALineCommentAtEitherLineBreak() {
+        List<DsqlStatements.Token> lineFeed = DsqlStatements.tokenize("a --\nb");
+        List<DsqlStatements.Token> carriageReturn = DsqlStatements.tokenize("a --\rb");
+
+        assertEquals(2, lineFeed.size());
+        assertEquals(5, lineFeed.get(1).start());
+        assertEquals(2, carriageReturn.size());
+        assertEquals(5, carriageReturn.get(1).start());
+    }
 }
