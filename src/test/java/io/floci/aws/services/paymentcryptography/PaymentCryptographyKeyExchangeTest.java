@@ -7,19 +7,28 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.CertificatesTest;
+import io.floci.aws.services.paymentcryptography.crypto.Ecdh;
 import io.floci.aws.services.paymentcryptography.crypto.PaymentCryptographyTr34RoundTripTest;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
 import io.floci.aws.services.paymentcryptography.crypto.Tr34;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import io.floci.aws.testing.ManualClock;
+import org.bouncycastle.crypto.engines.AESEngine;
+import org.bouncycastle.crypto.macs.CMac;
+import org.bouncycastle.crypto.params.KeyParameter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
+import java.security.MessageDigest;
+import java.security.PrivateKey;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.ECPublicKey;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
@@ -242,6 +251,172 @@ class PaymentCryptographyKeyExchangeTest {
 
         assertEquals(exchange.key().getKeyMaterialHex(), imported.getKeyMaterialHex());
         assertEquals(exchange.key().getKeyUsage(), imported.getKeyUsage());
+    }
+
+
+    @Test
+    void aKeyIsTranslatedFromAKeyTheTwoPartiesAgreedToAnotherKey() {
+        // The key comes under a key the two parties agreed with ECDH, and it goes out under
+        // the key the request names.
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
+                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
+                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
+        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
+
+        // The key that leaves under the agreed key.
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
+
+        // The key it is translated under.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_128");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey outgoing = service.createKey("us-east-1", attributes,
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+
+        Map<String, Object> incoming = new LinkedHashMap<>(exchange.material());
+        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("IncomingKeyMaterial", Map.of("DiffieHellmanTr31KeyBlock", incoming));
+        material.put("OutgoingKeyMaterial", Map.of(
+                "Tr31KeyBlock", Map.of("WrappingKeyIdentifier", outgoing.getKeyId())));
+
+        Map<?, ?> translated = (Map<?, ?>) service.translateKeyMaterial("us-east-1", material)
+                .get("WrappedKey");
+
+        assertEquals("TR31_KEY_BLOCK", translated.get("WrappedKeyMaterialFormat"));
+        // The block that goes out opens under the key the request named, and it holds the key
+        // that came in.
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", outgoing.getKeyId(),
+                        "WrappedKeyBlock", translated.get("WrappedKeyMaterial")),
+                "", true, Map.of());
+        assertEquals(exchange.key().getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(exchange.key().getKeyUsage(), imported.getKeyUsage());
+    }
+
+
+    @Test
+    void aKeyIsTranslatedUnderTheKeyTheSampleDerives() throws Exception {
+        // The sample derives the one-time wrapping key with the Concat KDF of NIST SP
+        // 800-56A over the shared secret, with SHA-512 and a 32-byte shared information,
+        // and the emulator has to derive the same key from the request's parameters.
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
+                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
+                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
+        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
+
+        // The shared information the sample passes: 32 bytes, the same bytes as the KDF's
+        // other info.
+        byte[] sharedInformation = HexFormat.of().parseHex(
+                "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF");
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
+        // The sample derives an AES-256 key, with the Concat KDF of NIST SP 800-56A and
+        // SHA-512.
+        material.put("DeriveKeyAlgorithm", "AES_256");
+        material.put("KeyDerivationFunction", "NIST_SP800");
+        material.put("KeyDerivationHashAlgorithm", "SHA_512");
+        material.put("DerivationData", Map.of(
+                "SharedInformation", HexFormat.of().formatHex(sharedInformation)));
+
+        // The shared secret the two parties made, and the key the standard derives from it.
+        byte[] secret = sharedSecret(exchange);
+        byte[] derived = concatKdf("SHA-512", secret, sharedInformation, 32);
+
+        // The block that comes in is under the derived key, as the sample wraps it.
+        String incoming = PaymentCryptographyTr31.wrap(
+                HexFormat.of().parseHex(
+                        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+                derived, true, "A", "D0", "B", "N");
+
+        // The wrapping key has to be at least as strong as the key it carries.
+        PaymentCryptographyKey outgoing = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        Map<String, Object> incomingMaterial = new LinkedHashMap<>(material);
+        incomingMaterial.put("WrappedKeyBlock", incoming);
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("IncomingKeyMaterial", Map.of("DiffieHellmanTr31KeyBlock", incomingMaterial));
+        request.put("OutgoingKeyMaterial", Map.of(
+                "Tr31KeyBlock", Map.of("WrappingKeyIdentifier", outgoing.getKeyId())));
+
+        Map<?, ?> translated = (Map<?, ?>) service.translateKeyMaterial("us-east-1", request)
+                .get("WrappedKey");
+
+        // The block that goes out holds the key that came in, and the check value is the
+        // one the sample computes locally.
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", outgoing.getKeyId(),
+                        "WrappedKeyBlock", translated.get("WrappedKeyMaterial")),
+                "", true, Map.of());
+        assertEquals("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+                imported.getKeyMaterialHex());
+        assertEquals(cmacKeyCheckValue(imported.getKeyMaterialHex()), translated.get("KeyCheckValue"));
+    }
+
+    /**
+     * The Concat KDF of NIST SP 800-56A, as the standard writes it.
+     *
+     * <p>The key is the digest of the counter, the secret and the shared information, the
+     * counter over the blocks that are needed, so the derivation here does not use the
+     * service's own.
+     */
+    private static byte[] concatKdf(String hash, byte[] secret, byte[] otherInfo, int length)
+            throws Exception {
+        MessageDigest digest = MessageDigest.getInstance(hash);
+        byte[] out = new byte[length];
+        int at = 0;
+        for (int counter = 1; at < length; counter++) {
+            digest.reset();
+            // The standard's order: the counter, then the secret, then the shared
+            // information.
+            digest.update(new byte[] {
+                (byte) (counter >>> 24), (byte) (counter >>> 16), (byte) (counter >>> 8),
+                (byte) counter});
+            digest.update(secret);
+            digest.update(otherInfo);
+            byte[] block = digest.digest();
+            int take = Math.min(block.length, length - at);
+            System.arraycopy(block, 0, out, at, take);
+            at += take;
+        }
+        return out;
+    }
+
+    /**
+     * The check value of a key: the leftmost three bytes of the CMAC of sixteen zero bytes.
+     *
+     * <p>The sample computes it the same way, so the emulator's answer is held to the
+     * sample's.
+     */
+    private static String cmacKeyCheckValue(String keyHex) {
+        CMac mac = new CMac(new AESEngine());
+        mac.init(new KeyParameter(HexFormat.of().parseHex(keyHex)));
+        // The CMAC of sixteen zero bytes.
+        mac.update(new byte[16], 0, 16);
+        byte[] value = new byte[16];
+        mac.doFinal(value, 0);
+        return HexFormat.of().withUpperCase().formatHex(value).substring(0, 6);
+    }
+
+
+    /** The secret the two parties made, from the service's key and the counterparty's. */
+    private byte[] sharedSecret(Exchange exchange) throws Exception {
+        PaymentCryptographyKey agreement = service.findKey("us-east-1",
+                (String) exchange.material().get("PrivateKeyIdentifier"));
+        PrivateKey privateKey = PaymentCryptographyKeyExchange.privateKeyOf(agreement);
+        X509Certificate certificate = Certificates.parseCertificate(
+                (String) exchange.material().get("PublicKeyCertificate"));
+        return Ecdh.agree((ECPrivateKey) privateKey, (ECPublicKey) certificate.getPublicKey());
     }
 
     @Test

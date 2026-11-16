@@ -558,6 +558,65 @@ final class PaymentCryptographyKeyExchange {
     }
 
     /** A key out of a block the two parties agreed with ECDH. */
+
+    /**
+     * The material of a key that came under a key the two parties agreed with, and goes out
+     * under another key.
+     *
+     * <p>The key material never leaves the service: the block comes in under the key the two
+     * parties agreed with ECDH, it is opened there, and it is wrapped again under the key the
+     * request names. The block that goes out carries the attributes of the key it holds, so
+     * the key that is translated is the same key on the way out.
+     *
+     * @param region the region the request is in
+     * @param material the request's members
+     * @return the wrapped key, its check value and the format it is in
+     */
+    Map<String, Object> translateKeyMaterial(String region, Map<String, Object> material) {
+        Map<String, Object> incoming = object(material, "IncomingKeyMaterial");
+        Map<String, Object> incomingBlock = object(incoming, "DiffieHellmanTr31KeyBlock");
+        Map<String, Object> outgoing = object(material, "OutgoingKeyMaterial");
+        Map<String, Object> outgoingBlock = object(outgoing, "Tr31KeyBlock");
+
+        String wrappingKeyIdentifier = text(outgoingBlock, "WrappingKeyIdentifier");
+        PaymentCryptographyKey protection = usableKey(wrappingKeyIdentifier, region);
+        if (!PaymentCryptographyService.isKeyEncryptionKey(protection.getKeyUsage())) {
+            throw validation("the key " + protection.getArn() + " is not a key encryption key, so "
+                    + "it cannot wrap a key block");
+        }
+        if (!PaymentCryptographyService.mayWrap(protection)) {
+            throw validation("the key " + protection.getArn() + " does not have the mode of use "
+                    + "Wrap, which it needs to wrap a key");
+        }
+
+        Agreed agreed = agreed(region, incomingBlock);
+        String block = text(incomingBlock, "WrappedKeyBlock");
+        byte[] clear;
+        try {
+            clear = PaymentCryptographyTr31.unwrap(block, agreed.derived());
+        } catch (RuntimeException e) {
+            throw validation("the key block did not open under the key the two parties agreed: "
+                    + e.getMessage());
+        }
+        // The block that came in carries the attributes of the key it holds, and the block
+        // that goes out carries the same ones.
+        String wrapped = PaymentCryptographyTr31.wrap(clear,
+                PaymentCryptographyKeyRules.material(protection),
+                PaymentCryptographyService.isAes(protection),
+                PaymentCryptographyTr31.algorithmInHeader(block),
+                PaymentCryptographyTr31.usageOf(block),
+                PaymentCryptographyTr31.modeOf(block),
+                PaymentCryptographyTr31.exportabilityOf(block));
+
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.from(
+                PaymentCryptographyService.algorithmOf(block, clear.length));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("WrappedKeyMaterial", wrapped);
+        out.put("KeyCheckValue", PaymentCryptographyCrypto.checkValue(clear, algorithm));
+        out.put("WrappedKeyMaterialFormat", "TR31_KEY_BLOCK");
+        return Map.of("WrappedKey", out);
+    }
+
     private Imported importEcdh(String region, Map<String, Object> material) {
         String block = text(material, "WrappedKeyBlock");
         Agreed agreed = agreed(region, material);

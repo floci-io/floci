@@ -15,6 +15,7 @@ client that talks to the control plane does not reach it by accident.
 | `EncryptData` | Encrypt plaintext under a key, on `POST /keys/{KeyIdentifier}/encrypt` |
 | `DecryptData` | Decrypt a ciphertext under a key, on `POST /keys/{KeyIdentifier}/decrypt` |
 | `ReEncryptData` | Decrypt under one key and encrypt under another, on `POST /keys/{IncomingKeyIdentifier}/reencrypt` |
+| `TranslateKeyMaterial` | Move a key from a key the two parties agreed to another key, on `POST /keymaterial/translate` |
 | `GenerateMac` | A MAC of a message under a key, on `POST /mac/generate` |
 | `VerifyMac` | Verify a MAC over a message, on `POST /mac/verify` |
 | `GeneratePinData` | Generate a PIN block and the verification value that goes with it, on `POST /pindata/generate` |
@@ -73,6 +74,11 @@ client that talks to the control plane does not reach it by accident.
   Triple DES one, so a request that asks for another of the five the model allows is refused,
   and the PIN key it derives both encrypts and decrypts, so a key variant other than the
   bidirectional one is refused.
+- **The key material of a key may be translated:** `TranslateKeyMaterial` takes a key block
+  that came under a key two parties agreed with ECDH, and answers with the same key wrapped
+  under the key the request names. The key material never leaves the service: the block is
+  opened under the agreed key and wrapped again under the other one, and the block that goes
+  out carries the attributes of the key it holds.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
   request that asks for one of them is refused with the error that says so, rather than
   answered with something of another kind. The EMV PIN change MAC is refused as well: it needs
