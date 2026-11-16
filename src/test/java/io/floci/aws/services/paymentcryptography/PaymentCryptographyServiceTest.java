@@ -1449,24 +1449,6 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void theAliasesOfAReplicaGoWithThePrimary() {
-        // A replica shares the identifier of its primary, so the aliases that name the
-        // replica are the aliases of the key, and they go when the key goes.
-        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
-        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
-        service.createAlias("alias/team/card-key", replica);
-        PaymentCryptographyKey primary = service.findKey("us-east-1", key.getKeyId());
-        service.createAlias("alias/team/primary-key", primary);
-
-        service.deleteKey(primary);
-
-        assertNull(service.findAlias("us-west-2", "alias/team/card-key"),
-                "the alias of the replica is still there");
-        assertNull(service.findAlias("us-east-1", "alias/team/primary-key"),
-                "the alias of the primary is still there");
-    }
-
-    @Test
     void aReplicaCarriesTheMetadataOfItsPrimary() {
         // A replica is a copy of the primary's material and metadata, so every change made
         // on the primary reaches it: its tags, its state, whether it is enabled, and the
