@@ -23,6 +23,7 @@ import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.StorageBackedMap;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.VpcDependencyProvider;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
@@ -93,7 +94,7 @@ import java.util.stream.Collectors;
  * Business logic for Lambda function management and invocation.
  */
 @ApplicationScoped
-public class LambdaService implements ResourceProvider {
+public class LambdaService implements ResourceProvider, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(LambdaService.class);
 
@@ -695,7 +696,7 @@ public class LambdaService implements ResourceProvider {
             }
         }
 
-        functionStore.save(region, fn);
+        saveHoldingSubnets(region, fn, vpcConfig != null);
         LOG.infov("Created Lambda function: {0} in region {1}", functionName, region);
         if (Boolean.TRUE.equals(request.get("Publish"))) {
             return publishVersion(region, functionName, null);
@@ -1220,7 +1221,7 @@ public class LambdaService implements ResourceProvider {
         // Drain warm containers so the next invocation picks up the new configuration
         warmPool.drainEnvironment(fn);
 
-        functionStore.save(region, fn);
+        saveHoldingSubnets(region, fn, requestedVpcConfigUpdate != null);
         // LastUpdateStatus reports the last update of either kind, so this one replaces a failed sync's.
         failedReactiveSyncs.remove(fn.getFunctionArn());
         LOG.infov("Updated configuration for function: {0}", functionName);
@@ -2808,6 +2809,53 @@ public class LambdaService implements ResourceProvider {
         if (!hasValues(vpcConfig, "SubnetIds") || !hasValues(vpcConfig, "SecurityGroupIds")) {
             throw new AwsException("InvalidParameterValueException",
                     "EFS file system access requires VpcConfig with subnets and security groups", 400);
+        }
+    }
+
+    // ─── VPC dependencies ────────────────────────────────────────────────────────
+
+    /**
+     * Whether a function of the caller's account, or a published version of one, names the subnet in its VpcConfig:
+     * Lambda creates a Hyperplane network interface in each subnet a function's VpcConfig names, and EC2 refuses
+     * DeleteSubnet while one is there.
+     */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        return functionStore.listWithVersionsForAccount(regionResolver.getAccountId(), region).stream()
+                .anyMatch(fn -> namesSubnet(fn, subnetId));
+    }
+
+    /** Whether a function of the caller's account, or a version of one, is configured in the VPC. */
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return functionStore.listWithVersionsForAccount(regionResolver.getAccountId(), region).stream()
+                .anyMatch(fn -> vpcId.equals(fn.getVpcId()));
+    }
+
+    private static boolean namesSubnet(LambdaFunction fn, String subnetId) {
+        Object subnets = fn.getVpcConfig() == null ? null : fn.getVpcConfig().get("SubnetIds");
+        return subnets instanceof List<?> list && list.contains(subnetId);
+    }
+
+    /**
+     * Saves a function, under EC2's subnet lock when its VpcConfig names subnets, so a DeleteSubnet or DeleteVpc
+     * either sees it or runs before it is stored, never between. A VpcConfig this request set is resolved again under
+     * the lock: a subnet deleted since the request was validated is then unknown, as one never created is, and the
+     * function infers no VPC from it.
+     *
+     * @param vpcConfigSet whether this request set the function's VpcConfig
+     */
+    private void saveHoldingSubnets(String region, LambdaFunction fn, boolean vpcConfigSet) {
+        Object subnets = fn.getVpcConfig() == null ? null : fn.getVpcConfig().get("SubnetIds");
+        if (ec2Service != null && subnets instanceof List<?> list && !list.isEmpty()) {
+            ec2Service.runWithSubnetReferencesHeld(region, () -> {
+                if (vpcConfigSet) {
+                    fn.setVpcId(resolveVpcId(region, fn.getVpcConfig()));
+                }
+                functionStore.save(region, fn);
+            });
+        } else {
+            functionStore.save(region, fn);
         }
     }
 

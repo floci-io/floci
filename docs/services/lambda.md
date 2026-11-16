@@ -1091,6 +1091,10 @@ A rejected update preserves the configuration and revision. Empty subnet and sec
 group lists detach the function, and the response then omits `VpcConfig`. Published
 versions retain their network configuration when `$LATEST` changes.
 
+As on AWS, where a function's network interfaces sit in the subnets its `VpcConfig` names,
+EC2's `DeleteSubnet` and `DeleteVpc` fail with `DependencyViolation` while a function, or a
+published version of one, names the subnet or is configured in the VPC.
+
 These checks validate the declaration. Function containers still use the configured
 Docker network. With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true`
 and `FLOCI_SERVICES_EC2_MOCK=false`) and a known `VpcId`, the container also joins that VPC's

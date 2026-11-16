@@ -31,7 +31,7 @@ public class TableDefinition {
     private long warmReadUnitsPerSecond;
     private long warmWriteUnitsPerSecond;
     private String tableArn;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private List<GlobalSecondaryIndex> globalSecondaryIndexes;
     private List<LocalSecondaryIndex> localSecondaryIndexes;
     private List<VectorIndex> vectorIndexes;
@@ -343,6 +343,12 @@ public class TableDefinition {
         return localSecondaryIndexes.stream()
                 .filter(l -> indexName.equals(l.getIndexName()))
                 .findFirst();
+    }
+
+    /** Whether the table has a global secondary, local secondary or vector index of this name. */
+    public boolean holdsIndex(String indexName) {
+        return findGsi(indexName).isPresent() || findLsi(indexName).isPresent()
+                || findVectorIndex(indexName).isPresent();
     }
 
     @JsonIgnore

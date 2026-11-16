@@ -2134,6 +2134,42 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags DynamoDB holds on the table a request names, as created and
+     * as tagged later, so an allow on one team's tag lets the caller describe that team's tables and not another's.
+     */
+    @Test
+    void aDynamoDbResourceTagConditionReadsTheTagsOfTheTable() {
+        String tagged = dynamoDbTable("res-tag-ddb-" + suffix(), "data");
+        String other = dynamoDbTable("res-tag-ddb-" + suffix(), "web");
+
+        User user = user("res-ddb-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"dynamodb:DescribeTable\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "dynamodb", "DynamoDB_20120810.DescribeTable", "1.0", "{\"TableName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "dynamodb", "DynamoDB_20120810.DescribeTable", "1.0", "{\"TableName\":\"" + other
+                + "\"}"), "dynamodb:DescribeTable");
+
+        adminJson("dynamodb", "DynamoDB_20120810.TagResource", "1.0").body("{\"ResourceArn\":\"arn:aws:dynamodb:"
+                + REGION + ":" + ACCOUNT + ":table/" + other + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+        send(user, "dynamodb", "DynamoDB_20120810.DescribeTable", "1.0", "{\"TableName\":\"" + other + "\"}")
+                .statusCode(200);
+    }
+
+    /** A DynamoDB table of the name, keyed on {@code id} and tagged with the team, deleted afterwards. */
+    private String dynamoDbTable(String name, String team) {
+        adminJson("dynamodb", "DynamoDB_20120810.CreateTable", "1.0").body("{\"TableName\":\"" + name + "\","
+                + "\"KeySchema\":[{\"AttributeName\":\"id\",\"KeyType\":\"HASH\"}],"
+                + "\"AttributeDefinitions\":[{\"AttributeName\":\"id\",\"AttributeType\":\"S\"}],"
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("dynamodb", "DynamoDB_20120810.DeleteTable", "1.0")
+                .body("{\"TableName\":\"" + name + "\"}").post("/"));
+        return name;
+    }
+
+    /**
      * What Glue's batch deletes name, the tables of {@code TablesToDelete} and the connections of
      * {@code ConnectionNameList}, is checked one by one, so a deny scoped to one of them holds under an allow on
      * everything.
