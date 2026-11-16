@@ -3,7 +3,6 @@ package io.floci.aws.services.paymentcryptography;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -1303,16 +1302,19 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * <p>A key is replicated within the partition it is in and the account it belongs to, as
      * the reference says, so a region of another partition is refused. The account is the
      * one the request is made in, so a request cannot name a region of another account.
+     * The partition of a region is the one its ARN is minted with, so a region the catalog
+     * cannot place is in the partition of the deployment and not in the commercial one.
      * The check is in one place, so every operation that names a replication region
      * refuses the same regions in the same words.
      *
      * @param region the region the request is in
      * @param regions the regions the request names
      */
-    private static void requireReplicationRegions(String region, List<String> regions) {
+    private void requireReplicationRegions(String region, List<String> regions) {
         requireKnownRegions(regions);
         for (String target : regions) {
-            if (!AwsRegions.partitionFor(region).equals(AwsRegions.partitionFor(target))) {
+            if (!regionResolver.partitionForRegion(region)
+                    .equals(regionResolver.partitionForRegion(target))) {
                 throw new AwsException("ValidationException",
                         "the region " + target + " is in another partition than the region "
                                 + region + ", and a key is replicated within its own partition", 400);

@@ -864,6 +864,34 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyIsReplicatedWithinThePartitionOfItsDeployment() {
+        // The partition of a Region the catalog cannot place is the partition of the
+        // deployment, which is the one the ARN of the key is minted in, so a key of a
+        // deployment in another partition is replicated to a Region of that partition.
+        PaymentCryptographyService china = new PaymentCryptographyService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"),
+                new PaymentCryptographyRequestContext());
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        Map<String, Boolean> modes = new LinkedHashMap<>();
+        modes.put("Encrypt", Boolean.TRUE);
+        modes.put("Decrypt", Boolean.TRUE);
+
+        PaymentCryptographyKey primary = china.createKey("local-1", attributes, modes, true, true,
+                Map.of(), List.of("cn-north-1"));
+
+        assertEquals("PRIMARY", primary.getMultiRegionKeyType());
+        assertTrue(primary.getArn().startsWith("arn:aws-cn:"), primary.getArn());
+
+        PaymentCryptographyKey replica = china.findKey("cn-north-1", primary.getKeyId());
+        assertNotNull(replica, "the key is not in the region it is replicated to");
+        assertTrue(replica.getArn().startsWith("arn:aws-cn:"), replica.getArn());
+    }
+
+    @Test
     void theRegionOfTheRequestIsNotARegionToReplicateTo() {
         // The key is in the region of the request already, so naming that region is a request
         // that cannot be carried out.
