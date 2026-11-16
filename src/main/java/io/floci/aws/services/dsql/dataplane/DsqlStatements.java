@@ -155,8 +155,11 @@ public final class DsqlStatements {
                 return rejected("42602", "role name \"" + logical + "\" is too long for Floci's external backend (max "
                         + PrefixedRoleNames.MAX_LOGICAL + " bytes)");
             }
+            // A string constant goes back as a quoted identifier, which SET ROLE and SET SESSION
+            // AUTHORIZATION read alike, and whose quoting, unlike a string's, does not depend on
+            // standard_conforming_strings. The prefixed name is never none.
             translated.append(text, copied, token.start() - base)
-                    .append(string ? literal(backend) : roleIdentifier(backend, token.type() == Type.QUOTED_IDENTIFIER));
+                    .append(roleIdentifier(backend, string || token.type() == Type.QUOTED_IDENTIFIER));
             copied = token.end() - base;
             changed = true;
         }
@@ -779,7 +782,8 @@ public final class DsqlStatements {
     /**
      * {@code SET [SESSION|LOCAL] ROLE name} (or {@code TO} or {@code =} name) and
      * {@code SET [SESSION|LOCAL] SESSION AUTHORIZATION name}, where the name may also be a string
-     * constant. PostgreSQL takes a role named {@code none}, however it is written, for
+     * constant, written back as a quoted identifier. PostgreSQL takes a role named {@code none},
+     * however it is written, for
      * {@code SET ROLE NONE}, so that one is left as it is.
      */
     private static void setRole(List<Token> tokens, Set<Integer> at) {
