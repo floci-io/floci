@@ -108,6 +108,14 @@ public final class CfnRollback {
     public static final String SNS_PRIOR_INLINE_SUBSCRIPTIONS_ATTR = "__FlociSnsPriorInlineSubscriptions";
 
     /**
+     * What an update that adopted an existing SNS topic changed on it: the topic ARN and region, the
+     * attributes it wrote with their prior values (null when absent) and the ARNs of the inline
+     * subscriptions it created, so a failed stack update can put the topic back. Written and spent
+     * by {@code SnsCfnProvisioner}.
+     */
+    public static final String SNS_ADOPTED_TOPIC_UPDATE_SNAPSHOT_ATTR = "__FlociSnsAdoptedTopicUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
