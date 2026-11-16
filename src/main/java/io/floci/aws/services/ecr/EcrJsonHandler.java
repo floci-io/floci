@@ -356,7 +356,7 @@ public class EcrJsonHandler {
         }
         Integer maxResults = request.hasNonNull("maxResults") ? limit.asInt() : null;
         PaginatedResult<ImageIdentifier> page = service.listImages(repo, registryId, region,
-                maxResults, request.path("nextToken").asText(null));
+                maxResults, request.path("nextToken").asText(null), tagStatus(request));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
@@ -370,12 +370,17 @@ public class EcrJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static String tagStatus(JsonNode request) {
+        return request.path("filter").path("tagStatus").asText(null);
+    }
+
     private Response handleDescribeImages(JsonNode request, String region) {
         String repo = request.path("repositoryName").asText(null);
         String registryId = request.path("registryId").asText(null);
         List<ImageIdentifier> requested = parseImageIds(request.path("imageIds"));
 
-        EcrService.DescribeImagesResult result = service.describeImages(repo, requested, registryId, region);
+        EcrService.DescribeImagesResult result = service.describeImages(repo, requested, registryId, region,
+                tagStatus(request));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode details = objectMapper.createArrayNode();

@@ -23,7 +23,7 @@
 | `DescribeRepositories` | Page repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
-| `ListImages` | Enumerate paginated tags and digests in a repository |
+| `ListImages` | Enumerate paginated tags and digests in a repository, tagged and untagged, filtered by `tagStatus` |
 | `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
 | `BatchDeleteImage` | Delete images by tag or digest; a tag delete removes only that tag |
@@ -60,8 +60,13 @@ or change the registry's blob upload behavior.
 
 `ListImages` accepts `maxResults` from 1 to 1000 (default 100) and returns `nextToken`
 when another page remains. Tokens are scoped to the region, registry, and repository;
-local pages use stable tag order. Listing still enumerates tagged images and ignores
-the optional `filter` fields.
+local pages use stable tag order. `ListImages` and `DescribeImages` also list untagged
+images by digest, taken from the recorded pushes, and honour `filter.tagStatus`
+(`TAGGED`, `UNTAGGED` or `ANY`). `ANY` and `UNTAGGED` cost one manifest HEAD per tag while
+an untagged digest is recorded. With explicit `imageIds`, `DescribeImages` returns the
+requested images and does not apply `tagStatus`, because telling tagged from untagged for
+an explicit id would need the same walk of every tag. A registry error fails the call
+instead of returning an empty list.
 
 ### Admin Endpoints
 
