@@ -905,6 +905,9 @@
     "VectorBucketName",
     "EncryptionConfiguration"
   ],
+  "AWS::SES::ConfigurationSet": [
+    "Name"
+  ],
   "AWS::SES::EmailIdentity": [
     "EmailIdentity"
   ],

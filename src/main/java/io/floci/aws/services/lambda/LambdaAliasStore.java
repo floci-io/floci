@@ -86,6 +86,12 @@ public class LambdaAliasStore {
         return backend.get(key(region, functionName, aliasName));
     }
 
+    /** As {@link #getForAccount}, reading a pre-multi-account alias in place instead of moving it. */
+    public Optional<LambdaAlias> readForAccount(
+            String accountId, String region, String functionName, String aliasName) {
+        return AccountAwareStorageBackend.readInAccount(backend, accountId, key(region, functionName, aliasName));
+    }
+
     public Optional<LambdaAlias> getByUrlId(String urlId) {
         return Optional.ofNullable(urlIdIndex.get(urlId));
     }

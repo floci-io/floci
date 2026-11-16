@@ -24,9 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code GetWebIdentityToken} over the wire: the signed JWT it answers with, the switch it reads,
  * and the constraints it is held to.
  *
- * <p>The token is checked here by decoding it rather than by verifying its signature, no endpoint
- * publishing the verification key yet, that being the other half of the feature. What is checked
- * instead is the shape a verifier depends on, including the one detail an ECDSA JWS is easy to get
+ * <p>The token is checked here by decoding it rather than by verifying its signature, which
+ * {@link StsWebIdentityWellKnownIntegrationTest} does against the published key set. What is
+ * checked here is the shape a verifier depends on, including the one detail an ECDSA JWS is easy to get
  * wrong: the signature is the raw {@code R || S} pair, 96 bytes for P-384, rather than the
  * variable-length DER sequence the JDK's default ECDSA signer returns. That the signature verifies
  * at all, against the key the issuer stored and over the claims it was made for, is

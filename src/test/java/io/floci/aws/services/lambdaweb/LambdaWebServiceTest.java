@@ -255,6 +255,24 @@ class LambdaWebServiceTest {
     }
 
     @Test
+    void storedTagsAreTheWebFunctionsForItAndItsRevisionsAndEndpoints() {
+        LambdaWebService service = service();
+        ObjectNode request = createRequest("app");
+        request.putObject("tags").put("team", "data");
+        WebFunction created = service.createFunction(REGION, request);
+        String revision = created.revisions.keySet().iterator().next();
+
+        assertEquals(Map.of("team", "data"), service.storedTags(ARN));
+        assertEquals(Map.of("team", "data"), service.storedTags(ARN + "/revision/" + revision));
+        assertEquals(Map.of("team", "data"), service.storedTags(ARN + "/endpoint/dev"));
+        assertEquals(Map.of(), service.storedTags(ARN + "/endpoint/prod"));
+        assertEquals(Map.of(), service.storedTags(ARN + "/revision/rev-zzzzz"));
+        assertEquals(Map.of(), service.storedTags(ARN.replace(ACCOUNT_ID, "111111111111")));
+        assertEquals(Map.of(), service.storedTags(ARN.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), service.storedTags(ARN + "-missing"));
+    }
+
+    @Test
     void untagValidatesEveryKey() {
         LambdaWebService service = service();
         service.createFunction(REGION, createRequest("app"));

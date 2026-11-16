@@ -7,7 +7,9 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackedMap;
+import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.lambda.LambdaArnUtils;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -77,6 +79,9 @@ public class LambdaMicrovmsService implements ResourceProvider {
     private Map<String, MicrovmImage> images = new ConcurrentHashMap<>();
     private Map<String, Microvm> microvms = new ConcurrentHashMap<>();
     private Map<String, NetworkConnector> connectors = new ConcurrentHashMap<>();
+    /** The backends of {@link #images} and {@link #connectors}, read in another account than the caller's. */
+    private StorageBackend<String, MicrovmImage> imageStorage;
+    private StorageBackend<String, NetworkConnector> connectorStorage;
 
     @Inject
     public LambdaMicrovmsService(RegionResolver regionResolver, StorageFactory storageFactory) {
@@ -97,12 +102,14 @@ public class LambdaMicrovmsService implements ResourceProvider {
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
         }
-        this.images = new StorageBackedMap<>(storageFactory.create("lambda",
-                "lambda-microvm-images.json", new TypeReference<Map<String, MicrovmImage>>() {}));
+        this.imageStorage = storageFactory.create("lambda",
+                "lambda-microvm-images.json", new TypeReference<Map<String, MicrovmImage>>() {});
+        this.images = new StorageBackedMap<>(imageStorage);
         this.microvms = new StorageBackedMap<>(storageFactory.create("lambda",
                 "lambda-microvms.json", new TypeReference<Map<String, Microvm>>() {}));
-        this.connectors = new StorageBackedMap<>(storageFactory.create("lambda",
-                "lambda-network-connectors.json", new TypeReference<Map<String, NetworkConnector>>() {}));
+        this.connectorStorage = storageFactory.create("lambda",
+                "lambda-network-connectors.json", new TypeReference<Map<String, NetworkConnector>>() {});
+        this.connectors = new StorageBackedMap<>(connectorStorage);
     }
 
     // ---------------------------------------------------------------- images
@@ -856,6 +863,37 @@ public class LambdaMicrovmsService implements ResourceProvider {
 
     public Map<String, String> listTags(String region, String arn) {
         return snapshotTags(taggable(region, arn));
+    }
+
+    /**
+     * The tags of the image or the network connector stored under {@code arn} in the account and Region it names,
+     * matched on the whole ARN and left as they are; empty for an ARN naming nothing stored, or any other resource.
+     */
+    public Map<String, String> storedTags(String arn) {
+        String resource = taggedResource(arn).orElse("");
+        if (resource.isEmpty()) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (resource.startsWith(IMAGE_RESOURCE)) {
+            String key = key(parsed.region(), resource.substring(IMAGE_RESOURCE.length()));
+            return stored(imageStorage, images, parsed.accountId(), key)
+                    .filter(image -> arn.equals(image.imageArn))
+                    .map(image -> snapshotTags(image.tags))
+                    .orElse(Map.of());
+        }
+        String key = key(parsed.region(), resource.substring(CONNECTOR_RESOURCE.length()));
+        return stored(connectorStorage, connectors, parsed.accountId(), key)
+                .filter(connector -> arn.equals(connector.arn))
+                .map(connector -> snapshotTags(connector.tags))
+                .orElse(Map.of());
+    }
+
+    /** The entry {@code key} names in the account, read in place; from {@code local} where there is no storage. */
+    private static <V> Optional<V> stored(StorageBackend<String, V> storage, Map<String, V> local, String accountId,
+                                          String key) {
+        return storage == null ? Optional.ofNullable(local.get(key))
+                : AccountAwareStorageBackend.readInAccount(storage, accountId, key);
     }
 
     public void tagResource(String region, String arn, Map<String, String> tags) {

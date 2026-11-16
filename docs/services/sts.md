@@ -235,10 +235,44 @@ says what the maximum payload is, so no size is invented here to refuse a reques
 The signing key is the account's, minted on first use per algorithm and stored, so a restart does
 not invalidate a token already handed out. `RS256` signs with a 2048-bit RSA key and `ES384` with
 P-384, whose signature is the raw `R || S` pair JWS defines rather than the DER sequence a default
-ECDSA signer returns. What is not here yet is the other half of the feature: nothing publishes the
-verification key, so the `/.well-known/openid-configuration` and `/.well-known/jwks.json` documents
-the issuer URL would host are not served, and a relying party cannot verify one of these tokens
-against this emulator.
+ECDSA signer returns.
+
+### Verifying a token
+
+AWS publishes the verification keys at the issuer itself, under
+`/.well-known/openid-configuration` and `/.well-known/jwks.json`. The issuer's host
+(`https://<uuid>.tokens.sts.global.api.aws`) does not reach Floci, so the two documents are served
+under a Floci route keyed by the issuer's UUID, its first host label:
+
+| Route | Serves |
+|---|---|
+| `GET /_floci/sts/web-identity/<uuid>/.well-known/openid-configuration` | The OIDC discovery document |
+| `GET /_floci/sts/web-identity/<uuid>/.well-known/jwks.json` | The account's verification keys |
+
+A relying party fetches them without AWS credentials, as it would from AWS, and the UUID tells Floci
+which account's keys to answer with. The token's `iss` keeps AWS's form, and the discovery document
+names it as `issuer`, which is what a verifier compares, while `jwks_uri` points at the key route
+above. Point the relying party's JWKS URL (or its discovery URL) at Floci:
+
+```bash
+ISSUER=$(aws iam get-outbound-web-identity-federation-info --endpoint-url $AWS_ENDPOINT_URL \
+  --query IssuerIdentifier --output text)
+ID=$(echo "$ISSUER" | sed -E 's#https://([^.]+)\..*#\1#')
+curl -s "$AWS_ENDPOINT_URL/_floci/sts/web-identity/$ID/.well-known/jwks.json"
+```
+
+The key set holds one key per algorithm, in the shape of the sample the IAM User Guide gives: the
+`ES384` key with `kty` `EC`, `alg` and `crv` `P-384`, and the `RS256` key with `kty` `RSA`, its
+modulus and exponent. Both are minted on the first read if no token has used them yet, so a key set
+cached before the first token already holds that token's key. AWS does not publish its discovery
+document, so Floci's carries the members OpenID Connect Discovery requires and no more: `issuer`,
+`jwks_uri`, `response_types_supported`, `subject_types_supported` and
+`id_token_signing_alg_values_supported` (`RS256` and `ES384`).
+
+The documents stay served while the feature is disabled. The issuer outlives a disable, and so do
+the tokens already minted under it, which a relying party still has to verify until they expire.
+AWS does not document this either way, so it is Floci's reading. An issuer no account was given
+answers 404.
 
 ## Configuration
 
