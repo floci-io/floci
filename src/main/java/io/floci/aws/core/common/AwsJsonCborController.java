@@ -60,6 +60,7 @@ public class AwsJsonCborController {
 
     private static final Logger LOG = Logger.getLogger(AwsJsonCborController.class);
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
+    private static final RpcV2CborCodec RPC_CODEC = RpcV2CborCodec.load();
     private static final String GENERIC_CBOR_MEDIA_TYPE = "application/cbor";
     private static final String AWS_CBOR_1_1_MEDIA_TYPE = "application/x-amz-cbor-1.1";
 
@@ -345,6 +346,10 @@ public class AwsJsonCborController {
 
         try {
             JsonNode request = bodyToJson(httpHeaders, body);
+            boolean modeled = RPC_CODEC.supports(serviceId);
+            if (modeled) {
+                request = RPC_CODEC.decodeRequest(serviceId, operation, request);
+            }
             String region = regionResolver.resolveRegion(httpHeaders);
 
             Response delegated = dispatchCbor(serviceId, operation, request, region, httpHeaders, uriInfo);
@@ -353,16 +358,19 @@ public class AwsJsonCborController {
                         httpHeaders);
             }
 
-            JsonNode responseNode = responseNode(delegated.getEntity());
-            byte[] cborBytes = nodeToSmithyCbor(responseNode, timestampMembers(serviceId));
-            String responseContentType = responseContentType(httpHeaders);
-            return Response.fromResponse(delegated)
+            boolean successful = delegated.getStatus() >= 200 && delegated.getStatus() < 300;
+            Response.ResponseBuilder response = Response.fromResponse(delegated)
+                    .status(successful ? 200 : delegated.getStatus())
                     .header(HttpHeaders.CONTENT_LENGTH, null)
                     .header("X-Amz-Crc32", null)
-                    .header("smithy-protocol", "rpc-v2-cbor")
-                    .type(responseContentType)
-                    .entity(cborBytes)
-                    .build();
+                    .header("smithy-protocol", "rpc-v2-cbor");
+            if (modeled && successful && !RPC_CODEC.hasOutput(serviceId, operation)) {
+                return response.entity(null).type((String) null).build();
+            }
+            JsonNode responseNode = responseNode(delegated.getEntity());
+            byte[] cborBytes = modeled ? RPC_CODEC.encodeResponse(serviceId, operation, responseNode)
+                    : nodeToSmithyCbor(responseNode, timestampMembers(serviceId));
+            return response.type(responseContentType(httpHeaders)).entity(cborBytes).build();
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
         } catch (JacksonException e) {

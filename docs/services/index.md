@@ -4,6 +4,19 @@ Floci emulates the AWS services listed below on a single port (`4566`). All serv
 
 This page is the canonical reference for supported service and operation counts. Some services expose separate control-plane and data-plane rows below. Other docs (and the README) should link here rather than duplicating the table.
 
+## Smithy RPC v2 CBOR
+
+Services with a JSON `X-Amz-Target` endpoint also accept Smithy RPC v2 CBOR at
+`POST /service/{serviceName}/operation/{operation}`, with `Content-Type: application/cbor`
+and `smithy-protocol: rpc-v2-cbor`. The service name is its target prefix without the final dot;
+for example, CodeBuild uses `/service/CodeBuild_20161006/operation/ListProjects`. SDKs that
+select this protocol use the same operations, accounts, regions, and IAM checks as JSON clients.
+
+Modeled blobs use CBOR byte strings. Modeled timestamps use tag 1 with epoch seconds, including
+members whose JSON form is an ISO date. An operation without an output shape returns no body or
+content type. The existing root-path, `X-Amz-Target` legacy CBOR routes retain their own dialect;
+its timestamp conventions do not change.
+
 ## Service Matrix
 
 Operation counts are exact. For dispatch-table services (Query and JSON 1.1) each count reflects one case per AWS action in the handler. For REST-based services (S3, Lambda, API Gateway v1) the count reflects distinct AWS SDK operations, collapsing routes where one JAX-RS handler fans out via query-string or header markers (e.g. `PUT /{bucket}/{key}` → `PutObject`, `PutObjectTagging`, `PutObjectAcl`, etc.).
