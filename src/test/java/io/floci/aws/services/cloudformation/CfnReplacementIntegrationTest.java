@@ -205,6 +205,17 @@ class CfnReplacementIntegrationTest {
                                 + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-novalue\","
                                 + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
                         "Subject", "False", false, null),
+                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue over a dynamic reference",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 14,"
+                                + " \"KmsKeyId\": {\"Fn::ImportValue\": \"repl-missing-export\"},"
+                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"{{resolve:ssm:repl-name}}\","
+                                + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
+                        "Subject", "False", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
