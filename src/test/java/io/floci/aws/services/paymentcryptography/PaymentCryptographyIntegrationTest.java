@@ -648,6 +648,54 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aResourcePolicyIsPutReadAndDeleted() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+        call("PutResourcePolicy", """
+                {"ResourceArn":"%s","Policy":"{\\"Version\\":\\"2012-10-17\\",\\"Statement\\":[]}"}"""
+                .formatted(arn))
+                .then().statusCode(200)
+                    .body("ResourceArn", equalTo(arn))
+                    .body("Policy", equalTo(policy));
+
+        call("GetResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("ResourceArn", equalTo(arn))
+                    .body("Policy", equalTo(policy));
+
+        call("DeleteResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200);
+
+        call("GetResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aPolicyThatGrantsPublicAccessIsRefused() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("PutResourcePolicy", """
+                {"ResourceArn":"%s","Policy":"{\\"Statement\\":[{\\"Effect\\":\\"Allow\\",\\"Principal\\":\\"*\\"}]}"}"""
+                .formatted(arn))
+                .then().statusCode(400)
+                    .body("__type", containsString("PublicPolicyException"));
+    }
+
+    @Test
+    void aPolicyThatIsNotJsonIsRefused() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("PutResourcePolicy", "{\"ResourceArn\":\"" + arn + "\",\"Policy\":\"not json\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
     void aKeyThatDoesNotExistIsNotFound() {
         call("GetKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:000000000000:key/"
                 + "0123456789abcdef0123456789abcdef\"}")

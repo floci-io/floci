@@ -640,6 +640,54 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                 maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
     }
 
+    // ---- resource policies ----------------------------------------------------
+
+    /**
+     * Attaches or replaces the resource-based policy of a key.
+     *
+     * <p>The policy belongs to the key, so it is written with the key and goes when the key
+     * goes. A policy the service has not seen is replaced, as the reference replaces one.
+     */
+    public synchronized PaymentCryptographyKey putResourcePolicy(PaymentCryptographyKey key,
+                                                                  String policy) {
+        PaymentCryptographyKey current = liveKey(key);
+        current.setResourcePolicy(policy);
+        storeKey(current);
+        return current;
+    }
+
+    /**
+     * The key and the resource-based policy attached to it.
+     *
+     * <p>A key without a policy is refused as the resource the reference cannot find, not
+     * answered with an empty policy: the two are different answers.
+     */
+    public PaymentCryptographyKey resourcePolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        if (current.getResourcePolicy() == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Resource policy for key " + key.getArn() + " is not found", 400);
+        }
+        return current;
+    }
+
+    /**
+     * Removes the resource-based policy of a key.
+     *
+     * <p>A key without a policy is refused, as it is by the read.
+     */
+    public synchronized PaymentCryptographyKey deleteResourcePolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        if (current.getResourcePolicy() == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Resource policy for key " + key.getArn() + " is not found", 400);
+        }
+        current.setResourcePolicy(null);
+        storeKey(current);
+        return current;
+    }
+
+
     // ---- the key exchange ----------------------------------------------------
 
     /**

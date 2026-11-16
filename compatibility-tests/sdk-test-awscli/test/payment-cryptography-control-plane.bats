@@ -71,6 +71,26 @@ create_key() {
     [ "$(json_get "$output" '.Tags | length')" = "0" ]
 }
 
+@test "Payment Cryptography control plane: a resource policy is put, read and deleted" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography put-resource-policy \
+        --resource-arn "$KEY_ARN" \
+        --policy '{"Version":"2012-10-17","Statement":[]}'
+    assert_success
+
+    run aws_cmd payment-cryptography get-resource-policy --resource-arn "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Policy')" = '{"Version":"2012-10-17","Statement":[]}' ]
+
+    run aws_cmd payment-cryptography delete-resource-policy --resource-arn "$KEY_ARN"
+    assert_success
+
+    run aws_cmd payment-cryptography get-resource-policy --resource-arn "$KEY_ARN"
+    assert_failure
+}
+
 @test "Payment Cryptography control plane: a key pair is created with the usage its derived keys have" {
     # The usage a derived key is for is named when the key pair is made, as the export
     # guide's key agreement flow does.

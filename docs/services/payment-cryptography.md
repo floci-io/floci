@@ -30,6 +30,9 @@
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
+| `PutResourcePolicy` | Attach or replace the resource-based policy of a key |
+| `GetResourcePolicy` | Get the resource-based policy of a key |
+| `DeleteResourcePolicy` | Remove the resource-based policy of a key |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -189,6 +192,7 @@
 - **The data plane is a service of its own:** the operations that use a key are on
   [the data plane's page](payment-cryptography-data.md), which is reached at its own
   routes.
+<<<<<<< HEAD
 - **Multi-Region key replication:** a key may be replicated to other Regions, so the same
   key material is usable in several of them. The key is created in the Region of the
   request and is the *Primary Region key* there; every other Region holds a *Replica
@@ -228,6 +232,16 @@
 - **Not yet emulated:** the resource policy operations, the key usage operations, the key
   restore operation, the multi-party approval operations and the certificate signing
   request.
+=======
+- **Resource policies:** `PutResourcePolicy` attaches or replaces the policy stored on the
+  key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
+  a policy is answered with `ResourceNotFoundException` by both reads. A policy that names
+  every principal without a condition that bounds it is refused with
+  `PublicPolicyException`, as the reference refuses one.
+- **Not yet emulated:** the multi-region replication operations, the key usage
+  operations, the key restore operation, the multi-party approval operations and the
+  certificate signing request.
+>>>>>>> 81668aaae (feat(paymentcryptography): the resource policies of a key)
 
 ## Configuration
 
