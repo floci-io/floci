@@ -179,10 +179,9 @@ class RequestResourceMembersTest {
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
                 .collect(Collectors.toSet()),
                 "only the operations listed to read override hand-built operations");
-        assertEquals(Set.of("rds"), table.namespaces().stream().filter(table.notCovered()::contains)
-                .collect(Collectors.toSet()), "RDS explicitly retains unimplemented operation families");
+        assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
         assertTrue(table.operations().containsKey("rds:CreateDBParameterGroup"));
-        assertFalse(table.operations().containsKey("rds:CreateDBProxy"));
+        assertTrue(table.operations().containsKey("rds:CreateDBProxy"));
         assertTrue(table.otherNamespaces().stream().noneMatch(table.notCovered()::contains));
         table.operations().forEach((operation, resources) -> {
             Map<String, ArnFormat> formats = table.formats().get(operation.substring(0, operation.indexOf(':')));
@@ -677,7 +676,7 @@ class RequestResourceMembersTest {
      * {@code ""}).
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
-        if (resource.arn() != null || resource.fill().values().stream()
+        if (resource.arn() != null || Stream.concat(resource.fill().values().stream(), resource.find().stream())
                 .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
                         || !AwsArnUtils.isArn(given.get(member))))) {
             return false;

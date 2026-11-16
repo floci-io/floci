@@ -371,7 +371,6 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
-    monkeypatch.setattr(r, "READ_IN_NOT_COVERED", {})
     monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "FORWARDED", {})
     return monkeypatch
@@ -2269,18 +2268,6 @@ def test_an_explicit_arn_value_sentence_identifies_the_request_resource(document
     assert result == ([{"types": ["thing", "pool"], "arn": "ResourceName"}] if expected else [])
 
 
-def test_incremental_coverage_reads_only_selected_operations_of_an_uncovered_namespace(isolated):
-    isolated.setattr(r, "READ_IN_NOT_COVERED", {"later:GetThing": "tested lifecycle"})
-    assert r.reads("later:GetThing")
-    assert not r.reads("later:CreateOther")
-    r._check_overrides({"later:GetThing": {}})
-    with pytest.raises(ValueError, match="READ_IN_NOT_COVERED"):
-        r._check_overrides({})
-    isolated.setattr(r, "READ_IN_NOT_COVERED", {"svc:GetThing": "already fully read"})
-    with pytest.raises(ValueError, match="outside NOT_COVERED"):
-        r._check_overrides({"svc:GetThing": {}})
-
-
 def test_a_creates_subject_can_be_its_sole_arn_variable_for_an_abbreviated_type():
     formats = {"db": "arn:${Partition}:svc:${Region}:${Account}:db:${DbInstanceName}",
                "pg": "arn:${Partition}:svc:${Region}:${Account}:pg:${ParameterGroupName}"}
@@ -2288,15 +2275,6 @@ def test_a_creates_subject_can_be_its_sole_arn_variable_for_an_abbreviated_type(
     group = {"type": "pg", "fill": {"ParameterGroupName": "DBParameterGroupName"}}
     assert r.with_made([database, group], "svc:CreateDBInstance", formats) == [dict(database, made=True), group]
     assert r.with_made([database, group], "svc:ModifyDBInstance", formats) == [database, group]
-
-
-def test_verification_does_not_report_intentionally_unread_operations_as_new(isolated):
-    document = good_document()
-    document["notCovered"] = {"svc": "only A is covered"}
-    isolated.setattr(r, "READ_IN_NOT_COVERED", {"svc:A": "tested"})
-    upstream = {"svc:D": {"action": "svc:D", "types": [], "clients": ["svc"]}}
-    _, added = r.verify_against(document, upstream, document["arnFormats"])
-    assert added == []
 
 
 def test_resource_type_tag_prefixes_require_the_documented_namespace_and_type():
@@ -2501,3 +2479,60 @@ def test_a_create_acting_on_other_types_alone_tags_what_it_makes_when_it_names_i
     # One whose request does not name every variable of what it makes leaves it to the action's own resources.
     formats["widget"] = "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}/${WidgetId}"
     assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True)) == []
+
+
+def test_an_arn_identifying_a_type_is_not_read_as_its_name():
+    modeled = model({"RemoveFromPool": {"ThingIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["RemoveFromPoolIn"]["members"]["ThingIdentifier"]["documentation"] = (
+        "<p>The Amazon Resource Name (ARN) identifying the thing that was detached from the pool.</p>")
+    result = r.with_documented("svc:RemoveFromPool", ["thing"], FORMATS, {"svc": modeled}, [])
+    assert result == [{"types": ["thing"], "arn": "ThingIdentifier"}]
+
+
+def test_a_name_documented_as_an_identifier_finds_a_generated_id():
+    formats = {"proxy": "arn:${Partition}:svc:${Region}:${Account}:proxy:${ProxyId}"}
+    modeled = model({"ModifyProxy": {"ProxyName": "String"}}, protocol="query")
+    modeled["shapes"]["ModifyProxyIn"]["members"]["ProxyName"]["documentation"] = (
+        "<p>The identifier for the proxy to modify.</p>")
+    assert r.with_documented("svc:ModifyProxy", ["proxy"], formats, {"svc": modeled}, []) == [
+        {"type": "proxy", "fill": {}, "find": ["ProxyName"]}]
+
+
+def test_an_arn_identifying_a_type_replaces_the_identifier_name_mapping():
+    modeled = model({"RemoveFromPool": {"ThingIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["RemoveFromPoolIn"]["members"]["ThingIdentifier"]["documentation"] = (
+        "<p>The Amazon Resource Name (ARN) identifying the thing that was detached from the pool.</p>")
+    modeled["shapes"]["RemoveFromPoolIn"]["required"] = ["ThingIdentifier"]
+    assert r.read_resources("svc:RemoveFromPool", ["thing"], FORMATS, {"svc": modeled}) == [
+        {"types": ["thing"], "arn": "ThingIdentifier"}]
+
+
+def test_a_found_child_name_is_scoped_by_its_records_associated_parent():
+    formats = {"group": "arn:${Partition}:svc:${Region}:${Account}:group:${GroupId}"}
+    modeled = model({"ModifyGroup": {"ProxyName": "String", "GroupName": "String"}}, protocol="query")
+    modeled["shapes"]["ProxyGroup"] = {"type": "structure", "members": {
+        "GroupName": {"shape": "String"}, "ProxyName": {"shape": "String", "documentation":
+            "<p>The identifier for the proxy associated with this group.</p>"}}}
+    modeled["shapes"]["ModifyGroupIn"]["required"] = ["GroupName", "ProxyName"]
+    resources = [{"type": "group", "fill": {}, "find": ["GroupName"]}]
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == [
+        {"type": "group", "fill": {}, "find": ["ProxyName", "GroupName"]}]
+    modeled["shapes"]["ModifyGroupIn"]["required"] = ["ProxyName"]
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == [
+        {"type": "group", "fill": {}, "find": ["ProxyName", "GroupName"], "unless": {"GroupName": [None]}},
+        {"type": "group", "fill": {}, "find": ["ProxyName"], "when": {"GroupName": [None]}}]
+    # A fully named record, such as a proxy endpoint, already has its independent key.
+    modeled["shapes"]["ProxyGroup"]["members"]["ProxyGroupName"] = {"shape": "String"}
+    independently_named = [{"type": "group", "fill": {}, "find": ["ProxyGroupName"]}]
+    assert r.with_find_scope(independently_named, {"svc": modeled}, "ModifyGroup", formats) == independently_named
+    modeled["shapes"]["OtherGroup"] = modeled["shapes"].pop("ProxyGroup")
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == resources
+
+
+def test_a_task_identifier_reaches_the_source_arn_its_record_documents():
+    modeled = model({"DescribeExports": {"ExportTaskIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["ExportTask"] = {"type": "structure", "members": {
+        "ExportTaskIdentifier": {"shape": "String"}, "SourceArn": {"shape": "String", "documentation":
+            "<p>The Amazon Resource Name (ARN) of the thing that was exported to storage.</p>"}}}
+    assert r.read_resources("svc:DescribeExports", ["thing"], FORMATS, {"svc": modeled}) == [
+        {"types": ["thing"], "through": "ExportTaskIdentifier"}]

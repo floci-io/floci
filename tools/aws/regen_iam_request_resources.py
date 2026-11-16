@@ -102,8 +102,6 @@ follow the rule unchanged: a family of a hand-built namespace whose requests nam
 way the rule reads them. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
-`READ_IN_NOT_COVERED` selects tested operations from a namespace still listed in `NOT_COVERED`;
-its remaining operations retain their previous fallback until they have their own coverage.
 `ID_TARGETS` is Floci's coverage of id-list namespaces, the types of each it reads by id (EC2's instances and
 network resources): a resource ARN's variable names its list member, with the request's list of whatever resources
 it acts on (`Resources`) as a fallback. A list a type's variable names is the request's targets only when the
@@ -280,7 +278,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "controlcatalog", "controltower", "cur",
               "datasync", "ec2", "ecr", "ecs", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
-              "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
+              "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue")
@@ -302,22 +300,6 @@ READ_IN_HAND_BUILT: dict[str, str] = {
 READ_IN_HAND_BUILT["logs:PutDestination"] = (
     "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
     "reads from the generated request-resource table")
-
-# Incremental coverage in a namespace whose remaining operations are still named in NOT_COVERED.
-# The rules derive the selected operations normally; this list does not override their AWS resource types.
-READ_IN_NOT_COVERED = {
-    f"rds:{operation}": "RDS group and database lifecycle, with SDK authorization coverage"
-    for operation in (
-        "CreateDBParameterGroup", "CopyDBParameterGroup", "DescribeDBParameterGroups", "DescribeDBParameters",
-        "ModifyDBParameterGroup", "ResetDBParameterGroup", "DeleteDBParameterGroup",
-        "CreateDBClusterParameterGroup", "CopyDBClusterParameterGroup", "DescribeDBClusterParameterGroups",
-        "DescribeDBClusterParameters", "ModifyDBClusterParameterGroup", "ResetDBClusterParameterGroup",
-        "DeleteDBClusterParameterGroup", "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup",
-        "DeleteDBSubnetGroup", "CreateDBCluster", "DescribeDBClusters", "ModifyDBCluster", "DeleteDBCluster",
-        "CreateDBInstance", "DescribeDBInstances", "ModifyDBInstance", "DeleteDBInstance",
-        "CreateDBClusterSnapshot", "DescribeDBClusterSnapshots", "DeleteDBClusterSnapshot",
-        "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource")
-}
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -449,7 +431,6 @@ NOT_COVERED: dict[str, str] = {
     "mq": _REST,
     "network-firewall": _LATER,
     "organizations": _LATER,
-    "rds": "parameter/subnet groups, instance/cluster lifecycle and tagging are read; other operations await coverage",
     "rds-data": _REST,
     "route53resolver": _LATER,
     "rum": _REST,
@@ -791,7 +772,7 @@ def doc_head(lead: str) -> tuple[str, str | None]:
     of trail, event data store, dashboard, or channel arns" before "whose tags will be listed")."""
     rest = re.sub(r" (?:of|for)$", "", re.split(r" (?:to|from|whose|that|which|in which|with|associated) ", lead,
                                                maxsplit=1)[0])
-    match = re.match(r"^(.*?)(?: (?:of|for) (?:the |a |an )?(.*))?$", rest)
+    match = re.match(r"^(.*?)(?: (?:of|for|identifying) (?:the |a |an )?(.*))?$", rest)
     head, of = match.group(1).strip(), (match.group(2) or None)
     if re.search(r"(?:^|\s)list$", head) and of:
         return f"{head} of {of}", None
@@ -950,11 +931,13 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
     kinds = [kind for kind in types if kind in formats]
     resources = [dict(resource) for resource in resources]
     held = {resource["arn"] for resource in resources if "arn" in resource}
+    documented_arns = set()
     for path, fact in sorted(facts.items()):
         if fact["nested"] or fact["path"] in held or not kinds or re.search(r"arn(s|list)?$", path, re.IGNORECASE):
             continue
         if fact["arnValue"]:
             resources.insert(0, {"types": kinds, "arn": fact["path"]})
+            documented_arns.add(fact["path"])
             continue
         head, of = doc_head(fact["lead"])
         if re.search(r"(?:arns?|amazon resource names? \(arns?\))$", head) \
@@ -963,6 +946,11 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                 or (of is not None and any(doc_names("the name of the " + part.strip(), kind, formats)
                                            for part in re.split(r",| or ", of) for kind in kinds))):
             resources.insert(0, {"types": kinds, "arn": fact["path"]})
+            if " identifying " in fact["lead"]:
+                documented_arns.add(fact["path"])
+    # A member documented as an ARN cannot also fill a name variable of that same target.
+    resources = [resource for resource in resources if not resource.get("fill")
+                 or not set(resource["fill"].values()) <= documented_arns]
     services = {formats[kind].split(":")[2] for kind in kinds}
     def foreign(path: str) -> bool:
         fact = facts.get(path.removesuffix("[]"))
@@ -1007,7 +995,8 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
         kind_stem = stem(kind)
         candidates = []
         for path, fact in sorted(facts.items()):
-            if path in used or re.search(r"arns?$", path, re.IGNORECASE):
+            if path in used or re.search(r"arns?$", path, re.IGNORECASE) \
+                    or any(resource.get("through") == fact["path"] for resource in resources):
                 continue
             field = path.split(".")[-1]
             effective = stem(path.split(".")[0] if fact["nested"] and field.lower() in BARE else field)
@@ -1018,6 +1007,9 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                     candidates.append(("fill", fact["path"]))
             elif doc_names(fact["lead"], kind, formats):
                 said = doc_kind(fact["lead"]) or kind_of(field)
+                # "Identifier" can mean a name; an explicitly named member cannot fill a generated id.
+                if kind_of(field) == "name" and re.search(r"\bidentifiers?$", doc_head(fact["lead"])[0]):
+                    said = "name"
                 if (compatible(said, variable) or (kind_of(variable) == "identifier" and not creating)) \
                         and not (creating and not kind_of(variable)) \
                         and not (creating and said != kind_of(variable) and kind_of(variable) != "identifier"):
@@ -2363,6 +2355,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
                                             requested_members(models)),
                                  types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
+    resources = with_find_scope(resources, models, name, formats)
     resources = with_typed_targets(resources, formats, typed_target_fields(models, name))
     resources = with_integer_members(resources, formats, models, name)
     resources = with_minted_names(operation, resources, formats, models)
@@ -2894,6 +2887,41 @@ def with_found(resources: list[dict], types: list[str], formats: dict[str, str],
     return found + [{"type": kind, "fill": {}, "find": list(by)} for kind, by in by_kind.items()]
 
 
+def with_find_scope(resources: list[dict], models: dict[str, dict], operation: str,
+                    formats: dict[str, str]) -> list[dict]:
+    """A found name is scoped by a request member its record says is associated with that resource."""
+    members = request_members(models, operation)
+    found = []
+    for resource in resources:
+        if "find" not in resource:
+            found.append(resource)
+            continue
+        scope = set()
+        for model in models.values():
+            for shape_name, shape in model["shapes"].items():
+                fields = shape.get("members", {}) if shape.get("type") == "structure" else {}
+                if not stem(shape_name).endswith(stem(resource["type"])) \
+                        or any(stem(member) == stem(shape_name) for member in resource["find"]) \
+                        or not all(member in fields for member in resource["find"]):
+                    continue
+                for member, spec in fields.items():
+                    associated = re.search(r"\bassociated with (?:this|the) (.+)$", _lead(spec.get("documentation")))
+                    if member in members and member not in resource["find"] and associated \
+                            and stem(member) and stem(shape_name).startswith(stem(member)) \
+                            and stem(shape_name) != stem(member) \
+                            and doc_names("the name of the " + associated.group(1), resource["type"], formats):
+                        scope.add(member)
+        scoped = dict(resource, find=sorted(scope) + resource["find"])
+        if scope and len(resource["find"]) == 1 and resource["find"][0] in optional_members(models, operation):
+            absent = {resource["find"][0]: [None]}
+            found.append(dict(scoped, unless=absent))
+            # With no child name, the handler uses its default child of the explicitly named parent.
+            found.append(dict(resource, find=sorted(scope), when=absent))
+        else:
+            found.append(scoped)
+    return found
+
+
 def requested_members(models: dict[str, dict]) -> set[str]:
     """Every top-level member of every request of the clients given."""
     return {member for model in models.values() for spec in model["operations"].values() if "input" in spec
@@ -2962,6 +2990,15 @@ def through_members(models: dict[str, dict], formats: dict[str, str]) -> dict[st
                          for known, kind in stems.items() if related(stem(field), known)}
                 if kinds:
                     found.setdefault(member, set()).update(kinds)
+            source = fields.get("SourceArn")
+            if source is not None:
+                head, of = doc_head(_lead(source.get("documentation")))
+                if of and re.search(r"(?:arn|amazon resource name \(arn\))$", head):
+                    kinds = {kind for kind in formats for phrase in re.split(r",| or ", of)
+                             if doc_names("the name of the " + phrase.strip(), kind, formats)}
+                    for member in fields:
+                        if kinds and kind_of(member) == "identifier" and stem(member) == stem(shape_name):
+                            found.setdefault(member, set()).update(kinds)
     for member, kinds in documented_through(models, formats).items():
         found.setdefault(member, set()).update(kinds)
     return {member: sorted(kinds) for member, kinds in sorted(found.items())}
@@ -3211,10 +3248,10 @@ def _with_resource_types(documents: list[dict]) -> set[str]:
 
 def reads(operation: str) -> bool:
     """Read whole namespaces, and in a namespace otherwise built by hand the operations `READ_IN_HAND_BUILT` lists
-    and those `MEASURED` gives, plus the incremental operations in `READ_IN_NOT_COVERED`."""
+    and those `MEASURED` gives."""
     namespace = namespace_of(operation)
-    return (namespace in NAMESPACES or operation in READ_IN_NOT_COVERED
-            or namespace in HAND_BUILT and (operation in READ_IN_HAND_BUILT or operation in MEASURED))
+    return namespace in NAMESPACES or namespace in HAND_BUILT and (operation in READ_IN_HAND_BUILT
+                                                                     or operation in MEASURED)
 
 
 def _check_overrides(covered: dict[str, dict]) -> None:
@@ -3222,10 +3259,6 @@ def _check_overrides(covered: dict[str, dict]) -> None:
     two places."""
     stale = [f"READ_IN_HAND_BUILT names {operation}, which the reference does not give" for operation in READ_IN_HAND_BUILT
               if operation not in covered]
-    stale += [f"READ_IN_NOT_COVERED names {operation}, which the reference does not give"
-              for operation in READ_IN_NOT_COVERED if operation not in covered]
-    stale += [f"READ_IN_NOT_COVERED names {operation}, outside NOT_COVERED"
-              for operation in READ_IN_NOT_COVERED if namespace_of(operation) not in NOT_COVERED]
     stale += [f"MEASURED gives {operation}, which the file does not read" for operation in MEASURED
               if operation not in covered]
     stale += [f"MEASURED gives {operation}, which READ_IN_HAND_BUILT reads by the rules" for operation in MEASURED
@@ -3621,8 +3654,6 @@ def verify_against(vendored: dict, upstream: dict[str, dict], formats: dict[str,
                    if namespace_of(operation) in vendored["namespaces"]
                    and (namespace_of(operation) not in vendored["handBuilt"] or operation in READ_IN_HAND_BUILT
                         or operation in MEASURED)
-                   and (namespace_of(operation) not in vendored.get("notCovered", {})
-                        or operation in READ_IN_NOT_COVERED)
                    and operation not in vendored["operations"])
     return untrue, added
 

@@ -1272,16 +1272,20 @@ mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
 
 ### IAM lifecycle resources and tags
 
-With IAM enforcement enabled, parameter groups, cluster parameter groups, subnet
-groups, DB instances and DB clusters use their named ARNs for lifecycle
-operations. Explicitly supplied secondary groups and clusters are authorized
-separately, including parameter-group changes in `ModifyDBCluster`. Tagging operations use the ARN in `ResourceName`; unfiltered describe
-requests continue to require a wildcard grant.
+With IAM enforcement enabled, RDS request-resource mappings cover the complete
+namespace generated from AWS's Service Authorization Reference and pinned
+botocore models. Parameter groups, subnet groups, DB instances and DB clusters
+use their named ARNs. Stored proxy and endpoint identities are resolved from
+request names, and target group lookups include the owning proxy. ARN-valued
+members, including `RemoveFromGlobalCluster`'s `DbClusterIdentifier`, are checked
+as ARNs. Unfiltered describe requests continue to require a wildcard grant.
 
 For modeled taggable RDS resources (including endpoints and proxies) and
 DocumentDB clusters, instances and snapshots sharing the RDS ARN namespace,
 supported `aws:ResourceTag` and RDS resource-specific tag conditions read stored
-tags from the exact target ARN's account, Region and partition through the shared
-stored-tag resolver. Create-time request tags remain separate
-from existing-resource tags. Other RDS resource families retain their existing
-IAM resource-resolution coverage.
+tags from the exact target ARN's account, Region and partition. IAM and tagging
+share resource lookup dispatch. IAM reads neither create defaults nor migrate
+legacy records; named lookups use direct account-scoped keys, and generated
+proxy identities only search their owning account. Create-time request tags
+remain separate from existing-resource tags. Resource types without modeled
+storage retain the generated wildcard fallback when no stored identity exists.

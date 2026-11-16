@@ -258,6 +258,135 @@ class RdsResourceIamIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "cn-north-1", "us-gov-west-1"})
+    void generatedProxyIdsAndParentScopedTargetGroupsUseStoredArns(String regionName) {
+        String name = "iam-proxy-" + UUID.randomUUID().toString().substring(0, 8);
+        String other = name + "-other";
+        String user = "proxy-user-" + UUID.randomUUID();
+        String prefix = "arn:" + AwsRegions.partitionFor(regionName) + ":";
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup,
+                RestAssured.port, auth(ACCOUNT, "iam"), user);
+        try (RdsClient root = AwsTestClients.create(RdsClient.builder(), ACCOUNT, Region.of(regionName));
+                RdsClient limited = AwsTestClients.create(RdsClient.builder(), credentials.accessKeyId(),
+                        credentials.secretAccessKey(), Region.of(regionName))) {
+            for (String proxyName : List.of(name, other)) {
+                root.createDBProxy(r -> r.dbProxyName(proxyName).engineFamily("POSTGRESQL")
+                        .roleArn(prefix + "iam::" + ACCOUNT + ":role/proxy")
+                        .vpcSubnetIds(Ec2Service.defaultSubnetId(regionName, "a"),
+                                Ec2Service.defaultSubnetId(regionName, "b"))
+                        .auth(a -> a.authScheme("SECRETS")
+                                .secretArn(prefix + "secretsmanager:" + regionName + ":" + ACCOUNT + ":secret:db-AbCdEf"))
+                        .tags(tag("Owner", "team-a")));
+            }
+            try {
+                String proxyArn = root.describeDBProxies(r -> r.dbProxyName(name)).dbProxies().getFirst().dbProxyArn();
+                String targetArn = root.describeDBProxyTargetGroups(r -> r.dbProxyName(name))
+                        .targetGroups().getFirst().targetGroupArn();
+                String endpointArn = root.createDBProxyEndpoint(r -> r.dbProxyName(name).dbProxyEndpointName(name)
+                        .vpcSubnetIds(Ec2Service.defaultSubnetId(regionName, "a"),
+                                Ec2Service.defaultSubnetId(regionName, "b"))).dbProxyEndpoint().dbProxyEndpointArn();
+                policy(user, """
+                        [{"Effect":"Allow","Action":"rds:ModifyDBProxy","Resource":"%s",
+                          "Condition":{"StringEquals":{"aws:ResourceTag/Owner":"team-a"}}},
+                         {"Effect":"Allow","Action":["rds:ModifyDBProxyTargetGroup","rds:DeregisterDBProxyTargets"],
+                          "Resource":["%s","%s"]},
+                         {"Effect":"Allow","Action":"rds:DeleteDBProxyEndpoint","Resource":"%s"}]
+                        """.formatted(proxyArn, proxyArn, targetArn, endpointArn));
+                limited.modifyDBProxy(r -> r.dbProxyName(name).idleClientTimeout(1200));
+                denied(() -> limited.modifyDBProxy(r -> r.dbProxyName(other).idleClientTimeout(1200)));
+                limited.modifyDBProxyTargetGroup(r -> r.dbProxyName(name).targetGroupName("default")
+                        .connectionPoolConfig(c -> c.maxConnectionsPercent(80)));
+                denied(() -> limited.modifyDBProxyTargetGroup(r -> r.dbProxyName(other).targetGroupName("default")
+                        .connectionPoolConfig(c -> c.maxConnectionsPercent(80))));
+                // The exact proxy and group grants reach input validation; an unscoped group cannot.
+                RdsException invalid = assertThrows(RdsException.class,
+                        () -> limited.deregisterDBProxyTargets(r -> r.dbProxyName(name).targetGroupName("default")));
+                assertEquals("InvalidParameterValue", invalid.awsErrorDetails().errorCode());
+                denied(() -> limited.deregisterDBProxyTargets(r -> r.dbProxyName(other).targetGroupName("default")));
+                RdsException defaultGroup = assertThrows(RdsException.class,
+                        () -> limited.deregisterDBProxyTargets(r -> r.dbProxyName(name)));
+                assertEquals("InvalidParameterValue", defaultGroup.awsErrorDetails().errorCode());
+                denied(() -> limited.deregisterDBProxyTargets(r -> r.dbProxyName(other)));
+                limited.deleteDBProxyEndpoint(r -> r.dbProxyEndpointName(name));
+                root.removeTagsFromResource(r -> r.resourceName(proxyArn).tagKeys("Owner"));
+                denied(() -> limited.modifyDBProxy(r -> r.dbProxyName(name).idleClientTimeout(1200)));
+            } finally {
+                root.deleteDBProxy(r -> r.dbProxyName(name));
+                root.deleteDBProxy(r -> r.dbProxyName(other));
+            }
+        }
+    }
+
+    @Test
+    void removingAGlobalMemberAuthorizesItsArnWithoutTreatingItAsAName() {
+        String name = "iam-global-" + UUID.randomUUID().toString().substring(0, 8);
+        String user = "global-user-" + UUID.randomUUID();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup,
+                RestAssured.port, auth(ACCOUNT, "iam"), user);
+        try (RdsClient root = AwsTestClients.create(RdsClient.builder(), ACCOUNT, Region.US_EAST_1);
+                RdsClient limited = AwsTestClients.create(RdsClient.builder(), credentials.accessKeyId(),
+                        credentials.secretAccessKey(), Region.US_EAST_1)) {
+            String clusterArn = create(root, "cluster", name, "us-east-1", "team-a");
+            String globalArn = root.createGlobalCluster(r -> r.globalClusterIdentifier(name)
+                    .sourceDBClusterIdentifier(clusterArn)).globalCluster().globalClusterArn();
+            try {
+                policy(user, """
+                        [{"Effect":"Allow","Action":"rds:RemoveFromGlobalCluster","Resource":"%s"}]
+                        """.formatted(globalArn));
+                denied(() -> limited.removeFromGlobalCluster(r -> r.globalClusterIdentifier(name)
+                        .dbClusterIdentifier(clusterArn)));
+                policy(user, """
+                        [{"Effect":"Allow","Action":"rds:RemoveFromGlobalCluster","Resource":["%s","%s"]}]
+                        """.formatted(globalArn, clusterArn));
+                assertEquals(0, limited.removeFromGlobalCluster(r -> r.globalClusterIdentifier(name)
+                        .dbClusterIdentifier(clusterArn)).globalCluster().globalClusterMembers().size());
+            } finally {
+                delete(root, "cluster", name);
+                root.deleteGlobalCluster(r -> r.globalClusterIdentifier(name));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void clusterSnapshotRestoresFindTheStoredSnapshotByNameOrArn(boolean useArn) {
+        String name = "iam-restore-" + UUID.randomUUID().toString().substring(0, 8);
+        String restored = name + "-restored";
+        String user = "restore-user-" + UUID.randomUUID();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup,
+                RestAssured.port, auth(ACCOUNT, "iam"), user);
+        try (RdsClient root = AwsTestClients.create(RdsClient.builder(), ACCOUNT, Region.US_EAST_1);
+                RdsClient limited = AwsTestClients.create(RdsClient.builder(), credentials.accessKeyId(),
+                        credentials.secretAccessKey(), Region.US_EAST_1)) {
+            create(root, "cluster", name, "us-east-1", "team-a");
+            String snapshotArn = root.createDBClusterSnapshot(r -> r.dbClusterIdentifier(name)
+                    .dbClusterSnapshotIdentifier(name)).dbClusterSnapshot().dbClusterSnapshotArn();
+            String selector = useArn ? snapshotArn : name;
+            String restoredArn = "arn:aws:rds:us-east-1:" + ACCOUNT + ":cluster:" + restored;
+            boolean created = false;
+            try {
+                policy(user, """
+                        [{"Effect":"Allow","Action":"rds:RestoreDBClusterFromSnapshot","Resource":"%s"}]
+                        """.formatted(restoredArn));
+                denied(() -> limited.restoreDBClusterFromSnapshot(r -> r.dbClusterIdentifier(restored)
+                        .snapshotIdentifier(selector).engine("aurora-postgresql")));
+                policy(user, """
+                        [{"Effect":"Allow","Action":"rds:RestoreDBClusterFromSnapshot","Resource":["%s","%s"]}]
+                        """.formatted(restoredArn, snapshotArn));
+                assertEquals(restoredArn, limited.restoreDBClusterFromSnapshot(r -> r.dbClusterIdentifier(restored)
+                        .snapshotIdentifier(selector).engine("aurora-postgresql")).dbCluster().dbClusterArn());
+                created = true;
+            } finally {
+                if (created) {
+                    delete(root, "cluster", restored);
+                }
+                root.deleteDBClusterSnapshot(r -> r.dbClusterSnapshotIdentifier(name));
+                delete(root, "cluster", name);
+            }
+        }
+    }
+
     private static String create(RdsClient client, String type, String name, String region, String owner) {
         Tag tag = tag("Owner", owner);
         return switch (type) {
