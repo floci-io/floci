@@ -26,7 +26,7 @@ public class StateMachine {
     private JsonNode loggingConfiguration;
     private JsonNode tracingConfiguration;
     private JsonNode encryptionConfiguration;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     private String creationVersionArn;
     private String creationVersionDescription;
     private int versionCounter = 0;

@@ -1,6 +1,7 @@
 package io.floci.aws.services.redshift;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.exception.DockerException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -8,6 +9,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceCallAuthorizer;
+import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -525,9 +527,9 @@ class RedshiftServiceTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void activityParameterUpdatesStayWithinTheCallingAccount(boolean reset) {
+    void activityParameterUpdatesStayWithinTheCallingAccountAndRegion(boolean reset) {
         ClusterParameterGroup group = new ClusterParameterGroup("shared", "redshift-1.0", "audit");
-        when(parameterGroupBackend.get("shared")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("shared"))).thenReturn(Optional.of(group));
         Cluster owned = new Cluster();
         owned.setClusterIdentifier("owned");
         owned.setClusterParameterGroupName("shared");
@@ -536,10 +538,17 @@ class RedshiftServiceTest {
         foreign.setClusterIdentifier("foreign");
         foreign.setClusterParameterGroupName("shared");
         foreign.setUserActivityLoggingEnabled(reset);
+        // A cluster of another Region uses that Region's group of the same name.
+        Cluster otherRegion = new Cluster();
+        otherRegion.setClusterIdentifier("west");
+        otherRegion.setClusterParameterGroupName("shared");
+        otherRegion.setSnapshotRegion("eu-west-1");
+        otherRegion.setUserActivityLoggingEnabled(reset);
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "owned", owned),
-                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "foreign", foreign)));
-        when(clusterBackend.scan(any())).thenReturn(List.of(owned));
+                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "foreign", foreign),
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "west", otherRegion)));
+        when(clusterBackend.scan(any())).thenReturn(List.of(owned, otherRegion));
 
         if (reset) {
             service.resetClusterParameterGroup("shared", true, List.of());
@@ -549,7 +558,33 @@ class RedshiftServiceTest {
 
         assertEquals(!reset, owned.isUserActivityLoggingEnabled());
         assertEquals(reset, foreign.isUserActivityLoggingEnabled());
+        assertEquals(reset, otherRegion.isUserActivityLoggingEnabled());
         verify(clusterBackend, never()).putForAccount(eq("222222222222"), anyString(), any());
+        verify(clusterBackend, never()).putForAccount(anyString(), eq("west"), any());
+    }
+
+    /**
+     * A snapshot schedule is in use only by the clusters of its Region: a cluster of another Region using a
+     * schedule of the same name is not one of its clusters and does not keep it from being deleted.
+     */
+    @Test
+    void aSnapshotScheduleIsInUseOnlyByTheClustersOfItsRegion() {
+        Cluster west = storedCluster("west", "eu-west-1");
+        west.setSnapshotScheduleIdentifier("nightly");
+        when(clusterBackend.scan(any())).thenReturn(List.of(west));
+        SnapshotSchedule schedule = new SnapshotSchedule("nightly", null, List.of("rate(12 hours)"));
+        when(snapshotScheduleBackend.get(regionalKey("nightly"))).thenReturn(Optional.of(schedule));
+        when(snapshotScheduleBackend.get(RedshiftService.regionalKey("eu-west-1", "nightly")))
+                .thenReturn(Optional.of(schedule));
+        RedshiftService westService = serviceIn("eu-west-1");
+
+        assertEquals(List.of("west"), westService.clustersUsingSnapshotSchedule("nightly"));
+        assertEquals(List.of(), service.clustersUsingSnapshotSchedule("nightly"));
+        assertEquals("InvalidClusterSnapshotScheduleState", assertThrows(AwsException.class,
+                () -> westService.deleteSnapshotSchedule("nightly")).getErrorCode());
+        service.deleteSnapshotSchedule("nightly");
+        verify(snapshotScheduleBackend).delete(regionalKey("nightly"));
+        verify(snapshotScheduleBackend, never()).delete(RedshiftService.regionalKey("eu-west-1", "nightly"));
     }
 
     @Test
@@ -956,6 +991,19 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void createClusterAnswersADockerRejectionWithANonRetryableCapacityError() {
+        when(cm.start("111111111111", "c1", "admin", "pw")).thenThrow(new ContainerRejectedException(
+                new DockerException("authorization denied by plugin: --mounts is not allowed", 403)));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster("c1", "dc2.large",
+                "admin", "pw", null, List.of(), List.of(), null));
+
+        assertEquals("InsufficientClusterCapacity", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("--mounts is not allowed"));
+    }
+
+    @Test
     void createClusterStoresDefaultRoleAndConfiguresProxy() {
         String role = "arn:aws:iam::111111111111:role/copy";
         when(cm.start("111111111111", "c1", "admin", "pw"))
@@ -975,6 +1023,11 @@ class RedshiftServiceTest {
         service.createCluster("c-ra3", "ra3.xlplus", "admin", "pw",
                 null, List.of(), List.of(), null);
         verify(cm).start("111111111111", "c-ra3", "admin", "pw", "dev", "ra3.xlplus");
+    }
+
+    /** The key the four Regional stores keep {@code name} under in us-east-1, the fixture's Region. */
+    private static String regionalKey(String name) {
+        return RedshiftService.regionalKey("us-east-1", name);
     }
 
     private StorageFactory sf;
@@ -1312,6 +1365,34 @@ class RedshiftServiceTest {
     private Integration createS3Integration(String name, String sourceArn) {
         when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.of(new Namespace()));
         return service.createIntegration(name, sourceArn, NAMESPACE_ARN, null, null, Map.of(), Map.of(), "us-east-1");
+    }
+
+    /**
+     * An integration is in the Region its ARN names: another Region of the account neither lists, describes nor
+     * deletes it, and may give its name to an integration of its own.
+     */
+    @Test
+    void anIntegrationIsListedDescribedAndDeletedOnlyInItsRegion() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:eu-west-1:111111111111:integration:one");
+        stored.setIntegrationName("lake-to-warehouse");
+        when(integrationBackend.scan(any())).thenReturn(List.of(stored));
+        when(integrationBackend.keys()).thenReturn(Set.of("one"));
+        when(integrationBackend.get("one")).thenReturn(Optional.of(stored));
+        RedshiftService west = serviceIn("eu-west-1");
+
+        assertEquals(List.of(stored), west.describeIntegrations(null, null, null, null).integrations());
+        assertEquals(List.of(), service.describeIntegrations(null, null, null, null).integrations());
+        for (Executable call : List.<Executable>of(
+                () -> service.describeIntegrations(stored.getIntegrationArn(), null, null, null),
+                () -> service.deleteIntegration(stored.getIntegrationArn()))) {
+            assertEquals("IntegrationNotFoundFault", assertThrows(AwsException.class, call).getErrorCode());
+        }
+        verify(integrationBackend, never()).delete(any());
+
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("us-east-1");
+        Integration created = createS3Integration("lake-to-warehouse", BUCKET_ARN);
+        assertEquals("lake-to-warehouse", created.getIntegrationName());
     }
 
     @Test
@@ -1698,7 +1779,7 @@ class RedshiftServiceTest {
     @Test
     void parameterGroupModifyAndResetRecordUpdatesAfterPersistence() {
         ClusterParameterGroup group = new ClusterParameterGroup("event-pg", "redshift-1.0", "events");
-        when(parameterGroupBackend.get("event-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("event-pg"))).thenReturn(Optional.of(group));
 
         service.modifyClusterParameterGroup("event-pg", List.of(new Parameter("max_cursor_result_set_size", "1000")));
         service.resetClusterParameterGroup("event-pg", true, List.of());
@@ -1714,7 +1795,7 @@ class RedshiftServiceTest {
     @Test
     void invalidParameterGroupResetDoesNotRecordAnUpdate() {
         ClusterParameterGroup group = new ClusterParameterGroup("event-pg", "redshift-1.0", "events");
-        when(parameterGroupBackend.get("event-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("event-pg"))).thenReturn(Optional.of(group));
 
         assertThrows(AwsException.class,
                 () -> service.resetClusterParameterGroup("event-pg", false, List.of("unknown-parameter")));
@@ -3344,7 +3425,7 @@ class RedshiftServiceTest {
 
     @Test
     void describeDefaultParameterGroupIsSynthesized() {
-        when(parameterGroupBackend.get("default.redshift-1.0")).thenReturn(Optional.empty());
+        when(parameterGroupBackend.get(regionalKey("default.redshift-1.0"))).thenReturn(Optional.empty());
 
         List<ClusterParameterGroup> groups = service.describeClusterParameterGroups("default.redshift-1.0");
         assertEquals(1, groups.size());
@@ -3651,20 +3732,20 @@ class RedshiftServiceTest {
 
     @Test
     void createClusterParameterGroup() {
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.empty());
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.empty());
 
         ClusterParameterGroup pg = service.createClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         assertNotNull(pg);
         assertEquals("my-pg", pg.getParameterGroupName());
         assertEquals("redshift-1.0", pg.getParameterGroupFamily());
         assertEquals("custom pg", pg.getDescription());
-        verify(parameterGroupBackend).put(eq("my-pg"), any(ClusterParameterGroup.class));
+        verify(parameterGroupBackend).put(eq(regionalKey("my-pg")), any(ClusterParameterGroup.class));
         verify(parameterGroupBackend).flush();
     }
 
     @Test
     void createClusterParameterGroupAlreadyExists() {
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(new ClusterParameterGroup()));
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.of(new ClusterParameterGroup()));
 
         assertThrows(AwsException.class, () ->
                 service.createClusterParameterGroup("my-pg", "redshift-1.0", "custom pg"));
@@ -3673,7 +3754,7 @@ class RedshiftServiceTest {
     @Test
     void describeClusterParameterGroups() {
         ClusterParameterGroup pg = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(pg));
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.of(pg));
 
         List<ClusterParameterGroup> list = service.describeClusterParameterGroups("my-pg");
         assertEquals(1, list.size());
@@ -3682,7 +3763,7 @@ class RedshiftServiceTest {
 
     @Test
     void describeClusterParameterGroupsNotFound() {
-        when(parameterGroupBackend.get("missing-pg")).thenReturn(Optional.empty());
+        when(parameterGroupBackend.get(regionalKey("missing-pg"))).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
                 service.describeClusterParameterGroups("missing-pg"));
@@ -3691,18 +3772,18 @@ class RedshiftServiceTest {
     @Test
     void deleteClusterParameterGroup() {
         ClusterParameterGroup pg = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(pg));
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.of(pg));
 
         ClusterParameterGroup deleted = service.deleteClusterParameterGroup("my-pg");
         assertNotNull(deleted);
         assertEquals("my-pg", deleted.getParameterGroupName());
-        verify(parameterGroupBackend).delete("my-pg");
+        verify(parameterGroupBackend).delete(regionalKey("my-pg"));
         verify(parameterGroupBackend).flush();
     }
 
     @Test
     void deleteClusterParameterGroupNotFound() {
-        when(parameterGroupBackend.get("missing-pg")).thenReturn(Optional.empty());
+        when(parameterGroupBackend.get(regionalKey("missing-pg"))).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
                 service.deleteClusterParameterGroup("missing-pg"));
@@ -3711,7 +3792,7 @@ class RedshiftServiceTest {
     @Test
     void modifyClusterParameterGroup() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.of(group));
 
         ClusterParameterGroup updated = service.modifyClusterParameterGroup("my-pg",
                 List.of(new Parameter("max_cursor_result_set_size", "1000")));
@@ -3719,14 +3800,14 @@ class RedshiftServiceTest {
         assertEquals("1000", updated.getParameters().stream()
                 .filter(p -> "max_cursor_result_set_size".equals(p.getParameterName()))
                 .findFirst().orElseThrow().getParameterValue());
-        verify(parameterGroupBackend).put(eq("my-pg"), any(ClusterParameterGroup.class));
+        verify(parameterGroupBackend).put(eq(regionalKey("my-pg")), any(ClusterParameterGroup.class));
         verify(parameterGroupBackend).flush();
     }
 
     @Test
     void modifyClusterParameterGroupAppendsUnknownParameter() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.of(group));
 
         ClusterParameterGroup updated = service.modifyClusterParameterGroup("my-pg",
                 List.of(new Parameter("statement_timeout", "5000")));
@@ -3737,7 +3818,7 @@ class RedshiftServiceTest {
 
     @Test
     void modifyClusterParameterGroupNotFound() {
-        when(parameterGroupBackend.get("missing")).thenReturn(Optional.empty());
+        when(parameterGroupBackend.get(regionalKey("missing"))).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () ->
                 service.modifyClusterParameterGroup("missing", List.of(new Parameter("x", "y"))));
@@ -3747,7 +3828,7 @@ class RedshiftServiceTest {
     void describeClusterParametersReturnsStoredValues() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
         group.setParameters(new ArrayList<>(List.of(new Parameter("statement_timeout", "5000"))));
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.of(group));
 
         List<Parameter> params = service.describeClusterParameters("my-pg");
 
@@ -3759,7 +3840,7 @@ class RedshiftServiceTest {
     @Test
     void modifyClusterParameterGroupPreservesMetadata() {
         ClusterParameterGroup group = new ClusterParameterGroup("my-pg", "redshift-1.0", "custom pg");
-        when(parameterGroupBackend.get("my-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("my-pg"))).thenReturn(Optional.of(group));
 
         // Modify using 2-arg constructor (only name and value) - should preserve description and dataType
         ClusterParameterGroup updated = service.modifyClusterParameterGroup("my-pg",
@@ -3776,7 +3857,7 @@ class RedshiftServiceTest {
     @Test
     void resetClusterParameterGroupRestoresOnlySelectedDefaults() {
         ClusterParameterGroup group = new ClusterParameterGroup("reset-pg", "redshift-1.0", "description");
-        when(parameterGroupBackend.get("reset-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("reset-pg"))).thenReturn(Optional.of(group));
         service.modifyClusterParameterGroup("reset-pg", List.of(
                 new Parameter("max_cursor_result_set_size", "1000"),
                 new Parameter("wlm_json_configuration", "custom")));
@@ -3797,7 +3878,7 @@ class RedshiftServiceTest {
     void resetAllClusterParametersDropsOverridesOutsideDefaultCatalog() {
         ClusterParameterGroup group = new ClusterParameterGroup("reset-pg", "redshift-1.0", "description");
         group.getTags().put("owner", "analytics");
-        when(parameterGroupBackend.get("reset-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("reset-pg"))).thenReturn(Optional.of(group));
         service.modifyClusterParameterGroup("reset-pg", List.of(
                 new Parameter("max_cursor_result_set_size", "1000"), new Parameter("custom_parameter", "value")));
 
@@ -3817,7 +3898,7 @@ class RedshiftServiceTest {
     void resetClusterParametersValidatesEveryNameBeforeMutating() {
         ClusterParameterGroup group = new ClusterParameterGroup("reset-pg", "redshift-1.0", "description");
         group.getParameters().get(0).setParameterValue("1000");
-        when(parameterGroupBackend.get("reset-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("reset-pg"))).thenReturn(Optional.of(group));
 
         AwsException failure = assertThrows(AwsException.class, () -> service.resetClusterParameterGroup(
                 "reset-pg", false, List.of("max_cursor_result_set_size", "missing")));
@@ -3861,7 +3942,7 @@ class RedshiftServiceTest {
         String name = RedshiftService.DEFAULT_PARAMETER_GROUP_NAME;
         ClusterParameterGroup stored = new ClusterParameterGroup(name, "redshift-1.0", "legacy custom group");
         stored.setParameters(List.of(new Parameter("max_cursor_result_set_size", "1000")));
-        when(parameterGroupBackend.get(name)).thenReturn(Optional.of(stored));
+        when(parameterGroupBackend.get(regionalKey(name))).thenReturn(Optional.of(stored));
 
         assertEquals("legacy custom group", service.describeClusterParameterGroups(name).getFirst().getDescription());
         List<Parameter> parameters = service.describeClusterParameters(name);
@@ -3878,7 +3959,7 @@ class RedshiftServiceTest {
         String name = RedshiftService.DEFAULT_PARAMETER_GROUP_NAME;
         ClusterParameterGroup stored = new ClusterParameterGroup(name, "redshift-1.0", "legacy custom group");
         stored.setParameters(List.of(new Parameter("max_cursor_result_set_size", "1000")));
-        when(parameterGroupBackend.get(name)).thenReturn(Optional.of(stored));
+        when(parameterGroupBackend.get(regionalKey(name))).thenReturn(Optional.of(stored));
 
         service.modifyClusterParameterGroup(name, List.of(new Parameter("max_cursor_result_set_size", "2000")));
         assertEquals("2000", service.describeClusterParameters(name).getFirst().getParameterValue());
@@ -3887,7 +3968,7 @@ class RedshiftServiceTest {
         assertEquals("0", service.describeClusterParameters(name).getFirst().getParameterValue());
         assertEquals("engine-default", service.describeClusterParameters(name).getFirst().getSource());
         assertEquals("legacy custom group", service.describeClusterParameterGroups(name).getFirst().getDescription());
-        verify(parameterGroupBackend, times(2)).put(eq(name), any());
+        verify(parameterGroupBackend, times(2)).put(eq(regionalKey(name)), any());
         verify(parameterGroupBackend, times(2)).flush();
     }
 
@@ -3941,7 +4022,7 @@ class RedshiftServiceTest {
                     {"parameterName":"wlm_json_configuration","parameterValue":"custom"}
                 ]}
                 """, ClusterParameterGroup.class);
-        when(parameterGroupBackend.get("legacy")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("legacy"))).thenReturn(Optional.of(group));
 
         List<Parameter> parameters = service.describeClusterParameters("legacy");
 
@@ -3953,7 +4034,7 @@ class RedshiftServiceTest {
     @Test
     void resetSourceSurvivesSerialization() throws Exception {
         ClusterParameterGroup group = new ClusterParameterGroup("reset-pg", "redshift-1.0", "description");
-        when(parameterGroupBackend.get("reset-pg")).thenReturn(Optional.of(group));
+        when(parameterGroupBackend.get(regionalKey("reset-pg"))).thenReturn(Optional.of(group));
         service.modifyClusterParameterGroup("reset-pg", List.of(new Parameter("max_cursor_result_set_size", "0")));
         assertEquals("user", service.describeClusterParameters("reset-pg").getFirst().getSource());
         service.resetClusterParameterGroup("reset-pg", true, List.of());
@@ -4080,20 +4161,20 @@ class RedshiftServiceTest {
 
     @Test
     void createClusterSubnetGroup() {
-        when(subnetGroupBackend.get("my-subnet-group")).thenReturn(Optional.empty());
+        when(subnetGroupBackend.get(regionalKey("my-subnet-group"))).thenReturn(Optional.empty());
 
         ClusterSubnetGroup group = service.createClusterSubnetGroup(
                 "my-subnet-group", "test group", "vpc-123", List.of("subnet-1", "subnet-2"));
 
         assertEquals("my-subnet-group", group.getClusterSubnetGroupName());
         assertEquals(List.of("subnet-1", "subnet-2"), group.getSubnetIds());
-        verify(subnetGroupBackend).put(eq("my-subnet-group"), any(ClusterSubnetGroup.class));
+        verify(subnetGroupBackend).put(eq(regionalKey("my-subnet-group")), any(ClusterSubnetGroup.class));
         verify(subnetGroupBackend).flush();
     }
 
     @Test
     void createClusterSubnetGroupAlreadyExists() {
-        when(subnetGroupBackend.get("existing")).thenReturn(Optional.of(new ClusterSubnetGroup()));
+        when(subnetGroupBackend.get(regionalKey("existing"))).thenReturn(Optional.of(new ClusterSubnetGroup()));
 
         assertThrows(AwsException.class, () ->
                 service.createClusterSubnetGroup("existing", "d", "vpc-1", List.of("subnet-1")));
@@ -4102,7 +4183,7 @@ class RedshiftServiceTest {
     @Test
     void describeClusterSubnetGroups() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
-        when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
+        when(subnetGroupBackend.get(regionalKey("my-group"))).thenReturn(Optional.of(group));
 
         List<ClusterSubnetGroup> list = service.describeClusterSubnetGroups("my-group");
 
@@ -4113,7 +4194,7 @@ class RedshiftServiceTest {
     @Test
     void modifyClusterSubnetGroup() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "old", "vpc-1", List.of("subnet-1"));
-        when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
+        when(subnetGroupBackend.get(regionalKey("my-group"))).thenReturn(Optional.of(group));
 
         ClusterSubnetGroup updated = service.modifyClusterSubnetGroup("my-group", "new", List.of("subnet-2", "subnet-3"));
 
@@ -4124,18 +4205,18 @@ class RedshiftServiceTest {
     @Test
     void deleteClusterSubnetGroup() {
         ClusterSubnetGroup group = new ClusterSubnetGroup("my-group", "d", "vpc-1", List.of("subnet-1"));
-        when(subnetGroupBackend.get("my-group")).thenReturn(Optional.of(group));
+        when(subnetGroupBackend.get(regionalKey("my-group"))).thenReturn(Optional.of(group));
 
         ClusterSubnetGroup deleted = service.deleteClusterSubnetGroup("my-group");
 
         assertEquals("my-group", deleted.getClusterSubnetGroupName());
-        verify(subnetGroupBackend).delete("my-group");
+        verify(subnetGroupBackend).delete(regionalKey("my-group"));
         verify(subnetGroupBackend).flush();
     }
 
     @Test
     void deleteClusterSubnetGroupNotFound() {
-        when(subnetGroupBackend.get("missing")).thenReturn(Optional.empty());
+        when(subnetGroupBackend.get(regionalKey("missing"))).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteClusterSubnetGroup("missing"));
     }
@@ -4188,19 +4269,19 @@ class RedshiftServiceTest {
 
     @Test
     void createsSnapshotCopyGrant() {
-        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey("my-grant"))).thenReturn(Optional.empty());
 
         SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of());
 
         assertEquals("my-grant", grant.getSnapshotCopyGrantName());
         assertEquals("key-abc", grant.getKmsKeyId());
-        verify(snapshotCopyGrantBackend).put(eq("my-grant"), any(SnapshotCopyGrant.class));
+        verify(snapshotCopyGrantBackend).put(eq(regionalKey("my-grant")), any(SnapshotCopyGrant.class));
         verify(snapshotCopyGrantBackend).flush();
     }
 
     @Test
     void createSnapshotCopyGrantDefaultsKmsKeyId() {
-        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey("my-grant"))).thenReturn(Optional.empty());
 
         SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", null, Map.of());
 
@@ -4209,7 +4290,7 @@ class RedshiftServiceTest {
 
     @Test
     void createSnapshotCopyGrantStoresTags() {
-        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey("my-grant"))).thenReturn(Optional.empty());
 
         SnapshotCopyGrant grant = service.createSnapshotCopyGrant("my-grant", "key-abc", Map.of("env", "prod"));
 
@@ -4218,7 +4299,7 @@ class RedshiftServiceTest {
 
     @Test
     void createSnapshotCopyGrantRejectsDuplicateName() {
-        when(snapshotCopyGrantBackend.get("existing")).thenReturn(Optional.of(new SnapshotCopyGrant()));
+        when(snapshotCopyGrantBackend.get(regionalKey("existing"))).thenReturn(Optional.of(new SnapshotCopyGrant()));
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.createSnapshotCopyGrant("existing", "key-abc", Map.of()));
@@ -4235,7 +4316,7 @@ class RedshiftServiceTest {
             "g123456789012345678901234567890123456789012345678901234567890123" // 64 characters
     })
     void createSnapshotCopyGrantRejectsNamesRedshiftRejects(String name) {
-        when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey(name))).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.createSnapshotCopyGrant(name, "key-abc", Map.of()));
@@ -4250,19 +4331,19 @@ class RedshiftServiceTest {
     void createSnapshotCopyGrantAcceptsMaximumLengthName() {
         String name = "g12345678901234567890123456789012345678901234567890123456789012";
         assertEquals(63, name.length());
-        when(snapshotCopyGrantBackend.get(name)).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey(name))).thenReturn(Optional.empty());
 
         SnapshotCopyGrant grant = service.createSnapshotCopyGrant(name, "key-abc", Map.of());
 
         assertEquals(name, grant.getSnapshotCopyGrantName());
-        verify(snapshotCopyGrantBackend).put(eq(name), any(SnapshotCopyGrant.class));
+        verify(snapshotCopyGrantBackend).put(eq(regionalKey(name)), any(SnapshotCopyGrant.class));
         verify(snapshotCopyGrantBackend).flush();
     }
 
     @Test
     void describeSnapshotCopyGrantsByName() {
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
-        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+        when(snapshotCopyGrantBackend.get(regionalKey("my-grant"))).thenReturn(Optional.of(grant));
 
         List<SnapshotCopyGrant> list = service.describeSnapshotCopyGrants("my-grant", null, null).items();
 
@@ -4285,7 +4366,7 @@ class RedshiftServiceTest {
 
     @Test
     void describeSnapshotCopyGrantsRejectsMissingGrant() {
-        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey("missing"))).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.describeSnapshotCopyGrants("missing", null, null));
@@ -4363,7 +4444,7 @@ class RedshiftServiceTest {
         // AWS documents the two as mutually exclusive but models no error, so Floci filters
         // by name and then paginates rather than rejecting the pair.
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
-        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+        when(snapshotCopyGrantBackend.get(regionalKey("my-grant"))).thenReturn(Optional.of(grant));
 
         PaginatedResult<SnapshotCopyGrant> page =
                 service.describeSnapshotCopyGrants("my-grant", null, null);
@@ -4375,18 +4456,18 @@ class RedshiftServiceTest {
     @Test
     void deletesSnapshotCopyGrant() {
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
-        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+        when(snapshotCopyGrantBackend.get(regionalKey("my-grant"))).thenReturn(Optional.of(grant));
 
         SnapshotCopyGrant deleted = service.deleteSnapshotCopyGrant("my-grant");
 
         assertEquals("my-grant", deleted.getSnapshotCopyGrantName());
-        verify(snapshotCopyGrantBackend).delete("my-grant");
+        verify(snapshotCopyGrantBackend).delete(regionalKey("my-grant"));
         verify(snapshotCopyGrantBackend).flush();
     }
 
     @Test
     void deleteSnapshotCopyGrantRejectsMissingGrant() {
-        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey("missing"))).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class, () -> service.deleteSnapshotCopyGrant("missing"));
         assertEquals("SnapshotCopyGrantNotFoundFault", ex.getErrorCode());
@@ -4398,7 +4479,7 @@ class RedshiftServiceTest {
     @Test
     void createTagsOnSnapshotCopyGrant() {
         SnapshotCopyGrant grant = new SnapshotCopyGrant("my-grant", "key-abc");
-        when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.of(grant));
+        when(snapshotCopyGrantBackend.get(regionalKey("my-grant"))).thenReturn(Optional.of(grant));
 
         service.createTags("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:my-grant",
                 Map.of("env", "prod"));
@@ -4409,7 +4490,7 @@ class RedshiftServiceTest {
 
     @Test
     void createTagsOnMissingSnapshotCopyGrantIsNotFound() {
-        when(snapshotCopyGrantBackend.get("missing")).thenReturn(Optional.empty());
+        when(snapshotCopyGrantBackend.get(regionalKey("missing"))).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.createTags("arn:aws:redshift:us-east-1:111111111111:snapshotcopygrant:missing",
@@ -4467,15 +4548,15 @@ class RedshiftServiceTest {
         schedule.setTags(current);
         when(clusterBackend.get("res")).thenReturn(Optional.of(cluster));
         when(snapshotBackend.get("res")).thenReturn(Optional.of(snapshot));
-        when(parameterGroupBackend.get("res")).thenReturn(Optional.of(parameterGroup));
-        when(subnetGroupBackend.get("res")).thenReturn(Optional.of(subnetGroup));
-        when(snapshotCopyGrantBackend.get("res")).thenReturn(Optional.of(grant));
-        when(snapshotScheduleBackend.get("res")).thenReturn(Optional.of(schedule));
+        when(parameterGroupBackend.get(regionalKey("res"))).thenReturn(Optional.of(parameterGroup));
+        when(subnetGroupBackend.get(regionalKey("res"))).thenReturn(Optional.of(subnetGroup));
+        when(snapshotCopyGrantBackend.get(regionalKey("res"))).thenReturn(Optional.of(grant));
+        when(snapshotScheduleBackend.get(regionalKey("res"))).thenReturn(Optional.of(schedule));
     }
 
     @Test
     void snapshotScheduleRejectsOutOfRangeCronFields() {
-        when(snapshotScheduleBackend.get("invalid-cron")).thenReturn(Optional.empty());
+        when(snapshotScheduleBackend.get(regionalKey("invalid-cron"))).thenReturn(Optional.empty());
 
         AwsException failure = assertThrows(AwsException.class, () -> service.createSnapshotSchedule(
                 "invalid-cron", null, List.of("cron(60 12 *)"), Map.of()));

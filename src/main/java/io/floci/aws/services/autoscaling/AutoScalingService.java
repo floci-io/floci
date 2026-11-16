@@ -33,7 +33,9 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -631,9 +633,18 @@ public class AutoScalingService implements PassedRoleLookup {
             }
             if (asg.isEksManaged()) {
                 // The instance is the cluster's node, which EKS owns and the cluster's other node groups share: it
-                // is not terminated, and stays in the target groups another of their groups has attached.
+                // is not terminated, and stays in the load balancers another of their groups has attached.
                 deregisterFromUnsharedTargetGroups(asg, memberIds(asg), attachedTargetGroups(asg));
+                deregisterFromUnsharedClassicLoadBalancers(asg, memberIds(asg), attachedClassicLoadBalancers(asg));
             } else if (forceDelete && ec2Service != null && !active.isEmpty()) {
+                // The instances leave the group's load balancers before they are terminated, as on a scale-in.
+                List<String> leaving = active.stream().map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+                if (elbV2Service != null) {
+                    deregisterFromTargetGroups(elbV2Service, asg, leaving);
+                }
+                if (elbClassicService != null) {
+                    deregisterFromClassicLoadBalancers(elbClassicService, asg, leaving);
+                }
                 active.stream()
                         .map(AsgInstance::getInstanceId)
                         .filter(Objects::nonNull)
@@ -1037,18 +1048,60 @@ public class AutoScalingService implements PassedRoleLookup {
      */
     static void registerWithTargetGroups(ElbV2Service elb, AutoScalingGroup asg, Collection<String> targetGroupArns,
                                          String instanceId, boolean strict) {
+        registerWithTargetGroups(elb, asg, targetGroupArns, List.of(instanceId), strict);
+    }
+
+    /** As above, for several instances, with one call to each target group. */
+    static void registerWithTargetGroups(ElbV2Service elb, AutoScalingGroup asg, Collection<String> targetGroupArns,
+                                         List<String> instanceIds, boolean strict) {
+        if (instanceIds.isEmpty()) {
+            return;
+        }
+        String instances = String.join(", ", instanceIds);
         for (String tgArn : targetGroupArns) {
+            // Fresh targets for each target group: ELBv2 fills a target's missing port in with the group's own.
+            List<TargetDescription> targets = instanceIds.stream().map(id -> {
+                TargetDescription target = new TargetDescription();
+                target.setId(id);
+                return target;
+            }).toList();
             try {
-                TargetDescription td = new TargetDescription();
-                td.setId(instanceId);
-                elb.registerTargets(asg.getRegion(), tgArn, List.of(td));
+                elb.registerTargets(asg.getRegion(), tgArn, targets);
                 LOG.debugv("ASG {0}: registered {1} with TG {2}",
-                        asg.getAutoScalingGroupName(), instanceId, tgArn);
+                        asg.getAutoScalingGroupName(), instances, tgArn);
             } catch (Exception e) {
                 LOG.warnv(e, "ASG {0}: could not register {1} with TG {2}: {3}",
-                        asg.getAutoScalingGroupName(), instanceId, tgArn, e.getMessage());
+                        asg.getAutoScalingGroupName(), instances, tgArn, e.getMessage());
                 if (strict && !(e instanceof AwsException aws
                         && "TargetGroupNotFound".equals(aws.getErrorCode()))) {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    /**
+     * Registers {@code instanceIds} with each of {@code loadBalancerNames}, Classic Load Balancers, in one call to
+     * each. A load balancer that refuses them is logged and skipped, unless {@code strict}: then only a load balancer
+     * that is gone is skipped, and any other failure is thrown.
+     */
+    static void registerWithClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
+                                                 Collection<String> loadBalancerNames, List<String> instanceIds,
+                                                 boolean strict) {
+        if (elb == null || instanceIds.isEmpty()) {
+            return;
+        }
+        String instances = String.join(", ", instanceIds);
+        for (String loadBalancer : loadBalancerNames) {
+            try {
+                elb.registerInstances(asg.getRegion(), loadBalancer, instanceIds);
+                LOG.debugv("ASG {0}: registered {1} with Classic ELB {2}",
+                        asg.getAutoScalingGroupName(), instances, loadBalancer);
+            } catch (Exception e) {
+                LOG.warnv(e, "ASG {0}: could not register {1} with Classic ELB {2}: {3}",
+                        asg.getAutoScalingGroupName(), instances, loadBalancer, e.getMessage());
+                if (strict && !(e instanceof AwsException aws
+                        && "LoadBalancerNotFound".equals(aws.getErrorCode()))) {
                     throw e;
                 }
             }
@@ -1071,8 +1124,9 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
+    /** Deregisters {@code instanceIds} from every target group attached to {@code asg}, elbv2 sources included. */
     static void deregisterFromTargetGroups(ElbV2Service elb, AutoScalingGroup asg, List<String> instanceIds) {
-        deregisterFromTargetGroups(elb, asg, asg.getTargetGroupARNs(), instanceIds);
+        deregisterFromTargetGroups(elb, asg, attachedTargetGroups(asg), instanceIds);
     }
 
     /** As above, from {@code targetGroupArns} rather than from every target group the group has attached. */
@@ -1095,9 +1149,21 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
+    /**
+     * Deregisters {@code instanceIds} from every Classic Load Balancer attached to {@code asg}, elb sources included.
+     */
     static void deregisterFromClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
                                                     List<String> instanceIds) {
-        for (String loadBalancer : asg.getLoadBalancerNames()) {
+        deregisterFromClassicLoadBalancers(elb, asg, attachedClassicLoadBalancers(asg), instanceIds);
+    }
+
+    /** As above, from {@code loadBalancerNames} rather than from every Classic Load Balancer the group has attached. */
+    static void deregisterFromClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
+                                                    Collection<String> loadBalancerNames, List<String> instanceIds) {
+        if (elb == null || instanceIds.isEmpty()) {
+            return;
+        }
+        for (String loadBalancer : loadBalancerNames) {
             try {
                 elb.deregisterInstances(asg.getRegion(), loadBalancer, instanceIds);
             } catch (AwsException e) {
@@ -1137,12 +1203,13 @@ public class AutoScalingService implements PassedRoleLookup {
             InstanceRefresh refresh = activeInstanceRefresh(asg);
             if (!detached.isEmpty()) {
                 if (asg.isEksManaged()) {
-                    // The node stays in the target groups another group holding it has attached.
+                    // The node stays in the load balancers another group holding it has attached.
                     deregisterFromUnsharedTargetGroups(asg, detached, attachedTargetGroups(asg));
+                    deregisterFromUnsharedClassicLoadBalancers(asg, detached, attachedClassicLoadBalancers(asg));
                 } else {
                     deregisterFromTargetGroups(elbV2Service, asg, detached);
+                    deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
                 }
-                deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
                 // Detaching removes only the group-name tag, and only where it still names this group.
                 ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
                 completeInstanceRefreshIfSettled(region, name, asg);
@@ -1475,19 +1542,17 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void attachLoadBalancers(String region, String name, List<String> lbNames) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        for (String lb : lbNames) {
-            if (!asg.getLoadBalancerNames().contains(lb)) {
-                asg.getLoadBalancerNames().add(lb);
+        changeAttachments(region, name, asg -> {
+            for (String lb : lbNames) {
+                if (!asg.getLoadBalancerNames().contains(lb)) {
+                    asg.getLoadBalancerNames().add(lb);
+                }
             }
-        }
-        groups.put(asgKey(region, name), asg);
+        });
     }
 
     public void detachLoadBalancers(String region, String name, List<String> lbNames) {
-        AutoScalingGroup asg = requireGroup(region, name);
-        asg.getLoadBalancerNames().removeAll(lbNames);
-        groups.put(asgKey(region, name), asg);
+        changeAttachments(region, name, asg -> asg.getLoadBalancerNames().removeAll(lbNames));
     }
 
     // ── Traffic sources ─────────────────────────────────────────────────────────────
@@ -1495,9 +1560,9 @@ public class AutoScalingService implements PassedRoleLookup {
     // unified ASG-to-load-balancer wiring API (elb, elbv2, vpc-lattice), which
     // aws_autoscaling_traffic_source_attachment uses instead of the older
     // AttachLoadBalancerTargetGroups. Like the target-group attachment above, each source is
-    // stored with its type, and only an EKS group's node is registered with an elbv2 source as
-    // it is attached and deregistered as it is detached. Floci has no real health-checking loop,
-    // so every attached traffic source is reported InService immediately.
+    // stored with its type, and the group's instances join and leave an elbv2 source as they
+    // do a target group attached the older way. Floci has no real health-checking loop, so
+    // every attached traffic source is reported InService immediately.
 
     public record TrafficSourceIdentifier(String identifier, String type) {}
 
@@ -1533,10 +1598,19 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     /** The target groups attached to {@code asg}: as target groups, and as {@code elbv2} traffic sources. */
-    private static Set<String> attachedTargetGroups(AutoScalingGroup asg) {
-        Set<String> attached = new LinkedHashSet<>(asg.getTargetGroupARNs());
+    static Set<String> attachedTargetGroups(AutoScalingGroup asg) {
+        return attached(asg.getTargetGroupARNs(), asg, "elbv2");
+    }
+
+    /** The Classic Load Balancers attached to {@code asg}: by name, and as {@code elb} traffic sources. */
+    static Set<String> attachedClassicLoadBalancers(AutoScalingGroup asg) {
+        return attached(asg.getLoadBalancerNames(), asg, "elb");
+    }
+
+    private static Set<String> attached(List<String> listed, AutoScalingGroup asg, String sourceType) {
+        Set<String> attached = new LinkedHashSet<>(listed);
         asg.getTrafficSourceTypeByIdentifier().forEach((identifier, type) -> {
-            if ("elbv2".equals(type)) {
+            if (sourceType.equals(type)) {
                 attached.add(identifier);
             }
         });
@@ -1546,9 +1620,9 @@ public class AutoScalingService implements PassedRoleLookup {
     // ── EKS managed node groups ────────────────────────────────────────────────
     // EKS keeps a group for each managed node group, under the name DescribeNodegroup reports. Floci runs one node
     // per cluster, which all of the cluster's node groups share, so their groups all hold that node, and the
-    // reconciler leaves them alone. The reconciler registers other groups' members with their target groups as
-    // they come into service; these groups' members are registered and deregistered here, as target groups are
-    // attached and detached.
+    // reconciler leaves them alone. The reconciler registers other groups' members with their target groups and
+    // Classic Load Balancers as they come into service; these groups' members are registered and deregistered here,
+    // as those are attached and detached.
 
     /**
      * Creates the group EKS keeps for a managed node group, unless a group of that name exists. It has no launch
@@ -1574,7 +1648,8 @@ public class AutoScalingService implements PassedRoleLookup {
 
     /**
      * Puts {@code instance} in service in the EKS group {@code name}, unless it is a member already, and registers
-     * it with the group's target groups. Does nothing when there is no EKS group of that name.
+     * it with the group's target groups and Classic Load Balancers. Does nothing when there is no EKS group of that
+     * name.
      */
     public void addEksManagedInstance(String region, String name, Instance instance) {
         String key = asgKey(region, name);
@@ -1595,14 +1670,16 @@ public class AutoScalingService implements PassedRoleLookup {
                 groups.put(key, asg);
                 registerWithTargetGroups(elbV2Service, asg, attachedTargetGroups(asg), member.getInstanceId(),
                         false);
+                registerWithClassicLoadBalancers(elbClassicService, asg, attachedClassicLoadBalancers(asg),
+                        List.of(member.getInstanceId()), false);
             }
         }
     }
 
     /**
      * Deletes the EKS group {@code name}, if there is one, as {@link #deleteAutoScalingGroup} deletes it: its
-     * instance, which EKS owns, is not terminated, and leaves the group's target groups except those another group
-     * holding it has attached. Does nothing when there is no EKS group of that name.
+     * instance, which EKS owns, is not terminated, and leaves the group's target groups and Classic Load Balancers
+     * except those another group holding it has attached. Does nothing when there is no EKS group of that name.
      */
     public void deleteEksManagedGroup(String region, String name) {
         synchronized (lockFor(region)) {
@@ -1614,46 +1691,71 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     /**
-     * Applies {@code change} to the target groups and traffic sources attached to the group {@code name}, and
-     * stores it. An EKS group's in-service members are then registered with the target groups the change attached
-     * and deregistered from those it detached, as AWS does, all under the Region's lock and then the group's, like
-     * every change to an EKS group's members or target groups. Other groups' members are left as they are: the
-     * reconciler registers them as they come into service.
+     * Applies {@code change} to the target groups, Classic Load Balancers and traffic sources attached to the group
+     * {@code name}, and stores it. The group's members are deregistered from the target groups and Classic Load
+     * Balancers the change detached, and its in-service members registered with those it attached, as AWS does, all
+     * under the Region's lock and then the group's, in the order {@code attachInstances} and the changes to an EKS
+     * group's members take them. An instance an EKS group shares with another group stays in a target group or
+     * Classic Load Balancer that other group still has attached.
      */
     private void changeAttachments(String region, String name, Consumer<AutoScalingGroup> change) {
         String key = asgKey(region, name);
-        AutoScalingGroup asg = requireGroup(region, name);
-        if (!asg.isEksManaged()) {
-            change.accept(asg);
-            groups.put(key, asg);
-            return;
-        }
         synchronized (lockFor(region)) {
             synchronized (lockFor(key)) {
                 AutoScalingGroup current = requireGroup(region, name);
                 List<String> targetGroupsBefore = new ArrayList<>(current.getTargetGroupARNs());
+                List<String> loadBalancersBefore = new ArrayList<>(current.getLoadBalancerNames());
                 Map<String, String> trafficSourcesBefore = new LinkedHashMap<>(current.getTrafficSourceTypeByIdentifier());
                 Set<String> attachedBefore = attachedTargetGroups(current);
+                Set<String> classicBefore = attachedClassicLoadBalancers(current);
                 change.accept(current);
                 Set<String> attached = attachedTargetGroups(current);
                 Set<String> detached = new LinkedHashSet<>(attachedBefore);
                 detached.removeAll(attached);
                 attached.removeAll(attachedBefore);
-                // The node leaves the target groups the change detached before the change is stored: when ELBv2
-                // refuses, the group keeps them attached, so the detach can be sent again.
+                Set<String> classicAttached = attachedClassicLoadBalancers(current);
+                Set<String> classicDetached = new LinkedHashSet<>(classicBefore);
+                classicDetached.removeAll(classicAttached);
+                classicAttached.removeAll(classicBefore);
+                List<String> members = memberIds(current);
+                List<String> inService = current.getInstances().stream()
+                        .filter(member -> "InService".equals(member.getLifecycleState()))
+                        .map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+                // The members leave the target groups and Classic Load Balancers the change detached before the change
+                // is stored, one load balancer at a time. When one refuses, the in-service members rejoin those they
+                // had already left and the group keeps them all attached, as it was, so the detach can be sent again.
+                // An ordinary group's instances are its own, so they leave every one it detached.
+                List<Runnable> rejoin = new ArrayList<>();
                 try {
-                    deregisterFromUnsharedTargetGroups(current, memberIds(current), detached);
+                    for (String targetGroup : detached) {
+                        if (current.isEksManaged()) {
+                            deregisterFromUnsharedTargetGroups(current, members, Set.of(targetGroup));
+                        } else if (!members.isEmpty()) {
+                            deregisterFromTargetGroups(elbV2Service, current, List.of(targetGroup), members);
+                        }
+                        rejoin.add(() -> registerWithTargetGroups(elbV2Service, current, List.of(targetGroup),
+                                inService, false));
+                    }
+                    for (String loadBalancer : classicDetached) {
+                        if (current.isEksManaged()) {
+                            deregisterFromUnsharedClassicLoadBalancers(current, members, Set.of(loadBalancer));
+                        } else {
+                            deregisterFromClassicLoadBalancers(elbClassicService, current, List.of(loadBalancer),
+                                    members);
+                        }
+                        rejoin.add(() -> registerWithClassicLoadBalancers(elbClassicService, current,
+                                List.of(loadBalancer), inService, false));
+                    }
                 } catch (RuntimeException e) {
+                    rejoin.forEach(Runnable::run);
                     current.setTargetGroupARNs(targetGroupsBefore);
+                    current.setLoadBalancerNames(loadBalancersBefore);
                     current.setTrafficSourceTypeByIdentifier(trafficSourcesBefore);
                     throw e;
                 }
                 groups.put(key, current);
-                for (AsgInstance member : current.getInstances()) {
-                    if ("InService".equals(member.getLifecycleState())) {
-                        registerWithTargetGroups(elbV2Service, current, attached, member.getInstanceId(), false);
-                    }
-                }
+                registerWithTargetGroups(elbV2Service, current, attached, inService, false);
+                registerWithClassicLoadBalancers(elbClassicService, current, classicAttached, inService, false);
             }
         }
     }
@@ -1685,19 +1787,38 @@ public class AutoScalingService implements PassedRoleLookup {
      */
     private void deregisterFromUnsharedTargetGroups(AutoScalingGroup asg, List<String> instanceIds,
                                                     Set<String> targetGroupArns) {
-        if (targetGroupArns.isEmpty()) {
+        forEachUnshared(asg, instanceIds, targetGroupArns, AutoScalingService::attachedTargetGroups,
+                (instanceId, leaving) -> deregisterFromTargetGroups(elbV2Service, asg, leaving, List.of(instanceId)));
+    }
+
+    /** As {@link #deregisterFromUnsharedTargetGroups}, from Classic Load Balancers. */
+    private void deregisterFromUnsharedClassicLoadBalancers(AutoScalingGroup asg, List<String> instanceIds,
+                                                            Set<String> loadBalancerNames) {
+        forEachUnshared(asg, instanceIds, loadBalancerNames, AutoScalingService::attachedClassicLoadBalancers,
+                (instanceId, leaving) -> deregisterFromClassicLoadBalancers(elbClassicService, asg, leaving,
+                        List.of(instanceId)));
+    }
+
+    /**
+     * Calls {@code deregister} for each of {@code instanceIds} with those of {@code loadBalancers} that no other group
+     * holding the instance has attached, as {@code attachedOf} reads a group's.
+     */
+    private void forEachUnshared(AutoScalingGroup asg, List<String> instanceIds, Set<String> loadBalancers,
+                                 Function<AutoScalingGroup, Set<String>> attachedOf,
+                                 BiConsumer<String, Set<String>> deregister) {
+        if (loadBalancers.isEmpty()) {
             return;
         }
         for (String instanceId : instanceIds) {
-            Set<String> leaving = new LinkedHashSet<>(targetGroupArns);
+            Set<String> leaving = new LinkedHashSet<>(loadBalancers);
             forEachGroupInRegion(asg.getRegion(), other -> {
                 if (!asg.getAutoScalingGroupName().equals(other.getAutoScalingGroupName())
                         && containsInstance(other, instanceId)) {
-                    leaving.removeAll(attachedTargetGroups(other));
+                    leaving.removeAll(attachedOf.apply(other));
                 }
             });
             if (!leaving.isEmpty()) {
-                deregisterFromTargetGroups(elbV2Service, asg, leaving, List.of(instanceId));
+                deregister.accept(instanceId, leaving);
             }
         }
     }

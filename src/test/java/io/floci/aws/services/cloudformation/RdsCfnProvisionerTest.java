@@ -2072,6 +2072,8 @@ class RdsCfnProvisionerTest {
     private static final String PLAIN = "{\"Engine\":\"postgres\"}";
     private static final String SG_FIRST = "{\"Engine\":\"postgres\",\"VPCSecurityGroups\":[\"sg-first\"]}";
     private static final String SG_SECOND = "{\"Engine\":\"postgres\",\"VPCSecurityGroups\":[\"sg-second\"]}";
+    private static final String MOVED_TO_SG_SECOND =
+            "{\"Engine\":\"postgres\",\"DBSubnetGroupName\":\"app-subnets\",\"VPCSecurityGroups\":[\"sg-second\"]}";
     private static final String ENCRYPTED = "{\"Engine\":\"postgres\",\"StorageEncrypted\":true}";
     private static final String MEMBER = "{\"DBClusterIdentifier\":\"cluster\"";
 
@@ -2130,6 +2132,17 @@ class RdsCfnProvisionerTest {
         return new Created(replaced, created.id(), PLAIN, created.onFile(), created.requests());
     }
 
+    /** Makes {@code groupIds} the default groups of whatever VPC an update leaves the instance in. */
+    private void vpcDefaultGroups(List<String> groupIds) {
+        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any(), any())).thenReturn(groupIds);
+    }
+
+    /** Asserts the update neither modified the instance nor changed its VPC security groups. */
+    private void assertInstanceUntouched() {
+        assertEquals(0, modifyCalls());
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
+    }
+
     /** How many times the provisioner asked RdsService to modify an instance, whatever the arguments. */
     private long modifyCalls() {
         return Mockito.mockingDetails(rdsService).getInvocations().stream()
@@ -2169,6 +2182,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
         InOrder order = inOrder(rdsService);
+        order.verify(rdsService).requireVpcSecurityGroupsFit("us-east-1", r.getPhysicalId(), null, List.of("sg-second"));
         order.verify(rdsService).modifyDbInstance(eq(r.getPhysicalId()), any(), any(), any(), any(), any(), any(),
                 any(), any(DbInstanceSettings.class));
         order.verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-second"));
@@ -2181,13 +2195,51 @@ class RdsCfnProvisionerTest {
 
     @Test
     void droppedGroupsPutTheInstanceOnItsVpcsDefaultGroupAndARollbackPutsThemBack() {
-        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any())).thenReturn(List.of("sg-default"));
+        vpcDefaultGroups(List.of("sg-default"));
 
         StackResource r = updateFromFirstGroup(PLAIN);
 
         verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-default"));
         assertTrue(provisioner.rollbackUpdate(r));
         verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+    }
+
+    @Test
+    void droppedGroupsTakeTheDefaultGroupOfTheVpcTheUpdateMovesTheInstanceTo() {
+        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any(), eq("app-subnets")))
+                .thenReturn(List.of("sg-app-default"));
+
+        StackResource r = updateFromFirstGroup("{\"Engine\":\"postgres\",\"DBSubnetGroupName\":\"app-subnets\"}");
+
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-app-default"));
+    }
+
+    @Test
+    void anUpdateWhoseGroupsDoNotFitTheVpcItLeavesTheInstanceInFailsBeforeAnythingChanges() {
+        doThrow(new AwsException("InvalidParameterCombination",
+                "The DB instance and EC2 security group are in different VPCs.", 400))
+                .when(rdsService).requireVpcSecurityGroupsFit(eq("us-east-1"), any(), eq("app-subnets"),
+                        eq(List.of("sg-second")));
+
+        StackResource r = updateFromFirstGroup(MOVED_TO_SG_SECOND);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("different VPCs"), r.getStatusReason());
+        assertInstanceUntouched();
+    }
+
+    @Test
+    void aRollbackLeavesTheGroupsOfAnInstanceTheUpdateMovedToAnotherVpc() {
+        // A rollback does not move the instance back, and the old VPC's groups cannot go on it there.
+        StackResource r = updateFromFirstGroup(MOVED_TO_SG_SECOND, created -> {
+            when(created.onFile().getVpcId()).thenReturn("vpc-default", "vpc-app");
+            when(created.onFile().getDbSubnetGroupName()).thenReturn("default", "app-subnets");
+        });
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-second"));
+        assertFalse(provisioner.rollbackUpdate(r), "the move to another VPC has no rollback here");
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
     }
 
     @ParameterizedTest
@@ -2200,8 +2252,7 @@ class RdsCfnProvisionerTest {
             String template, String updated, String defaultGroup) {
         // AWS's handler gives the VPC's default group only to a standalone instance whose previous
         // template declared groups, and only when there is such a group; a member's are its cluster's.
-        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any()))
-                .thenReturn(defaultGroup == null ? List.of() : List.of(defaultGroup));
+        vpcDefaultGroups(defaultGroup == null ? List.of() : List.of(defaultGroup));
         Created created = createInstance(template, "sg-manual");
 
         StackResource r = updateInstance(created, updated);
@@ -2222,8 +2273,7 @@ class RdsCfnProvisionerTest {
 
         assertEquals("CREATE_FAILED", r.getStatus());
         assertTrue(r.getStatusReason().contains("Modify vpc security group for the DB Cluster"), r.getStatusReason());
-        assertEquals(0, modifyCalls());
-        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
+        assertInstanceUntouched();
     }
 
     @Test
@@ -2299,10 +2349,9 @@ class RdsCfnProvisionerTest {
         String replacement = replaced.resource().getPhysicalId();
         assertEquals(new CreateRequest(replacement, List.of(), DbInstanceSettings.defaults()),
                 replaced.requests().get(1));
-        assertEquals(0, modifyCalls());
+        assertInstanceUntouched();
         verify(rdsService, never()).deleteDbInstance(any(), any());
         verify(rdsService, never()).deleteDbInstance(any());
-        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
         assertEquals(replaced.id(), provisioner.updateCleanupPhysicalId(replaced.resource()));
 
         assertTrue(provisioner.completeUpdate(replaced.resource()).complete());

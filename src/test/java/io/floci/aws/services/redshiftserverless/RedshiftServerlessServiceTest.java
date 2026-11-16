@@ -7,6 +7,8 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.RedshiftAuditTarget;
 import io.floci.aws.services.redshift.TempCredential;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshiftserverless.model.ConfigParameter;
@@ -24,6 +26,7 @@ import org.mockito.Mockito;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -55,6 +58,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1043,6 +1047,182 @@ class RedshiftServerlessServiceTest {
         AwsException conflict = assertThrows(AwsException.class,
                 () -> service.createSnapshot("snap-one", "snap-a", null, null, REGION));
         assertEquals("ConflictException", conflict.getErrorCode());
+    }
+
+    @Test
+    void aRunningWorkgroupExportsTheLogTypesItsNamespaceSelects() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("audit-ns", "admin", null, null, null, null, List.of("connectionlog", "userlog"),
+                Map.of(), REGION);
+
+        createWorkgroup("audit-wg", "audit-ns");
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        RedshiftAuditTarget target = registered.getValue();
+        assertEquals("serverless_us-east-1_audit-wg", target.identifier());
+        assertEquals("/aws/redshift/audit-ns", target.logGroupPrefix());
+        assertEquals("serverless", target.name());
+        assertEquals("cloudwatch", target.destinationType());
+        assertEquals(List.of("connectionlog", "userlog"), target.exports());
+        assertTrue(target.enabled());
+        assertFalse(target.activityLoggingEnabled());
+
+        service.updateNamespace("audit-ns", null, null, null, null, List.of("useractivitylog"), REGION);
+        service.updateNamespace("audit-ns", null, null, null, null, List.of(), REGION);
+        service.deleteWorkgroup("audit-wg", REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> reregistered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(3)).register(eq(ACCOUNT_ID), eq(REGION), reregistered.capture());
+        assertEquals(List.of("useractivitylog"), reregistered.getAllValues().get(1).exports());
+        assertFalse(reregistered.getAllValues().get(2).enabled());
+        verify(publisher).unregister(ACCOUNT_ID, "serverless_us-east-1_audit-wg");
+    }
+
+    @Test
+    void updatingTheWorkgroupConfigParameterReregistersTheTarget() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("cfg-ns", "admin", null, null, null, null, List.of("useractivitylog"), Map.of(), REGION);
+        createWorkgroup("cfg-wg", "cfg-ns");
+
+        service.updateWorkgroup("cfg-wg", new WorkgroupSettings(null, null, null, null, null,
+                List.of(new ConfigParameter("enable_user_activity_logging", "true")), null, null, null, null, null,
+                null), REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(2)).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertFalse(registered.getAllValues().get(0).activityLoggingEnabled());
+        assertTrue(registered.getAllValues().get(1).activityLoggingEnabled());
+    }
+
+    @Test
+    void restoringANamespaceUpdateReregistersThePreviousLogExports() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("rollback-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(),
+                REGION);
+        createWorkgroup("rollback-wg", "rollback-ns");
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot =
+                service.snapshotNamespaceUpdate("rollback-ns", REGION);
+        service.updateNamespace("rollback-ns", null, null, null, null, List.of("userlog"), REGION);
+
+        service.restoreNamespaceUpdate(snapshot, REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(3)).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals(List.of("userlog"), registered.getAllValues().get(1).exports());
+        assertEquals(List.of("connectionlog"), registered.getAllValues().get(2).exports());
+    }
+
+    @Test
+    void aRestartRegistersTheTargetOfEveryRecoveredWorkgroup() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.createNamespace("boot-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(), REGION);
+        createWorkgroup("boot-wg", "boot-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals("serverless_us-east-1_boot-wg", registered.getValue().identifier());
+        assertEquals(List.of("connectionlog"), registered.getValue().exports());
+    }
+
+    @Test
+    void aWorkgroupThatFailsToStartRegistersNothing() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("fail-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(), REGION);
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenThrow(new IllegalStateException("container failed"));
+
+        assertThrows(IllegalStateException.class, () -> createWorkgroup("fail-wg", "fail-ns"));
+
+        verify(publisher, never()).register(any(), any(), any(RedshiftAuditTarget.class));
+    }
+
+    @Test
+    void theUserActivityLogNeedsItsConfigParameterOnTheWorkgroup() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("activity-ns", "admin", null, null, null, null, List.of("useractivitylog"), Map.of(),
+                REGION);
+
+        service.createWorkgroup("activity-wg", "activity-ns", new WorkgroupSettings(null, null, null, null, null,
+                List.of(new ConfigParameter("enable_user_activity_logging", "true")), null, null, null, null, null,
+                null), null, REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertTrue(registered.getValue().activityLoggingEnabled());
+    }
+
+    @Test
+    void recoveryIgnoresNullLogExportsAndKeepsWorkgroupRuntime() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        Namespace namespace = service.createNamespace("null-export-ns", "admin", null, null, null, null,
+                List.of("connectionlog"), Map.of(), REGION);
+        namespace.setLogExports(Arrays.asList("connectionlog", null));
+        store.put(REGION + "::null-export-ns", namespace);
+        createWorkgroup("null-export-wg", "null-export-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        Workgroup recovered = service.getWorkgroup("null-export-wg", REGION);
+        assertEquals("127.0.0.1", recovered.getRuntimeHost());
+        assertEquals(55432, recovered.getRuntimePort());
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals(List.of("connectionlog"), registered.getValue().exports());
+    }
+
+    @Test
+    void recoveryKeepsWorkgroupRuntimeWhenAuditRegistrationThrows() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        doThrow(new IllegalStateException("audit failure")).when(publisher)
+                .register(eq(ACCOUNT_ID), eq(REGION), any(RedshiftAuditTarget.class));
+        service.createNamespace("audit-err-ns", "admin", null, null, null, null, List.of("connectionlog"),
+                Map.of(), REGION);
+        createWorkgroup("audit-err-wg", "audit-err-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        Workgroup recovered = service.getWorkgroup("audit-err-wg", REGION);
+        assertEquals("127.0.0.1", recovered.getRuntimeHost());
+        assertEquals(55432, recovered.getRuntimePort());
+    }
+
+    @Test
+    void clearUnregistersAuditTargetEvenWhenRuntimeStopFails() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("clear-err-ns", "admin", null, null, null, null, List.of("connectionlog"),
+                Map.of(), REGION);
+        Workgroup created = createWorkgroup("clear-err-wg", "clear-err-ns");
+        doThrow(new RuntimeException("stop failed")).when(runtime).stop(ACCOUNT_ID, REGION, "clear-err-wg");
+
+        service.clear();
+
+        verify(publisher).unregister(ACCOUNT_ID, "serverless_us-east-1_clear-err-wg");
+        verify(endpoints, never()).release(created.getEndpoint());
+        assertTrue(service.listWorkgroups(REGION, null, null).items().isEmpty());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Instance<RedshiftAuditLogPublisher> instanceOf(RedshiftAuditLogPublisher publisher) {
+        Instance<RedshiftAuditLogPublisher> instance = mock(Instance.class);
+        when(instance.isUnsatisfied()).thenReturn(false);
+        when(instance.get()).thenReturn(publisher);
+        return instance;
     }
 
     @Test

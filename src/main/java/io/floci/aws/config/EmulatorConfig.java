@@ -244,6 +244,26 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean spoofAwsEndpoints();
+
+        /**
+         * When Floci runs natively, the UDP port of a resolver on {@code 127.0.0.1} that answers the names the
+         * embedded DNS server answers for containers, Cloud Map {@code <service>.<namespace>} and Route 53 private
+         * zones among them, so the host's own resolver can be pointed at Floci for them. It refuses every other
+         * name rather than forwarding it. Unset by default, which starts no listener. When Floci runs in Docker,
+         * publish the container's port 53/udp instead.
+         * Env: {@code FLOCI_DNS_HOST_PORT}
+         */
+        OptionalInt hostPort();
+
+        /**
+         * When Floci runs natively on a host with a {@code docker0} bridge, the embedded DNS server also listens on
+         * that bridge's address, port 53, and the containers Floci launches resolve through it, as they do when
+         * Floci runs in Docker. Port 53 needs root or {@code CAP_NET_BIND_SERVICE}; without either, Floci logs how
+         * to grant it and the containers keep resolving through Docker.
+         * Env: {@code FLOCI_DNS_BRIDGE_LISTENER_ENABLED}
+         */
+        @WithDefault("true")
+        boolean bridgeListenerEnabled();
     }
 
     interface SecurityConfig {
@@ -400,6 +420,7 @@ public interface EmulatorConfig {
         RumStorageConfig rum();
         GuardDutyStorageConfig guardduty();
         EmrServerlessStorageConfig emrserverless();
+        EmrContainersStorageConfig emrcontainers();
 
         ControlTowerStorageConfig controltower();
 
@@ -714,6 +735,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface EmrContainersStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface LakeFormationStorageConfig {
         Optional<String> mode();
 
@@ -862,6 +890,7 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+        EmrContainersServiceConfig emrcontainers();
         Route53ResolverServiceConfig route53resolver();
         NetworkFirewallServiceConfig networkfirewall();
         ServiceCatalogServiceConfig servicecatalog();
@@ -1153,6 +1182,20 @@ public interface EmulatorConfig {
     interface GuardDutyServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface EmrContainersServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * How long a job run stays RUNNING before it completes; 0, the default, completes a job run as
+         * soon as it is submitted. Floci follows the job run states without running Spark on Kubernetes.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_JOB_RUN_DURATION_SECONDS
+         */
+        @WithDefault("0")
+        int jobRunDurationSeconds();
     }
 
     interface EmrServerlessServiceConfig {
@@ -1683,6 +1726,17 @@ public interface EmulatorConfig {
          * is the AWS default.
          */
         Optional<String> accountAlias();
+
+        /**
+         * A file holding the permissions boundaries AWS registers for a delegation partner out of
+         * band, as a JSON object of partner account id to an object of boundary ARN to policy
+         * document. AWS registers those by email with no API at all, and reports them on a
+         * delegation request rather than taking them from one, so a request a registered partner
+         * files carries what this names. Unset, which is the default, registers nothing: a request
+         * reports no {@code RolePermissionRestrictionArns} and a role created with delegated
+         * credentials carries only the boundary its own call asks for.
+         */
+        Optional<String> partnerPermissionBoundariesPath();
     }
 
     interface MskServiceConfig {
@@ -3836,6 +3890,18 @@ public interface EmulatorConfig {
         /** Default idle-pool timeout in seconds; zero disables expiry. Target Keep-Alive may override it. */
         @WithDefault("60")
         int backendKeepAliveTimeoutSeconds();
+
+        /** AWS defaults unless explicitly overridden for local deployments. */
+        @WithDefault("aws")
+        AlbZoneRule albZoneRule();
+
+        /** A region entry takes precedence over the global rule, including an explicit AWS reset. */
+        Map<String, AlbZoneRule> albZoneRuleByRegion();
+    }
+
+    enum AlbZoneRule {
+        AWS,
+        ALLOW_SINGLE_ZONE
     }
 
     interface EksServiceConfig {
@@ -4152,30 +4218,33 @@ public interface EmulatorConfig {
         String dockerHost();
 
         /**
-         * Size of the connection pool behind the shared Docker client. Every Docker call leases a
-         * connection from it, and some hold one for as long as a container runs: a Lambda
-         * container holds one (its exit watcher) plus one per extension. Log-follow streams
-         * live in the separate streaming pool. Once the long-lived connections fill this pool,
-         * create, start, stop and remove wait for a free connection, including the calls that
-         * would release one, so the emulator stalls.
+         * Size of the connection pool behind the shared Docker client. Every short Docker call
+         * leases a connection from it, and a few streams hold one for as long as they run:
+         * CodeBuild phase execs, EKS audit followers and ECS Exec sessions. The streams a Lambda
+         * container holds for its whole lifetime live in the separate streaming pool. Once
+         * long-lived connections fill this pool, create, start, stop and remove wait for a free
+         * connection, including the calls that would release one, so the emulator stalls.
          *
-         * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
-         * about 50: a tenth of the 500 that the runtime API port range
-         * ({@link LambdaServiceConfig#runtimeApiBasePort}) exists to allow. Connections are
-         * opened on demand, so a small stack never approaches the limit.
+         * <p>1024 rather than the former hard-coded 100. Connections are opened on demand, so a
+         * small stack never approaches the limit.
          */
         @WithDefault("1024")
         int maxConnections();
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived container log-follow streams that occupy a slot for a container's entire
-         * lifetime. Exec-output and container-wait streams stay on the main pool. Total live
-         * containers is unbounded across distinct functions (each {@code WarmPool} caps only
-         * per-function), so this pool is sized generously rather than tied to any single
-         * function's warm-pool cap.
+         * long-lived streams that occupy a slot for a container's entire lifetime: container log
+         * follow, and for each Lambda container its exit watcher and one exec per extension.
+         * Total live containers is unbounded across distinct functions (each {@code WarmPool}
+         * caps only per-function), so this pool is sized generously rather than tied to any
+         * single function's warm-pool cap.
+         *
+         * <p>2048 covers the 500 containers the runtime API port range
+         * ({@link LambdaServiceConfig#runtimeApiBasePort}) allows, each with its log follow, its
+         * exit watcher and two extensions. Connections are opened on demand, so a small stack
+         * never approaches the limit.
          */
-        @WithDefault("512")
+        @WithDefault("2048")
         int streamingMaxConnections();
 
         /**

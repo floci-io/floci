@@ -440,3 +440,11 @@ refuses it. Across accounts the bus policy and the caller's identity policies bo
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
 - Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
 - An event is forwarded between buses only once, matching AWS: a bus that received an event from another bus does not forward it on to a third. The second hop is dropped with only a `WARN` rather than reported to the caller.
+
+### IAM resource tags
+
+With IAM enforcement enabled, event bus and rule operations that support
+`aws:ResourceTag` conditions read the exact target's stored tags. Tag changes take
+immediate effect. Request tags and another bus or rule's tags do not satisfy an
+existing-resource tag condition. The lookup validates the ARN's account, Region
+and partition before reading tags.

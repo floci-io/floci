@@ -61,11 +61,27 @@ public class S3TablesController {
         return Response.ok(bucketRepresentation(service.getTableBucket(decode(tableBucketArn), region(headers)))).build();
     }
 
+    @GET
+    @Path("/buckets/{tableBucketARN}/encryption")
+    public Response getTableBucketEncryption(@Context HttpHeaders headers,
+                                             @Encoded @PathParam("tableBucketARN") String tableBucketArn) {
+        return Response.ok(Map.of("encryptionConfiguration",
+                service.getTableBucketEncryption(decode(tableBucketArn), region(headers)))).build();
+    }
+
     @DELETE
     @Path("/buckets/{tableBucketARN}")
     public Response deleteTableBucket(@Context HttpHeaders headers, @Encoded @PathParam("tableBucketARN") String tableBucketArn) {
         service.deleteTableBucket(decode(tableBucketArn), region(headers));
         return Response.noContent().build();
+    }
+
+    @GET
+    @Path("/buckets/{tableBucketARN}/storage-class")
+    public Response getTableBucketStorageClass(@Context HttpHeaders headers,
+                                               @Encoded @PathParam("tableBucketARN") String tableBucketArn) {
+        return Response.ok(Map.of("storageClassConfiguration",
+                service.getTableBucketStorageClass(decode(tableBucketArn), region(headers)))).build();
     }
 
     @PUT

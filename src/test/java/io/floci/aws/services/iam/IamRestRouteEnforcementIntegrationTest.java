@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.OrganizationsRequests;
@@ -15,6 +16,10 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.eks.EksClient;
+import software.amazon.awssdk.services.eks.model.EksException;
+import software.amazon.awssdk.services.eks.model.ResourceNotFoundException;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -31,6 +36,8 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * REST requests whose route no rule mapped to an IAM action were let through under enforcement
@@ -167,6 +174,26 @@ class IamRestRouteEnforcementIntegrationTest {
                 .body(containsString("Invalid resource ARN"));
     }
 
+    /** A resource-tag condition reads the tags Scheduler holds on the schedule group a request names. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheScheduleGroup() {
+        String tagged = "route-tagged-" + suffix();
+        String untagged = "route-untagged-" + suffix();
+        for (String[] group : new String[][] {{tagged, "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}"},
+                {untagged, "{}"}}) {
+            given().header("Authorization", auth(ADMIN, "scheduler")).contentType("application/json").body(group[1])
+                    .post("/schedule-groups/" + group[0]).then().statusCode(200);
+            cleanup.register(() -> given().header("Authorization", auth(ADMIN, "scheduler"))
+                    .delete("/schedule-groups/" + group[0]).then().statusCode(200));
+        }
+        String user = user("route-scheduler-tag-condition");
+
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":\"scheduler:GetScheduleGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        as(user, "scheduler").get("/schedule-groups/" + tagged).then().statusCode(200);
+        refused(as(user, "scheduler").get("/schedule-groups/" + untagged).then(), "scheduler:GetScheduleGroup");
+    }
+
     @Test
     void postTagsIsCheckedAgainstTheArnItsBodyNames() {
         // POST /tags tags the ARN its body names: one named in the query does not move the check.
@@ -219,6 +246,60 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "eks").get(path).then(), "eks:DescribeNodegroup");
         policy(user, allow("eks:DescribeNodegroup", cluster.replace(":cluster/", ":nodegroup/") + "/ng/*"));
         as(user, "eks").get(path).then().statusCode(200).body("nodegroup.nodegroupArn", equalTo(nodegroup));
+    }
+
+    @Test
+    void deletedEksAddonRemainsAuthorizedForItsScopedDescribeWaiter() {
+        String name = "addon-waiter-" + suffix();
+        eksCluster(name);
+        String base = "/clusters/" + name + "/addons";
+        String arn = eks().body("{\"addonName\":\"vpc-cni\"}").post(base).then().statusCode(200)
+                .extract().path("addon.addonArn");
+        String user = "addon-waiter-user-" + suffix();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
+        policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn));
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
+            assertEquals(arn, client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")).addon().addonArn());
+            client.deleteAddon(r -> r.clusterName(name).addonName("vpc-cni"));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")));
+            policy(user, allow("eks:DescribeAddon", arn + "-foreign"));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni"))).statusCode());
+            policy(user, allow("eks:DescribeAddon", "*") + "," + deny("eks:DescribeAddon", arn));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni"))).statusCode());
+        }
+    }
+
+    @Test
+    void deletedEksFargateProfileRemainsAuthorizedForItsScopedDescribeWaiter() {
+        String name = "fargate-waiter-" + suffix();
+        eksCluster(name);
+        String path = "/clusters/" + name + "/fargate-profiles";
+        String arn = eks().body("{\"fargateProfileName\":\"fp\",\"podExecutionRoleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/route-fargate\"}").post(path).then().statusCode(200)
+                .extract().path("fargateProfile.fargateProfileArn");
+        String user = "fargate-waiter-user-" + suffix();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
+        policy(user, allow("eks:DescribeFargateProfile", arn) + "," + allow("eks:DeleteFargateProfile", arn));
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
+            assertEquals(arn, client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))
+                    .fargateProfile().fargateProfileArn());
+            client.deleteFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp")));
+            policy(user, allow("eks:DescribeFargateProfile", arn + "-foreign"));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))).statusCode());
+            policy(user, allow("eks:DescribeFargateProfile", "*") + "," + deny("eks:DescribeFargateProfile", arn));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))).statusCode());
+        }
     }
 
     @Test

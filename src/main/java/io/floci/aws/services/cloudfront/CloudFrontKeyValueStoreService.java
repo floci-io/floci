@@ -43,6 +43,8 @@ public class CloudFrontKeyValueStoreService implements StoredResourceArns {
     static final int MAX_STORES = 200;
 
     private static final Pattern STORE_NAME = Pattern.compile("[a-zA-Z0-9_-]{1,64}");
+    private static final Pattern ISSUED_ETAG = Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
     private static final int MAX_COMMENT_LENGTH = 128;
     private static final String STATUS_READY = "READY";
 
@@ -273,10 +275,15 @@ public class CloudFrontKeyValueStoreService implements StoredResourceArns {
     }
 
     private static void requireControlPlaneEtag(KeyValueStore kvs, String ifMatch) {
-        if (ifMatch == null || !kvs.getEtag().equals(ifMatch)) {
+        if (kvs.getEtag().equals(ifMatch)) {
+            return;
+        }
+        if (ifMatch == null || !ISSUED_ETAG.matcher(ifMatch).matches()) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        throw new AwsException("PreconditionFailed",
+                "The precondition in the If-Match header did not match the current resource.", 412);
     }
 
     private static void requireDataPlaneEtag(KeyValueStore kvs, String ifMatch) {

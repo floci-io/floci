@@ -306,7 +306,7 @@ final class RequestResourceMembers {
 
     /**
      * The file: each operation's resources, the resource types its action acts on, the resources it creates under a
-     * parent and the one a create whose action acts on no type makes ({@code makes}), as
+     * parent and the one a create whose action acts on no type, or on other types alone, makes ({@code makes}), as
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
      * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
      * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
@@ -407,7 +407,9 @@ final class RequestResourceMembers {
                 }
                 type.getValue().forEach(key -> {
                     String prefix = key.asText("");
-                    if (!prefix.matches("[a-z0-9-]+:(?i:ResourceTag)/") || keys.contains(prefix)) {
+                    if ((!prefix.matches("[a-z0-9-]+:(?i:ResourceTag)/")
+                            && !prefix.equals(namespace.getKey() + ":" + type.getKey() + "-tag/"))
+                            || keys.contains(prefix)) {
                         throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
                     }
                     keys.add(prefix);
@@ -441,10 +443,10 @@ final class RequestResourceMembers {
             actsOn.put(operation.getKey(), types);
             List<Resource> made = new ArrayList<>();
             for (JsonNode resource : operation.getValue().path("makes")) {
-                if (!types.isEmpty() || !resource.isObject() || resource.size() != 2 || !resource.has("type")
-                        || !resource.has("fill")) {
+                if (!resource.isObject() || resource.size() != 2 || !resource.has("type") || !resource.has("fill")
+                        || types.contains(resource.get("type").asText())) {
                     throw new IllegalStateException(RESOURCE_NAME + " makes " + resource + " for " + operation.getKey()
-                            + ", no type's variables of a create acting on none");
+                            + ", no type's variables of a create acting on none or on other types alone");
                 }
                 made.add(resource(operation.getKey(), resource, formats.getOrDefault(namespace, Map.of())));
             }

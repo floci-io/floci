@@ -273,6 +273,32 @@ class MwaaServiceTest {
     }
 
     @Test
+    void anUpdateChangesAnEnvironmentsSecurityGroupsButNotItsSubnets() {
+        mwaaService.createEnvironment("network-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+        NetworkConfiguration requested = new NetworkConfiguration();
+        requested.setSubnetIds(List.of("subnet-9"));
+        requested.setSecurityGroupIds(List.of("sg-2"));
+        UpdateEnvironmentRequest request = new UpdateEnvironmentRequest();
+        request.setNetworkConfiguration(requested);
+
+        Environment updated = mwaaService.updateEnvironment("network-env", request);
+
+        assertEquals(List.of("subnet-1", "subnet-2"), updated.getNetworkConfiguration().getSubnetIds());
+        assertEquals(List.of("sg-2"), updated.getNetworkConfiguration().getSecurityGroupIds());
+    }
+
+    @Test
+    void aSubnetAnEnvironmentUsesCannotBeDeletedUntilTheEnvironmentIsGone() {
+        mwaaService.createEnvironment("subnet-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+
+        assertTrue(mwaaService.hasSubnetDependency("us-east-1", "subnet-2"));
+        assertFalse(mwaaService.hasSubnetDependency("us-east-1", "subnet-3"));
+        assertFalse(mwaaService.hasSubnetDependency("eu-west-1", "subnet-2"));
+        mwaaService.deleteEnvironment("subnet-env");
+        assertFalse(mwaaService.hasSubnetDependency("us-east-1", "subnet-2"));
+    }
+
+    @Test
     void createEnvironment() {
         Environment environment = mwaaService.createEnvironment("test-env",
                 createRequest("arn:aws:s3:::my-bucket", "dags"));

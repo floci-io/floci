@@ -2,13 +2,12 @@ package io.floci.aws.services.lambda;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
-import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -31,8 +30,7 @@ class LambdaPermissionTagLayerIntegrationTest {
     @Test
     @Order(1)
     void createFunction() throws Exception {
-        byte[] zip = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({});");
-        String zipBase64 = Base64.getEncoder().encodeToString(zip);
+        String zipBase64 = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({});");
 
         given()
             .contentType("application/json")

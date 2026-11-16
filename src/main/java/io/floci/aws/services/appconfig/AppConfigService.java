@@ -1,7 +1,6 @@
 package io.floci.aws.services.appconfig;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
@@ -10,6 +9,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageJson;
 import io.floci.aws.core.storage.StorageOperations;
 import io.floci.aws.services.appconfig.model.Application;
 import io.floci.aws.services.appconfig.model.ConfigurationProfile;
@@ -56,7 +56,6 @@ public class AppConfigService {
     private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
     private static final int MAX_MONITORS = 5;
     private static final int MAX_ARN_LENGTH = 2048;
-    private static final ObjectMapper COPIER = new ObjectMapper();
     private static final Pattern ROLE_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::\\d{12}:role/.*");
 
     @Inject
@@ -892,9 +891,8 @@ public class AppConfigService {
      * such as one a GetApplication is still serializing, under that caller. The models are plain
      * Jackson beans, as storage persists them, so a round trip copies every field.
      */
-    @SuppressWarnings("unchecked")
     private static <T> T copy(T entity) {
-        return (T) COPIER.convertValue(entity, entity.getClass());
+        return StorageJson.copy(entity);
     }
 
     private static String shortId(int length) {

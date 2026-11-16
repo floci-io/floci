@@ -13,7 +13,6 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.dns.DnsAnswer;
 import io.floci.aws.core.common.dns.DnsClientVpcSource;
 import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
@@ -197,7 +196,7 @@ public class EksClusterManager
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
-    private record VpcLease(String region, String vpcId, String subnetId, String address) {}
+    private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
 
@@ -246,7 +245,8 @@ public class EksClusterManager
         if (persistedIp == null || persistedIp.isBlank() || subnet == null) {
             return null;
         }
-        return new VpcLease(clusterRegion(cluster), subnet.vpcId(), subnet.subnetId(), persistedIp);
+        return new VpcLease(resolveClusterAccountId(cluster), clusterRegion(cluster), subnet.vpcId(), subnet.subnetId(),
+                persistedIp);
     }
 
     // Issue #5501: Lease or re-reserve a stable VPC subnet IP for the k3s node container across restarts.
@@ -276,10 +276,9 @@ public class EksClusterManager
         }
         String persistedIp = cluster.getNodePrivateIp();
         if (persistedIp != null && !persistedIp.isBlank()) {
-            boolean reserved = Boolean.TRUE.equals(RequestScopes.callAs(accountId, region,
-                    () -> ec2.reserveVpcPrivateIp(region, subnetId, persistedIp)));
+            boolean reserved = ec2.reserveVpcPrivateIp(accountId, region, subnetId, persistedIp);
             if (reserved) {
-                VpcLease lease = new VpcLease(region, vpcId, subnetId, persistedIp);
+                VpcLease lease = new VpcLease(accountId, region, vpcId, subnetId, persistedIp);
                 clusterVpcLeases.put(resourceName, lease);
                 return lease;
             }
@@ -291,14 +290,13 @@ public class EksClusterManager
         if (!allocateWhenUnreserved) {
             return null;
         }
-        Optional<String> allocated = RequestScopes.callAs(accountId, region,
-                () -> ec2.allocateVpcPrivateIp(region, subnetId));
+        Optional<String> allocated = ec2.allocateVpcPrivateIp(accountId, region, subnetId);
         if (allocated == null || allocated.isEmpty()) {
             return null;
         }
         String address = allocated.get();
         cluster.setNodePrivateIp(address);
-        VpcLease lease = new VpcLease(region, vpcId, subnetId, address);
+        VpcLease lease = new VpcLease(accountId, region, vpcId, subnetId, address);
         clusterVpcLeases.put(resourceName, lease);
         return lease;
     }
@@ -307,7 +305,7 @@ public class EksClusterManager
         VpcLease lease = clusterVpcLeases.remove(resourceName);
         Ec2Service ec2 = ec2Service();
         if (lease != null && ec2 != null) {
-            ec2.releaseVpcPrivateIp(lease.region(), lease.subnetId(), lease.address());
+            ec2.releaseVpcPrivateIp(lease.accountId(), lease.region(), lease.subnetId(), lease.address());
         }
     }
 
@@ -940,7 +938,7 @@ public class EksClusterManager
         if (vpcLease != null) {
             Ec2Service ec2 = ec2Service();
             Optional<String> attachedNetwork = ec2 != null
-                    ? ec2.attachContainerToVpc(
+                    ? ec2.attachContainerToVpc(vpcLease.accountId(),
                             vpcLease.region(), vpcLease.vpcId(), vpcLease.subnetId(),
                             containerId, vpcLease.address())
                     : Optional.empty();
@@ -991,7 +989,8 @@ public class EksClusterManager
                 if (vpcLease != null) {
                     Ec2Service ec2 = ec2Service();
                     if (ec2 != null) {
-                        ec2.detachContainerFromVpc(vpcLease.region(), vpcLease.vpcId(), containerId);
+                        ec2.detachContainerFromVpc(vpcLease.accountId(), vpcLease.region(), vpcLease.vpcId(),
+                                containerId);
                     }
                 }
             }
@@ -1151,7 +1150,7 @@ public class EksClusterManager
             renamed = true;
             docker.stopContainerCmd(oldId).exec();
             if (lease != null && ec2 != null) {
-                ec2.detachContainerFromVpc(lease.region(), lease.vpcId(), oldId);
+                ec2.detachContainerFromVpc(lease.accountId(), lease.region(), lease.vpcId(), oldId);
             }
             unregisterMetadataEndpoint(cluster);
             closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
@@ -1169,7 +1168,7 @@ public class EksClusterManager
                 lifecycleManager.removeIfExistsStrict(containerName, true);
                 docker.renameContainerCmd(oldId).withName(containerName).exec();
                 if (lease != null && ec2 != null) {
-                    Optional<String> reattached = ec2.attachContainerToVpc(
+                    Optional<String> reattached = ec2.attachContainerToVpc(lease.accountId(),
                             lease.region(), lease.vpcId(), lease.subnetId(), oldId, lease.address());
                     if (reattached == null || reattached.isEmpty()) {
                         throw new IllegalStateException("Could not reattach previous EKS container " + oldId);
@@ -2855,9 +2854,9 @@ public class EksClusterManager
                     return;
                 }
                 String region = clusterRegion(cluster);
-                ec2.attachContainerToVpc(region, vpcId, containerId);
-
                 String accountId = resolveClusterAccountId(cluster);
+                ec2.attachContainerToVpc(accountId, region, vpcId, containerId);
+
                 List<RouteTable> vpcRouteTables = ec2.describeRouteTables(accountId, region, List.of(), Map.of("vpc-id", List.of(vpcId)));
                 List<RouteTable> applicable = EksVpcRouteProgramming.findApplicableRouteTables(
                         vpcId, vpcConfig.getSubnetIds(), vpcRouteTables);

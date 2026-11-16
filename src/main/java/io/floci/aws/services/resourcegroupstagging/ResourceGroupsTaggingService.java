@@ -9,7 +9,9 @@ import io.floci.aws.core.common.TagHandler;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackedMap;
+import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.resourcegroupstagging.model.ResourceTagMapping;
 import jakarta.annotation.PostConstruct;
@@ -29,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,6 +53,8 @@ public class ResourceGroupsTaggingService implements Resettable {
 
     // region::arn → ResourceTagMapping
     private Map<String, ResourceTagMapping> store = new ConcurrentHashMap<>();
+    /** The backend of {@link #store}, read in another account than the caller's. */
+    private StorageBackend<String, ResourceTagMapping> storage;
 
     @Inject
     public ResourceGroupsTaggingService(StorageFactory storageFactory,
@@ -80,8 +85,9 @@ public class ResourceGroupsTaggingService implements Resettable {
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
         }
-        this.store = new StorageBackedMap<>(storageFactory.create("tagging",
-                "tagging-resource-mappings.json", new TypeReference<Map<String, ResourceTagMapping>>() {}));
+        this.storage = storageFactory.create("tagging",
+                "tagging-resource-mappings.json", new TypeReference<Map<String, ResourceTagMapping>>() {});
+        this.store = new StorageBackedMap<>(storage);
     }
 
     private String key(String region, String arn) {
@@ -96,6 +102,17 @@ public class ResourceGroupsTaggingService implements Resettable {
         return mapping != null ? Collections.unmodifiableMap(mapping.getTags()) : Map.of();
     }
 
+    /**
+     * A copy of the tags applied to the resource {@code arn} names, stored in {@code accountId} and {@code region},
+     * read in place, a pre-multi-account mapping of the default account included; empty when none were applied.
+     */
+    public Map<String, String> storedTags(String accountId, String region, String arn) {
+        String storeKey = key(region, arn);
+        Optional<ResourceTagMapping> mapping = storage == null ? Optional.ofNullable(store.get(storeKey))
+                : AccountAwareStorageBackend.readInAccount(storage, accountId, storeKey);
+        return mapping.<Map<String, String>>map(stored -> new LinkedHashMap<>(stored.getTags())).orElse(Map.of());
+    }
+
     // ─── TagResources ──────────────────────────────────────────────────────────
 
     // Mutators are synchronized: StorageBackedMap has no atomic computeIfAbsent, so
@@ -107,7 +124,9 @@ public class ResourceGroupsTaggingService implements Resettable {
             if (mapping == null) {
                 mapping = new ResourceTagMapping(arn);
             }
-            mapping.getTags().putAll(tags);
+            Map<String, String> next = new LinkedHashMap<>(mapping.getTags());
+            next.putAll(tags);
+            mapping.setTags(next);
             // Re-put so StorageBackedMap routes the mutation through the backend
             store.put(storeKey, mapping);
         }
@@ -120,7 +139,9 @@ public class ResourceGroupsTaggingService implements Resettable {
             String storeKey = key(region, arn);
             ResourceTagMapping mapping = store.get(storeKey);
             if (mapping != null) {
-                tagKeys.forEach(mapping.getTags()::remove);
+                Map<String, String> next = new LinkedHashMap<>(mapping.getTags());
+                tagKeys.forEach(next::remove);
+                mapping.setTags(next);
                 store.put(storeKey, mapping);
             }
         }

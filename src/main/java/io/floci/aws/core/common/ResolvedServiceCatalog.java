@@ -44,8 +44,10 @@ import io.floci.aws.services.dlm.DlmController;
 import io.floci.aws.services.dsql.DsqlController;
 import io.floci.aws.services.efs.EfsController;
 import io.floci.aws.services.eks.EksController;
+import io.floci.aws.services.emrcontainers.EmrContainersController;
 import io.floci.aws.services.emrserverless.EmrServerlessController;
 import io.floci.aws.services.fis.FisController;
+import io.floci.aws.services.glue.iceberg.GlueIcebergController;
 import io.floci.aws.services.guardduty.GuardDutyController;
 import io.floci.aws.services.inspector2.Inspector2Controller;
 import io.floci.aws.services.iot.IotAuthorizerController;
@@ -287,6 +289,12 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("emr-serverless"), Set.of(),
                         Set.of(EmrServerlessController.class)),
+                descriptor("emr-containers", "emrcontainers", config.services().emrcontainers().enabled(), true,
+                        "emrcontainers", storageMode(config.storage().services().emrcontainers().mode(), config.storage().mode()),
+                        config.storage().services().emrcontainers().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("emr-containers"), Set.of(),
+                        Set.of(EmrContainersController.class)),
                 descriptor("wafv2", "wafv2", config.services().wafv2().enabled(), true,
                         "wafv2", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -385,7 +393,7 @@ public class ResolvedServiceCatalog {
                 descriptor("glue", "glue", config.services().glue().enabled(), true,
                         "glue", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("AWSGlue."), Set.of("glue"), Set.of(), Set.of()),
+                        Set.of("AWSGlue."), Set.of("glue"), Set.of(), Set.of(GlueIcebergController.class)),
                 descriptor("firehose", "firehose", config.services().firehose().enabled(), true,
                         "firehose", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

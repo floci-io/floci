@@ -5328,6 +5328,141 @@ class CodeArtifactServiceTest {
         assertEquals("ValidationException", missingVersion.getErrorCode());
     }
 
+    // ----------------------------------------------------- ListPackageVersionDependencies
+
+    @Test
+    void listPackageVersionDependenciesBridgesToReposiliteForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionDependencies(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(
+                List.of(new CodeArtifactService.PackageDependency("com.example", "b", "compile", "2.0.0")));
+
+        CodeArtifactService.PackageVersionDependenciesListResult result = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "maven", "com.example", "a", "1.0", null);
+
+        assertEquals(1, result.dependencies().size());
+        assertEquals("b", result.dependencies().get(0).packageName());
+        assertEquals("compile", result.dependencies().get(0).dependencyType());
+    }
+
+    @Test
+    void listPackageVersionDependenciesFailsNotFoundForAMavenVersionThatWasNeverPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION, "dom",
+                null, "repo", "maven", "com.example", "a", "1.0", null));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionDependenciesRoutesEveryValidFormatToTheSidecarBridge() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("npm", "pypi", "nuget")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                    "dom", null, "repo", format, null, "my-pkg", "1.0.0", null));
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionDependenciesRejectsAFormatAwsDoesNotDocumentForThisAction() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("generic", "cargo", "ruby", "swift", "not-a-real-format")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                    "dom", null, "repo", format, null, "my-pkg", "1.0.0", null));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionDependenciesRequiresANamespaceForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                "dom", null, "repo", "maven", null, "a", "1.0", null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageVersionDependenciesRejectsANamespaceForPypiAndNuGet() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        for (String format : List.of("pypi", "nuget")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.listPackageVersionDependencies(REGION,
+                    "dom", null, "repo", format, "a-namespace", "my-pkg", "1.0.0", null));
+            assertEquals("ValidationException", e.getErrorCode());
+        }
+    }
+
+    @Test
+    void listPackageVersionDependenciesPaginatesWithANextToken() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        List<CodeArtifactService.PackageDependency> many = new ArrayList<>();
+        for (int i = 0; i < 150; i++) {
+            many.add(new CodeArtifactService.PackageDependency(null, "dep-" + String.format("%03d", i), "regular",
+                    "1.0.0"));
+        }
+        when(verdaccioClient.listPackageVersionDependencies(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(many);
+
+        CodeArtifactService.PackageVersionDependenciesListResult firstPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", null);
+
+        assertEquals(100, firstPage.dependencies().size());
+        assertTrue(firstPage.nextToken() != null);
+
+        CodeArtifactService.PackageVersionDependenciesListResult secondPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", firstPage.nextToken());
+
+        assertEquals(50, secondPage.dependencies().size());
+    }
+
+    /**
+     * Qodo review finding: byte-for-byte identical dependency entries (a real shape for NuGet,
+     * where the same package id can be declared under more than one target-framework group with
+     * the same version requirement) must not share a pagination cursor - if a 100-item page ends
+     * between two of them, resuming "strictly after" a shared cursor would silently drop whichever
+     * one(s) land past the boundary.
+     */
+    @Test
+    void listPackageVersionDependenciesPaginationNeverDropsIdenticalEntriesAcrossAPageBoundary() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        List<CodeArtifactService.PackageDependency> many = new ArrayList<>();
+        for (int i = 0; i < 150; i++) {
+            // Every entry is byte-for-byte identical: the real worst case for a cursor collision.
+            many.add(new CodeArtifactService.PackageDependency(null, "Shared.Package", null, "1.0.0"));
+        }
+        when(bagetterClient.listPackageVersionDependencies(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(many);
+
+        CodeArtifactService.PackageVersionDependenciesListResult firstPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", null);
+        CodeArtifactService.PackageVersionDependenciesListResult secondPage = service.listPackageVersionDependencies(
+                REGION, "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", firstPage.nextToken());
+
+        assertEquals(100, firstPage.dependencies().size());
+        assertEquals(50, secondPage.dependencies().size());
+    }
+
     // ----------------------------------------------------- ListPackageVersions
 
     @Test

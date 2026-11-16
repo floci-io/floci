@@ -35,21 +35,22 @@ class WafV2TagPersistenceTest {
                     case "wafv2-rule-groups.json" -> ruleGroupStore;
                     default -> AccountAwareStorageBackend.inMemory("000000000000");
                 });
-        WafV2Service service = new WafV2Service(storageFactory, mock(RegionResolver.class), new ObjectMapper());
+        WafV2Service service = new WafV2Service(storageFactory, new RegionResolver("us-east-1", "000000000000"),
+                new ObjectMapper());
 
         RegexPatternSet regex = new RegexPatternSet();
         regex.setId("regex-id");
         regex.setScope("REGIONAL");
         regex.setArn("arn:aws:wafv2:us-east-1:000000000000:regional/regexpatternset/regex/regex-id");
-        regexStore.put("REGIONAL:regex-id", regex);
-        assertTagWrites(service, regexStore, "REGIONAL:regex-id", regex, regex.getArn());
+        regexStore.put("us-east-1::REGIONAL:regex-id", regex);
+        assertTagWrites(service, regexStore, "us-east-1::REGIONAL:regex-id", regex, regex.getArn());
 
         RuleGroup ruleGroup = new RuleGroup();
         ruleGroup.setId("rule-group-id");
         ruleGroup.setScope("REGIONAL");
         ruleGroup.setArn("arn:aws:wafv2:us-east-1:000000000000:regional/rulegroup/rules/rule-group-id");
-        ruleGroupStore.put("REGIONAL:rule-group-id", ruleGroup);
-        assertTagWrites(service, ruleGroupStore, "REGIONAL:rule-group-id", ruleGroup, ruleGroup.getArn());
+        ruleGroupStore.put("us-east-1::REGIONAL:rule-group-id", ruleGroup);
+        assertTagWrites(service, ruleGroupStore, "us-east-1::REGIONAL:rule-group-id", ruleGroup, ruleGroup.getArn());
     }
 
     private static <T> void assertTagWrites(WafV2Service service, StorageBackend<String, T> store,

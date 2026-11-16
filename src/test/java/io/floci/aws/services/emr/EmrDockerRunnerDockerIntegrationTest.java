@@ -12,6 +12,7 @@ import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.ContainerDataPlaneProfile;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.S3TestClients;
@@ -35,6 +36,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -122,7 +124,7 @@ class EmrDockerRunnerDockerIntegrationTest {
     void aStreamingWordCountStepReadsItsInputAndWritesItsCountsInFlocisS3() {
         startCluster("[]");
 
-        assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop-streaming",
+        assertEquals("COMPLETED", runSingleTaskStreamingStep("command-runner.jar",
                 "-files", side("mapper.py", "reducer.py"), "-mapper", "python3 mapper.py",
                 "-reducer", "python3 reducer.py", "-input", s3Uri("in/"), "-output", s3Uri("out/")));
         assertEquals(WORD_COUNTS, counts("out/"));
@@ -146,8 +148,7 @@ class EmrDockerRunnerDockerIntegrationTest {
 
         // The mapper and the reducer, from the files -files sends, with a shuffle between them, run on the core and
         // task nodes, not in the step's container.
-        assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop-streaming",
-                "-D", "mapreduce.job.maps=1", "-D", "mapreduce.job.reduces=1",
+        assertEquals("COMPLETED", runSingleTaskStreamingStep("command-runner.jar",
                 "-files", side("where-mapper.py", "where-reducer.py"), "-mapper", "python3 where-mapper.py mapper",
                 "-reducer", "python3 where-reducer.py reducer", "-input", s3Uri("in/"), "-output", s3Uri("where/")));
         Map<String, Integer> counts = counts("where/");
@@ -165,7 +166,7 @@ class EmrDockerRunnerDockerIntegrationTest {
     void aCustomJarAtEmrsStreamingJarPathRunsItsWordCountInTheDriver() {
         startCluster("[]");
 
-        assertEquals("COMPLETED", runStep("/usr/lib/hadoop-mapreduce/hadoop-streaming.jar",
+        assertEquals("COMPLETED", runSingleTaskStreamingStep("/usr/lib/hadoop-mapreduce/hadoop-streaming.jar",
                 "-files", side("mapper.py", "reducer.py"), "-mapper", "python3 mapper.py",
                 "-reducer", "python3 reducer.py", "-input", s3Uri("in/"), "-output", s3Uri("jar-out/")));
         assertEquals(WORD_COUNTS, counts("jar-out/"));
@@ -474,14 +475,20 @@ class EmrDockerRunnerDockerIntegrationTest {
         }
     }
 
+    /** Runs a tiny streaming fixture with one mapper and one reducer. */
+    private String runSingleTaskStreamingStep(String jar, String... args) {
+        List<String> streamingArgs = new ArrayList<>();
+        if ("command-runner.jar".equals(jar)) {
+            streamingArgs.add("hadoop-streaming");
+        }
+        streamingArgs.addAll(List.of("-D", "mapreduce.job.maps=1", "-D", "mapreduce.job.reduces=1"));
+        streamingArgs.addAll(List.of(args));
+        return runStep(jar, streamingArgs.toArray(String[]::new));
+    }
+
     /** Adds one step to the cluster and returns the state it ended in. */
     private String runStep(String jar, String... args) {
-        ObjectNode request = JSON.createObjectNode().put("JobFlowId", clusterId);
-        ObjectNode step = request.putArray("Steps").addObject().put("Name", jar).put("ActionOnFailure", "CONTINUE");
-        ObjectNode hadoopJarStep = step.putObject("HadoopJarStep").put("Jar", jar);
-        List.of(args).forEach(hadoopJarStep.putArray("Args")::add);
-        String stepId = emr("AddJobFlowSteps", request.toString())
-                .then().statusCode(200).extract().jsonPath().getString("StepIds[0]");
+        String stepId = EmrRequests.addStep(clusterId, jar, jar, args);
         return awaitStep(clusterId, stepId).jsonPath().getString("Step.Status.State");
     }
 
@@ -519,14 +526,7 @@ class EmrDockerRunnerDockerIntegrationTest {
                 .toList();
     }
 
-    /** What a job wrote under {@code prefix}: its part files, in key order, one after the other. */
     private String partFiles(String prefix) {
-        StringBuilder text = new StringBuilder();
-        for (S3Object object : s3.listObjectsV2(request -> request.bucket(bucket).prefix(prefix)).contents()) {
-            if (object.key().substring(prefix.length()).startsWith("part-")) {
-                text.append(s3.getObjectAsBytes(request -> request.bucket(bucket).key(object.key())).asUtf8String());
-            }
-        }
-        return text.toString();
+        return S3TestClients.partFiles(s3, bucket, prefix);
     }
 }

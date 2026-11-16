@@ -244,6 +244,9 @@ JSONPath state machines may resolve the limit from the Map input with `MaxItemsP
 JSONata state machines may use a `{% %}` expression in `MaxItems`. `MaxItems` and `MaxItemsPath`
 are mutually exclusive, and `MaxItemsPath` is rejected for JSONata state machines.
 
+Under IAM enforcement the reader needs `s3:GetObject` or `s3:ListBucket`: see
+[Distributed Map S3 calls](#distributed-map-s3-calls-under-iam-enforcement).
+
 ## Distributed Map ItemBatcher
 
 `ItemBatcher` hands each child execution a batch of items instead of a single item. The child input
@@ -275,6 +278,9 @@ absorbed failures to `FAILED_0.json`, each listed under the matching key of the 
 `ResultFiles`. A failed record carries `Error` and `Cause` in place of an output. Once the budget is
 spent, the state fails with `States.ExceedToleratedFailureThreshold` and the run emits
 `MapRunFailed`.
+
+Under IAM enforcement a `ResultWriter` export needs `s3:PutObject` on each of these files: see
+[Distributed Map S3 calls](#distributed-map-s3-calls-under-iam-enforcement).
 
 `DescribeMapRun` reports the declared values under `toleratedFailureCount` and
 `toleratedFailurePercentage`. A `Map` that declares neither keeps the earlier behaviour: the first
@@ -350,6 +356,10 @@ both carry the cause `The Task state in AWS Step Functions execution [<arn>] whi
 this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
 stops the job with the same cause, and so does the execution's budget, and so does a failure in
 another branch of the `Parallel`, or in another iteration of the `Map`, that the `Task` is in.
+Stopping is best effort: an ECS task that is gone (`InvalidParameterException`) or already stopped,
+or a child execution that is gone (`ExecutionDoesNotExist`) or already ended, leaves the state
+ending as it would have; any other refusal fails it, with `ECS.<code>` or `StepFunctions.<code>`
+and the service's message, and any other failure with `States.Runtime`.
 An `addStep.sync` step is cancelled with `CancelSteps` instead, and the cluster of a
 `createCluster.sync` is left running (see [Amazon EMR tasks](#amazon-emr-tasks)). An EMR Serverless
 job run is cancelled, a started application stopped and a created one deleted (see
@@ -791,14 +801,15 @@ type comes from the Service Authorization Reference:
 | `arn:aws:states:::aws-sdk:sfn:describeMapRun` | `states:DescribeMapRun` | The Map Run | `Sfn.AccessDeniedException` |
 | `arn:aws:states:::states:startExecution`, with `.sync`, `.sync:2` or `.waitForTaskToken` | `states:StartExecution` | The child state machine | `StepFunctions.AccessDeniedException` |
 
-A CloudFormation action is evaluated on the stack or stack set the request reaches, under the id
-CloudFormation holds for it, so a name and the id it stands for are one resource:
-`stack/<StackName>/<id>` and `stackset/<StackSetName>:<id>`. `createStack` and `createChangeSet` on a stack
-not there yet evaluate `stack/<StackName>/*`. A change set named by its ARN, or a `describeStackResources`
-naming a `PhysicalResourceId`, is evaluated on the stack that holds it. `describeStacks` and
-`getTemplateSummary` without a `StackName` are on `*`, as are `validateTemplate`, `listStacks`, `listExports`,
-`createStackSet`, `listStackSets`, `describeOrganizationsAccess` and `activateOrganizationsAccess`, which
-have no resource type.
+A CloudFormation action is evaluated as the same request made directly is, from the generated request resources:
+on the stack or stack set the request names, under the id CloudFormation holds for it, so a name and the id it
+stands for are one resource: `stack/<StackName>/<id>` and `stackset/<StackSetName>:<id>`. A stack or stack set
+CloudFormation does not hold has its id open, `stack/<StackName>/*` or `stackset/<StackSetName>:*`, and a stack
+id it does not hold is evaluated as given. A request naming its stack by no `StackName` (a change set by its ARN
+alone, a `describeStackResources` by `PhysicalResourceId` alone, a `describeStacks` or `getTemplateSummary` with
+none) is on `*`, as are `validateTemplate`, `listStacks`, `listExports`, `createStackSet`, `listStackSets`,
+`describeOrganizationsAccess` and `activateOrganizationsAccess`, which have no resource type. An API the handler
+does not serve is evaluated the same way, and CloudFormation then answers it with `UnknownAction`.
 
 `states:InvokeHTTPEndpoint` has no resource type in the Service Authorization Reference, and the CDK grants
 it on `*`, while the Developer Guide's example scopes it to the state machine, so the state machine is what is
@@ -819,15 +830,15 @@ Every integration that evaluates a role is refused on its `.waitForTaskToken` fo
 task starts nothing and waits for nothing. With the permission, it calls its service and then waits on its
 token.
 
-A request naming nothing it can reach has only the role checks, and its service answers it: no `Name`, a stack
-or stack set name its service does not have, no `SecretId`, no `UUID`, no `ApiEndpoint`, a `StateMachineArn` or
-`MapRunArn` that is not one, or a token naming no task. A stack named by an ARN of what does not exist here is left
-to the service. A secret is evaluated as a direct `DescribeSecret` naming it is, from the generated request resources. An API Floci does not serve keeps its
-answer, whatever the role: it is "Unsupported", or CloudFormation's `UnknownAction`, and the role is not checked.
+A request naming nothing it can reach has only the role checks, and its service answers it: no `Name`, no
+`SecretId`, no `UUID`, no `ApiEndpoint`, a `StateMachineArn` or `MapRunArn` that is not one, or a token naming no
+task. A secret is evaluated as a direct `DescribeSecret` naming it is, from the generated request resources. An API
+Floci does not serve keeps its answer, whatever the role: it is "Unsupported", and the role is not checked, except a
+CloudFormation API, which is evaluated as above before CloudFormation answers it with `UnknownAction`.
 
 An activity task is not evaluated: the CDK's own task needs no permission for it, and the worker calling
-`GetActivityTask` is authorized by its own request. `Map`'s `ItemReader` and `ResultWriter` S3 calls are not
-evaluated yet; they run in the state machine's account whatever the execution role's policies say.
+`GetActivityTask` is authorized by its own request. `Map`'s S3 calls are in
+[their own section](#distributed-map-s3-calls-under-iam-enforcement).
 
 `<prefix>.AccessDeniedException` and `States.Http.AccessDeniedException` are Floci's reading and have not
 been verified against AWS; a nested task with `Credentials` reports a refused action as
@@ -835,6 +846,39 @@ been verified against AWS; a nested task with `Credentials` reports a refused ac
 name both. `iam:PassRole` is not evaluated for the roles a schedule or a stack names, and only
 the condition keys above and global ones are available to the policies. With enforcement off nothing here is
 evaluated.
+
+## Distributed Map S3 calls under IAM enforcement
+
+With `floci.services.iam.enforcement-enabled`, a Distributed `Map` makes its S3 calls as its execution role, which
+has to exist and to trust `states.amazonaws.com`. Each permission is evaluated before the call that needs it, on the
+ARN a direct request is checked on, in the bucket's own partition, and the bucket's policy can grant or deny it.
+
+| Field | Form | Action | Resource | Refused with |
+|---|---|---|---|---|
+| `ItemReader` | `arn:aws:states:::s3:getObject` (`JSON`, `JSONL`, `CSV`) | `s3:GetObject` | `<bucket>/<Key>` | `States.ItemReaderFailed` |
+| `ItemReader` | `arn:aws:states:::s3:listObjectsV2` | `s3:ListBucket`, with `s3:prefix` when the request has a `Prefix` | `<bucket>` | `States.ItemReaderFailed` |
+| `ResultWriter` | `arn:aws:states:::s3:putObject` | `s3:PutObject` | `<bucket>/<Prefix>/<run id>/SUCCEEDED_0.json`, `manifest.json`, and `FAILED_0.json` when a child failed | `States.ResultWriterFailed` |
+
+An execution role that does not exist or does not trust Step Functions is refused with `States.Permissions`. Each is
+a failure of the `Map` state, so its `Retry` and `Catch` apply. The refusal's cause names the action and the resource.
+
+A refused reader starts no Map run and no child. A refused writer fails the Map run after its children have run, as
+any other `ResultWriter` failure does. The keys of an export are known before its first write, so all of them are
+evaluated first and a refusal of any leaves nothing in the bucket.
+
+The export writes each file in a single `PutObject`, so the rest of what the CDK grants a `ResultWriter`,
+`s3:GetObject`, `s3:ListMultipartUploadParts` and `s3:AbortMultipartUpload`, is accepted but not needed here.
+
+A request naming nothing it can reach has only the role checks, and is answered as it would be without them: no
+`Bucket` or `Key`, or a bucket S3 does not have once the role is allowed. The `ResultWriter` Region check comes after
+the evaluation. `PARQUET` and `MANIFEST` make no S3 call here, so they keep their `States.ItemReaderFailed` whatever
+the role. A `WriterConfig` with no `Resource`, a Map over its input and an inline `Map` make no S3 call either, and
+need nothing. The tasks inside `ItemProcessor` are evaluated as any other task.
+
+A `Map` has no credentials of its own here: `Credentials` on the state, or inside `ItemReader` or `ResultWriter`, is
+not read. An execution with a [mock test case](#mocked-service-integrations) is evaluated on these calls too: a test
+case cannot mock a `Map`, so its S3 calls stay real, as an unmocked task's call in that execution does. `States.ItemReaderFailed` and `States.ResultWriterFailed` for a refusal are Floci's
+reading and have not been verified against AWS.
 
 ## Task credentials in history
 
@@ -1259,7 +1303,10 @@ the same two clocks as the other `.sync` integrations (see [Timeouts](#timeouts)
 fail the Task with `States.TaskFailed`, the describe response as the cause: a JSON string, which a
 `Catch` reads with `States.StringToJson` (for example its `Step.Status.State`). When
 the wait ends early, `addStep.sync` cancels its step with `CancelSteps`, as Step Functions "will make
-a best-effort attempt to cancel the task". A cluster is never terminated: "Step Functions does not
+a best-effort attempt to cancel the task": if EMR answers that the cluster is gone or that its release
+cannot cancel steps (`InvalidRequestException`), or reports the step past cancelling (a `FAILED` entry in
+`CancelStepsInfoList`), the Task ends as it would have; any other failure fails it. A
+cluster is never terminated: "Step Functions does not
 terminate an Amazon EMR cluster automatically if execution is stopped." EMR in Floci reaches each
 state at once, so every wait ends at its first poll.
 

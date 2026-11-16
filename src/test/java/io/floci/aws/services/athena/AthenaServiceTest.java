@@ -4,9 +4,11 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.athena.model.CreateWorkGroupRequest;
 import io.floci.aws.services.athena.model.QueryExecutionState;
 import io.floci.aws.services.athena.model.ResultConfiguration;
 import io.floci.aws.services.athena.model.ResultSet;
+import io.floci.aws.services.athena.model.WorkGroupTag;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.s3.S3Service;
@@ -66,12 +68,31 @@ class AthenaServiceTest {
         when(athena.mock()).thenReturn(false);
 
         service = new AthenaService(storageFactory, duckClient, glueService, s3Service,
-                config, vertx, ddlBuilder, mock(RegionResolver.class));
+                config, vertx, ddlBuilder, mock(RegionResolver.class), mock(AthenaIcebergStatements.class));
     }
 
     @AfterEach
     void tearDown() {
         vertx.close();
+    }
+
+    @Test
+    void storedTagsReadTheWorkgroupOrTheDataCatalogTheArnNamesInItsAccountAndRegion() {
+        CreateWorkGroupRequest request = new CreateWorkGroupRequest();
+        request.setName("analytics");
+        request.setTags(List.of(new WorkGroupTag("team", "data")));
+        service.createWorkGroup(request, "us-east-1");
+        service.createDataCatalog("us-east-1", "lake", "LAMBDA", null, null, List.of(new WorkGroupTag("team", "lake")));
+        String arn = "arn:aws:athena:us-east-1:000000000000:";
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn + "workgroup/analytics"));
+        assertEquals(Map.of("team", "lake"), service.storedTags(arn + "datacatalog/lake"));
+        assertEquals(Map.of(), service.storedTags(arn + "workgroup/primary"));
+        assertEquals(Map.of(), service.storedTags(arn + "datacatalog/AwsDataCatalog"));
+        assertEquals(Map.of(), service.storedTags(arn + "workgroup/analytics/session/s-1"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:athena:us-east-1:111111111111:workgroup/analytics"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:athena:us-west-2:000000000000:workgroup/analytics"));
+        assertEquals(Map.of(), service.storedTags("arn:aws-cn:athena:us-east-1:000000000000:workgroup/analytics"));
     }
 
     @Test

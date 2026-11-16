@@ -1143,9 +1143,11 @@ class StsQueryHandlerTest {
         assertTrue(((String) response.getEntity()).contains(
                 "<AssumedPrincipal>arn:aws:iam::000000000002:user/admin</AssumedPrincipal>"),
                 (String) response.getEntity());
+        // The eighth argument is what the request restricts a role to, which is nothing here: no
+        // partner boundary is registered in this fixture.
         verify(iamService).registerDelegatedSession(anyString(), anyString(), anyString(),
                 eq("arn:aws:iam::000000000002:user/admin"), eq(expiry), isNull(),
-                eq("000000000002"));
+                eq("000000000002"), eq(List.of()));
         verify(iamService, never()).registerIssuedSession(anyString(), anyString(), anyString(),
                 anyString(), any(), any(), anyString(), any());
     }

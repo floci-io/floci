@@ -18,6 +18,7 @@
     {"action": "iam:DetachRolePolicy", "key": "iam:PolicyARN", "member": "PolicyArn"},
     {"action": "iam:DetachUserPolicy", "key": "iam:PolicyARN", "member": "PolicyArn"},
     {"action": "iam:GenerateOrganizationsAccessReport", "key": "iam:OrganizationsPolicyId", "member": "OrganizationsPolicyId"},
+    {"action": "iam:ListDelegationRequests", "key": "iam:DelegationRequestOwner", "member": "OwnerId"},
     {"action": "iam:PutRolePermissionsBoundary", "key": "iam:PermissionsBoundary", "member": "PermissionsBoundary"},
     {"action": "iam:PutUserPermissionsBoundary", "key": "iam:PermissionsBoundary", "member": "PermissionsBoundary"}
   ],
@@ -214,7 +215,6 @@
     {"action": "iam:GetServerCertificate", "key": "aws:ResourceTag/${TagKey}", "reason": "no member names a stored role or user whose resource tags can be read", "resources": ["server-certificate"]},
     {"action": "iam:GetServiceLinkedRoleDeletionStatus", "key": "aws:ResourceTag/${TagKey}", "reason": "no member names a stored role or user whose resource tags can be read", "resources": ["role"]},
     {"action": "iam:GetServiceLinkedRoleDeletionStatus", "key": "iam:ResourceTag/${TagKey}", "reason": "no member names a stored role or user whose resource tags can be read", "resources": ["role"]},
-    {"action": "iam:ListDelegationRequests", "key": "iam:DelegationRequestOwner", "reason": "the value is the delegation request's owner"},
     {"action": "iam:ListEntitiesForPolicy", "key": "aws:ResourceTag/${TagKey}", "reason": "no member names a stored role or user whose resource tags can be read", "resources": ["policy"]},
     {"action": "iam:ListInstanceProfileTags", "key": "aws:ResourceTag/${TagKey}", "reason": "no member names a stored role or user whose resource tags can be read", "resources": ["instance-profile"]},
     {"action": "iam:ListMFADeviceTags", "key": "aws:ResourceTag/${TagKey}", "reason": "no member names a stored role or user whose resource tags can be read", "resources": ["mfa"]},

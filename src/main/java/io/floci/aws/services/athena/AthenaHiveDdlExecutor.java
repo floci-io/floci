@@ -8,7 +8,6 @@ import io.floci.aws.services.glue.model.Partition;
 import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
-import io.floci.aws.services.s3.model.S3Object;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -28,19 +27,20 @@ import java.util.stream.Collectors;
  * Athena treats Iceberg tables as managed; {@code MSCK REPAIR TABLE}
  * adds the Hive-style {@code key=value} partitions it finds under the table's location and never
  * removes any; {@code IF [NOT] EXISTS} turns a duplicate or missing table or partition from an
- * error into a no-op.
+ * error into a no-op. An Iceberg {@code CREATE TABLE} goes to {@link AthenaIcebergStatements}.
  */
 final class AthenaHiveDdlExecutor {
 
-    private static final int LIST_PAGE_SIZE = 1000;
     private static final String HIVE_ESCAPED_CHARACTERS = "\"#%'*/:=?\\{[]^";
 
     private final GlueService glueService;
     private final S3Service s3Service;
+    private final AthenaIcebergStatements icebergStatements;
 
-    AthenaHiveDdlExecutor(GlueService glueService, S3Service s3Service) {
+    AthenaHiveDdlExecutor(GlueService glueService, S3Service s3Service, AthenaIcebergStatements icebergStatements) {
         this.glueService = glueService;
         this.s3Service = s3Service;
+        this.icebergStatements = icebergStatements;
     }
 
     /**
@@ -49,8 +49,35 @@ final class AthenaHiveDdlExecutor {
      * each, and no rows for every other statement.
      */
     List<String> execute(AthenaHiveDdl.Statement statement, String contextDatabase) {
+        return execute(statement, AthenaService.DEFAULT_CATALOG, contextDatabase);
+    }
+
+    /**
+     * Runs {@code statement} in the context catalog {@code contextCatalog}. In an S3 Tables catalog
+     * ({@code s3tablescatalog/<bucket>}), which holds Iceberg tables only, a {@code CREATE TABLE} creates one in the
+     * table bucket and {@code DROP TABLE} deletes it; Hive DDL, {@code OPTIMIZE} and {@code VACUUM} are refused, as on
+     * Athena.
+     */
+    List<String> execute(AthenaHiveDdl.Statement statement, String contextCatalog, String contextDatabase) {
         String database = statement.ref().database() != null ? statement.ref().database() : contextDatabase;
         String table = statement.ref().table();
+        String bucket = AthenaIcebergStatements.s3TablesBucket(contextCatalog);
+        if (bucket != null) {
+            return switch (statement) {
+                case AthenaHiveDdl.CreateIcebergTable create -> {
+                    icebergStatements.createTable(AthenaIcebergStatements.restCatalog(bucket), database, create);
+                    yield List.of();
+                }
+                case AthenaHiveDdl.DropTable drop -> {
+                    icebergStatements.dropS3Table(bucket, database, table, drop.ifExists());
+                    yield List.of();
+                }
+                case AthenaHiveDdl.Vacuum vacuum -> throw maintainedByS3();
+                case AthenaHiveDdl.Optimize optimize -> throw maintainedByS3();
+                default -> throw new AwsException("InvalidRequestException", "Catalog " + contextCatalog
+                        + " holds Iceberg tables only; this statement is not supported in it", 400);
+            };
+        }
         return switch (statement) {
             case AthenaHiveDdl.CreateTable create -> {
                 createTable(database, create);
@@ -73,7 +100,24 @@ final class AthenaHiveDdlExecutor {
                 yield List.of();
             }
             case AthenaHiveDdl.ShowPartitions show -> partitionNames(database, existingTable(database, table));
+            case AthenaHiveDdl.CreateIcebergTable create -> {
+                icebergStatements.createTable(database, create);
+                yield List.of();
+            }
+            case AthenaHiveDdl.Vacuum vacuum ->
+                    throw new IllegalStateException("VACUUM runs on the query engine, not against the catalog alone");
+            case AthenaHiveDdl.Optimize optimize ->
+                    throw new AwsException("InvalidRequestException", "OPTIMIZE is not supported yet", 400);
         };
+    }
+
+    /**
+     * Athena's refusal of {@code OPTIMIZE} and {@code VACUUM} on S3 Tables, whose compaction and snapshots S3
+     * manages.
+     */
+    private static AwsException maintainedByS3() {
+        return new AwsException("InvalidRequestException",
+                "OPTIMIZE and VACUUM are not supported on S3 Tables: S3 manages their compaction and snapshots", 400);
     }
 
     private void createTable(String database, AthenaHiveDdl.CreateTable create) {
@@ -106,37 +150,7 @@ final class AthenaHiveDdlExecutor {
         }
         if (GlueTableResolver.isIcebergTable(found)) {
             // Athena treats an Iceberg table as managed: dropping it removes its data too.
-            deleteObjectsUnder(found.getStorageDescriptor() != null ? found.getStorageDescriptor().getLocation() : null);
-        }
-    }
-
-    private void deleteObjectsUnder(String location) {
-        S3Prefix prefix = S3Prefix.of(location);
-        if (prefix == null) {
-            return;
-        }
-        String continuation = null;
-        do {
-            S3Service.ListObjectsResult page = s3Service.listObjectsWithPrefixes(prefix.bucket(), prefix.prefix(), null,
-                    LIST_PAGE_SIZE, continuation, null);
-            for (S3Object object : page.objects()) {
-                s3Service.deleteObject(prefix.bucket(), object.getKey());
-            }
-            continuation = page.isTruncated() ? page.nextContinuationToken() : null;
-        } while (continuation != null);
-    }
-
-    /** An {@code s3://bucket/prefix/} location split into its bucket and its key prefix, ending in a slash. */
-    private record S3Prefix(String bucket, String prefix) {
-        static S3Prefix of(String location) {
-            if (location == null || !location.startsWith("s3://")) {
-                return null;
-            }
-            String withoutScheme = location.substring("s3://".length());
-            int slash = withoutScheme.indexOf('/');
-            String bucket = slash < 0 ? withoutScheme : withoutScheme.substring(0, slash);
-            String prefix = slash < 0 ? "" : withoutScheme.substring(slash + 1);
-            return new S3Prefix(bucket, prefix.isEmpty() || prefix.endsWith("/") ? prefix : prefix + "/");
+            icebergStatements.purge(found);
         }
     }
 
@@ -164,7 +178,8 @@ final class AthenaHiveDdlExecutor {
     /** Adds every complete {@code key=value/...} folder path under the table's location that has no partition yet. */
     private void repair(String database, Table table) {
         List<Column> keys = partitionKeys(table);
-        S3Prefix root = S3Prefix.of(table.getStorageDescriptor() != null ? table.getStorageDescriptor().getLocation() : null);
+        TableLocation root = TableLocation.of(table.getStorageDescriptor() != null
+                ? table.getStorageDescriptor().getLocation() : null);
         if (keys.isEmpty() || root == null) {
             return;
         }
@@ -173,20 +188,14 @@ final class AthenaHiveDdlExecutor {
                 .collect(Collectors.toCollection(HashSet::new));
         // Each new partition's values and the folder they were found in, kept as spelled in S3.
         Map<List<String>, String> found = new LinkedHashMap<>();
-        String continuation = null;
-        do {
-            S3Service.ListObjectsResult page = s3Service.listObjectsWithPrefixes(root.bucket(), root.prefix(), null,
-                    LIST_PAGE_SIZE, continuation, null);
-            for (S3Object object : page.objects()) {
-                String relative = object.getKey().substring(root.prefix().length());
-                List<String> values = hivePartitionValues(relative, keys);
-                if (values != null && !existing.contains(values)) {
-                    found.putIfAbsent(values, "s3://" + root.bucket() + "/" + root.prefix()
-                            + String.join("/", Arrays.asList(relative.split("/", -1)).subList(0, keys.size())) + "/");
-                }
+        root.forEachObject(s3Service, object -> {
+            String relative = object.getKey().substring(root.prefix().length());
+            List<String> values = hivePartitionValues(relative, keys);
+            if (values != null && !existing.contains(values)) {
+                found.putIfAbsent(values, "s3://" + root.bucket() + "/" + root.prefix()
+                        + String.join("/", Arrays.asList(relative.split("/", -1)).subList(0, keys.size())) + "/");
             }
-            continuation = page.isTruncated() ? page.nextContinuationToken() : null;
-        } while (continuation != null);
+        });
         found.forEach((values, location) -> createPartition(database, table, values, location, true));
     }
 
@@ -266,7 +275,7 @@ final class AthenaHiveDdlExecutor {
     }
 
     /** Athena's location for a partition added without one: {@code <table location>/key=value/...}. */
-    private static String defaultLocation(Table table, List<String> values) {
+    static String defaultLocation(Table table, List<String> values) {
         String location = table.getStorageDescriptor() != null && table.getStorageDescriptor().getLocation() != null
                 ? table.getStorageDescriptor().getLocation() : "";
         StringBuilder path = new StringBuilder(location.endsWith("/") ? location : location + "/");

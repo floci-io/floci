@@ -180,6 +180,12 @@ class EmrClusterStorageTest {
         // Only a core node holds a DataNode, and with one the primary node holds neither.
         verify(spec).withEnv("FLOCI_NODE_CORE", "1");
         verify(spec).withEnv("FLOCI_NODE_WORKERS", "1");
+        // Each node's files say which it is, before its daemons start.
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "MASTER");
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "CORE");
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "TASK");
+        verify(spec, times(3)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.NODE_INFO + "\n")));
         // What the primary node has of YARN too, and Floci in reach.
         verify(spec, times(3)).withEnv("FLOCI_YARN_MEMORY_MB", "4096");
         verify(spec, times(3)).withEnv("FLOCI_YARN_VCORES", "4");
@@ -247,6 +253,26 @@ class EmrClusterStorageTest {
         verify(spec, never()).withName(coreName);
         verify(spec, never()).withName(taskName);
         verify(lifecycle, never()).removeIfExistsStrict(coreName);
+    }
+
+    @Test
+    void aNodeWithAnImageOfItsOwnRunsFromItAndStartsAgainWhereItRunsAnother() {
+        nodesStart(coreName, taskName);
+        runningNodes(node(coreName, "running", "sha256:core-node", CORE_HOST, true),
+                node(taskName, "running", IMAGE, TASK_HOST, false));
+        // Each from the image its own bootstrap left: the task node's is new, as a resize added it again.
+        ClusterStorage.Yarn ownImages = new ClusterStorage.Yarn(4096, 4).onNodes(List.of(
+                new ClusterStorage.Node("1-1", CORE_HOST, true, "sha256:core-node"),
+                new ClusterStorage.Node("2-1", TASK_HOST, false, "sha256:task-node")), 1, "s3://logs/j-1/containers/");
+        when(containerBuilder.newContainer("sha256:task-node")).thenReturn(spec);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> ownImages,
+                NOT_STOPPED);
+
+        verify(spec, never()).withName(coreName);
+        verify(spec).withName(taskName);
+        verify(containerBuilder).newContainer("sha256:task-node");
+        verify(containerBuilder, never()).newContainer("sha256:core-node");
     }
 
     @Test
@@ -649,6 +675,30 @@ class EmrClusterStorageTest {
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).createAndStart(any());
         order.verify(lifecycle).removeVolume(coreName);
+    }
+
+    @Test
+    void aCoreNodeThatStopsWhileItLeavesStartsAgainFromTheImageItRan() {
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofMinutes(30).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        // It ran from the image its own bootstrap left.
+        runningNodes(node(coreName, "running", "sha256:core-node", CORE_HOST, true),
+                node(taskName, "running", IMAGE, TASK_HOST, false));
+        when(containerBuilder.newContainer("sha256:core-node")).thenReturn(spec);
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        when(lifecycle.probeContainer(coreName)).thenReturn(ContainerLiveness.NOT_RUNNING, ContainerLiveness.RUNNING);
+        clearInvocations(spec, lifecycle, containerBuilder);
+        ClusterStorage.Yarn taskOnly = new ClusterStorage.Yarn(4096, 4).onNodes(List.of(TASK_NODE), 1, null);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> ticking.resize("j-1", () -> taskOnly));
+
+        verify(containerBuilder).newContainer("sha256:core-node");
+        verify(spec).withName(coreName);
     }
 
     @Test
@@ -1584,7 +1634,8 @@ class EmrClusterStorageTest {
         // A table's location in S3 is the metastore's to look at, with S3A, so it too leaves Hive one SDK first, as
         // root, which owns Hive's lib folder.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
-                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.HIVE_ONE_SDK + "\n")));
+                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.NODE_INFO + "\n"
+                        + EmrServerlessSparkRunner.HIVE_ONE_SDK + "\n")));
 
         // The session goes with the container.
         storage.remove("j-1");

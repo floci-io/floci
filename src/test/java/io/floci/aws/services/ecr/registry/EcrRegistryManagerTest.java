@@ -1083,4 +1083,17 @@ class EcrRegistryManagerTest {
         }
         assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(null));
     }
+
+    @Test
+    void anImageInAnEcrRepositoryNamesItsRepositoryAndTheTagOrDigestItAsksFor() {
+        String digest = "sha256:" + "d".repeat(64);
+        assertEquals(Optional.of(new EcrRegistryManager.EcrImage("123456789012", "us-east-1", "spark/custom", "7.5.0",
+                null)), EcrRegistryManager.ecrImage("123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0"));
+        assertEquals(Optional.of(new EcrRegistryManager.EcrImage("000000000000", "us-west-2", "spark", null, digest)),
+                EcrRegistryManager.ecrImage("localhost:4566/000000000000/us-west-2/spark@" + digest));
+        // Neither a tag nor a digest asks for latest.
+        assertEquals(Optional.of(new EcrRegistryManager.EcrImage("000000000000", "eu-west-1", "spark", "latest",
+                null)), EcrRegistryManager.ecrImage("000000000000.dkr.ecr.eu-west-1.localhost:4566/spark"));
+        assertEquals(Optional.empty(), EcrRegistryManager.ecrImage("python:3.12"));
+    }
 }

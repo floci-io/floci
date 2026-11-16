@@ -180,19 +180,19 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 
 | Operation | Notes |
 |---|---|
-| `AttachLoadBalancerTargetGroups` | Attaches ELB v2 target group ARNs. The reconciler registers each instance with them as it comes into service; instances already in service stay unregistered, which AWS registers. An EKS nodegroup's group registers its node at once |
-| `DetachLoadBalancerTargetGroups` | Detaches target groups. The group's instances stay registered with them, which AWS deregisters; an EKS nodegroup's group deregisters its node at once |
+| `AttachLoadBalancerTargetGroups` | Attaches ELB v2 target group ARNs and registers the group's `InService` instances with the ones it adds, as AWS does; the reconciler registers each later instance as it comes into service |
+| `DetachLoadBalancerTargetGroups` | Detaches target groups and deregisters the group's instances from them, as AWS does; a target group already deleted is detached all the same. An EKS nodegroup's node stays registered with a target group another nodegroup's group still has attached |
 | `DescribeLoadBalancerTargetGroups` | Lists target groups attached to a group |
-| `AttachLoadBalancers` | Classic ELB attachment (stored; no ELB v1 routing) |
-| `DetachLoadBalancers` | Classic ELB detachment |
+| `AttachLoadBalancers` | Attaches Classic Load Balancers by name and registers the group's `InService` instances with the ones it adds, as AWS does; the reconciler registers each later instance as it comes into service. Floci runs no Classic data plane ([Classic ELB](elb-classic.md)) |
+| `DetachLoadBalancers` | Detaches Classic Load Balancers and deregisters the group's instances from them, as AWS does; a load balancer already deleted is detached all the same. An EKS nodegroup's node stays registered with a load balancer another nodegroup's group still has attached |
 | `DescribeLoadBalancers` | Lists classic ELBs attached to a group |
 
 ### Traffic Sources
 
 | Operation | Notes |
 |---|---|
-| `AttachTrafficSources` | Unified elb/elbv2/vpc-lattice attachment API; stored per identifier with its type. Instances are not registered with an `elbv2` source, which AWS does, except an EKS nodegroup's node, registered at once |
-| `DetachTrafficSources` | Removes a traffic source by identifier; an EKS nodegroup's group deregisters its node from an `elbv2` source at once |
+| `AttachTrafficSources` | Unified elb/elbv2/vpc-lattice attachment API; stored per identifier with its type. The group's `InService` instances are registered with an `elbv2` or `elb` source it adds, as with a target group or a Classic Load Balancer |
+| `DetachTrafficSources` | Removes a traffic source by identifier, deregistering the group's instances from an `elbv2` or `elb` source |
 | `DescribeTrafficSources` | Lists attached sources, optionally filtered by type; every source reports `InService` |
 
 ### Lifecycle Hooks

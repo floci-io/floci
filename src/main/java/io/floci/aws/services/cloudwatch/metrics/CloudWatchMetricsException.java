@@ -31,6 +31,11 @@ class CloudWatchMetricsException extends AwsException {
         return new CloudWatchMetricsException("InvalidParameterValue", "InvalidParameterValueException", message, 400);
     }
 
+    static CloudWatchMetricsException invalidParameterCombination(String message) {
+        return new CloudWatchMetricsException("InvalidParameterCombination", "InvalidParameterCombinationException",
+                message, 400);
+    }
+
     @Override
     public String jsonType() {
         return jsonType;

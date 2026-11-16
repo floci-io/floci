@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.config.JsonPathConfig;
@@ -116,9 +117,9 @@ class EcsDescribeServicesIntegrationTest {
         Response created = call("CreateService", """
                 {"cluster":"blue-running-cluster","serviceName":"blue-running-service",
                  "taskDefinition":"blue-running-task","desiredCount":1,"launchType":"FARGATE",
-                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-default-us-east-1-a"]}},
+                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["%s"]}},
                  "deploymentController":{"type":"CODE_DEPLOY"}}
-                """);
+                """.formatted(Ec2Service.defaultSubnetId("us-east-1", "a")));
         String primaryId = created.path("service.taskSets[0].id");
         await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
                 describe("blue-running-cluster", "blue-running-service").then()
@@ -294,6 +295,46 @@ class EcsDescribeServicesIntegrationTest {
                 .body("failures", hasSize(1))
                 .body("failures[0].arn", equalTo(arn))
                 .body("failures[0].reason", equalTo("MISSING"));
+    }
+
+    @Test
+    void sameNamedServicesInTwoClustersEachResolveOnlyInTheirOwnCluster() {
+        // ECS services are cluster and Region specific (botocore ServiceNotFoundException docs):
+        // a name or an ARN must never resolve to a service in another cluster.
+        seedClusterAndTaskDef("dep-cluster-30a", "dep-td-30");
+        call("CreateCluster", "{\"clusterName\":\"dep-cluster-30b\"}");
+        String arnA = call("CreateService", "{\"cluster\":\"dep-cluster-30a\",\"serviceName\":\"dep-svc-30\","
+                + "\"taskDefinition\":\"dep-td-30\",\"desiredCount\":0}").path("service.serviceArn");
+        String arnB = call("CreateService", "{\"cluster\":\"dep-cluster-30b\",\"serviceName\":\"dep-svc-30\","
+                + "\"taskDefinition\":\"dep-td-30\",\"desiredCount\":0}").path("service.serviceArn");
+        try {
+            describe("dep-cluster-30a", "dep-svc-30").then()
+                    .body("services", hasSize(1))
+                    .body("services[0].serviceArn", equalTo(arnA));
+            describe("dep-cluster-30b", "dep-svc-30").then()
+                    .body("services", hasSize(1))
+                    .body("services[0].serviceArn", equalTo(arnB));
+            describe("dep-cluster-30a", arnA).then()
+                    .body("services", hasSize(1))
+                    .body("services[0].serviceArn", equalTo(arnA));
+
+            describe("dep-cluster-30a", arnB).then()
+                    .body("services", hasSize(0))
+                    .body("failures", hasSize(1))
+                    .body("failures[0].arn", equalTo(arnB))
+                    .body("failures[0].reason", equalTo("MISSING"));
+
+            given().contentType(CT).header("X-Amz-Target", TARGET + "DescribeTaskSets")
+                    .body("{\"cluster\":\"dep-cluster-30a\",\"service\":\"" + arnB + "\"}")
+                    .when().post("/")
+                    .then().body("__type", containsString("ServiceNotFoundException"));
+        } finally {
+            call("DeleteService", "{\"cluster\":\"dep-cluster-30a\",\"service\":\"dep-svc-30\",\"force\":true}");
+            call("DeleteService", "{\"cluster\":\"dep-cluster-30b\",\"service\":\"dep-svc-30\",\"force\":true}");
+            call("DeleteCluster", "{\"cluster\":\"dep-cluster-30a\"}");
+            call("DeleteCluster", "{\"cluster\":\"dep-cluster-30b\"}");
+            call("DeregisterTaskDefinition", "{\"taskDefinition\":\"dep-td-30:1\"}");
+        }
     }
 
     @Test

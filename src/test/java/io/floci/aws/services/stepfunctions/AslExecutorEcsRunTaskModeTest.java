@@ -3,6 +3,7 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.container.HostVolumePolicy;
@@ -33,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -120,6 +122,19 @@ class AslExecutorEcsRunTaskModeTest {
     }
 
     @Test
+    void syncTwoIsRefusedBeforeAnyTaskIsLaunched() {
+        launchOneTask();
+
+        Execution execution = run("arn:aws:states:::ecs:runTask.sync:2",
+                "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.TaskFailed", execution.getError());
+        assertEquals("Unsupported resource: arn:aws:states:::ecs:runTask.sync:2", execution.getCause());
+        verify(ecsService, never()).runTask(any(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void networkConfigurationIsThreadedThroughToRunTask() throws Exception {
         when(ecsService.runTask(any(), any(), anyInt(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new ArrayList<>());
@@ -177,6 +192,48 @@ class AslExecutorEcsRunTaskModeTest {
         verify(ecsService).stopTask(any(), eq(task("RUNNING").getTaskArn()),
                 eq("The Task state in AWS Step Functions execution [" + execution.getExecutionArn()
                         + "] which was managing this resource was aborted"), eq(REGION));
+    }
+
+    @Test
+    void syncStillTimesOutWhenTheTaskItStopsIsAlreadyGone() throws Exception {
+        launchOneTask();
+        when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("RUNNING")));
+        when(ecsService.stopTask(any(), any(), any(), any()))
+                .thenThrow(new AwsException("InvalidParameterException", "Task not found: task", 400));
+
+        Execution execution = runDefinition("""
+                {
+                  "StartAt": "RunTask",
+                  "States": {
+                    "RunTask": { "Type": "Task", "Resource": "arn:aws:states:::ecs:runTask.sync",
+                                 "TimeoutSeconds": 1, "End": true }
+                  }
+                }
+                """, "{\"TaskDefinition\":\"my-task-def\"}");
+
+        // Best effort: a task that is gone leaves the state ending as it was.
+        assertEquals("States.Timeout", execution.getError());
+    }
+
+    @Test
+    void anotherRefusalStoppingTheTaskFailsTheStateWithIt() throws Exception {
+        launchOneTask();
+        when(ecsService.describeTasks(any(), any(), any())).thenReturn(List.of(task("RUNNING")));
+        when(ecsService.stopTask(any(), any(), any(), any()))
+                .thenThrow(new AwsException("ServerException", "The ECS service failed", 500));
+
+        Execution execution = runDefinition("""
+                {
+                  "StartAt": "RunTask",
+                  "States": {
+                    "RunTask": { "Type": "Task", "Resource": "arn:aws:states:::ecs:runTask.sync",
+                                 "TimeoutSeconds": 1, "End": true }
+                  }
+                }
+                """, "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("ECS.ServerException", execution.getError());
+        assertEquals("The ECS service failed", execution.getCause());
     }
 
     /**

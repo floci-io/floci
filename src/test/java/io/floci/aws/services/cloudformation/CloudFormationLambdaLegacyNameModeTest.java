@@ -7,16 +7,14 @@ import io.floci.aws.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.floci.aws.services.cloudformation.provisioners.LambdaCfnProvisioner;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.LambdaFunction;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
-import java.util.logging.Handler;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -147,30 +145,7 @@ class CloudFormationLambdaLegacyNameModeTest {
 
     /** Collects the messages LambdaCfnProvisioner logs while {@code action} runs. */
     private List<String> provisionerLogMessages(Runnable action) {
-        Logger logger =
-                Logger.getLogger(LambdaCfnProvisioner.class.getName());
-        List<String> messages = new CopyOnWriteArrayList<>();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                messages.add(logRecord.getMessage());
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        try {
-            action.run();
-        } finally {
-            logger.removeHandler(handler);
-        }
-        return messages;
+        return LogCapture.capture(LambdaCfnProvisioner.class, action).stream().map(LogRecord::getMessage).toList();
     }
 
     private StackResource provision(String propertiesJson, String existingPhysicalId,

@@ -11,6 +11,9 @@ import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecr.model.ImageDetail;
+import io.floci.aws.services.ecr.model.ImageIdentifier;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.ApplicationSummary;
@@ -21,6 +24,7 @@ import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -31,6 +35,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -62,6 +67,13 @@ public class EmrServerlessService {
     private static final String RESERVED_PREFIX = "aws:";
     private static final Pattern TAG_TEXT = Pattern.compile("[A-Za-z0-9 /_.:=+@-]*");
     // ResourceArn's resource: an application, or one of its job runs or sessions.
+    private static final Logger LOG = Logger.getLogger(EmrServerlessService.class);
+    // Floci's ECR's answers for an image it does not hold, and, as ServerException, for image queries with no Docker
+    // daemon to serve its registry.
+    private static final Set<String> UNREADABLE_IMAGE_CODES =
+            Set.of("RepositoryNotFoundException", "ImageNotFoundException", "ServerException");
+    // A release label's major and minor versions.
+    private static final Pattern RELEASE_VERSION = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})(?:\\..*)?");
     private static final Pattern RESOURCE =
             Pattern.compile("/applications/([0-9a-zA-Z]+)(?:/(jobruns|sessions)/([0-9a-zA-Z]+))?");
     private static final List<String> APPLICATION_STATES =
@@ -80,6 +92,10 @@ public class EmrServerlessService {
     
     @Inject
     RequestContext requestContext;
+
+    // Floci's ECR, which a custom image's digest is read from as an application starts; none in a test without it.
+    @Inject
+    EcrService ecrService;
 
     @Inject
     public EmrServerlessService(EmulatorConfig config, StorageFactory storageFactory,
@@ -251,6 +267,7 @@ public class EmrServerlessService {
         if (request.getJobLevelCostAllocationConfiguration() != null) {
             app.setJobLevelCostAllocationConfiguration(request.getJobLevelCostAllocationConfiguration());
         }
+        unpinImagesResolvedPerWorkload(app);
 
         app.setUpdatedAt(now());
         storage.put(applicationId, app);
@@ -297,9 +314,159 @@ public class EmrServerlessService {
         if ("TERMINATED".equals(state)) {
             throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
+        pinImages(app);
         app.setState("STARTED");
         app.setUpdatedAt(now());
         storage.put(applicationId, app);
+    }
+
+    /**
+     * Resolves, as the application starts, each custom image it resolves then: "Custom images are resolved to a digest
+     * at application start; that digest is used for all jobs until the application restarts" (EMR Serverless user
+     * guide, "Image digest resolution behavior"). Its image configuration gets the digest as its
+     * resolvedImageDigest, which "doesn't exist until an application has started", and its runs take that image
+     * until it starts again, an update meanwhile notwithstanding unless it turns the image to resolution per
+     * workload. An image outside ECR, in another account's repository, or one Floci's ECR does not hold, has no digest
+     * read, and is resolved for each run.
+     */
+    private void pinImages(Application app) {
+        Map<String, ImageConfiguration> images = new LinkedHashMap<>();
+        images.put("", app.getImageConfiguration());
+        if (app.getWorkerTypeSpecifications() != null) {
+            app.getWorkerTypeSpecifications().forEach((workerType, specification) ->
+                    images.put(workerType, specification != null ? specification.getImageConfiguration() : null));
+        }
+        // Every digest is read before any is written, so an answer that fails the start leaves the application as it
+        // was.
+        Map<String, String> digests = new LinkedHashMap<>();
+        images.forEach((key, image) -> {
+            String digest = startDigest(app, image);
+            if (digest != null) {
+                digests.put(key, digest);
+            }
+        });
+        Map<String, ImageConfiguration> pinned = new LinkedHashMap<>();
+        images.forEach((key, image) -> {
+            if (image == null) {
+                return;
+            }
+            // A digest from an earlier start is not this start's: one read now replaces it, and none read leaves
+            // none, as the runs then resolve the image themselves.
+            String digest = digests.get(key);
+            image.setResolvedImageDigest(digest);
+            if (digest != null) {
+                ImageConfiguration resolved = new ImageConfiguration();
+                resolved.setImageUri(image.getImageUri());
+                resolved.setResolvedImageDigest(digest);
+                pinned.put(key, resolved);
+            }
+        });
+        app.setPinnedImages(pinned.isEmpty() ? null : pinned);
+    }
+
+    // The digest an image configuration resolves as its application starts, or null where it has none to read then.
+    private String startDigest(Application app, ImageConfiguration image) {
+        if (image == null || image.getImageUri() == null || !applicationLevelDigests(app.getReleaseLabel(), image)) {
+            return null;
+        }
+        return ecrDigest(image.getImageUri(), accountOf(app));
+    }
+
+    /**
+     * Whether a custom image is resolved as its application starts: its image configuration's
+     * applicationLevelDigestResolution, else, as the user guide's table gives the default, true for "EMR 7.13 and
+     * earlier" and false for "EMR 7.14 and later". A release label not of the emr-x.y form is taken as current.
+     */
+    static boolean applicationLevelDigests(String releaseLabel, ImageConfiguration image) {
+        if (image.getApplicationLevelDigestResolution() != null) {
+            return image.getApplicationLevelDigestResolution();
+        }
+        Matcher version = RELEASE_VERSION.matcher(releaseLabel == null ? "" : releaseLabel);
+        if (!version.matches()) {
+            return false;
+        }
+        int major = Integer.parseInt(version.group(1));
+        int minor = Integer.parseInt(version.group(2));
+        return major < 7 || major == 7 && minor <= 13;
+    }
+
+    /**
+     * Each run resolves its image again where an update turns a STARTED application's image to resolution per
+     * workload, or removes it: the pin of an image the application still resolves at its start stays until it starts
+     * again, "that digest is used for all jobs until the application restarts", and any other ends now.
+     */
+    private static void unpinImagesResolvedPerWorkload(Application app) {
+        Map<String, ImageConfiguration> pinned = app.getPinnedImages();
+        if (pinned == null) {
+            return;
+        }
+        Map<String, ImageConfiguration> kept = new LinkedHashMap<>(pinned);
+        kept.keySet().removeIf(key -> {
+            ImageConfiguration current = imageConfigurationOf(app, key);
+            return current == null || current.getImageUri() == null
+                    || !applicationLevelDigests(app.getReleaseLabel(), current);
+        });
+        app.setPinnedImages(kept.isEmpty() ? null : kept);
+    }
+
+    // The application's image configuration for a pin's key: its own for "", else its worker type's.
+    private static ImageConfiguration imageConfigurationOf(Application app, String key) {
+        if (key.isEmpty()) {
+            return app.getImageConfiguration();
+        }
+        WorkerTypeSpecification specification = app.getWorkerTypeSpecifications() == null ? null
+                : app.getWorkerTypeSpecifications().get(key);
+        return specification == null ? null : specification.getImageConfiguration();
+    }
+
+    private static String accountOf(Application app) {
+        return AwsArnUtils.parse(app.getArn()).accountId();
+    }
+
+    /**
+     * The manifest digest of an image in one of the application's account's ECR repositories, the one its URI names
+     * where it names one; null for an image outside ECR, one in another account's repository, which Floci does not
+     * check the application may pull, or one Floci's ECR does not hold or cannot read without Docker. Each run then
+     * resolves the image itself. Any other answer from ECR fails the start.
+     */
+    private String ecrDigest(String imageUri, String accountId) {
+        Optional<EcrRegistryManager.EcrImage> image = EcrRegistryManager.ecrImage(imageUri);
+        if (image.isEmpty() || !accountId.equals(image.get().registryId())) {
+            return null;
+        }
+        if (image.get().digest() != null) {
+            return image.get().digest();
+        }
+        if (ecrService == null) {
+            return null;
+        }
+        try {
+            List<ImageDetail> details = ecrService.describeImages(image.get().repository(),
+                    List.of(new ImageIdentifier(image.get().tag(), null)), image.get().registryId(),
+                    image.get().region()).imageDetails();
+            return details.isEmpty() ? null : details.getFirst().getImageDigest();
+        } catch (AwsException e) {
+            if (!UNREADABLE_IMAGE_CODES.contains(e.getErrorCode())) {
+                throw new AwsException("InternalServerException", "The custom image " + imageUri
+                        + " could not be resolved: " + e.getMessage(), 500);
+            }
+            LOG.infov("The custom image {0} has no digest in Floci's ECR ({1}), so each run resolves it: {2}",
+                    imageUri, e.getErrorCode(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static void clearResolvedDigests(Application app) {
+        if (app.getImageConfiguration() != null) {
+            app.getImageConfiguration().setResolvedImageDigest(null);
+        }
+        if (app.getWorkerTypeSpecifications() != null) {
+            for (WorkerTypeSpecification specification : app.getWorkerTypeSpecifications().values()) {
+                if (specification != null && specification.getImageConfiguration() != null) {
+                    specification.getImageConfiguration().setResolvedImageDigest(null);
+                }
+            }
+        }
     }
 
     public synchronized void stopApplication(String applicationId) {
@@ -312,6 +479,9 @@ public class EmrServerlessService {
             throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
         app.setState("STOPPED");
+        // Its images are resolved again as it starts again.
+        app.setPinnedImages(null);
+        clearResolvedDigests(app);
         app.setUpdatedAt(now());
         storage.put(applicationId, app);
     }

@@ -305,6 +305,8 @@ floci:
         flush-interval-ms: 5000
       emrserverless:
         flush-interval-ms: 5000
+      emrcontainers:
+        flush-interval-ms: 5000
       lakeformation:
         flush-interval-ms: 5000
 
@@ -336,6 +338,17 @@ floci:
     # Combine with tls.enabled so clients that hardcode https:// are served on port 443
     # with a certificate covering those suffixes and their regional wildcards.
     spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
+
+    # When Floci runs natively: a resolver on 127.0.0.1:<port> answering the same names as the
+    # embedded DNS server (Cloud Map <service>.<namespace>, Route 53 private zones), for the host's
+    # own resolver to point at; other names are refused. Unset starts no listener. In Docker,
+    # publish port 53/udp instead.
+    # host-port: 5354                             # FLOCI_DNS_HOST_PORT
+
+    # When Floci runs natively on a host with a docker0 bridge: also listen on that bridge's
+    # address, port 53, and give it to the containers Floci launches as their resolver. Port 53
+    # needs root or CAP_NET_BIND_SERVICE; without it Floci logs how to grant it.
+    bridge-listener-enabled: true                 # FLOCI_DNS_BRIDGE_LISTENER_ENABLED
 
   auth:
     validate-signatures: false
@@ -382,17 +395,18 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
-    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for every Docker call Floci makes. Each
-    # live Lambda container holds 1 connection for its whole lifetime (its exit watcher) plus one
-    # per extension; log follow uses the streaming pool below. Past the limit,
-    # create/start/stop/remove wait for a free connection and the emulator stalls. 1024 covers
-    # the 500 containers the runtime API port range allows. Keep in step with the @WithDefault on
-    # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
+    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls, plus
+    # CodeBuild phase execs, EKS audit followers and ECS Exec sessions. Past the limit,
+    # create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
+    # with the @WithDefault on EmulatorConfig.DockerConfig.maxConnections: a value set here WINS
+    # over the annotation.
     max-connections: 1024
-    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for container log-follow streams, so
-    # they never starve create/start/stop/remove. Keep in step with the @WithDefault on
+    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for streams that last a container's
+    # lifetime, so they never starve create/start/stop/remove. Each live Lambda container holds 2
+    # (log follow and exit watcher) plus one per extension; 2048 covers the 500 containers the
+    # runtime API port range allows with two extensions each. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
-    streaming-max-connections: 512
+    streaming-max-connections: 2048
     # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
     # connection before failing, for both pools. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
@@ -511,6 +525,11 @@ floci:
       # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
                            # without creating it first. Unset means the account has no alias,
                            # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
+      partner-permission-boundaries-path: ${FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH:}
+                           # A JSON object of partner account id to an object of boundary ARN to
+                           # policy document, standing in for the permissions boundaries AWS
+                           # registers for a delegation partner by email. Unset registers nothing:
+                           # a request reports no restriction and a delegated role is uncapped.
     msk:
       enabled: true
       mock: false
@@ -910,6 +929,12 @@ floci:
       mock: false
       backend-keep-alive: true
       backend-keep-alive-timeout-seconds: 60
+
+      alb-zone-rule: ${FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE:aws}
+      # Per-region entries override this global setting, including an explicit aws reset.
+      # alb-zone-rule-by-region:
+      #   ap-northeast-3: allow-single-zone
+      #   us-east-1: allow-single-zone
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -1061,6 +1086,9 @@ floci:
       # Remove the drivers and executors a previous run of this deployment left on the daemon before
       # the first job run starts. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
+    emrcontainers:
+      enabled: true
+      job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
     ssoadmin:
       enabled: true
     ssooidc:

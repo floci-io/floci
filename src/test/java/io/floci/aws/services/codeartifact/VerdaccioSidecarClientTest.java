@@ -374,6 +374,51 @@ class VerdaccioSidecarClientTest {
                 null, "demo-pkg"));
     }
 
+    @Test
+    void listPackageVersionDependenciesReadsAllFourDependencyMapsFromTheStoredVersionDoc() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        String body = "{\"versions\":{\"1.0.0\":{"
+                + "\"dependencies\":{\"@types/node\":\"^18.0.0\"},"
+                + "\"devDependencies\":{\"jest\":\"^29.0.0\"},"
+                + "\"peerDependencies\":{\"react\":\">=16\"},"
+                + "\"optionalDependencies\":{\"fsevents\":\"^2.0.0\"}"
+                + "}}}";
+        backend.createContext("/demo-pkg", exchange -> {
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "npm-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0");
+
+        assertEquals(4, dependencies.size());
+        assertTrue(dependencies.contains(
+                new CodeArtifactService.PackageDependency("types", "node", "regular", "^18.0.0")));
+        assertTrue(dependencies.contains(new CodeArtifactService.PackageDependency(null, "jest", "dev", "^29.0.0")));
+        assertTrue(dependencies.contains(new CodeArtifactService.PackageDependency(null, "react", "peer", ">=16")));
+        assertTrue(dependencies.contains(
+                new CodeArtifactService.PackageDependency(null, "fsevents", "optional", "^2.0.0")));
+    }
+
+    @Test
+    void listPackageVersionDependenciesIsEmptyWhenThePackageDoesNotExist() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        backend.createContext("/demo-pkg", exchange -> {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "npm-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0");
+
+        assertTrue(dependencies.isEmpty());
+    }
+
     private void respondWithMetadata(String packagePath, String version, String tarballPath) {
         String body = "{\"versions\":{\"" + version + "\":{\"dist\":{\"tarball\":\"http://ignored" + tarballPath
                 + "\"}}}}";

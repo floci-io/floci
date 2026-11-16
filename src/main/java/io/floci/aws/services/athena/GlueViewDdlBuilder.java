@@ -4,14 +4,19 @@ import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.GlueTableResolver;
 import io.floci.aws.services.glue.PartitionProjection;
 import io.floci.aws.services.glue.model.Database;
+import io.floci.aws.services.glue.model.Partition;
 import io.floci.aws.services.glue.model.Table;
+import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.NavigableSet;
 
 @ApplicationScoped
 public class GlueViewDdlBuilder {
@@ -26,10 +31,12 @@ public class GlueViewDdlBuilder {
     private static final String ICEBERG_EXTENSION_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
 
     private final GlueService glueService;
+    private final S3Service s3Service;
 
     @Inject
-    public GlueViewDdlBuilder(GlueService glueService) {
+    public GlueViewDdlBuilder(GlueService glueService, S3Service s3Service) {
         this.glueService = glueService;
+        this.s3Service = s3Service;
     }
 
     public String build(String contextDatabase) {
@@ -45,6 +52,8 @@ public class GlueViewDdlBuilder {
      */
     public String build(String contextDatabase, String query) {
         ViewFilter wanted = viewFilter(query);
+        // A table read through its registered partitions is built once for its qualified and unqualified views.
+        Map<String, String> partitionReads = new HashMap<>();
         StringBuilder sb = new StringBuilder();
         boolean usesIceberg = false;
         boolean contextDbHandled = false;
@@ -61,9 +70,9 @@ public class GlueViewDdlBuilder {
                 sb.append("CREATE SCHEMA IF NOT EXISTS ").append(quote(schema)).append(";\n");
                 try {
                     List<Table> tables = glueService.getTables(schema);
-                    usesIceberg |= appendViews(sb, schema, tables, true, wanted);
+                    usesIceberg |= appendViews(sb, schema, tables, true, wanted, partitionReads);
                     if (schema.equals(contextDatabase)) {
-                        usesIceberg |= appendViews(sb, schema, tables, false, wanted);
+                        usesIceberg |= appendViews(sb, schema, tables, false, wanted, partitionReads);
                         contextDbHandled = true;
                     }
                 } catch (Exception e) {
@@ -75,7 +84,7 @@ public class GlueViewDdlBuilder {
         if (!contextDbHandled && contextDatabase != null && !contextDatabase.isBlank()) {
             try {
                 List<Table> tables = glueService.getTables(contextDatabase);
-                usesIceberg |= appendViews(sb, contextDatabase, tables, false, wanted);
+                usesIceberg |= appendViews(sb, contextDatabase, tables, false, wanted, partitionReads);
             } catch (Exception e) {
                 LOG.debugv("Could not fetch tables for context database {0}: {1}", contextDatabase, e.getMessage());
             }
@@ -90,7 +99,7 @@ public class GlueViewDdlBuilder {
 
     /** @return true if at least one of the appended views reads an Iceberg table. */
     private boolean appendViews(StringBuilder sb, String schemaOrNull, List<Table> tables, boolean qualified,
-                                ViewFilter wanted) {
+                                ViewFilter wanted, Map<String, String> partitionReads) {
         if (tables == null) {
             return false;
         }
@@ -129,9 +138,20 @@ public class GlueViewDdlBuilder {
                         && !GlueTableResolver.icebergMetadataLocation(t).isBlank()) {
                     fromClause = GlueTableResolver.icebergReadExpression(GlueTableResolver.icebergMetadataLocation(t));
                     usesIceberg = true;
+                } else if (GlueTableResolver.readsRegisteredPartitions(t)) {
+                    sb.append("CREATE OR REPLACE VIEW ").append(target).append(" AS ")
+                            .append(registeredPartitionsSelect(schemaOrNull, t, partitionReads)).append(";\n");
+                    continue;
                 } else {
                     String readFn = GlueTableResolver.inferReadFunction(t);
                     String readPath = GlueTableResolver.readPath(t, normalizedLocation);
+                    // Reading a location that holds no data fails to bind, where Athena answers no rows.
+                    String empty = holdsNoData(readPath) ? GlueTableResolver.emptyProjection(t) : null;
+                    if (empty != null) {
+                        sb.append("CREATE OR REPLACE VIEW ").append(target).append(" AS SELECT ").append(empty)
+                                .append(";\n");
+                        continue;
+                    }
                     fromClause = GlueTableResolver.readExpression(t, readFn, readPath);
                 }
                 sb.append("CREATE OR REPLACE VIEW ")
@@ -150,6 +170,72 @@ public class GlueViewDdlBuilder {
             }
         }
         return usesIceberg;
+    }
+
+    /**
+     * The rows of a table Athena reads through its registered partitions, built once per batch for the table's
+     * qualified and unqualified views: the partitions holding data, each at its own location (its storage
+     * descriptor's, or {@code <table location>/key=value/...} for one that gives none) with its values as the
+     * partition keys, read together ({@link GlueTableResolver#registeredPartitionsSelect}); no rows when none holds
+     * data, as a table whose partitions are not loaded answers on Athena. A partition that does not give one value for
+     * each key, which Glue refuses on AWS, is skipped rather than hiding the table.
+     */
+    private String registeredPartitionsSelect(String database, Table table, Map<String, String> built) {
+        String builtKey = database + "/" + table.getName();
+        String select = built.get(builtKey);
+        if (select != null) {
+            return select;
+        }
+        String tableLocation = normalized(table.getStorageDescriptor().getLocation());
+        TableLocation root = TableLocation.of(tableLocation);
+        NavigableSet<String> rootKeys = null;
+        boolean rootListed = false;
+        List<GlueTableResolver.RegisteredPartition> holdingData = new ArrayList<>();
+        List<Partition> partitions = glueService.getPartitions(database, table.getName());
+        for (Partition partition : partitions == null ? List.<Partition>of() : partitions) {
+            if (!GlueTableResolver.valuesEachKey(table, partition.getValues())) {
+                LOG.debugv("skip a partition of Glue table {0}.{1}: values {2} do not match its keys",
+                        database, table.getName(), partition.getValues());
+                continue;
+            }
+            String location = normalized(partition.getStorageDescriptor() != null
+                    && partition.getStorageDescriptor().getLocation() != null
+                    && !partition.getStorageDescriptor().getLocation().isBlank()
+                    ? partition.getStorageDescriptor().getLocation()
+                    : AthenaHiveDdlExecutor.defaultLocation(table, partition.getValues()));
+            TableLocation at = TableLocation.of(location);
+            boolean holds;
+            if (at == null) {
+                holds = true;
+            } else if (root != null && root.covers(at)) {
+                // One listing of the table's location answers for every partition under it.
+                if (!rootListed) {
+                    rootKeys = root.keysHoldingData(s3Service);
+                    rootListed = true;
+                }
+                String next = rootKeys == null ? null : rootKeys.ceiling(at.prefix());
+                holds = rootKeys == null || next != null && next.startsWith(at.prefix());
+            } else {
+                holds = !at.holdsNoData(s3Service);
+            }
+            if (holds) {
+                holdingData.add(new GlueTableResolver.RegisteredPartition(location, partition.getValues()));
+            }
+        }
+        select = holdingData.isEmpty() ? "SELECT " + GlueTableResolver.emptyProjection(table)
+                : GlueTableResolver.registeredPartitionsSelect(table, holdingData);
+        built.put(builtKey, select);
+        return select;
+    }
+
+    private static String normalized(String location) {
+        return location.endsWith("/") ? location.substring(0, location.length() - 1) : location;
+    }
+
+    /** Whether the S3 location a table is read from holds no data; false for one that is not in S3. */
+    private boolean holdsNoData(String readPath) {
+        TableLocation location = TableLocation.of(readPath);
+        return location != null && location.holdsNoData(s3Service);
     }
 
     /** Which views a query needs: a qualified view of a database's table, or an unqualified one of the context's. */

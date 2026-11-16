@@ -2,6 +2,7 @@ package io.floci.aws.services.apigatewayv2.proxy;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -9,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * Verifies {@link ContextValueResolver} resolves the documented HTTP API v2
- * source value expressions: $context.*, $request.*, and literal pass-through.
+ * source value expressions: $context.*, $request.*, $stageVariables.*, and literal pass-through.
  */
 class ContextValueResolverTest {
 
@@ -18,6 +19,16 @@ class ContextValueResolverTest {
                                 Map<String, String> pathParams) {
         return new RequestContext("api1", "$default", "GET", "/foo", "foo", "ANY /foo",
                 "req-1", "1.2.3.4", headers, query, pathParams, null, claims, authContext);
+    }
+
+    private RequestContext withBody(String body) {
+        return new RequestContext("api1", "$default", "POST", "/foo", "foo", "POST /foo",
+                "req-1", "1.2.3.4", Map.of(), Map.of(), Map.of(),
+                body == null ? null : body.getBytes(StandardCharsets.UTF_8), Map.of(), Map.of());
+    }
+
+    private RequestContext withVariables(Map<String, String> stageVariables, Map<String, String> contextVariables) {
+        return ctx(Map.of(), Map.of(), Map.of(), Map.of(), Map.of()).withVariables(stageVariables, contextVariables);
     }
 
     @Test
@@ -99,5 +110,60 @@ class ContextValueResolverTest {
     void nullExpressionReturnsNull() {
         ContextValueResolver r = new ContextValueResolver();
         assertNull(r.resolve(null, ctx(Map.of(), Map.of(), Map.of(), Map.of(), Map.of())));
+    }
+
+    @Test
+    void requestBodyResolvesToTheWholeBody() {
+        ContextValueResolver r = new ContextValueResolver();
+        assertEquals("{\"order\":{\"id\":\"o-42\"}}",
+                r.resolve("$request.body", withBody("{\"order\":{\"id\":\"o-42\"}}")));
+    }
+
+    @Test
+    void emptyRequestBodyReturnsNull() {
+        ContextValueResolver r = new ContextValueResolver();
+        assertNull(r.resolve("$request.body", withBody(null)));
+        assertNull(r.resolve("$request.body", withBody("")));
+    }
+
+    @Test
+    void requestBodyPathResolvesScalarsAndJson() {
+        ContextValueResolver r = new ContextValueResolver();
+        RequestContext c = withBody("{\"order\":{\"id\":\"o-42\",\"qty\":3,\"tags\":[\"a\",\"b\"]}}");
+        assertEquals("o-42", r.resolve("$request.body.order.id", c));
+        assertEquals("3", r.resolve("$request.body.order.qty", c));
+        assertEquals("a", r.resolve("$request.body.order.tags[0]", c));
+        assertEquals("[\"a\",\"b\"]", r.resolve("$request.body.order.tags", c));
+    }
+
+    @Test
+    void requestBodyPathMissingOrUnreadableReturnsNull() {
+        ContextValueResolver r = new ContextValueResolver();
+        assertNull(r.resolve("$request.body.order.missing", withBody("{\"order\":{\"id\":\"o-42\"}}")));
+        assertNull(r.resolve("$request.body.order.id", withBody("not json")));
+        assertNull(r.resolve("$request.body.order.id", withBody(null)));
+    }
+
+    @Test
+    void stageVariableResolves() {
+        ContextValueResolver r = new ContextValueResolver();
+        RequestContext c = withVariables(Map.of("backend", "blue"), null);
+        assertEquals("blue", r.resolve("$stageVariables.backend", c));
+        assertNull(r.resolve("$stageVariables.missing", c));
+    }
+
+    @Test
+    void stageVariableWithoutStageVariablesReturnsNull() {
+        ContextValueResolver r = new ContextValueResolver();
+        assertNull(r.resolve("$stageVariables.backend", ctx(Map.of(), Map.of(), Map.of(), Map.of(), Map.of())));
+    }
+
+    @Test
+    void contextVariableResolves() {
+        ContextValueResolver r = new ContextValueResolver();
+        RequestContext c = withVariables(null, Map.of("stage", "prod", "routeKey", "ANY /foo"));
+        assertEquals("prod", r.resolve("$context.stage", c));
+        assertEquals("ANY /foo", r.resolve("$context.routeKey", c));
+        assertNull(r.resolve("$context.unknown", c));
     }
 }

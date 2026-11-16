@@ -21,7 +21,6 @@ import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
-import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -196,7 +195,7 @@ class ElastiCacheCfnProvisionerTest {
                 throw new IllegalStateException(e);
             }
         }).stream()
-                .map(record -> MessageFormat.format(record.getMessage(), record.getParameters()))
+                .map(LogCapture::formatted)
                 .filter(message -> message.contains("in-place modification is not supported"))
                 .toList();
     }

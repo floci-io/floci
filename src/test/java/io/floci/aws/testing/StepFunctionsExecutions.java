@@ -3,11 +3,13 @@ package io.floci.aws.testing;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -24,7 +26,11 @@ public final class StepFunctionsExecutions {
     private StepFunctionsExecutions() {}
 
     public static Response describeExecution(String executionArn) {
-        Response response = given()
+        return describeExecution(executionArn, given());
+    }
+
+    private static Response describeExecution(String executionArn, RequestSpecification request) {
+        Response response = request
                 .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -40,10 +46,14 @@ public final class StepFunctionsExecutions {
      * the terminal status: asserting which one is the caller's business.
      */
     public static Response waitForTerminalState(String executionArn) {
+        return waitForTerminalState(executionArn, () -> describeExecution(executionArn));
+    }
+
+    private static Response waitForTerminalState(String executionArn, Supplier<Response> describe) {
         return await("execution " + executionArn + " to leave RUNNING")
                 .atMost(TERMINAL_STATE_TIMEOUT)
                 .pollInterval(POLL_INTERVAL)
-                .until(() -> describeExecution(executionArn),
+                .until(describe::get,
                         response -> !"RUNNING".equals(response.jsonPath().getString("status")));
     }
 
@@ -60,7 +70,8 @@ public final class StepFunctionsExecutions {
         String executionArn = callInRegion(region, "StartExecution", MAPPER.createObjectNode()
                 .put("stateMachineArn", stateMachineArn).put("input", "{}").toString())
                 .then().statusCode(200).extract().path("executionArn");
-        return waitForTerminalState(executionArn);
+        return waitForTerminalState(executionArn,
+                () -> describeExecution(executionArn, requestInRegion(region)));
     }
 
     /** The history events of an execution that {@link #runInRegion} ran in {@code region}. */
@@ -74,12 +85,16 @@ public final class StepFunctionsExecutions {
     }
 
     private static Response callInRegion(String region, String action, String body) {
-        return given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region
-                        + "/states/aws4_request, SignedHeaders=host, Signature=abc")
+        return requestInRegion(region)
                 .header("X-Amz-Target", "AWSStepFunctions." + action)
                 .contentType(SFN_CONTENT_TYPE)
                 .body(body)
                 .when().post("/");
+    }
+
+    private static RequestSpecification requestInRegion(String region) {
+        return given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region
+                        + "/states/aws4_request, SignedHeaders=host, Signature=abc");
     }
 }

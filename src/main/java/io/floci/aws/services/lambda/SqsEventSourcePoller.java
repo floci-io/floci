@@ -13,6 +13,7 @@ import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.pipes.PipesFilterMatcher;
+import io.floci.aws.services.sqs.SqsEventRecordBuilder;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.Message;
 import io.vertx.core.Vertx;
@@ -22,7 +23,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -435,51 +435,7 @@ public class SqsEventSourcePoller implements Resettable {
      * {@code body}; the matcher auto-reparses a JSON body).
      */
     private ObjectNode buildSqsRecordNode(Message msg, EventSourceMapping esm) {
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("messageId", msg.getMessageId());
-        record.put("receiptHandle", msg.getReceiptHandle());
-        record.put("body", msg.getBody());
-        ObjectNode attrs = record.putObject("attributes");
-        attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
-        attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
-        attrs.put("SenderId", AwsArnUtils.accountOrDefault(esm.getEventSourceArn(), "000000000000"));
-        attrs.put("ApproximateFirstReceiveTimestamp",
-                String.valueOf(msg.getFirstReceiveTimestamp() != null
-                        ? msg.getFirstReceiveTimestamp().toEpochMilli()
-                        : System.currentTimeMillis()));
-        if (msg.getSequenceNumber() > 0) {
-            attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
-        }
-        if (msg.getMessageGroupId() != null) {
-            attrs.put("MessageGroupId", msg.getMessageGroupId());
-        }
-        if (msg.getMessageDeduplicationId() != null) {
-            attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
-        }
-        // Populate messageAttributes from the message model
-        ObjectNode msgAttrs = record.putObject("messageAttributes");
-        if (msg.getMessageAttributes() != null) {
-            msg.getMessageAttributes().forEach((name, val) -> {
-                ObjectNode attrNode = msgAttrs.putObject(name);
-                attrNode.put("dataType", val.getDataType() != null ? val.getDataType() : "String");
-                if (val.getBinaryValue() != null) {
-                    attrNode.put("binaryValue",
-                            Base64.getEncoder().encodeToString(val.getBinaryValue()));
-                } else if (val.getStringValue() != null) {
-                    attrNode.put("stringValue", val.getStringValue());
-                }
-                attrNode.putArray("stringListValues");
-                attrNode.putArray("binaryListValues");
-            });
-        }
-        record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
-        if (msg.getMd5OfMessageAttributes() != null) {
-            record.put("md5OfMessageAttributes", msg.getMd5OfMessageAttributes());
-        }
-        record.put("eventSource", "aws:sqs");
-        record.put("eventSourceARN", esm.getEventSourceArn());
-        record.put("awsRegion", esm.getRegion());
-        return record;
+        return SqsEventRecordBuilder.build(objectMapper, msg, esm.getEventSourceArn(), esm.getRegion(), clockMs);
     }
 
     /**

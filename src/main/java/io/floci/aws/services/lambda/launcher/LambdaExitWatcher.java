@@ -29,6 +29,9 @@ import java.util.function.LongSupplier;
  * time, so the watch outlasts a short outage instead of spending its attempts within milliseconds; after
  * {@link #MAX_QUICK_FAILURES} in a row it stops. A stream that lived longer than {@link #QUICK_FAILURE}
  * resets the count and re-arms at once.
+ *
+ * <p>The wait stream holds its connection for the container's whole lifetime, so it runs on the
+ * streaming client; the inspect is a short call and stays on the control-plane client.
  */
 final class LambdaExitWatcher {
 
@@ -42,15 +45,17 @@ final class LambdaExitWatcher {
     static final Duration FIRST_RETRY_DELAY = Duration.ofSeconds(1);
 
     private final DockerClient dockerClient;
+    private final DockerClient streamingDocker;
     private final String containerId;
     private final IntConsumer onExit;
     private final BiConsumer<Duration, Runnable> scheduler;
     private final LongSupplier nanoClock;
     private int quickFailures;
 
-    LambdaExitWatcher(DockerClient dockerClient, String containerId, IntConsumer onExit,
-                      BiConsumer<Duration, Runnable> scheduler, LongSupplier nanoClock) {
+    LambdaExitWatcher(DockerClient dockerClient, DockerClient streamingDocker, String containerId,
+                      IntConsumer onExit, BiConsumer<Duration, Runnable> scheduler, LongSupplier nanoClock) {
         this.dockerClient = dockerClient;
+        this.streamingDocker = streamingDocker;
         this.containerId = containerId;
         this.onExit = onExit;
         this.scheduler = scheduler;
@@ -58,9 +63,10 @@ final class LambdaExitWatcher {
     }
 
     /** Arms a watch that calls {@code onExit} with the exit status, at most once per exit. */
-    static void watch(DockerClient dockerClient, String containerId, IntConsumer onExit) {
-        new LambdaExitWatcher(dockerClient, containerId, onExit, LambdaExitWatcher::schedule, System::nanoTime)
-                .arm();
+    static void watch(DockerClient dockerClient, DockerClient streamingDocker, String containerId,
+                      IntConsumer onExit) {
+        new LambdaExitWatcher(dockerClient, streamingDocker, containerId, onExit, LambdaExitWatcher::schedule,
+                System::nanoTime).arm();
     }
 
     private static void schedule(Duration delay, Runnable task) {
@@ -70,7 +76,7 @@ final class LambdaExitWatcher {
     void arm() {
         long armedAt = nanoClock.getAsLong();
         try {
-            dockerClient.waitContainerCmd(containerId).exec(new WaitContainerResultCallback() {
+            streamingDocker.waitContainerCmd(containerId).exec(new WaitContainerResultCallback() {
                 @Override
                 public void onNext(WaitResponse response) {
                     super.onNext(response);

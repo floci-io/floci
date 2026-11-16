@@ -95,6 +95,8 @@ floci:
         flush-interval-ms: 60000
       emrserverless:
         flush-interval-ms: 60000
+      emrcontainers:
+        flush-interval-ms: 60000
       lakeformation:
         flush-interval-ms: 60000
 
@@ -125,6 +127,11 @@ floci:
   protocols:
     strict-claiming: false
     reject-unknown-service-scope: true
+
+  dns:
+    # Tests run natively; with the bridge listener on, a runner allowed to bind port 53 would change
+    # how every container a test launches resolves names.
+    bridge-listener-enabled: false
 
   docker:
     log-max-size: "10m"
@@ -412,6 +419,8 @@ floci:
       mock: true
       backend-keep-alive: true
       backend-keep-alive-timeout-seconds: 60
+
+      alb-zone-rule: aws
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -534,6 +543,9 @@ floci:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
       runner-mode: immediate
+    emrcontainers:
+      enabled: true
+      job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
     ssoadmin:
       enabled: true
     ssooidc:

@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -31,7 +32,7 @@ class EcsFargateTaskIntegrationTest {
     private static final String TARGET = "AmazonEC2ContainerServiceV20141113.";
     private static final String CT = "application/x-amz-json-1.1";
     private static final String CLUSTER = "fargate-task-cluster";
-    private static final String SUBNET = "subnet-default-us-east-1-a";
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":[\"" + SUBNET + "\"]}}";
 

@@ -24,6 +24,7 @@ import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.lambdaweb.model.WebFunctionRevision;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -251,6 +252,24 @@ class LambdaWebServiceTest {
                 + " must satisfy regular expression pattern: arn:[^:]+:lambda:[^:]+:\\d{12}:web-function/[^/]+; Value"
                 + " null at 'tags' failed to satisfy constraint: Member must not be null",
                 message(() -> service.tagResource(REGION, "not-an-arn", mapper.createObjectNode())));
+    }
+
+    @Test
+    void storedTagsAreTheWebFunctionsForItAndItsRevisionsAndEndpoints() {
+        LambdaWebService service = service();
+        ObjectNode request = createRequest("app");
+        request.putObject("tags").put("team", "data");
+        WebFunction created = service.createFunction(REGION, request);
+        String revision = created.revisions.keySet().iterator().next();
+
+        assertEquals(Map.of("team", "data"), service.storedTags(ARN));
+        assertEquals(Map.of("team", "data"), service.storedTags(ARN + "/revision/" + revision));
+        assertEquals(Map.of("team", "data"), service.storedTags(ARN + "/endpoint/dev"));
+        assertEquals(Map.of(), service.storedTags(ARN + "/endpoint/prod"));
+        assertEquals(Map.of(), service.storedTags(ARN + "/revision/rev-zzzzz"));
+        assertEquals(Map.of(), service.storedTags(ARN.replace(ACCOUNT_ID, "111111111111")));
+        assertEquals(Map.of(), service.storedTags(ARN.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), service.storedTags(ARN + "-missing"));
     }
 
     @Test
@@ -1082,8 +1101,8 @@ class LambdaWebServiceTest {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
         LambdaWebCode code = new LambdaWebCode(storageDir.resolve("code"));
-        byte[] v1 = LambdaWebZips.indexJs("v1");
-        byte[] v2 = LambdaWebZips.indexJs("v2");
+        byte[] v1 = LambdaCodeFixtures.nodeJsZip("v1");
+        byte[] v2 = LambdaCodeFixtures.nodeJsZip("v2");
         when(s3.openObject("code", "app.zip", null)).thenReturn(object(v1));
         String first = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
         when(s3.openObject("code", "app.zip", null)).thenReturn(object(v2));
@@ -1100,7 +1119,7 @@ class LambdaWebServiceTest {
     @Test
     void aStartKeepsOnlyTheCopiesOfStoredRevisions() throws IOException {
         S3Service s3 = mock(S3Service.class);
-        byte[] zip = LambdaWebZips.indexJs("code");
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("code");
         when(s3.openObject("code", "app.zip", null)).thenReturn(object(zip));
         FileStorageFactory storage = new FileStorageFactory(storageDir);
         String revisionId = service(storage, "http://localhost:4566", s3).createFunction(REGION, createRequest("app"))
@@ -1163,7 +1182,7 @@ class LambdaWebServiceTest {
     void aRevisionWhoseCodeIsNotAZipIsFailedAndCannotBeDeployed() {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
-        when(s3.openObject("code", "app.zip", null)).thenReturn(object(LambdaWebZips.indexJs("v1")));
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object(LambdaCodeFixtures.nodeJsZip("v1")));
         String good = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
         when(s3.openObject("code", "app.zip", null)).thenReturn(object(NOT_A_ZIP));
         WebFunctionRevision bad = service.createRevision(REGION, "app", revisionConfig(30));
@@ -1231,7 +1250,7 @@ class LambdaWebServiceTest {
                 + " Active state.", update.getMessage());
 
         // A good revision still moves the endpoint's weights, and the endpoint stays Failed, as on AWS.
-        when(s3.openObject("code", "app.zip", null)).thenReturn(object(LambdaWebZips.indexJs("v2")));
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object(LambdaCodeFixtures.nodeJsZip("v2")));
         String good = service.createRevision(REGION, "app", revisionConfig(30)).revisionId;
         dev = service.getEndpoint(REGION, "app", "dev");
         assertEquals(good, dev.revisionWeights.get(0).revisionId);
@@ -1256,7 +1275,7 @@ class LambdaWebServiceTest {
         assertEquals("The function arn:aws:lambda:us-east-1:000000000000:web-function/app does not exist.",
                 message(() -> service.getFunction(REGION, "app")));
 
-        when(s3.openObject("code", "app.zip", null)).thenReturn(object(LambdaWebZips.indexJs("v1")));
+        when(s3.openObject("code", "app.zip", null)).thenReturn(object(LambdaCodeFixtures.nodeJsZip("v1")));
         service.createFunction(REGION, createRequest("app"));
         when(s3.openObject("code", "app.zip", null)).thenReturn(object(new byte[0]));
         assertInstanceOf(LambdaWebInternalServerException.class,
@@ -1309,7 +1328,7 @@ class LambdaWebServiceTest {
     void anObjectPastTheZippedLimitIsRefusedAndCreatesNothing() throws IOException {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
-        byte[] zip = LambdaWebZips.indexJs("");
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("");
         String refusal = "Zipped size must be smaller than 536870912 bytes";
         when(s3.openObject("code", "app.zip", null)).thenReturn(object(zip, LambdaWebCode.MAX_BYTES + 1));
 
@@ -1334,7 +1353,7 @@ class LambdaWebServiceTest {
     void theNullVersionAsTheLatestIsRefusedBeforeTheSize() {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
-        byte[] zip = LambdaWebZips.indexJs("");
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("");
         when(s3.openObject("code", "app.zip", null)).thenReturn(nullVersion(object(zip, LambdaWebCode.MAX_BYTES + 1)));
 
         AwsException create = error(() -> service.createFunction(REGION, createRequest("app")));
@@ -1375,7 +1394,7 @@ class LambdaWebServiceTest {
         }
 
         when(s3.openObject("code", "app.zip", null))
-                .thenReturn(object(LambdaWebZips.indexJs(""), LambdaWebCode.MAX_BYTES + 1));
+                .thenReturn(object(LambdaCodeFixtures.nodeJsZip(""), LambdaWebCode.MAX_BYTES + 1));
         assertEquals("Zipped size must be smaller than 536870912 bytes",
                 message(() -> service.createFunction(REGION, createRequest("app"))));
     }
@@ -1384,7 +1403,7 @@ class LambdaWebServiceTest {
     void anActiveRevisionPastFiftyDeletesTheOldestUnusedOnes() {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
-        byte[] zip = LambdaWebZips.indexJs("");
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("");
         when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
         String pinned = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
         ObjectNode pin = endpointConfig("pin").put("autoDeploymentMode", "Disabled");
@@ -1425,7 +1444,7 @@ class LambdaWebServiceTest {
     void theRevisionALatestRevisionEndpointLeavesStaysUntilTheNextActiveOne() {
         S3Service s3 = mock(S3Service.class);
         LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", s3);
-        byte[] zip = LambdaWebZips.indexJs("");
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("");
         when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(zip));
         String first = service.createFunction(REGION, createRequest("app")).revisions.keySet().iterator().next();
         when(s3.openObject("code", "app.zip", null)).thenAnswer(invocation -> object(NOT_A_ZIP));

@@ -901,6 +901,51 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body(containsString("ResourceNotFoundException"));
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CodeBuild holds on a project and a report group, so an allow
+     * on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void aCodeBuildResourceTagConditionReadsTheTagsOfTheProjectAndTheReportGroup() {
+        String tagged = codeBuildProject("res-tag-project-" + suffix(), "data");
+        String other = codeBuildProject("res-tag-project-" + suffix(), "web");
+        String taggedGroup = codeBuildReportGroup("res-tag-group-" + suffix(), "data");
+        String otherGroup = codeBuildReportGroup("res-tag-group-" + suffix(), "web");
+
+        User user = user("res-codebuild-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"codebuild:BatchGetProjects\","
+                + "\"codebuild:BatchGetReportGroups\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + tagged + "\"]}").statusCode(200);
+        refusedJson(codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + other + "\"]}"),
+                "codebuild:BatchGetProjects");
+        codeBuild(user, "BatchGetReportGroups", "{\"reportGroupArns\":[\"" + taggedGroup + "\"]}").statusCode(200);
+        refusedJson(codeBuild(user, "BatchGetReportGroups", "{\"reportGroupArns\":[\"" + otherGroup + "\"]}"),
+                "codebuild:BatchGetReportGroups");
+    }
+
+    private String codeBuildProject(String name, String team) {
+        adminJson("codebuild", "CodeBuild_20161006.CreateProject").body("{\"name\":\"" + name
+                + "\",\"source\":{\"type\":\"NO_SOURCE\",\"buildspec\":\"version: 0.2\"},"
+                + "\"artifacts\":{\"type\":\"NO_ARTIFACTS\"},\"environment\":{\"type\":\"LINUX_CONTAINER\","
+                + "\"image\":\"aws/codebuild/standard:7.0\",\"computeType\":\"BUILD_GENERAL1_SMALL\"},"
+                + "\"serviceRole\":\"arn:aws:iam::" + ACCOUNT + ":role/codebuild-role\","
+                + "\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("codebuild", "CodeBuild_20161006.DeleteProject")
+                .body("{\"name\":\"" + name + "\"}").post("/"));
+        return name;
+    }
+
+    private String codeBuildReportGroup(String name, String team) {
+        String arn = adminJson("codebuild", "CodeBuild_20161006.CreateReportGroup").body("{\"name\":\"" + name
+                + "\",\"type\":\"TEST\",\"exportConfig\":{\"exportConfigType\":\"NO_EXPORT\"},"
+                + "\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]}").post("/").then().statusCode(200)
+                .extract().path("reportGroup.arn");
+        cleanup.register(() -> adminJson("codebuild", "CodeBuild_20161006.DeleteReportGroup")
+                .body("{\"arn\":\"" + arn + "\"}").post("/"));
+        return arn;
+    }
+
     /** A Managed Service for Apache Flink application is checked on the ARN its name gives. */
     @Test
     void anApplicationIsCheckedOnTheArnItsNameGives() {
@@ -945,6 +990,45 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "athena:ListQueryExecutions");
         refusedJson(send(user, "athena", "AmazonAthena.StartQueryExecution", "1.1", "{\"QueryString\":\"SELECT 1\"}"),
                 "athena:StartQueryExecution");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Athena holds on a workgroup and a data catalog, so an allow
+     * on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void anAthenaResourceTagConditionReadsTheTagsOfTheWorkgroupAndTheDataCatalog() {
+        String workGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "data");
+        String otherWorkGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "web");
+        String catalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "data");
+        String otherCatalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "web");
+
+        User user = user("res-athena-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"athena:GetWorkGroup\",\"athena:GetDataCatalog\"],"
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + workGroup + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + otherWorkGroup
+                + "\"}"), "athena:GetWorkGroup");
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + catalog + "\"}").statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + otherCatalog
+                + "\"}"), "athena:GetDataCatalog");
+    }
+
+    /** An Athena workgroup or {@code LAMBDA} data catalog of the name, tagged with the team, deleted afterwards. */
+    private String athenaTagged(String operation, String name, String team) {
+        String body = "CreateWorkGroup".equals(operation) ? "{\"Name\":\"" + name + "\""
+                : "{\"Name\":\"" + name + "\",\"Type\":\"LAMBDA\"";
+        adminJson("athena", "AmazonAthena." + operation).body(body + ",\"Tags\":[{\"Key\":\"team\",\"Value\":\""
+                + team + "\"}]}").post("/").then().statusCode(200);
+        if ("CreateWorkGroup".equals(operation)) {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteWorkGroup")
+                    .body("{\"WorkGroup\":\"" + name + "\"}").post("/"));
+        } else {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteDataCatalog")
+                    .body("{\"Name\":\"" + name + "\"}").post("/"));
+        }
+        return name;
     }
 
     /**
@@ -1860,6 +1944,229 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /** The user's JSON-protocol request to the target, {@code <prefix>.<operation>}, with the body. */
+    /**
+     * An {@code aws:ResourceTag} condition reads a Step Functions state machine's tags for the state machine, its
+     * version and its execution, and an activity's own, so an allow on one team's tag lets the caller read that
+     * team's and not another's.
+     */
+    @Test
+    void aStepFunctionsResourceTagConditionReadsTheStateMachineTagsAndTheActivityTags() {
+        String definition = "{\\\"StartAt\\\":\\\"Done\\\",\\\"States\\\":{\\\"Done\\\":{\\\"Type\\\":\\\"Pass\\\","
+                + "\\\"End\\\":true}}}";
+        String tagged = stateMachine("res-tag-sm-" + suffix(), definition, "data");
+        String other = stateMachine("res-tag-sm-" + suffix(), definition, "web");
+        String version = sfn("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + tagged + "\"}")
+                .statusCode(200).extract().path("stateMachineVersionArn");
+        String execution = sfn("StartExecution", "{\"stateMachineArn\":\"" + tagged + "\"}")
+                .statusCode(200).extract().path("executionArn");
+        String otherExecution = sfn("StartExecution", "{\"stateMachineArn\":\"" + other + "\"}")
+                .statusCode(200).extract().path("executionArn");
+        String activity = activity("res-tag-act-" + suffix(), "data");
+        String otherActivity = activity("res-tag-act-" + suffix(), "web");
+
+        User user = user("res-sfn-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"states:DescribeStateMachine\",\"states:DescribeExecution\","
+                + "\"states:DescribeActivity\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describe(user, "DescribeStateMachine", "stateMachineArn", tagged).statusCode(200);
+        describe(user, "DescribeStateMachine", "stateMachineArn", version).statusCode(200);
+        refusedJson(describe(user, "DescribeStateMachine", "stateMachineArn", other), "states:DescribeStateMachine");
+        describe(user, "DescribeExecution", "executionArn", execution).statusCode(200);
+        refusedJson(describe(user, "DescribeExecution", "executionArn", otherExecution), "states:DescribeExecution");
+        describe(user, "DescribeActivity", "activityArn", activity).statusCode(200);
+        refusedJson(describe(user, "DescribeActivity", "activityArn", otherActivity), "states:DescribeActivity");
+    }
+
+    private String stateMachine(String name, String definition, String team) {
+        String arn = sfn("CreateStateMachine", "{\"name\":\"" + name + "\",\"definition\":\"" + definition
+                + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/sfn\",\"tags\":[{\"key\":\"team\",\"value\":\""
+                + team + "\"}]}").statusCode(200).extract().path("stateMachineArn");
+        cleanup.register(() -> sfn("DeleteStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}"));
+        return arn;
+    }
+
+    private String activity(String name, String team) {
+        String arn = sfn("CreateActivity", "{\"name\":\"" + name + "\",\"tags\":[{\"key\":\"team\",\"value\":\""
+                + team + "\"}]}").statusCode(200).extract().path("activityArn");
+        cleanup.register(() -> sfn("DeleteActivity", "{\"activityArn\":\"" + arn + "\"}"));
+        return arn;
+    }
+
+    private static ValidatableResponse sfn(String operation, String body) {
+        return adminJson("states", "AWSStepFunctions." + operation, "1.0").body(body).post("/").then();
+    }
+
+    private static ValidatableResponse describe(User user, String operation, String member, String arn) {
+        return send(user, "states", "AWSStepFunctions." + operation, "1.0", "{\"" + member + "\":\"" + arn + "\"}");
+    }
+
+    /**
+     * A Glue table is checked on the account's catalog, its database and itself, the types AWS gives
+     * {@code glue:GetTable}, so a grant on all three allows it, the same grant refuses another table of the database,
+     * a grant leaving out the catalog refuses it, and a deny scoped to the table holds under an allow on everything.
+     */
+    @Test
+    void aGlueTableIsCheckedOnTheCatalogItsDatabaseAndItself() {
+        String database = "res_db_" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        glue("CreateTable", "{\"DatabaseName\":\"" + database + "\",\"TableInput\":{\"Name\":\"orders\"}}")
+                .statusCode(200);
+        cleanup.register(() -> glue("DeleteTable", "{\"DatabaseName\":\"" + database + "\",\"Name\":\"orders\"}"));
+        String catalog = allowOn("glue:GetTable", glueArn + "catalog");
+        String scoped = allowOn("glue:GetTable", glueArn + "database/" + database) + ","
+                + allowOn("glue:GetTable", glueArn + "table/" + database + "/orders");
+
+        User user = user("res-glue-table");
+        user.policy(catalog + "," + scoped);
+        getTable(user, database, "orders").statusCode(200);
+        refusedJson(getTable(user, database, "other"), "glue:GetTable");
+        user.policy(scoped);
+        refusedJson(getTable(user, database, "orders"), "glue:GetTable");
+        user.policy(allowOn("glue:GetTable", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"glue:GetTable\",\"Resource\":\""
+                + glueArn + "table/" + database + "/orders\"}");
+        refusedJson(getTable(user, database, "orders"), "glue:GetTable");
+    }
+
+    /** A Glue database is checked on the catalog and {@code database/<name>}, and a job on {@code job/<name>}. */
+    @Test
+    void aGlueDatabaseAndAJobAreCheckedOnTheArnsGlueGivesThem() {
+        String database = "res_db_" + suffix();
+        String job = "res-job-" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        glue("CreateJob", "{\"Name\":\"" + job + "\",\"Role\":\"arn:aws:iam::" + ACCOUNT + ":role/glue\","
+                + "\"Command\":{\"Name\":\"glueetl\",\"ScriptLocation\":\"s3://scripts/job.py\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + job + "\"}"));
+
+        User user = user("res-glue-db");
+        user.policy(allowOn("glue:GetDatabase", glueArn + "catalog") + ","
+                + allowOn("glue:GetDatabase", glueArn + "database/" + database) + ","
+                + allowOn("glue:GetJob", glueArn + "job/" + job));
+        send(user, "glue", "AWSGlue.GetDatabase", "1.1", "{\"Name\":\"" + database + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetDatabase", "1.1", "{\"Name\":\"" + database + "_other\"}"),
+                "glue:GetDatabase");
+        send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + job + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + job + "-other\"}"), "glue:GetJob");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Glue holds on the resource a request names, a job's and a
+     * schema registry's, so an allow on one team's tag lets the caller read that team's job and registry and not
+     * another's.
+     */
+    @Test
+    void aGlueResourceTagConditionReadsTheTagsOfTheJobAndTheRegistry() {
+        String tagged = "res-tag-job-" + suffix();
+        String other = "res-tag-job-" + suffix();
+        String jobRest = "\",\"Role\":\"arn:aws:iam::" + ACCOUNT + ":role/glue\","
+                + "\"Command\":{\"Name\":\"glueetl\",\"ScriptLocation\":\"s3://scripts/job.py\"}";
+        glue("CreateJob", "{\"Name\":\"" + tagged + jobRest + ",\"Tags\":{\"team\":\"data\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + tagged + "\"}"));
+        glue("CreateJob", "{\"Name\":\"" + other + jobRest + ",\"Tags\":{\"team\":\"web\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + other + "\"}"));
+        String taggedRegistry = "res-tag-reg-" + suffix();
+        String otherRegistry = "res-tag-reg-" + suffix();
+        glue("CreateRegistry", "{\"RegistryName\":\"" + taggedRegistry + "\",\"Tags\":{\"team\":\"data\"}}")
+                .statusCode(200);
+        cleanup.register(() -> glue("DeleteRegistry", "{\"RegistryId\":{\"RegistryName\":\"" + taggedRegistry
+                + "\"}}"));
+        glue("CreateRegistry", "{\"RegistryName\":\"" + otherRegistry + "\"}").statusCode(200);
+        cleanup.register(() -> glue("DeleteRegistry", "{\"RegistryId\":{\"RegistryName\":\"" + otherRegistry
+                + "\"}}"));
+
+        User user = user("res-glue-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"glue:GetJob\",\"glue:GetRegistry\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + other + "\"}"), "glue:GetJob");
+        send(user, "glue", "AWSGlue.GetRegistry", "1.1", "{\"RegistryId\":{\"RegistryName\":\"" + taggedRegistry
+                + "\"}}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetRegistry", "1.1", "{\"RegistryId\":{\"RegistryName\":\""
+                + otherRegistry + "\"}}"), "glue:GetRegistry");
+    }
+
+    /**
+     * What Glue's batch deletes name, the tables of {@code TablesToDelete} and the connections of
+     * {@code ConnectionNameList}, is checked one by one, so a deny scoped to one of them holds under an allow on
+     * everything.
+     */
+    @Test
+    void aGlueBatchDeleteIsCheckedOnEachTableAndConnectionItNames() {
+        String database = "res_db_" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+
+        User user = user("res-glue-batch");
+        user.policy(allowOn("glue:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":[\"glue:BatchDeleteTable\","
+                + "\"glue:BatchDeleteConnection\"],\"Resource\":[\"" + glueArn + "table/" + database + "/kept\",\""
+                + glueArn + "connection/kept-" + database + "\"]}");
+        refusedJson(send(user, "glue", "AWSGlue.BatchDeleteTable", "1.1", "{\"DatabaseName\":\"" + database
+                + "\",\"TablesToDelete\":[\"gone\",\"kept\"]}"), "glue:BatchDeleteTable");
+        send(user, "glue", "AWSGlue.BatchDeleteTable", "1.1", "{\"DatabaseName\":\"" + database
+                + "\",\"TablesToDelete\":[\"gone\"]}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.BatchDeleteConnection", "1.1", "{\"ConnectionNameList\":[\"gone-"
+                + database + "\",\"kept-" + database + "\"]}"), "glue:BatchDeleteConnection");
+        send(user, "glue", "AWSGlue.BatchDeleteConnection", "1.1", "{\"ConnectionNameList\":[\"gone-" + database
+                + "\"]}").statusCode(200);
+    }
+
+    /**
+     * A Glue database's creation is checked on the catalog and the database its {@code DatabaseInput.Name} names, and
+     * a connection's tags on the connection its {@code ConnectionInput.Name} names, the resource they go on.
+     */
+    @Test
+    void aGlueCreateIsCheckedOnWhatItsInputNames() {
+        String database = "res_db_" + suffix();
+        String connection = "res-conn-" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        cleanup.register(() -> glue("DeleteConnection", "{\"ConnectionName\":\"" + connection + "\"}"));
+
+        User user = user("res-glue-create");
+        user.policy(allowOn("glue:CreateDatabase", glueArn + "catalog") + ","
+                + allowOn("glue:CreateDatabase", glueArn + "database/" + database));
+        refusedJson(send(user, "glue", "AWSGlue.CreateDatabase", "1.1",
+                "{\"DatabaseInput\":{\"Name\":\"" + database + "_other\"}}"), "glue:CreateDatabase");
+        send(user, "glue", "AWSGlue.CreateDatabase", "1.1", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}")
+                .statusCode(200);
+
+        String create = "{\"ConnectionInput\":{\"Name\":\"" + connection + "\",\"ConnectionType\":\"JDBC\","
+                + "\"ConnectionProperties\":{\"JDBC_CONNECTION_URL\":\"jdbc:postgresql://db:5432/app\"}},"
+                + "\"Tags\":{\"team\":\"data\"}}";
+        user.policy(allowOn("glue:CreateConnection", "*") + "," + allowOn("glue:TagResource", "*")
+                + ",{\"Effect\":\"Deny\",\"Action\":\"glue:TagResource\",\"Resource\":\"" + glueArn + "connection/"
+                + connection + "\"}");
+        refusedJson(send(user, "glue", "AWSGlue.CreateConnection", "1.1", create), "glue:TagResource");
+        user.policy(allowOn("glue:CreateConnection", "*") + ","
+                + allowOn("glue:TagResource", glueArn + "connection/" + connection));
+        send(user, "glue", "AWSGlue.CreateConnection", "1.1", create).statusCode(200);
+    }
+
+    /** A Glue workflow run is checked on the workflow its {@code Name} names. */
+    @Test
+    void aGlueWorkflowRunIsCheckedOnItsWorkflow() {
+        String workflow = "res-wf-" + suffix();
+        User user = user("res-glue-run");
+        user.policy(allowOn("glue:GetWorkflowRun", "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":workflow/" + workflow));
+        refusedJson(send(user, "glue", "AWSGlue.GetWorkflowRun", "1.1",
+                "{\"Name\":\"" + workflow + "-other\",\"RunId\":\"wr_0\"}"), "glue:GetWorkflowRun");
+        send(user, "glue", "AWSGlue.GetWorkflowRun", "1.1", "{\"Name\":\"" + workflow + "\",\"RunId\":\"wr_0\"}")
+                .body(not(containsString("AccessDeniedException")));
+    }
+
+    private static ValidatableResponse glue(String operation, String body) {
+        return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
+    }
+
+    private static ValidatableResponse getTable(User user, String database, String table) {
+        return send(user, "glue", "AWSGlue.GetTable", "1.1",
+                "{\"DatabaseName\":\"" + database + "\",\"Name\":\"" + table + "\"}");
+    }
+
     private static ValidatableResponse send(User user, String service, String target, String version, String body) {
         return user.json(service, target, version).body(body).post("/").then();
     }

@@ -392,26 +392,29 @@ public class ResourceArnBuilder {
      * {@code CreateServiceLinkedRole}, an access key id for {@code GetAccessKeyLastUsed}, a
      * deletion task id for {@code GetServiceLinkedRoleDeletionStatus}, an Organizations
      * entity path for {@code GenerateOrganizationsAccessReport}, whose resource lives in another
-     * service's tree, and a request id for the five delegation actions that name one.
+     * service's tree, and a request id for the six delegation actions that name one.
      *
      * <p>The resolver is the value rather than a branch elsewhere, so this cannot become a list
      * that says an action is handled while the dispatch has nothing for it. The keys are also what
      * {@code IamActionResourcesTest} reads to tell a type one of these covers from a type nothing
      * resolves.
      */
-    static final Map<String, DerivedResolver> DERIVED_RESOLVERS = Map.of(
-            "CreateServiceLinkedRole", ResourceArnBuilder::serviceLinkedRoleArn,
-            "GetAccessKeyLastUsed",
-            (self, ctx, region, accountId) -> self.accessKeyOwnerArn(ctx, accountId),
-            "GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn,
-            "GenerateOrganizationsAccessReport",
-            ResourceArnBuilder::organizationsAccessReportArn,
-            "AssociateDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "GetDelegationRequest", ResourceArnBuilder::delegationRequestArn,
-            "SendDelegationToken", ResourceArnBuilder::delegationRequestArn,
-            "GetHumanReadableSummary", ResourceArnBuilder::summarizedRequestArn);
+    // Map.ofEntries rather than Map.of: this map passed ten pairs when the forward action gained
+    // its resource, and Map.of has no overload beyond ten.
+    static final Map<String, DerivedResolver> DERIVED_RESOLVERS = Map.ofEntries(
+            Map.entry("CreateServiceLinkedRole", ResourceArnBuilder::serviceLinkedRoleArn),
+            Map.entry("GetAccessKeyLastUsed",
+                    (self, ctx, region, accountId) -> self.accessKeyOwnerArn(ctx, accountId)),
+            Map.entry("GetServiceLinkedRoleDeletionStatus", ResourceArnBuilder::deletionTaskRoleArn),
+            Map.entry("GenerateOrganizationsAccessReport",
+                    ResourceArnBuilder::organizationsAccessReportArn),
+            Map.entry("AssociateDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("AcceptDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("RejectDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("GetDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("UpdateDelegationRequest", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("SendDelegationToken", ResourceArnBuilder::delegationRequestArn),
+            Map.entry("GetHumanReadableSummary", ResourceArnBuilder::summarizedRequestArn));
 
     /** How one of {@link #DERIVED_RESOLVERS} reads its resource out of the request. */
     interface DerivedResolver {
@@ -609,9 +612,12 @@ public class ResourceArnBuilder {
      * actions use, one step earlier, because this family passes an id where they pass an ARN.
      *
      * <p>{@code CreateDelegationRequest} is not here: IAM mints the id, so the request names no
-     * resource and the wildcard is the honest answer. {@code UpdateDelegationRequest} is not here
-     * either, AWS publishing no authorizable action for it at all, so it carries no type to
-     * resolve.
+     * resource and the wildcard is the honest answer. {@code UpdateDelegationRequest} is here,
+     * which corrects what this note said before: the customer-side page "Managing Permissions for
+     * Delegation Requests" lists {@code iam:UpdateDelegationRequest} among the permissions an
+     * administrator grants, describing it as "Forward a delegation request to an administrator for
+     * approval", so it is an authorizable action and it names the request its id names, as its
+     * siblings do.
      */
     private List<String> delegationRequestArn(ContainerRequestContext ctx, String region,
                                               String accountId) {

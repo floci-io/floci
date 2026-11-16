@@ -197,8 +197,8 @@ public class Route53ResolverService {
         return list.deepCopy();
     }
 
-    public ObjectNode deleteFirewallDomainList(String id) {
-        ObjectNode list = require(domainListStore, id, "firewall domain list");
+    public ObjectNode deleteFirewallDomainList(String id, String region) {
+        ObjectNode list = require(domainListStore, id, "firewall domain list", region);
         domainListStore.delete(id);
         tagStore.delete(text(list, "Arn"));
         ObjectNode result = list.deepCopy();
@@ -206,12 +206,12 @@ public class Route53ResolverService {
         return result;
     }
 
-    public List<ObjectNode> listCustomFirewallDomainLists() {
-        return domainListStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    public List<ObjectNode> listCustomFirewallDomainLists(String region) {
+        return recordsIn(domainListStore, region);
     }
 
-    public Optional<ObjectNode> getCustomFirewallDomainList(String id) {
-        return domainListStore.get(id).map(ObjectNode::deepCopy);
+    public Optional<ObjectNode> getCustomFirewallDomainList(String id, String region) {
+        return domainListStore.get(id).filter(list -> inRegion(list, region)).map(ObjectNode::deepCopy);
     }
 
     // ---------- Resolver endpoints ----------
@@ -387,8 +387,8 @@ public class Route53ResolverService {
 
     // Synchronized with createResolverEndpoint, which stores the endpoint before its record: a delete
     // between the two would find no interfaces to delete, and the create would then store the record.
-    public synchronized ObjectNode deleteResolverEndpoint(String id) {
-        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+    public synchronized ObjectNode deleteResolverEndpoint(String id, String region) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint", region);
         // A record written before endpoints had interfaces has no NetworkInterfaces, so none to delete.
         endpointIpRequestStore.get(id).ifPresent(record -> {
             List<String> interfaceIds = new ArrayList<>();
@@ -409,12 +409,12 @@ public class Route53ResolverService {
         return result;
     }
 
-    public ObjectNode getResolverEndpoint(String id) {
-        return require(endpointStore, id, "resolver endpoint").deepCopy();
+    public ObjectNode getResolverEndpoint(String id, String region) {
+        return require(endpointStore, id, "resolver endpoint", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverEndpoints() {
-        return endpointStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    public List<ObjectNode> listResolverEndpoints(String region) {
+        return recordsIn(endpointStore, region);
     }
 
     /**
@@ -424,8 +424,8 @@ public class Route53ResolverService {
      * is the address of the EC2 interface behind the entry; an entry with no interface (see
      * {@link #createEndpointInterfaces}) has the request's {@code Ip}, or none.
      */
-    public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
-        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+    public List<ObjectNode> listResolverEndpointIpAddresses(String id, String region) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint", region);
         // Read once, so the requests and their interfaces come from the same record.
         JsonNode record = endpointIpRequestStore.get(id).orElse(null);
         JsonNode recorded = record == null ? null : record.get("IpAddressRequests");
@@ -462,8 +462,8 @@ public class Route53ResolverService {
         }
     }
 
-    public ObjectNode updateResolverEndpoint(String id, JsonNode request) {
-        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+    public ObjectNode updateResolverEndpoint(String id, JsonNode request, String region) {
+        ObjectNode endpoint = require(endpointStore, id, "resolver endpoint", region);
         String endpointType = text(request, "ResolverEndpointType");
         if (endpointType != null) {
             requireEnum(endpointType, "ResolverEndpointType", ENDPOINT_TYPES, INVALID_PARAMETER);
@@ -514,8 +514,20 @@ public class Route53ResolverService {
         return rule.deepCopy();
     }
 
-    public ObjectNode deleteResolverRule(String id) {
-        ObjectNode rule = require(ruleStore, id, "resolver rule");
+    /**
+     * Deletes a rule no VPC is associated with. AWS refuses one that still is, with {@code ResourceInUseException}:
+     * a rule is disassociated from every VPC it was associated with before it is deleted. Deleting it would leave
+     * associations whose rule, and so whose Region, is gone. {@code synchronized} with
+     * {@link #associateResolverRule}, so an association can't be stored between the check and the deletion.
+     */
+    public synchronized ObjectNode deleteResolverRule(String id, String region) {
+        ObjectNode rule = require(ruleStore, id, "resolver rule", region);
+        boolean associated = ruleAssociationStore.scan(key -> true).stream()
+                .anyMatch(association -> id.equals(text(association, "ResolverRuleId")));
+        if (associated) {
+            throw new AwsException("ResourceInUseException",
+                    "Resolver rule " + id + " is associated with one or more VPCs.", 400);
+        }
         ruleStore.delete(id);
         tagStore.delete(text(rule, "Arn"));
         ObjectNode result = rule.deepCopy();
@@ -523,16 +535,16 @@ public class Route53ResolverService {
         return result;
     }
 
-    public ObjectNode getResolverRule(String id) {
-        return require(ruleStore, id, "resolver rule").deepCopy();
+    public ObjectNode getResolverRule(String id, String region) {
+        return require(ruleStore, id, "resolver rule", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverRules() {
-        return ruleStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    public List<ObjectNode> listResolverRules(String region) {
+        return recordsIn(ruleStore, region);
     }
 
-    public ObjectNode updateResolverRule(String id, JsonNode config) {
-        ObjectNode rule = require(ruleStore, id, "resolver rule");
+    public ObjectNode updateResolverRule(String id, JsonNode config, String region) {
+        ObjectNode rule = require(ruleStore, id, "resolver rule", region);
         copyIfPresent(config, rule, "Name", "TargetIps", "ResolverEndpointId");
         rule.put("ModificationTime", Instant.now().toString());
         ruleStore.put(id, rule);
@@ -541,10 +553,10 @@ public class Route53ResolverService {
 
     // ---------- Resolver rule associations ----------
 
-    public ObjectNode associateResolverRule(JsonNode request) {
+    public synchronized ObjectNode associateResolverRule(JsonNode request, String region) {
         String ruleId = requireText(request, "ResolverRuleId", INVALID_PARAMETER);
         String vpcId = requireText(request, "VPCId", INVALID_PARAMETER);
-        require(ruleStore, ruleId, "resolver rule");
+        require(ruleStore, ruleId, "resolver rule", region);
         String id = id("rslvr-rrassoc");
         ObjectNode association = objectMapper.createObjectNode();
         association.put("Id", id);
@@ -556,11 +568,12 @@ public class Route53ResolverService {
         return association.deepCopy();
     }
 
-    public ObjectNode disassociateResolverRule(JsonNode request) {
+    public ObjectNode disassociateResolverRule(JsonNode request, String region) {
         String ruleId = requireText(request, "ResolverRuleId", INVALID_PARAMETER);
         String vpcId = requireText(request, "VPCId", INVALID_PARAMETER);
         ObjectNode association = ruleAssociationStore.scan(key -> true).stream()
                 .filter(a -> ruleId.equals(text(a, "ResolverRuleId")) && vpcId.equals(text(a, "VPCId")))
+                .filter(a -> inRegion(a, region))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No association between resolver rule " + ruleId + " and VPC " + vpcId, 400));
@@ -570,12 +583,12 @@ public class Route53ResolverService {
         return result;
     }
 
-    public ObjectNode getResolverRuleAssociation(String id) {
-        return require(ruleAssociationStore, id, "resolver rule association").deepCopy();
+    public ObjectNode getResolverRuleAssociation(String id, String region) {
+        return require(ruleAssociationStore, id, "resolver rule association", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverRuleAssociations() {
-        return ruleAssociationStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    public List<ObjectNode> listResolverRuleAssociations(String region) {
+        return recordsIn(ruleAssociationStore, region);
     }
 
     /**
@@ -986,9 +999,30 @@ public class Route53ResolverService {
                         + text(existing, "Id") + " with a different " + field + ".", 400);
     }
 
-    private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type) {
-        return store.get(id).orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                "Unknown " + type + ": " + id, 400));
+    /** The record {@code id} names in {@code region}; one of another Region is not found, as Resolver is Regional. */
+    private ObjectNode require(StorageBackend<String, ObjectNode> store, String id, String type, String region) {
+        return store.get(id).filter(record -> inRegion(record, region))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Unknown " + type + ": " + id, 400));
+    }
+
+    /** {@code store}'s records of {@code region}, copied. */
+    private List<ObjectNode> recordsIn(StorageBackend<String, ObjectNode> store, String region) {
+        return store.scan(key -> true).stream().filter(record -> inRegion(record, region))
+                .map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * Whether a stored record belongs to {@code region}. The stores carry no Region in their keys, so it comes from the
+     * ARN this service minted for the record, read as {@link #resolverRuleIn} reads a rule's on the DNS path, and for a
+     * rule association, which has no ARN, from its rule. An association whose rule is gone, which only a rule deleted
+     * before such deletes were refused leaves, has no Region to claim and belongs to none, rather than to every Region.
+     */
+    private boolean inRegion(ObjectNode record, String region) {
+        String ruleId = text(record, "ResolverRuleId");
+        if (!record.has("Arn") && ruleId != null) {
+            return ruleStore.get(ruleId).map(rule -> inRegion(rule, region)).orElse(false);
+        }
+        return region.equals(AwsArnUtils.regionOrDefault(text(record, "Arn"), region));
     }
 
     /**

@@ -39,6 +39,7 @@ public class NetworkInterface {
     private NetworkInterfaceAttachment attachment;
     private List<Tag> tagSet = new ArrayList<>();
     private List<NetworkInterfacePrivateIpAddress> privateIpAddresses = new ArrayList<>();
+    private List<String> ipv6Addresses = new ArrayList<>();
 
     public NetworkInterface() {}
 
@@ -94,5 +95,7 @@ public class NetworkInterface {
     public void setTagSet(List<Tag> tagSet) { this.tagSet = tagSet; }
 
     public List<NetworkInterfacePrivateIpAddress> getPrivateIpAddresses() { return privateIpAddresses; }
+    public List<String> getIpv6Addresses() { return ipv6Addresses; }
+    public void setIpv6Addresses(List<String> ipv6Addresses) { this.ipv6Addresses = ipv6Addresses; }
     public void setPrivateIpAddresses(List<NetworkInterfacePrivateIpAddress> privateIpAddresses) { this.privateIpAddresses = privateIpAddresses; }
 }

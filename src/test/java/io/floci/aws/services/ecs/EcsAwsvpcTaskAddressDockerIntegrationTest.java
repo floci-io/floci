@@ -43,7 +43,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class EcsAwsvpcTaskAddressDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String SUBNET = "subnet-default-us-east-1-a";
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
     private static final int PORT = 8080;
 
     /**
@@ -96,7 +96,7 @@ class EcsAwsvpcTaskAddressDockerIntegrationTest {
             assertEquals("RUNNING", described.getLastStatus(), "the task must start: " + described.getStoppedReason());
             String address = described.getPrivateIpAddress();
             assertNotNull(address, "an awsvpc task must report its ENI address");
-            network = vpcNetworkManager.networkNameFor(REGION, vpcId).orElseThrow();
+            network = vpcNetworkManager.networkNameFor("000000000000", REGION, vpcId).orElseThrow();
             String dockerId = described.getContainers().getFirst().getDockerId();
             ContainerNetwork onVpc = dockerClient.inspectContainerCmd(dockerId).exec()
                     .getNetworkSettings().getNetworks().get(network);
@@ -127,7 +127,7 @@ class EcsAwsvpcTaskAddressDockerIntegrationTest {
             }
             if (network != null) {
                 // Also disconnects the endpoint Floci gives itself on the network when it runs in a container.
-                vpcNetworkManager.deleteVpcNetwork(REGION, vpcId);
+                vpcNetworkManager.deleteVpcNetwork("000000000000", REGION, vpcId);
             }
         }
     }

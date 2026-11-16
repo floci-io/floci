@@ -87,17 +87,17 @@ class VpcNetworkTeardownDockerIntegrationTest {
             for (int round = 0; round < 2; round++) {
                 String vpcId = "vpc-" + round;
                 String subnetId = "subnet-" + round;
-                manager.declareVpc(REGION, vpcId, cidr.toString());
-                manager.declareSubnet(REGION, vpcId, subnetId, cidr.toString());
-                String address = manager.allocatePrivateIp(REGION, subnetId).orElseThrow();
+                manager.declareVpc("000000000000", REGION, vpcId, cidr.toString());
+                manager.declareSubnet("000000000000", REGION, vpcId, subnetId, cidr.toString());
+                String address = manager.allocatePrivateIp("000000000000", REGION, subnetId).orElseThrow();
                 assertEquals(expectedAddress, address);
-                assertFalse(manager.isSubstituted(REGION, vpcId));
+                assertFalse(manager.isSubstituted("000000000000", REGION, vpcId));
 
                 String guest = startContainer(namespace + "-guest-" + round);
                 containers.add(guest);
-                String networkName = manager.networkName(REGION, vpcId);
+                String networkName = manager.networkName("000000000000", REGION, vpcId);
                 networks.add(networkName);
-                assertTrue(manager.attach(REGION, vpcId, subnetId, guest, address).isPresent());
+                assertTrue(manager.attach("000000000000", REGION, vpcId, subnetId, guest, address).isPresent());
                 Network network = docker.inspectNetworkCmd().withNetworkId(networkName).exec();
                 assertTrue(network.getContainers().containsKey(self));
                 assertEquals(address + "/24", network.getContainers().get(guest).getIpv4Address());
@@ -105,15 +105,15 @@ class VpcNetworkTeardownDockerIntegrationTest {
                 if (restored) {
                     manager.shutdown();
                     manager = new VpcNetworkManager(config, docker, resolver);
-                    manager.declareVpc(REGION, vpcId, cidr.toString());
-                    manager.declareSubnet(REGION, vpcId, subnetId, cidr.toString());
-                    assertTrue(manager.attachContainer(REGION, vpcId, guest));
+                    manager.declareVpc("000000000000", REGION, vpcId, cidr.toString());
+                    manager.declareSubnet("000000000000", REGION, vpcId, subnetId, cidr.toString());
+                    assertTrue(manager.attachContainer("000000000000", REGION, vpcId, guest));
                 }
 
                 docker.removeContainerCmd(guest).withForce(true).exec();
                 containers.remove(guest);
-                manager.forgetSubnet(REGION, subnetId);
-                manager.deleteVpcNetwork(REGION, vpcId);
+                manager.forgetSubnet("000000000000", REGION, subnetId);
+                manager.deleteVpcNetwork("000000000000", REGION, vpcId);
 
                 await().pollInterval(Duration.ofMillis(25)).atMost(Duration.ofSeconds(12))
                         .untilAsserted(() -> assertThrows(NotFoundException.class,

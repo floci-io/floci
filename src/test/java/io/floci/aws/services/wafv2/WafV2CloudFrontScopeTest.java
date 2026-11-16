@@ -14,7 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /**
@@ -25,14 +27,15 @@ import static org.mockito.Mockito.when;
 class WafV2CloudFrontScopeTest {
 
     private WafV2Service service;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
-        service = new WafV2Service(storageFactory, new RegionResolver("us-gov-west-1", "000000000000"),
-                new ObjectMapper());
+        regionResolver = spy(new RegionResolver("us-gov-west-1", "000000000000"));
+        service = new WafV2Service(storageFactory, regionResolver, new ObjectMapper());
     }
 
     @Test
@@ -41,6 +44,8 @@ class WafV2CloudFrontScopeTest {
 
         assertTrue(acl.getArn().startsWith("arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/"),
                 acl.getArn());
+        // The stack's later calls run in its own Region's request scope, as CloudFormation provisions them.
+        doReturn("us-east-1").when(regionResolver).getRegion();
         assertEquals("edge", service.getWebAcl("CLOUDFRONT", acl.getId(), "edge").getName());
         service.deleteWebAcl("CLOUDFRONT", acl.getId(), "edge", acl.getLockToken());
     }
