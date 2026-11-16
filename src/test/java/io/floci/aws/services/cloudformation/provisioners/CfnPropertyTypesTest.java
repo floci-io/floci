@@ -305,6 +305,47 @@ class CfnPropertyTypesTest {
                         "#/EventDestination/SnsDestination: extraneous key [Extra] is not permitted"));
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidLaunchConfigurationProperties")
+    void handlerReaderValidatesAnotherVendoredType(String caseName, String properties, String violation) {
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new CfnPropertyTypes.HandlerReader(engine())
+                        .read("AWS::AutoScaling::LaunchConfiguration", json(properties)));
+
+        assertEquals("InvalidRequest", failure.getErrorCode());
+        assertEquals("Model validation failed (" + violation + ")", failure.getMessage());
+    }
+
+    static Stream<Arguments> invalidLaunchConfigurationProperties() {
+        return Stream.of(
+                Arguments.of("null required ImageId",
+                        "{\"ImageId\":null,\"InstanceType\":\"t3.micro\"}",
+                        "#: required key [ImageId] not found"),
+                Arguments.of("blank required InstanceType",
+                        "{\"ImageId\":\"ami-123\",\"InstanceType\":\"  \"}",
+                        "#: required key [InstanceType] not found"),
+                Arguments.of("extraneous root member",
+                        "{\"ImageId\":\"ami-123\",\"InstanceType\":\"t3.micro\",\"Extra\":true}",
+                        "#: extraneous key [Extra] is not permitted"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("strictVendoredTypes")
+    void handlerReaderRejectsUnmodeledMembersAcrossVendoredTypes(String resourceType) {
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new CfnPropertyTypes.HandlerReader(engine()).read(resourceType, json("{\"Extra\":true}")));
+
+        assertEquals("InvalidRequest", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("#: extraneous key [Extra] is not permitted"), failure.getMessage());
+    }
+
+    static Stream<Arguments> strictVendoredTypes() {
+        return RequestShapeModel.load(CfnPropertyTypes.RESOURCE_NAME, "CloudFormation property types")
+                .operations().keySet().stream()
+                .filter(type -> !"AWS::ECS::TaskDefinition".equals(type))
+                .map(Arguments::of);
+    }
+
     @Test
     void handlerReaderLeavesMapEntriesAndFreeFormValuesAlone() {
         JsonNode read = new CfnPropertyTypes.HandlerReader(engine(), MODEL).read("AWS::Test::Thing",

@@ -393,7 +393,7 @@ final class CfnPropertyTypes {
 
         private final List<Violation> violations = new ArrayList<>();
         private boolean unconverted;
-        private boolean validateSesProperties;
+        private boolean preserveEcsHandlerSemantics;
 
         HandlerReader(CloudFormationTemplateEngine engine) {
             this(engine, Holder.MODEL);
@@ -409,8 +409,8 @@ final class CfnPropertyTypes {
             if (shape == null) {
                 throw notVendored(resourceType);
             }
-            // SES rejects null, blank and unmodeled members; ECS passes unmodeled members through.
-            validateSesProperties = "AWS::SES::ConfigurationSetEventDestination".equals(resourceType);
+            // ECS forwards unmodeled members and uses presence-only required checks in its API path.
+            preserveEcsHandlerSemantics = "AWS::ECS::TaskDefinition".equals(resourceType);
             JsonNode raw = props == null || props.isNull() ? JsonNodeFactory.instance.objectNode() : props;
             JsonNode read = read("", "", engine.omitNoValue(raw), shape);
             if (unconverted) {
@@ -465,7 +465,7 @@ final class CfnPropertyTypes {
             for (String member : shape.required()) {
                 JsonNode raw = value.get(member);
                 boolean absent = raw == null;
-                if (!absent && validateSesProperties) {
+                if (!absent && !preserveEcsHandlerSemantics) {
                     absent = raw.isNull() || raw.isMissingNode();
                     if (!absent && "string".equals(model.shapes().get(shape.members().get(member)).type())) {
                         JsonNode resolved = engine.resolveNode(raw);
@@ -494,7 +494,7 @@ final class CfnPropertyTypes {
 
         @Override
         JsonNode readUnknown(String path, String name, JsonNode raw) {
-            if (!validateSesProperties) {
+            if (preserveEcsHandlerSemantics) {
                 return super.readUnknown(path, name, raw);
             }
             record(new Violation(path, "extraneous key [" + name + "] is not permitted", false), false);
