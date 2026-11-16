@@ -795,6 +795,21 @@ class SnsCfnProvisionerTest {
         assertEquals("arn:replacement", resource.getPhysicalId());
         verify(sns).subscribe("t", "sqs", "replacement", REGION, Map.of("RawMessageDelivery", "true"));
         verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
+
+        // A replacement that only adopted a subscription somebody else made is not unsubscribed on rollback.
+        doReturn(new SnsService.SubscriptionCreation(subscription("arn:adopted"), false))
+                .when(sns).subscribeWithStatus("t", "sqs", "adopted", REGION, Map.of());
+        StackResource adopting = existingSubscription();
+        provisioner.provision(adopting, props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"adopted"}
+                """), subscriptionUpdate(props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """)));
+        assertEquals("arn:adopted", adopting.getPhysicalId());
+        assertTrue(provisioner.rollbackUpdate(adopting));
+
+        assertEquals("arn:prior", adopting.getPhysicalId());
+        verify(sns, never()).unsubscribe(anyString(), anyString());
     }
 
     @Test

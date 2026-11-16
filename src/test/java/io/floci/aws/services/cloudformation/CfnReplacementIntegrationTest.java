@@ -222,6 +222,24 @@ class CfnReplacementIntegrationTest {
                         "True", false, null),
                 createOnlyRow("SNS topic FifoTopic switched on", "", "", "AWS::SNS::Topic",
                         "\"FifoTopic\": false", "\"FifoTopic\": true", "True", false, null),
+                createOnlyRow("SNS subscription Endpoint", json("'TopicA': {'Type': 'AWS::SNS::Topic'}, 'TopicB': {'Type': 'AWS::SNS::Topic'}"), "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription Protocol", json("'TopicA': {'Type': 'AWS::SNS::Topic'}, 'TopicB': {'Type': 'AWS::SNS::Topic'}"), "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email-json\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription TopicArn", json("'TopicA': {'Type': 'AWS::SNS::Topic'}, 'TopicB': {'Type': 'AWS::SNS::Topic'}"), "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicB\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
