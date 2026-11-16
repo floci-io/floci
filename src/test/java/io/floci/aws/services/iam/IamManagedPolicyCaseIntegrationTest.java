@@ -17,11 +17,9 @@ import software.amazon.awssdk.services.iam.model.AttachedPolicy;
 import software.amazon.awssdk.services.iam.model.NoSuchEntityException;
 
 import java.net.URI;
-import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -43,32 +41,21 @@ class IamManagedPolicyCaseIntegrationTest {
                 CloudFormationClient.builder(), "test", Region.US_EAST_1, endpoint);
              IamClient iam = AwsTestClients.create(IamClient.builder(), "test", Region.US_EAST_1, endpoint)) {
             assertEquals(CANONICAL, iam.getPolicy(request -> request.policyArn(ALIAS)).policy().arn());
-            boolean created = false;
             try {
-                cfn.createStack(request -> request.stackName(name).templateBody(template(kind, name, ALIAS))
-                        .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
-                created = true;
-                CfnStackWaits.awaitStatus(cfn, name, "CREATE_COMPLETE");
+                CfnStackWaits.createStack(cfn, name, template(kind, name, ALIAS), "CREATE_COMPLETE");
                 assertEquals(List.of(CANONICAL), attached(iam, kind, name));
                 for (String policy : new String[] {null, ALIAS, CANONICAL, ALIAS, null}) {
-                    cfn.updateStack(request -> request.stackName(name).templateBody(template(kind, name, policy))
-                            .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
-                    CfnStackWaits.awaitStatus(cfn, name, "UPDATE_COMPLETE");
+                    CfnStackWaits.updateStack(cfn, name, template(kind, name, policy), "UPDATE_COMPLETE");
                     assertEquals(policy == null ? List.of() : List.of(CANONICAL), attached(iam, kind, name));
                 }
             } finally {
-                if (created) {
-                    cfn.deleteStack(request -> request.stackName(name));
-                    await().atMost(Duration.ofSeconds(10)).pollDelay(Duration.ZERO)
-                            .pollInterval(Duration.ofMillis(20)).untilAsserted(() -> {
-                                if ("Role".equals(kind)) {
-                                    assertThrows(NoSuchEntityException.class,
-                                            () -> iam.getRole(request -> request.roleName(name)));
-                                } else {
-                                    assertThrows(NoSuchEntityException.class,
-                                            () -> iam.getUser(request -> request.userName(name)));
-                                }
-                            });
+                CfnStackWaits.deleteStack(cfn, name);
+                if ("Role".equals(kind)) {
+                    assertThrows(NoSuchEntityException.class,
+                            () -> iam.getRole(request -> request.roleName(name)));
+                } else {
+                    assertThrows(NoSuchEntityException.class,
+                            () -> iam.getUser(request -> request.userName(name)));
                 }
             }
         }
