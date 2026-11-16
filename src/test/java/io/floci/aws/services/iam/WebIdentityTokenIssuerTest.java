@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.services.iam.model.WebIdentityTokenKey;
@@ -25,9 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * What the wire test cannot check: that a token verifies against the key the issuer stored. Nothing
- * publishes that key yet, that being the other half of the feature, so this reaches it through the
- * store the issuer is built with.
+ * What the wire test cannot check: that a token verifies against the key the issuer stored,
+ * reached through the store the issuer is built with, and that the keys it publishes are those.
  *
  * <p>The JCA names are spelled out here rather than read off
  * {@link WebIdentityTokenIssuer.Algorithm}, which is the point of the exercise: a signature that
@@ -141,5 +141,52 @@ class WebIdentityTokenIssuerTest {
         assertNotEquals(keyId(first), keyId(other));
         assertEquals(keyId(first), keyStore.get("RS256").orElseThrow().getKeyId());
         assertEquals(keyId(other), keyStore.get("ES384").orElseThrow().getKeyId());
+    }
+
+    /**
+     * The keys a relying party is handed are the ones tokens are signed with: one per algorithm,
+     * under the {@code kid} the token names, and a token verifies against the published half.
+     */
+    @Test
+    void thePublishedKeysAreTheOnesTokensAreSignedWith() throws Exception {
+        String rs256 = mint(WebIdentityTokenIssuer.Algorithm.RS256, 300);
+
+        List<WebIdentityTokenIssuer.PublishedKey> published = issuer.publishedKeys(null);
+
+        assertEquals(List.of(WebIdentityTokenIssuer.Algorithm.RS256, WebIdentityTokenIssuer.Algorithm.ES384),
+                published.stream().map(WebIdentityTokenIssuer.PublishedKey::algorithm).toList());
+        WebIdentityTokenIssuer.PublishedKey key = published.get(0);
+        assertEquals(keyId(rs256), key.keyId(), "the key minted for the token is the one published");
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(key.publicKey());
+        verifier.update(signingInput(rs256).getBytes(StandardCharsets.US_ASCII));
+        assertTrue(verifier.verify(signature(rs256)));
+
+        String es384 = mint(WebIdentityTokenIssuer.Algorithm.ES384, 300);
+        assertEquals(keyId(es384), published.get(1).keyId(),
+                "a key published before any token signed with it is the one the token then uses");
+    }
+
+    /**
+     * The key set is read for a named account, since the request asking for it carries none, and
+     * reading or minting one account's keys never touches another's.
+     */
+    @Test
+    void publishedKeysAreTheNamedAccountsOwn() {
+        AccountAwareStorageBackend<WebIdentityTokenKey> scoped =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        WebIdentityTokenIssuer accounts = new WebIdentityTokenIssuer(scoped, MAPPER);
+
+        List<WebIdentityTokenIssuer.PublishedKey> first = accounts.publishedKeys("111111111111");
+        List<WebIdentityTokenIssuer.PublishedKey> second = accounts.publishedKeys("222222222222");
+
+        assertNotEquals(first.get(0).keyId(), second.get(0).keyId());
+        assertNotEquals(first.get(1).keyId(), second.get(1).keyId());
+        assertEquals(first.get(0).keyId(), accounts.publishedKeys("111111111111").get(0).keyId(),
+                "a second read publishes the keys the first one minted");
+        assertEquals(first.get(0).keyId(),
+                scoped.getForAccount("111111111111", "RS256").orElseThrow().getKeyId());
+        assertTrue(scoped.getForAccount("000000000000", "RS256").isEmpty(),
+                "naming an account does not fall through to the default one");
     }
 }

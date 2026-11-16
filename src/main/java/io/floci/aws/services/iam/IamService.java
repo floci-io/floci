@@ -199,6 +199,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String ACCOUNT_PASSWORD_POLICY_KEY = "account-password-policy";
     private static final String STS_PREFERENCES_KEY = "sts-preferences";
     private static final String OUTBOUND_FEDERATION_KEY = "outbound-web-identity-federation";
+    /** The issuer URL's first host label: the lowercase UUID {@code UUID.randomUUID()} prints. */
+    private static final Pattern ISSUER_ID =
+            Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     /** globalEndpointTokenVersion's only two values. */
     private static final Set<String> GLOBAL_ENDPOINT_TOKEN_VERSIONS = Set.of("v1Token", "v2Token");
     /** AWS-documented bounds for the account password policy's numeric fields. */
@@ -3418,6 +3421,44 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                             + "cannot disable the feature multiple times", 404);
         }
         return state;
+    }
+
+    /**
+     * The account whose issuer URL has {@code issuerId} as its first host label, and that URL, for
+     * a request that names an issuer rather than carrying an account: the discovery routes are
+     * fetched by relying parties, which hold no AWS credential. The id is the UUID minted for the
+     * account, so it names one account across all of them, as AWS's discovery endpoint "serves
+     * discovery requests for any issuer UUID in the partition".
+     *
+     * <p>The issuer is found whether the feature is on or off. It outlives a disable (see
+     * {@link OutboundWebIdentityFederation}), and so do the tokens already minted under it, which
+     * a relying party still has to verify until they expire.
+     *
+     * <p>The routes asking are public, so an id that is not a UUID, the only form
+     * {@link #mintIssuerIdentifier} produces, is answered without reading the store, and the read
+     * itself takes no lock: it only reads, the store is safe to read concurrently, and an issuer
+     * URL never changes once minted. The lock serializes enabling and disabling, which a public
+     * request has no reason to wait behind.
+     */
+    public Optional<AccountAwareStorageBackend.AccountEntry<String>> findOutboundWebIdentityIssuer(
+            String issuerId) {
+        if (issuerId == null || !ISSUER_ID.matcher(issuerId).matches()) {
+            return Optional.empty();
+        }
+        String hostPrefix = "https://" + issuerId + ".";
+        if (outboundFederation instanceof AccountAwareStorageBackend<OutboundWebIdentityFederation> aware) {
+            return aware.scanAllAccountEntries(OUTBOUND_FEDERATION_KEY::equals).stream()
+                    .filter(entry -> entry.value().getIssuerIdentifier() != null
+                            && entry.value().getIssuerIdentifier().startsWith(hostPrefix))
+                    .findFirst()
+                    .map(entry -> new AccountAwareStorageBackend.AccountEntry<>(
+                            entry.accountId(), entry.key(), entry.value().getIssuerIdentifier()));
+        }
+        return outboundFederation.get(OUTBOUND_FEDERATION_KEY)
+                .map(OutboundWebIdentityFederation::getIssuerIdentifier)
+                .filter(issuer -> issuer != null && issuer.startsWith(hostPrefix))
+                .map(issuer -> new AccountAwareStorageBackend.AccountEntry<>(
+                        regionResolver.getDefaultAccountId(), OUTBOUND_FEDERATION_KEY, issuer));
     }
 
     /**
