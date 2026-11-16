@@ -140,8 +140,7 @@ final class DynamoDbPartiQLKeyPlan {
                 return;
             }
         }
-        throw DynamoDbPartiQLParser.validationEx(
-                "Filter Expression can only contain non-primary key attributes: Primary key attribute: " + named.get());
+        throw DynamoDbAccessPathValidator.keyAttributeInFilter(named.get());
     }
 
     // DynamoDB drops the overlap check once a branch tests a key in a way no key condition can

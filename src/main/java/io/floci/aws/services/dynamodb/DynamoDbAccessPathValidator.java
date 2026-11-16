@@ -131,6 +131,11 @@ final class DynamoDbAccessPathValidator {
                 + String.join(", ", attributes) + "]");
     }
 
+    static AwsException keyAttributeInFilter(String keyAttribute) {
+        return validationException("Filter Expression can only contain non-primary key attributes: "
+                + "Primary key attribute: " + keyAttribute);
+    }
+
     static AwsException unprojectedGsiAttributes(String indexName, Collection<String> attributes) {
         return validationException("One or more parameter values were invalid: Global secondary index "
                 + indexName + " does not project [" + String.join(", ", attributes) + "]");
@@ -422,8 +427,7 @@ final class DynamoDbAccessPathValidator {
         collectAttributes(root, names, referenced);
         for (String keyAttribute : accessPath.keyAttributeNames()) {
             if (referenced.contains(keyAttribute)) {
-                throw validationException("Filter Expression can only contain non-primary key attributes: "
-                        + "Primary key attribute: " + keyAttribute);
+                throw keyAttributeInFilter(keyAttribute);
             }
         }
     }
