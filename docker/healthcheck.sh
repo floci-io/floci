@@ -7,9 +7,14 @@ case "$host" in
     ::|\[::\]) host=::1 ;;
 esac
 port=${QUARKUS_HTTP_PORT:-${FLOCI_PORT:-4566}}
+tls_enabled=${FLOCI_TLS_ENABLED:-}
+# Match LocalStackParity: a nonempty Floci setting wins, and parity can be disabled.
+if [[ -z $tls_enabled && ${LOCALSTACK_PARITY:-} != false && ${USE_SSL:-} == 1 ]]; then
+    tls_enabled=true
+fi
 # Floci TLS serves HTTP and HTTPS on its public multiplexed port. Its private
 # Quarkus HTTP backend requires a PROXY preface, so do not probe that directly.
-if [[ ${FLOCI_TLS_ENABLED,,} == true ]]; then
+if [[ ${tls_enabled,,} == true ]]; then
     port=${FLOCI_PORT:-4566}
 fi
 exec 3<>"/dev/tcp/$host/$port" || exit 1

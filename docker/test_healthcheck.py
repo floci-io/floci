@@ -24,7 +24,8 @@ class HealthcheckTest(unittest.TestCase):
             listener.settimeout(2)
             port = str(listener.getsockname()[1])
             env = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("QUARKUS_HTTP_", "FLOCI_PORT", "FLOCI_TLS_ENABLED"))}
+                   if not key.startswith(("QUARKUS_HTTP_", "FLOCI_PORT", "FLOCI_TLS_ENABLED"))
+                   and key not in ("USE_SSL", "LOCALSTACK_PARITY")}
             env.update({key: port if value == "PORT" else value for key, value in settings.items()})
             requests: list[bytes] = []
 
@@ -68,6 +69,32 @@ class HealthcheckTest(unittest.TestCase):
 
     def test_tls_uses_public_multiplexed_port(self):
         result, _ = self.probe({"FLOCI_TLS_ENABLED": "TRUE", "FLOCI_PORT": "PORT", "QUARKUS_HTTP_PORT": "1", "QUARKUS_HTTP_SSL_PORT": "2"})
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_localstack_tls_uses_public_multiplexed_port(self):
+        for floci_setting in (None, ""):
+            with self.subTest(floci_setting=floci_setting):
+                settings = {"USE_SSL": "1", "FLOCI_PORT": "PORT", "QUARKUS_HTTP_PORT": "1"}
+                if floci_setting is not None:
+                    settings["FLOCI_TLS_ENABLED"] = floci_setting
+                result, _ = self.probe(settings)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_explicit_floci_tls_setting_precedes_localstack_tls(self):
+        for floci_setting in ("false", " \t"):
+            with self.subTest(floci_setting=floci_setting):
+                result, _ = self.probe({"FLOCI_TLS_ENABLED": floci_setting, "USE_SSL": "1",
+                                        "QUARKUS_HTTP_PORT": "PORT", "FLOCI_PORT": "1"})
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_disabled_parity_ignores_localstack_tls(self):
+        result, _ = self.probe({"LOCALSTACK_PARITY": "false", "USE_SSL": "1",
+                                "QUARKUS_HTTP_PORT": "PORT", "FLOCI_PORT": "1"})
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_explicit_floci_tls_works_with_parity_disabled(self):
+        result, _ = self.probe({"LOCALSTACK_PARITY": "false", "FLOCI_TLS_ENABLED": "true",
+                                "QUARKUS_HTTP_PORT": "1", "FLOCI_PORT": "PORT"})
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_wildcard_uses_loopback(self):
