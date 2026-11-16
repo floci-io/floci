@@ -174,7 +174,7 @@ class RdsParameterGroupEngineIntegrationTest {
         createParameterGroup(group, "mysql8.0", "max_connections", "300");
         createParameterGroup(switchedGroup, "mysql8.0", "max_connections", "600");
         try {
-            int port = createInstance(instanceId, "mysql", group);
+            int port = createInstance(instanceId, "mysql", "8.0", group);
 
             assertThat(query(port, "SELECT @@GLOBAL.max_connections"), equalTo("300"));
 
@@ -204,7 +204,7 @@ class RdsParameterGroupEngineIntegrationTest {
         String instanceId = "engine-bad-db-" + suffix;
         createParameterGroup(group, "mysql8.0", "sql_mode", "NOT_A_MODE");
         try {
-            int port = createInstance(instanceId, "mysql", group);
+            int port = createInstance(instanceId, "mysql", "8.0", group);
             assertThat(instanceStatus(instanceId), equalTo("incompatible-parameters"));
 
             modifyParameterGroup(group, "sql_mode", "STRICT_TRANS_TABLES", "immediate");
@@ -265,7 +265,7 @@ class RdsParameterGroupEngineIntegrationTest {
         String instanceId = "engine-pg-db-" + suffix;
         createParameterGroup(group, "postgres16");
         try {
-            int port = createInstance(instanceId, "postgres", group);
+            int port = createInstance(instanceId, "postgres", "16", group);
             assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("replica"));
 
             modifyParameterGroup(group, "rds.logical_replication", "1", "pending-reboot");
@@ -281,10 +281,12 @@ class RdsParameterGroupEngineIntegrationTest {
         }
     }
 
-    private static int createInstance(String instanceId, String engine, String parameterGroup) {
+    private static int createInstance(
+            String instanceId, String engine, String engineVersion, String parameterGroup) {
         return rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", instanceId)
                 .formParam("Engine", engine)
+                .formParam("EngineVersion", engineVersion)
                 .formParam("DBInstanceClass", "db.t3.micro")
                 .formParam("AllocatedStorage", "20")
                 .formParam("DBParameterGroupName", parameterGroup)
@@ -345,8 +347,15 @@ class RdsParameterGroupEngineIntegrationTest {
     private static void createClusterParameterGroup(
             String name, String parameter, String value, String secondParameter, String secondValue) {
         createClusterParameterGroup(name, "aurora-mysql8.0");
-        modifyClusterParameterGroup(name, parameter, value, "immediate");
-        modifyClusterParameterGroup(name, secondParameter, secondValue, "immediate");
+        rds("ModifyDBClusterParameterGroup")
+                .formParam("DBClusterParameterGroupName", name)
+                .formParam("Parameters.member.1.ParameterName", parameter)
+                .formParam("Parameters.member.1.ParameterValue", value)
+                .formParam("Parameters.member.1.ApplyMethod", "immediate")
+                .formParam("Parameters.member.2.ParameterName", secondParameter)
+                .formParam("Parameters.member.2.ParameterValue", secondValue)
+                .formParam("Parameters.member.2.ApplyMethod", "immediate")
+        .when().post("/").then().statusCode(200);
     }
 
     private static void createClusterParameterGroup(String name, String family) {
