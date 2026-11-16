@@ -297,6 +297,42 @@ class RedshiftSqlInterceptorTest {
                 RedshiftSqlInterceptor.rewrite("CREATE TABLE t (\n    payload" + padding + "VARBYTE(64)\n);"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "ALTER TABLE events ADD COLUMN varbinary INT",
+            "ALTER TABLE events ADD varbinary INT",
+            "ALTER TABLE events ADD COLUMN IF NOT EXISTS varbinary INT",
+            "ALTER TABLE events RENAME COLUMN payload TO varbinary",
+            "ALTER TABLE events RENAME TO varbinary",
+            "CREATE TABLE t AS SELECT 1 AS varbinary",
+            "CREATE TABLE t AS SELECT a, b varbinary FROM s",
+            "CREATE TABLE t AS (SELECT a, b varbinary FROM s)",
+            "CREATE TABLE t (varbinary INT, a INT)"})
+    void shouldNotRenameAColumnOrAliasThatIsCalledLikeABinaryType(String sql) {
+        assertSame(sql, RedshiftSqlInterceptor.rewrite(sql));
+    }
+
+    @Test
+    void shouldTurnTheTypeOfAColumnCalledLikeABinaryTypeAndKeepItsName() {
+        assertEquals("ALTER TABLE events ADD COLUMN varbinary varbyte",
+                RedshiftSqlInterceptor.rewrite("ALTER TABLE events ADD COLUMN varbinary VARBYTE(8)"));
+        assertEquals("CREATE TABLE t (varbinary varbyte, a INT)",
+                RedshiftSqlInterceptor.rewrite("CREATE TABLE t (varbinary VARBINARY(8), a INT)"));
+        assertEquals("ALTER TABLE events ADD COLUMN IF NOT EXISTS x varbyte",
+                RedshiftSqlInterceptor.rewrite("ALTER TABLE events ADD COLUMN IF NOT EXISTS x VARBYTE(8)"));
+    }
+
+    @Test
+    void shouldTurnABinaryTypeAfterACommentOrALongGapIntoTheVarbyteDomain() {
+        assertEquals("CREATE TABLE t (payload /* note */ varbyte, id INT)",
+                RedshiftSqlInterceptor.rewrite("CREATE TABLE t (payload /* note */ VARBYTE(16), id INT)"));
+        assertEquals("CREATE TABLE t (payload -- note\n varbyte, id INT)",
+                RedshiftSqlInterceptor.rewrite("CREATE TABLE t (payload -- note\n VARBYTE(16), id INT)"));
+        String gap = " ".repeat(300);
+        assertEquals("CREATE TABLE t (payload" + gap + "varbyte)",
+                RedshiftSqlInterceptor.rewrite("CREATE TABLE t (payload" + gap + "VARBYTE(16))"));
+    }
+
     @Test
     void shouldTurnAnUnsizedBinaryAliasIntoTheVarbyteDomain() {
         assertEquals("CREATE TABLE t (a varbyte, b varbyte);",
