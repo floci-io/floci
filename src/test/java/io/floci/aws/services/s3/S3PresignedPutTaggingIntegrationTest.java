@@ -31,11 +31,9 @@ class S3PresignedPutTaggingIntegrationTest {
      * includes {@code x-amz-tagging} must NOT be misrouted to the
      * {@code ?tagging} sub-resource handler (PutObjectTagging).
      *
-     * <p>The fix was in {@link S3RequestParser#hasQueryParamInString}: the old
-     * {@code String.contains()} implementation falsely matched "tagging" inside the
+     * <p>The old {@code String.contains()} check matched "tagging" inside the
      * <em>value</em> of {@code X-Amz-SignedHeaders} (e.g.
-     * {@code host%3Bx-amz-tagging}), causing a 404. The new implementation correctly
-     * splits on {@code &} and extracts parameter names before {@code =}.
+     * {@code host%3Bx-amz-tagging}), causing a 404.
      */
     @Test
     void presignedPutWithTaggingSignedHeaderDoesNotMisrouteToPutObjectTagging() {
@@ -200,6 +198,40 @@ class S3PresignedPutTaggingIntegrationTest {
             .body(containsString("<Value>b</Value>"))
             .body(containsString("<Key>c</Key>"))
             .body(containsString("<Value>d</Value>"));
+    }
+
+    @Test
+    void listObjectsV2PrefixWithAnEncodedAmpersandListsObjects() {
+        String bucket = "encoded-amp-v2-" + System.nanoTime();
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().urlEncodingEnabled(false).body("x").when().put("/" + bucket + "/a&tagging/x").then().statusCode(200);
+        given().body("y").when().put("/" + bucket + "/b/y").then().statusCode(200);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/" + bucket + "?list-type=2&prefix=a%26tagging")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ListBucketResult"))
+            .body("ListBucketResult.Prefix", equalTo("a&tagging"))
+            .body("ListBucketResult.Contents.size()", equalTo(1))
+            .body("ListBucketResult.Contents.Key", equalTo("a&tagging/x"));
+    }
+
+    @Test
+    void listObjectsPrefixWithAnEncodedAmpersandListsObjects() {
+        String bucket = "encoded-amp-v1-" + System.nanoTime();
+        given().when().put("/" + bucket).then().statusCode(200);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/" + bucket + "?prefix=a%26uploads")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ListBucketResult"))
+            .body("ListBucketResult.Prefix", equalTo("a&uploads"));
     }
 
     private static void createBucket() {

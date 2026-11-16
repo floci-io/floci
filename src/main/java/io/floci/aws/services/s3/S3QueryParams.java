@@ -8,12 +8,8 @@ import jakarta.ws.rs.core.UriInfo;
 final class S3QueryParams {
 
     private final MultivaluedMap<String, String> decoded;
-    private final UriInfo uriInfo;
-    private String rawQuery;
-    private boolean rawQueryRead;
 
     S3QueryParams(UriInfo uriInfo) {
-        this.uriInfo = uriInfo;
         this.decoded = ResteasyRequests.queryParameters(uriInfo);
     }
 
@@ -22,18 +18,10 @@ final class S3QueryParams {
     }
 
     boolean has(String name) {
-        return decoded.containsKey(name) || S3RequestParser.hasQueryParamInString(rawQuery(), name);
+        return decoded.containsKey(name);
     }
 
     String first(String name) {
         return decoded.getFirst(name);
-    }
-
-    private String rawQuery() {
-        if (!rawQueryRead) {
-            rawQuery = uriInfo.getRequestUri().getQuery();
-            rawQueryRead = true;
-        }
-        return rawQuery;
     }
 }
