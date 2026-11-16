@@ -78,7 +78,9 @@ client that talks to the control plane does not reach it by accident.
   that came under a key two parties agreed with ECDH, and answers with the same key wrapped
   under the key the request names. The key material never leaves the service: the block is
   opened under the agreed key and wrapped again under the other one, and the block that goes
-  out carries the attributes of the key it holds.
+  out carries the attributes of the key it holds. The reference has it for the keys that
+  are rotated for every transaction, such as a PEK wrapped under a key that was agreed
+  with ECDH, so the key is moved to another wrapping key without being imported.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
   request that asks for one of them is refused with the error that says so, rather than
   answered with something of another kind. The EMV PIN change MAC is refused as well: it needs

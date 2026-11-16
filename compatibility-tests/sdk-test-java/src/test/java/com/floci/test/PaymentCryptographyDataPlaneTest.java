@@ -25,6 +25,7 @@ import software.amazon.awssdk.services.paymentcryptographydata.model.TranslateKe
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.spec.ECGenParameterSpec;
 import java.util.Base64;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -222,8 +223,11 @@ class PaymentCryptographyDataPlaneTest {
         // The authority that vouches for the other party's certificate, and the other party.
         KeyPair authority = KeyPairGenerator.getInstance("RSA")
                 .generateKeyPair();
-        KeyPair counterparty = KeyPairGenerator.getInstance("EC")
-                .generateKeyPair();
+        // The curve is the one the service's key pair is on: the two parties have to be on
+        // the same curve for the agreement to work.
+        KeyPairGenerator ecGenerator = KeyPairGenerator.getInstance("EC");
+        ecGenerator.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair counterparty = ecGenerator.generateKeyPair();
         String authorityPem = PaymentCryptographyTest.pem(authority, "floci key-exchange CA",
                 authority, "floci key-exchange CA");
         String counterpartyPem = PaymentCryptographyTest.pem(counterparty, "floci counterparty",
