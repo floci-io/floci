@@ -192,7 +192,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             }
 
             for (String policyArn : managedPolicyArns) {
-                String canonicalArn = iamService.getPolicy(policyArn).getArn();
+                String canonicalArn = iamService.canonicalPolicyArn(policyArn);
                 iamService.attachRolePolicy(resolvedRoleName, canonicalArn);
                 canonicalPolicyArns.add(canonicalArn);
                 if (!originalPolicyArns.contains(canonicalArn)) {

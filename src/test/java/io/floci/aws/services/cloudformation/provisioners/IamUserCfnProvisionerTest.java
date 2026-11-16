@@ -7,7 +7,6 @@ import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.AccessKey;
-import io.floci.aws.services.iam.model.IamPolicy;
 import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.testutil.IamInlinePolicyMock;
 import io.floci.aws.testutil.IamServiceTestHelper;
@@ -25,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -47,11 +47,7 @@ class IamUserCfnProvisionerTest {
     @BeforeEach
     void configureInlinePolicyChanges() {
         IamInlinePolicyMock.configure(iam);
-        when(iam.getPolicy(anyString())).thenAnswer(call -> {
-            IamPolicy policy = new IamPolicy();
-            policy.setArn(call.getArgument(0));
-            return policy;
-        });
+        when(iam.canonicalPolicyArn(anyString())).thenAnswer(returnsFirstArg());
     }
 
     private ProvisionContext ctx() {

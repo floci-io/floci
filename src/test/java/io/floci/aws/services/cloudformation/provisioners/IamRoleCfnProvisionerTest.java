@@ -6,7 +6,6 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.iam.IamService;
-import io.floci.aws.services.iam.model.IamPolicy;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.testutil.IamServiceTestHelper;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -55,11 +55,7 @@ class IamRoleCfnProvisionerTest {
 
     @BeforeEach
     void configureManagedPolicyLookup() {
-        when(iam.getPolicy(anyString())).thenAnswer(call -> {
-            IamPolicy policy = new IamPolicy();
-            policy.setArn(call.getArgument(0));
-            return policy;
-        });
+        when(iam.canonicalPolicyArn(anyString())).thenAnswer(returnsFirstArg());
     }
 
     private ProvisionContext ctx() {

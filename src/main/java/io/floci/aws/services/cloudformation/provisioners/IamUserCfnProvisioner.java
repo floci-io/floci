@@ -163,7 +163,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
             }
 
             for (String policyArn : managedPolicyArns) {
-                String canonicalArn = iamService.getPolicy(policyArn).getArn();
+                String canonicalArn = iamService.canonicalPolicyArn(policyArn);
                 iamService.attachUserPolicy(resolvedUserName, canonicalArn);
                 canonicalPolicyArns.add(canonicalArn);
                 if (!originalPolicyArns.contains(canonicalArn)) {

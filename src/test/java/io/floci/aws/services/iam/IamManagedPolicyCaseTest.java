@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -9,6 +10,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
@@ -117,6 +119,75 @@ class IamManagedPolicyCaseTest {
         assertEquals(canonical, iam.getRole("replacement").getPermissionsBoundaryArn());
         iam.detachRolePolicy("replacement", alias);
         assertEquals(0, iam.getPolicy(canonical).getAttachmentCount());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "create, arn:aws:iam::partner:policy/permission_boundary/registered",
+        "role, arn:aws:iam::partner:policy/permission_boundary/registered",
+        "user, arn:aws:iam::partner:policy/permission_boundary/registered",
+        "create, arn:aws:iam::aws:policy/amazons3readonlyaccess",
+        "role, arn:aws:iam::aws:policy/amazons3readonlyaccess",
+        "user, arn:aws:iam::aws:policy/amazons3readonlyaccess"
+    })
+    void registeredBoundaryIdentityAndDocumentTakePrecedence(String operation, String boundary) {
+        String cap = "{\"Statement\":{\"Effect\":\"Deny\",\"Action\":\"*\",\"Resource\":\"*\"}}";
+        IamService service = registeredBoundaries(Map.of(boundary, cap));
+        String principal;
+        if (operation.equals("create")) {
+            principal = service.createRole("bounded", "/", TRUST, null, 3600, null, boundary).getArn();
+            service.attachRolePolicy("bounded", AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess");
+        } else if (operation.equals("role")) {
+            principal = service.createRole("bounded", "/", TRUST, null, 3600, null).getArn();
+            service.attachRolePolicy("bounded", AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess");
+            service.putRolePermissionsBoundary("bounded", boundary);
+        } else {
+            principal = service.createUser("bounded", "/").getArn();
+            service.attachUserPolicy("bounded", AwsManagedPolicies.arnPrefix("aws") + "/AdministratorAccess");
+            service.putUserPermissionsBoundary("bounded", boundary);
+        }
+        String stored = operation.equals("user") ? service.getUser("bounded").getPermissionsBoundaryArn()
+                : service.getRole("bounded").getPermissionsBoundaryArn();
+        IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
+        assertEquals(IamPolicyEvaluator.Decision.DENY, evaluator.evaluate(
+                service.resolvePrincipalContext(principal), null, "s3:GetObject", "arn:aws:s3:::bucket/key", null));
+        assertEquals(boundary, stored);
+        if (boundary.contains(":partner:")) {
+            assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                    () -> service.getPolicy(boundary)).getErrorCode());
+        }
+    }
+
+    private static IamService registeredBoundaries(Map<String, String> boundaries) {
+        return new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false, null, boundaries, Clock.systemUTC());
+    }
+
+    @Test
+    void unresolvedIdentitySurvivesLookupButCannotBecomeAnUnregisteredBoundary() {
+        String unknown = AwsManagedPolicies.arnPrefix("aws") + "/MissingPolicy";
+        assertEquals(unknown, iam.canonicalPolicyArn(unknown));
+        iam.createUser("missing", "/");
+        iam.createRole("missing", "/", TRUST, null, 3600, null);
+        assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                () -> iam.putUserPermissionsBoundary("missing", unknown)).getErrorCode());
+        assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                () -> iam.putRolePermissionsBoundary("missing", unknown)).getErrorCode());
+        assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                () -> iam.createRole("missing-cap", "/", TRUST, null, 3600, null, unknown)).getErrorCode());
+        assertEquals("NoSuchEntity", assertThrows(AwsException.class,
+                () -> iam.getRole("missing-cap")).getErrorCode());
     }
 
     @Test
