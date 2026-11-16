@@ -45,6 +45,7 @@ import org.jboss.logging.Logger;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -570,6 +571,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         Optional<CallerArns> callerArns = accountRootPrincipal
                 ? Optional.of(accountRootArns(accountId))
                 : iamService.resolveCallerArns(akid);
+        callerArns = callerArns.map(arns -> withPresentedDevice(arns, action, ctx, akid));
         if (callerArns.isPresent()) {
             caller = caller.withPrincipalArn(callerArns.get().callerArn());
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
@@ -1041,6 +1043,35 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
+    /**
+     * The caller as this request authenticated it, which for the two operations that take a device
+     * includes the device the request itself presents. AWS "provides two API operations that let
+     * users pass MFA information: GetSessionToken and AssumeRole", and a policy on such a call is
+     * evaluated against the request carrying the device rather than against the credentials that
+     * signed it: "if a policy includes an MFA condition, a request is denied if users have not been
+     * MFA authenticated, or if they provide an invalid MFA device identifier or invalid TOTP". The
+     * refusal of a claim that fails belongs to the operation, which answers in its own namespace
+     * and reads the same claim this leaves on the request.
+     */
+    private CallerArns withPresentedDevice(CallerArns caller, String action,
+                                           ContainerRequestContext ctx, String akid) {
+        if (!"sts:AssumeRole".equals(action) && !"sts:GetSessionToken".equals(action)) {
+            return caller;
+        }
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        String serialNumber = form.get("SerialNumber");
+        String tokenCode = form.get("TokenCode");
+        if (serialNumber == null && tokenCode == null) {
+            return caller;
+        }
+        RequestMfaClaim claim = iamService.requestMfaClaim(requestContext, akid, serialNumber, tokenCode);
+        if (claim.authenticatedAt() == null) {
+            return caller;
+        }
+        return caller.withSessionMfa(new CallerArns.SessionMfa(true,
+                Math.max(0, Duration.between(claim.authenticatedAt(), clock.instant()).toSeconds())));
+    }
+
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
         return CallerArns.accountRoot(rootArn, accountId);

@@ -15,6 +15,8 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CertificateMaterialException;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestMfaClaim;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SessionAccountLookup;
@@ -81,6 +83,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
@@ -4585,6 +4588,121 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /**
+     * The MFA claim of the request in flight, computed on the first ask and remembered on the
+     * request for every later one, since a code is spent when it authenticates and the filter and
+     * the operation both have to read one answer.
+     */
+    public RequestMfaClaim requestMfaClaim(RequestContext requestContext, String accessKeyId,
+                                           String serialNumber, String tokenCode) {
+        RequestMfaClaim remembered = requestContext == null ? null : requestContext.getMfaClaim();
+        if (remembered != null) {
+            return remembered;
+        }
+        RequestMfaClaim claim = claimMfa(accessKeyId, serialNumber, tokenCode);
+        if (requestContext != null) {
+            requestContext.setMfaClaim(claim);
+        }
+        return claim;
+    }
+
+    /**
+     * What the MFA members of one request amount to. A request naming neither claims nothing. One
+     * naming either is a claim and has to make it good, since a code naming no device and a device
+     * with no code both prove nothing, and the device has to be one the caller can present: AWS
+     * takes the device "that is associated with the IAM user who is making the GetSessionToken
+     * call", so a serial naming a device enabled for somebody else authenticates nobody.
+     *
+     * <p>A key IAM does not hold is the one caller whose claim is taken as made. There is no
+     * identity behind such a key and so no device of its own to check, and this emulator already
+     * reads those keys as the account root acting as itself rather than as nobody: refusing the
+     * claim instead would leave a client configured with an MFA profile unable to mint a session
+     * against the default credentials at all.
+     *
+     * <p>The code is held to the device's own seed, as {@code EnableMFADevice} and
+     * {@code ResyncMFADevice} hold theirs, with the same one step of drift the enable path allows,
+     * and the step it matched is then spent: RFC 6238 says a verifier "MUST NOT accept the second
+     * attempt of the OTP generated for the same time step", so the same code cannot mint a second
+     * session inside its window. The check and the spending are one step under the device lock, so
+     * two racing calls cannot both take the same step.
+     *
+     * <p>The window is the wall clock's rather than this service's, which is the reading the two
+     * IAM actions take as well: the code was produced by a device keeping time of its own, so the
+     * step it was generated for is a fact about the world and not about the emulator. What the
+     * service clock does measure is the age of the authentication afterwards, which is its own to
+     * tell and moves with it.
+     */
+    RequestMfaClaim claimMfa(String accessKeyId, String serialNumber, String tokenCode) {
+        if (serialNumber == null && tokenCode == null) {
+            return RequestMfaClaim.NONE;
+        }
+        if (serialNumber == null || tokenCode == null) {
+            return new RequestMfaClaim(true, null);
+        }
+        Optional<String> userName = mfaUserName(accessKeyId);
+        if (userName.isEmpty()) {
+            return new RequestMfaClaim(true, holdsKey(accessKeyId) ? null : clock.instant());
+        }
+        synchronized (mfaDeviceLock) {
+            Optional<VirtualMfaDevice> device = virtualMfaDevices.get(serialNumber)
+                    .filter(candidate -> userName.get().equals(candidate.getUserName()));
+            if (device.isEmpty()) {
+                return new RequestMfaClaim(true, null);
+            }
+            OptionalLong step = Totp.matchingStep(device.get().getBase32Seed(), tokenCode,
+                    ENABLE_DRIFT_STEPS, Instant.now());
+            Long spent = device.get().getLastUsedTotpStep();
+            if (step.isEmpty() || (spent != null && step.getAsLong() <= spent)) {
+                return new RequestMfaClaim(true, null);
+            }
+            device.get().setLastUsedTotpStep(step.getAsLong());
+            virtualMfaDevices.put(serialNumber, device.get());
+            return new RequestMfaClaim(true, clock.instant());
+        }
+    }
+
+    /**
+     * The user whose devices a credential may present, which is the user an access key belongs to
+     * and, for a session that acts as the identity that minted it, that identity. A role session
+     * reaches no device: a device is enabled for a user, and the role is not one.
+     */
+    private Optional<String> mfaUserName(String accessKeyId) {
+        Optional<AccessKey> accessKey = accessKeys.get(accessKeyId);
+        if (accessKey.isPresent()) {
+            return users.get(accessKey.get().getUserName()).map(IamUser::getUserName);
+        }
+        return findSessionForCallerContext(accessKeyId)
+                .filter(session -> session.getRoleArn() == null)
+                .flatMap(this::issuingUser)
+                .map(IamUser::getUserName);
+    }
+
+    /**
+     * Records that the session {@code sessionAccessKeyId} names was minted behind an MFA device
+     * used at {@code authenticatedAt}, which is what its requests then publish as
+     * {@code aws:MultiFactorAuthPresent} and count {@code aws:MultiFactorAuthAge} from.
+     */
+    public void recordSessionMfa(String sessionAccessKeyId, Instant authenticatedAt) {
+        if (sessionAccessKeyId == null || authenticatedAt == null) {
+            return;
+        }
+        sessions.get(sessionAccessKeyId).ifPresent(session -> {
+            session.setMfaAuthenticatedAt(authenticatedAt);
+            sessions.put(sessionAccessKeyId, session);
+        });
+    }
+
+    /**
+     * When the credentials {@code accessKeyId} names last authenticated with an MFA device, empty
+     * for a session minted without one and for every long-term key. A session assumed from such a
+     * session inherits the instant rather than taking the instant of the assume, so the age the
+     * new session publishes keeps counting from the authentication itself.
+     */
+    public Optional<Instant> callerMfaAuthenticatedAt(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .flatMap(session -> Optional.ofNullable(session.getMfaAuthenticatedAt()));
+    }
+
     // OIDC Identity Providers
     // =========================================================================
 
@@ -5813,10 +5931,36 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public record CallerArns(String callerArn, String principalArn, String principalType,
                              String userId, String userName, boolean permissionsBoundary,
-                             Map<String, String> principalTags) {
+                             Map<String, String> principalTags, SessionMfa sessionMfa) {
 
         public CallerArns {
             principalTags = Map.copyOf(principalTags);
+        }
+
+        /**
+         * What the credentials a request was signed with say about multi-factor authentication.
+         * {@code present} is the value of {@code aws:MultiFactorAuthPresent}, and
+         * {@code authAgeSeconds} is {@code aws:MultiFactorAuthAge}, meaningful only when the
+         * device was used. A null {@code SessionMfa} says the credentials publish neither key,
+         * which the guide gives long-term keys: "The aws:MultiFactorAuthPresent key is not present
+         * when an API or CLI command is called with long-term credentials, such as user access key
+         * pairs."
+         */
+        public record SessionMfa(boolean present, long authAgeSeconds) {
+        }
+
+        /** A caller whose credentials say nothing about MFA, which is every long-term key. */
+        public CallerArns(String callerArn, String principalArn, String principalType,
+                          String userId, String userName, boolean permissionsBoundary,
+                          Map<String, String> principalTags) {
+            this(callerArn, principalArn, principalType, userId, userName, permissionsBoundary,
+                    principalTags, null);
+        }
+
+        /** Copy of this caller with what the session it signed with says about MFA. */
+        public CallerArns withSessionMfa(SessionMfa mfa) {
+            return new CallerArns(callerArn, principalArn, principalType, userId, userName,
+                    permissionsBoundary, principalTags, mfa);
         }
 
         /** A caller without stored principal tags, including account-root and federated identities. */
@@ -5875,6 +6019,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
          */
         public void putPrincipalKeys(Map<String, List<String>> context) {
             context.put("aws:PrincipalArn", List.of(principalArn));
+            putMfaKeys(context);
             if (principalType != null) {
                 context.put("aws:PrincipalType", List.of(principalType));
             }
@@ -5885,6 +6030,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 context.put("aws:username", List.of(userName));
             }
             principalTags.forEach((key, value) -> context.put("aws:PrincipalTag/" + key, List.of(value)));
+        }
+
+        /**
+         * The two MFA keys, which say something only about temporary credentials. The guide gives
+         * {@code aws:MultiFactorAuthPresent} and {@code aws:MultiFactorAuthAge} the same
+         * availability, "included in the request context only when the principal uses temporary
+         * credentials to make the request", and is explicit that a session minted without a device
+         * still carries the first one: "In these cases, the aws:MultiFactorAuthPresent key is
+         * present in the request and set to a value of false." A long-term key carries neither, so
+         * a statement matching on one cannot match such a request at all, which is why the guide
+         * recommends {@code BoolIfExists} for a deny and warns that plain {@code Bool} on false
+         * "is not a reliable way to check whether a request is authenticated using MFA".
+         *
+         * <p>The age is published only where there is an authentication to measure: the key counts
+         * "the number of seconds since the requesting principal was authorized using MFA", so a
+         * session that used no device publishes no age rather than a zero one.
+         */
+        private void putMfaKeys(Map<String, List<String>> context) {
+            if (sessionMfa == null) {
+                return;
+            }
+            context.put("aws:MultiFactorAuthPresent", List.of(Boolean.toString(sessionMfa.present())));
+            if (sessionMfa.present()) {
+                context.put("aws:MultiFactorAuthAge", List.of(Long.toString(sessionMfa.authAgeSeconds())));
+            }
         }
     }
 
@@ -5954,46 +6124,74 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
-            if (session.getDelegatedApproverArn() != null) {
-                return delegatedApproverArns(session);
-            }
-            if (isFederatedUserSession(session)) {
-                // A federated user has no aws:username at all, only the account:name userid.
-                String federatedArn = session.getRoleArn();
-                return Optional.of(new CallerArns(federatedArn, federatedArn,
-                        CallerArns.TYPE_FEDERATED_USER,
-                        sessionUserId(session).orElse(null), null));
-            }
-            String roleArn = session.getRoleArn();
-            if (roleArn == null) {
-                // GetSessionToken credentials act as the identity that minted them.
-                if (issuedByRoot(session)) {
-                    // The account root's aws:userid is the account id, and it has no
-                    // aws:username: the guide lists it as not present for this principal.
-                    String issuerArn = session.getIssuerArn();
-                    return Optional.of(new CallerArns(issuerArn, issuerArn,
-                            CallerArns.TYPE_ACCOUNT,
-                            AwsArnUtils.accountOrDefault(issuerArn, regionResolver.getAccountId()),
-                            null));
-                }
-                return issuingUser(session).map(IamService::callerForUser);
-            }
-            if (isAccountRootArn(roleArn)) {
-                // A privileged session (AssumeRoot) is the member account's root user, not an
-                // assumed role: the ARN it reports is the root ARN it was minted for, and its
-                // aws:userid is the account id, as the account root's always is.
-                return Optional.of(new CallerArns(roleArn, roleArn, CallerArns.TYPE_ACCOUNT,
-                        AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId()), null));
-            }
-            String sessionArn = assumedRoleSessionArn(session, roleArn);
-            Optional<IamRole> role = roleFromArnOrName(roleArn);
-            return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
-                    sessionUserId(session).orElse(null), null,
-                    role.map(IamRole::getPermissionsBoundaryArn).isPresent(),
-                    role.map(IamRole::getTags).orElse(Map.of())));
+            // Whatever identity the session resolves to, the MFA state belongs to the credentials
+            // rather than to the identity, so it is attached once here instead of at each of the
+            // identities below.
+            CallerArns.SessionMfa mfa = sessionMfa(session);
+            return callerForSession(session).map(caller -> caller.withSessionMfa(mfa));
         }
 
         return Optional.empty();
+    }
+
+    /**
+     * What the identity behind a session's credentials says about MFA, or null when the session
+     * publishes neither key. A federated user is one such session: the guide's note that the keys
+     * are "not present for federated identities or requests made using access keys to sign AWS
+     * CLI, AWS API, or AWS SDK requests" puts GetFederationToken credentials with the long-term
+     * keys rather than with the sessions that can carry a device.
+     */
+    private CallerArns.SessionMfa sessionMfa(SessionCredential session) {
+        if (isFederatedUserSession(session)) {
+            return null;
+        }
+        Instant authenticatedAt = session.getMfaAuthenticatedAt();
+        if (authenticatedAt == null) {
+            return new CallerArns.SessionMfa(false, 0);
+        }
+        long age = Duration.between(authenticatedAt, clock.instant()).toSeconds();
+        return new CallerArns.SessionMfa(true, Math.max(0, age));
+    }
+
+    /** The identity a session's credentials act as, which is what its own fields record. */
+    private Optional<CallerArns> callerForSession(SessionCredential session) {
+        if (session.getDelegatedApproverArn() != null) {
+            return delegatedApproverArns(session);
+        }
+        if (isFederatedUserSession(session)) {
+            // A federated user has no aws:username at all, only the account:name userid.
+            String federatedArn = session.getRoleArn();
+            return Optional.of(new CallerArns(federatedArn, federatedArn,
+                    CallerArns.TYPE_FEDERATED_USER,
+                    sessionUserId(session).orElse(null), null));
+        }
+        String roleArn = session.getRoleArn();
+        if (roleArn == null) {
+            // GetSessionToken credentials act as the identity that minted them.
+            if (issuedByRoot(session)) {
+                // The account root's aws:userid is the account id, and it has no
+                // aws:username: the guide lists it as not present for this principal.
+                String issuerArn = session.getIssuerArn();
+                return Optional.of(new CallerArns(issuerArn, issuerArn,
+                        CallerArns.TYPE_ACCOUNT,
+                        AwsArnUtils.accountOrDefault(issuerArn, regionResolver.getAccountId()),
+                        null));
+            }
+            return issuingUser(session).map(IamService::callerForUser);
+        }
+        if (isAccountRootArn(roleArn)) {
+            // A privileged session (AssumeRoot) is the member account's root user, not an
+            // assumed role: the ARN it reports is the root ARN it was minted for, and its
+            // aws:userid is the account id, as the account root's always is.
+            return Optional.of(new CallerArns(roleArn, roleArn, CallerArns.TYPE_ACCOUNT,
+                    AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId()), null));
+        }
+        String sessionArn = assumedRoleSessionArn(session, roleArn);
+        Optional<IamRole> role = roleFromArnOrName(roleArn);
+        return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
+                sessionUserId(session).orElse(null), null,
+                role.map(IamRole::getPermissionsBoundaryArn).isPresent(),
+                role.map(IamRole::getTags).orElse(Map.of())));
     }
 
     /**
