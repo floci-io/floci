@@ -2,6 +2,7 @@ package io.floci.aws.services.athena;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageFactory;
@@ -42,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
 
 /**
  * Athena's Iceberg statements run end to end through the real floci-duck sidecar: {@code CREATE TABLE} makes a Glue
@@ -101,7 +103,7 @@ class AthenaIcebergSidecarIntegrationTest {
     @BeforeEach
     void createDatabase() {
         athena = new AthenaService(storageFactory, duck, glue, s3, AthenaTestConfigs.realQueries(), vertx, ddlBuilder, regionResolver,
-                icebergStatements);
+                icebergStatements, mock(IamEnforcementFilter.class));
         long suffix = System.nanoTime();
         bucket = "athena-iceberg-" + suffix;
         database = "lake_" + suffix;

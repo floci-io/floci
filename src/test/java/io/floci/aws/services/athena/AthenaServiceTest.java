@@ -1,6 +1,7 @@
 package io.floci.aws.services.athena;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -68,7 +69,8 @@ class AthenaServiceTest {
         when(athena.mock()).thenReturn(false);
 
         service = new AthenaService(storageFactory, duckClient, glueService, s3Service,
-                config, vertx, ddlBuilder, mock(RegionResolver.class), mock(AthenaIcebergStatements.class));
+                config, vertx, ddlBuilder, mock(RegionResolver.class), mock(AthenaIcebergStatements.class),
+                mock(IamEnforcementFilter.class));
     }
 
     @AfterEach

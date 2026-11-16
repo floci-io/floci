@@ -1520,7 +1520,8 @@ public class GlueService {
         return value;
     }
 
-    private static String normalizeName(String name) {
+    /** A database, table or function name as Glue stores it and names it in an ARN: lowercase. */
+    public static String normalizeName(String name) {
         return name.toLowerCase(Locale.ROOT);
     }
 

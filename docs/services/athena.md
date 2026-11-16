@@ -173,6 +173,14 @@ Hive DDL runs against the Glue Data Catalog rather than the query engine, as it 
 
 Without `IF [NOT] EXISTS`, a table or partition that already exists, or does not, fails the query. Other `ALTER TABLE` statements are not supported.
 
+### Glue permissions under IAM enforcement
+
+Athena runs a DDL statement against the Glue Data Catalog with the caller's identity, so with IAM enforcement on (`floci.services.iam.enforcement-enabled`) a statement of the default catalog also needs the Glue permissions Athena's user guide gives it in [Examples of database and table-level permissions](https://docs.aws.amazon.com/athena/latest/ug/fine-grained-access-to-glue-resources.html). Floci checks each action of the guide's example policy for the statement on each resource of it: the catalog, and the database and table the statement names. For example, `CREATE DATABASE` needs `glue:GetDatabase` and `glue:CreateDatabase`, and `CREATE TABLE` needs `glue:GetDatabase` and `glue:GetDatabases` on the catalog and database, and `glue:GetTables`, `glue:GetTable`, `glue:GetPartitions` and `glue:CreateTable` on the catalog, database and table. The guide's examples are what Floci requires in full, `glue:CreateDatabase` for `MSCK REPAIR TABLE` included, so a policy that grants less is refused even where AWS might allow it. As the guide says, `DROP TABLE` of a table without partitions needs no partition action.
+
+A missing permission does not refuse `StartQueryExecution`. The query starts and fails, as on AWS, with a `StateChangeReason` of `Insufficient permissions to execute the query. ` followed by the denial of the first Glue request refused, for example `User: arn:aws:iam::123456789012:user/analyst is not authorized to perform: glue:GetDatabase on resource: arn:aws:glue:us-east-1:123456789012:catalog because no identity-based policy allows the glue:GetDatabase action `.
+
+The statements checked are `CREATE DATABASE`, `CREATE [EXTERNAL] TABLE`, `DROP TABLE` and `MSCK REPAIR TABLE`, the ones the guide lists that Floci runs. The guide gives no permissions for `ALTER TABLE ... ADD PARTITION`, `ALTER TABLE ... DROP PARTITION`, `SHOW PARTITIONS`, `VACUUM`, `SELECT` or other DML, so those are not checked against Glue, and neither are statements in an [S3 Tables catalog](#s3-tables-catalogs). The table of permissions is vendored from the guide's page by `tools/aws/fetch_athena_glue_ddl_permissions.py` and read into the IAM request table by `tools/aws/regen_iam_request_resources.py`.
+
 ## Iceberg tables
 
 Athena manages Iceberg tables through AWS Glue's Iceberg REST catalog, which Floci serves (see [Glue's Iceberg REST endpoint](glue.md#iceberg-rest-endpoint)):

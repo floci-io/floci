@@ -193,6 +193,16 @@ one the reference lists for the operation, which a rule would read instead: a Re
 Redshift Serverless restore asks KMS to decrypt with the snapshot's key. `forwardedActions` records what the
 reference gives each such action, the type it acts on, that type's ARN format and the `ViaService` key, which
 `--verify` checks against AWS.
+An operation whose request carries a statement its service runs against another service as the caller (Athena's
+`StartQueryExecution`, whose DDL statements Athena runs against the Glue Data Catalog with the caller's identity) is
+also checked, when its service runs the statement, as the requests that statement makes (`statements`). Neither
+botocore nor the Service Reference says which those are, so they come from a third source, granted for this one
+table and no other: the page of AWS's documentation that gives each statement's permissions, which its own script
+vendors as it stands (`STATEMENT_SOURCES`). Each action of a statement's example policy acts on each resource of the
+same policy statement whose type the Service Reference gives the action, the type whose format the example ARN
+matches, its variables filled from what the page says the example's names stand for (`database`, `table`) and
+open where the example has a wildcard. `statementActions` records the types the reference gives each such action,
+which `--verify` checks against AWS, as it checks the vendored page against the live one.
 A qualified type the reference gives an action, one whose format is another type's and one more `:${...}` (Lambda's
 `function alias` and `function version`), which no member fills alone, is named by that type's member and the
 request's one member documented as naming the qualified types ("The version number or alias name"): Lambda's
@@ -255,6 +265,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fetch_athena_glue_ddl_permissions
 from regen_iam_authorized_actions import authorized_actions_from, fetch_references
 from regen_iam_passed_roles import (
     NAMESPACE_RE,
@@ -370,6 +381,21 @@ MEASURED: dict[str, tuple[list[dict], str]] = {
     **{operation: ([{"action": "kms:Decrypt", "of": "snapshot"}], _SNAPSHOT_KEY_EVIDENCE)
        for operation in ("redshift:RestoreFromClusterSnapshot", "redshift-serverless:RestoreFromSnapshot")},
 }
+
+# ---------------------------------------------------------------------------------------------------------------------
+# STATEMENT_SOURCES: the statements an operation's request carries that its service runs against another service as
+# the caller, and the vendored page each one's permissions come from.
+#
+# This is the file's one source besides botocore and the Service Reference, granted for Athena's DDL statements alone:
+# it is not a place for any other table. Its file is written by its own script from AWS's documentation, unchanged
+# (tools/aws/fetch_athena_glue_ddl_permissions.py, with a prompt beside the file for rebuilding it when the page's
+# layout changes), and the generator only reads it (`statement_requests`): nothing about a statement is stated here.
+# ---------------------------------------------------------------------------------------------------------------------
+STATEMENT_SOURCES: dict[str, Path] = {
+    "athena:StartQueryExecution": REPO_ROOT / "tools/aws/sources/athena-glue-ddl-permissions.json",
+}
+# What a row's sentence says when its policy names partition actions a table without partitions does not need.
+UNPARTITIONED_RE = re.compile(r"does not have partitions, do not include partition actions", re.I)
 
 _LATER ="not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
@@ -2336,6 +2362,97 @@ def forwarded_for(operation: str, types: list[str], models: dict[str, dict], act
     return found
 
 
+def load_statement_sources() -> dict[str, dict]:
+    """Each operation's vendored statement source (`STATEMENT_SOURCES`)."""
+    return {operation: json.loads(path.read_text(encoding="utf-8")) for operation, path in STATEMENT_SOURCES.items()}
+
+
+def source_actions(sources: dict[str, dict]) -> list[str]:
+    """Every action the statement sources' policies name."""
+    return sorted({action for source in sources.values() for row in source["statements"].values()
+                   for statement in row["policy"] for action in statement["Action"]})
+
+
+def statement_actions(documents: list[dict], sources: dict[str, dict]) -> dict[str, list[str]]:
+    """For each action the statement sources name, the resource types the Service Reference gives it."""
+    by_name = {document["Name"]: document for document in documents}
+    found: dict[str, list[str]] = {}
+    for action in source_actions(sources):
+        namespace, name = action.split(":", 1)
+        listed = next((entry for entry in by_name.get(namespace, {}).get("Actions", []) if entry["Name"] == name),
+                      None)
+        if listed is None:
+            raise ValueError(f"a statement source names {action}, which the Service Reference does not list")
+        found[action] = sorted(resource["Name"] for resource in listed.get("Resources") or [])
+    return found
+
+
+def example_type(arn: str, formats: dict[str, str], statement: str) -> tuple[str, dict[str, str]]:
+    """The one resource type whose ARN format an example ARN matches, and the value it gives each variable of its own."""
+    matches = []
+    for kind, arn_format in formats.items():
+        variables = VARIABLE_RE.findall(arn_format)
+        pieces = VARIABLE_RE.split(arn_format)[::2]
+        match = re.fullmatch("([^:/]+)".join(re.escape(piece) for piece in pieces), arn)
+        if match:
+            matches.append((kind, {variable: match.group(index + 1) for index, variable in enumerate(variables)
+                                   if variable not in KNOWN_VARIABLES}))
+    if len(matches) != 1:
+        raise ValueError(f"the policy the page gives {statement} names {arn}, which is "
+                         f"{'no' if not matches else 'more than one'} resource type's ARN format")
+    return matches[0]
+
+
+def statement_requests(source: dict, actions: dict[str, list[str]],
+                       formats: dict[str, dict[str, str]]) -> dict[str, list[dict]]:
+    """The requests each statement of a vendored source makes: each action of its example policy, on each resource of
+    the same policy statement of a type the Service Reference gives the action (`actions`), as the type whose format
+    the example ARN matches, its variables filled from what the page says the example's names stand for and open
+    where the example has a wildcard. An action whose name says it is a partition action is marked `partitioned` in a
+    statement whose sentence says a table without partitions does not need those."""
+    examples = source["examples"]
+    found: dict[str, list[dict]] = {}
+    for statement, row in source["statements"].items():
+        unpartitioned = UNPARTITIONED_RE.search(row["text"]) is not None
+        requests: dict[str, list[dict]] = {}
+        for policy_statement in row["policy"]:
+            for action in policy_statement["Action"]:
+                namespace = namespace_of(action)
+                resources = requests.setdefault(action, [])
+                for arn in policy_statement["Resource"]:
+                    kind, values = example_type(arn, formats.get(namespace, {}), statement)
+                    if kind not in actions[action]:
+                        continue
+                    fill = {}
+                    for variable, value in values.items():
+                        if value == "*":
+                            continue
+                        if value not in examples:
+                            raise ValueError(f"the policy the page gives {statement} names {arn}, whose {value} the "
+                                             f"page does not say stands for anything")
+                        fill[variable] = examples[value]
+                    resource = {"type": kind, "fill": dict(sorted(fill.items()))}
+                    if resource not in resources:
+                        resources.append(resource)
+        entries = []
+        for action, resources in requests.items():
+            if not resources:
+                raise ValueError(f"the policy the page gives {statement} grants {action} on no resource of a type "
+                                 f"the Service Reference gives it")
+            entry = {"action": action, "resources": resources}
+            if unpartitioned and "Partition" in action.split(":", 1)[1]:
+                entry["partitioned"] = True
+            entries.append(entry)
+        found[statement] = entries
+    return found
+
+
+def statements_for(sources: dict[str, dict], actions: dict[str, list[str]],
+                   formats: dict[str, dict[str, str]]) -> dict[str, dict[str, list[dict]]]:
+    """Each operation's statements and the requests each makes (`statements`)."""
+    return {operation: statement_requests(source, actions, formats) for operation, source in sorted(sources.items())}
+
+
 def read_resources(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> list[dict]:
     """The resources the rules read from the request of the clients given."""
     name = operation.split(":", 1)[1]
@@ -3080,6 +3197,8 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     suffixes = minted_suffixes(formats, namespaces, data)
     check_forwarded(authorized_by(documents))
     forwarded = forwarded_actions(documents)
+    sources = load_statement_sources()
+    statement_types = statement_actions(documents, sources)
     operations = {}
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(namespaces[namespace])),
                                                  load_examples(data, set(namespaces[namespace])))
@@ -3112,6 +3231,8 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
         "mintedSuffixes": suffixes,
         "integerVariables": integer_variables(operations, namespaces, data),
         "forwardedActions": forwarded,
+        "statementActions": statement_types,
+        "statements": statements_for(sources, statement_types, formats),
         "operations": operations,
     }
 
@@ -3277,7 +3398,8 @@ def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
     for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
-                "resourceKeys", "unqualified", "mintedIds", "mintedSuffixes", "integerVariables", "forwardedActions"):
+                "resourceKeys", "unqualified", "mintedIds", "mintedSuffixes", "integerVariables", "forwardedActions",
+                "statementActions", "statements"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
     lines.append('  "operations": {')
     operations = list(document["operations"].items())
@@ -3394,6 +3516,7 @@ def validate(document: dict) -> list[str]:
         problems.append("forwardedActions is not each forwarded action's type, its ARN format of one variable and its "
                         "namespace's ViaService key")
         recorded_actions = {}
+    problems += _statement_problems(document.get("statementActions"), document.get("statements"), operations, formats)
     for operation, entry in operations.items():
         namespace = namespace_of(operation)
         if not OPERATION_RE.match(operation) or namespace not in namespaces:
@@ -3567,6 +3690,47 @@ def _read_as_one(path: object, fill: dict) -> bool:
     return bool(FILL_PATH_RE.match(path)) and not path.endswith("[]")
 
 
+def _statement_problems(actions: object, statements: object, operations: dict,
+                        formats: dict[str, dict[str, str]]) -> list[str]:
+    """Whether `statementActions` gives each action resource types and `statements` gives each operation's statements
+    as requests of those actions on resources of those types, each variable filled from a word or left open."""
+    actions = {} if actions is None else actions
+    statements = {} if statements is None else statements
+    if not isinstance(actions, dict) or not all(
+            isinstance(action, str) and OPERATION_RE.match(action) and isinstance(types, list) and types == sorted(types)
+            and all(isinstance(kind, str) for kind in types) for action, types in actions.items()):
+        return ["statementActions is not each statement action's resource types"]
+    if not isinstance(statements, dict):
+        return ["statements is not each operation's statements"]
+    problems = []
+    for operation, by_statement in statements.items():
+        if operation not in operations or not isinstance(by_statement, dict) or not by_statement:
+            problems.append(f"statements gives {operation!r}, no operation of the file, or no statement of it")
+            continue
+        for statement, requests in by_statement.items():
+            if not isinstance(requests, list) or not requests or not all(
+                    _statement_request_ok(request, actions, formats) for request in requests):
+                problems.append(f"statements gives {operation} {statement!r} something other than requests of "
+                                f"statementActions on resources of the types they act on")
+    return problems
+
+
+def _statement_request_ok(request: object, actions: dict, formats: dict[str, dict[str, str]]) -> bool:
+    if not isinstance(request, dict) or not {"action", "resources"} <= set(request) <= {"action", "resources",
+                                                                                     "partitioned"}:
+        return False
+    if request["action"] not in actions or request.get("partitioned", True) is not True:
+        return False
+    namespace = namespace_of(request["action"])
+    return isinstance(request["resources"], list) and bool(request["resources"]) and all(
+        isinstance(resource, dict) and set(resource) == {"type", "fill"}
+        and resource["type"] in actions[request["action"]] and resource["type"] in formats.get(namespace, {})
+        and isinstance(resource["fill"], dict) and all(
+            variable in set(VARIABLE_RE.findall(formats[namespace][resource["type"]])) - KNOWN_VARIABLES
+            and isinstance(word, str) and word for variable, word in resource["fill"].items())
+        for resource in request["resources"])
+
+
 def _created_problems(operation: str, created: object, types: set[str], formats: dict[str, str]) -> list[str]:
     if not isinstance(created, dict) or set(created) != {"type", "parent", "arn"} or not isinstance(created["arn"], str) \
             or not PATH_RE.match(created["arn"]):
@@ -3599,6 +3763,19 @@ def derive(document: dict, data: Path) -> list[str]:
     if sorted(document["forwardedActions"]) != named:
         problems.append(f"the file records {sorted(document['forwardedActions'])} as forwarded actions, MEASURED "
                         f"names {named}")
+    sources = load_statement_sources()
+    if sorted(document["statementActions"]) != source_actions(sources):
+        problems.append(f"the file records {sorted(document['statementActions'])} as statement actions, the "
+                        f"statement sources name {source_actions(sources)}")
+    else:
+        try:
+            statements = statements_for(sources, document["statementActions"], document["arnFormats"])
+        except ValueError as e:
+            problems.append(str(e))
+        else:
+            if document["statements"] != statements:
+                problems.append(f"the file's statements differ from what its sources give: expected "
+                                f"{json.dumps(statements)}")
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(document["namespaces"][namespace])),
                                                  load_examples(data, set(document["namespaces"][namespace])))
                 for namespace in ID_TARGETS if namespace in document["namespaces"]}
@@ -3630,6 +3807,27 @@ def verify_forwarded(vendored: dict, documents: list[dict]) -> list[str]:
         if listed:
             untrue.append(f"AWS now lists {listed} for {operation}: a rule reads those, so MEASURED should not "
                           f"give them")
+    return untrue
+
+
+def verify_statements(vendored: dict, documents: list[dict]) -> list[str]:
+    """What the file records of statement actions and AWS no longer gives, and a vendored page AWS has changed."""
+    sources = load_statement_sources()
+    try:
+        actual = statement_actions(documents, sources)
+    except ValueError as e:
+        return [str(e)]
+    untrue = [f"AWS gives {action} the resource types {actual.get(action)}, not {types}"
+              for action, types in vendored.get("statementActions", {}).items() if actual.get(action) != types]
+    for operation, source in sorted(sources.items()):
+        try:
+            changed = fetch_athena_glue_ddl_permissions.stale(source, fetch_athena_glue_ddl_permissions.fetch_url(
+                source["_source"]["page"]))
+        except (OSError, ValueError) as e:
+            raise OSError(f"could not read {source['_source']['page']} ({e})") from e
+        if changed:
+            untrue.append(f"{source['_source']['page']} no longer gives what {STATEMENT_SOURCES[operation].name} "
+                          f"holds for {operation}: run {source['_source']['fetcher']}")
     return untrue
 
 
@@ -3708,6 +3906,11 @@ def main(argv: list[str] | None = None) -> int:
                                                              document["namespaces"]):
             untrue.append("resourceKeys differ from AWS Service Reference and botocore")
         untrue += verify_forwarded(document, documents)
+        try:
+            untrue += verify_statements(document, documents)
+        except OSError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
         for claim in untrue:
             print(f"error: {claim}", file=sys.stderr)
         if untrue:
