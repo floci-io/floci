@@ -14,13 +14,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 
 import static io.floci.aws.testing.DynamoDbRequests.CONTENT_TYPE;
 import static io.floci.aws.testing.DynamoDbRequests.ddb;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
@@ -109,6 +112,24 @@ class DynamoDbPartiQLSortKeyReadsIntegrationTest {
         JsonNode capacity = read(keys + "(l='a' OR l='b')", true).path("ConsumedCapacity");
         assertEquals(2.0, capacity.path("CapacityUnits").asDouble());
         assertEquals(2.0, capacity.path("LocalSecondaryIndexes").path("lsi").path("CapacityUnits").asDouble());
+    }
+
+    @ParameterizedTest
+    @Order(5)
+    @ValueSource(strings = {"-1", "2", "\"0\"", "null"})
+    void refusesATokenThatNamesNoRead(String read) throws Exception {
+        String statement = "SELECT * FROM \"" + TABLE + "\" WHERE pk='p' AND (sk='row-1' OR sk='row-2')";
+        String first = MAPPER.createObjectNode().put("Statement", statement).put("Limit", 1).toString();
+        String token = call("ExecuteStatement", first).path("NextToken").asText();
+        ObjectNode payload = (ObjectNode) MAPPER.readTree(Base64.getDecoder().decode(token));
+        ((ObjectNode) payload.get("k")).set("r", MAPPER.readTree(read));
+        String next = MAPPER.createObjectNode()
+                .put("Statement", statement)
+                .put("NextToken", Base64.getEncoder().encodeToString(MAPPER.writeValueAsBytes(payload)))
+                .toString();
+        ddb("ExecuteStatement", next)
+                .statusCode(400)
+                .body("message", equalTo("Invalid NextToken"));
     }
 
     private List<String> walk(String statement, int limit) throws Exception {

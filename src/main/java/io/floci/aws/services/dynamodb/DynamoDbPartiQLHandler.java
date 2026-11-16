@@ -291,7 +291,7 @@ class DynamoDbPartiQLHandler {
     private Page readSortKeyReads(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                                   PVal partition, List<Cond.Leaf> reads, boolean descending, JsonNode cursor,
                                   Integer limit, String region) {
-        int read = cursor == null ? 0 : cursor.path("r").asInt();
+        int read = cursor == null ? 0 : readIndex(cursor, reads.size());
         JsonNode exclusiveStartKey = cursor == null ? null : cursor.get("k");
         List<JsonNode> rows = new ArrayList<>();
         List<Long> readBytes = new ArrayList<>();
@@ -318,6 +318,14 @@ class DynamoDbPartiQLHandler {
             }
         }
         return new Page(rows, null, readBytes, scannedItems);
+    }
+
+    private static int readIndex(JsonNode cursor, int reads) {
+        JsonNode read = cursor.get("r");
+        if (read == null || !read.isInt() || read.intValue() < 0 || reads <= read.intValue()) {
+            throw new AwsException("ValidationException", "Invalid NextToken", 400);
+        }
+        return read.intValue();
     }
 
     private ObjectNode readCursor(int read, JsonNode exclusiveStartKey) {
