@@ -28,15 +28,16 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
   and a value names a resource of a type when it matches the type's ARN format, so an ARN of
   something the action does not act on is not checked.
 - fills one of the variables of the type's ARN format: its stem (the name lowercased, `Arn`, `Name`,
-  `Id`, `Identifier` and a plural dropped) is the variable's, ends with it or is the end of it, four
+  `Id`, `Identifier`, `Config`, `Input`, `List` and a plural dropped) is the variable's, ends with it or is the end of it, four
   letters at least (`AutoScalingGroupName` fills `${GroupFriendlyName}`, `GroupId` fills
   `${SecurityGroupId}`), and it is a name for a name and an id for an id (an `Identifier` either),
   or the member is a bare `Name`, `Id` or `Identifier`, the variable is named after the type and the
   operation is about the type, its name past the verb the type's (`DescribeTargetGroups`, but not
   `StartExecution` for a state machine, whose `name` is the execution's), and no member holds its ARN,
-  or, when no member does either, a string member whose botocore shape is named after the type (Parameter Store's
-  `GetParametersByPath` names a hierarchy by a `Path` holding a `PSParameterName`, as `GetParameterHistory` names a
-  parameter by its `Name`).
+  or, when no member does either, a string or list member whose botocore shape is named after the type (Parameter
+  Store's `GetParametersByPath` names a hierarchy by a `Path` holding a `PSParameterName`, as `GetParameterHistory`
+  names a parameter by its `Name`, and Glue's `BatchDeleteTable` its tables by `TablesToDelete`, a
+  `BatchDeleteTableNameList`).
   Of several members that could fill a variable, one naming the type before the variable wins over a
   bare one: the snapshot `RestoreFromClusterSnapshot` restores has the cluster its
   `SnapshotClusterIdentifier` names, not the `ClusterIdentifier` of the cluster it creates, and the
@@ -68,7 +69,14 @@ one id appended (`CreateListener` acts on a load balancer and makes `listener/ap
 tagging action a create's tags need is checked on it, as AWS checks it on the resource being tagged. A create
 that names another resource beside the one it makes, the pipeline a webhook connects to or the namespace a
 service is made in, marks the one it makes `made`, of a type, or with an ARN format's leading resource word,
-related to its name past the verb, so its tags are checked there alone.
+related to its name past the verb, so its tags are checked there alone. A create whose request carries tags,
+whose action acts on other types alone, makes the resource of the type it is named after when the request names
+every variable of it, a field of a top-level structure included (`makes`): Glue's `CreateConnection` acts on its
+connection type and the catalog, and its tags go on `connection/<ConnectionInput.Name>`.
+
+A type of no variables of its own, the account's one (Glue's `catalog`), is named by every request, so it is no
+alternative to the unnamed type a create makes: `CreateDatabase` is checked on it and on the database its
+`DatabaseInput.Name` names.
 
 An optional member holding the ARN of a type whose format has no variable of its own, Security Hub's `HubArn` and
 `hub/default`, also names that type when the request leaves it out: there is one such resource in the caller's
@@ -272,7 +280,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
-              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation")
+              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
@@ -414,7 +422,6 @@ NOT_COVERED: dict[str, str] = {
                         "or EnvironmentId alone, so reading it needs the stored environment those find",
     "elasticfilesystem": _REST,
     "execute-api": _REST,
-    "glue": _LATER,
     "identitystore": _LATER,
     "iot": _LATER,
     "kafka": _REST,
@@ -496,7 +503,7 @@ DOC_MINTED_SUFFIX_RE = re.compile(r"\badds an? (?P<separator>hyphen|dash|undersc
                                   r"characters after the (?P<word>[a-z][a-z -]*?) name at the end of the arn\b")
 SEPARATORS = {"hyphen": "-", "dash": "-", "underscore": "_", "period": "."}
 COUNTS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
-STEM_SUFFIX_RE = re.compile(r"(arns|arn|names|name|identifiers|identifier|ids|id|config|s)$")
+STEM_SUFFIX_RE = re.compile(r"(arns|arn|names|name|identifiers|identifier|ids|id|config|input|list|s)$")
 # A bare member that names the resource of the type its operation acts on.
 BARE = {"name", "names", "id", "ids", "identifier", "identifiers"}
 # The patterns botocore gives a string shape that holds an account id.
@@ -518,8 +525,9 @@ LOCATED_RE = re.compile(r"^(\{[A-Za-z0-9_]+\}|\?[A-Za-z0-9_.-]+)$")
 
 def stem(name: str) -> str:
     """The name lowercased, without what is not a letter or digit, and without a trailing `Arn`,
-    `Name`, `Id`, `Identifier`, `Config` or plural, twice over (`TargetGroupArns` is `targetgroup`,
-    `DistributionConfig` is `distribution`)."""
+    `Name`, `Id`, `Identifier`, `Config`, `Input`, `List` or plural, twice over (`TargetGroupArns` is `targetgroup`,
+    `DistributionConfig` is `distribution`, Glue's `DatabaseInput` is `database` and `ConnectionNameList`
+    `connection`)."""
     value = re.sub(r"[^a-z0-9]", "", name.lower())
     for _ in range(2):
         value = STEM_SUFFIX_RE.sub("", value)
@@ -730,7 +738,7 @@ def with_absent_account(resources: list[dict], formats: dict[str, str], accounts
 # --------------------------------------------------------------------------- #
 # Words that end a type's name in a member's documentation: "The name of the pipeline to start".
 DOC_STOP = {"to", "that", "you", "for", "which", "created", "from", "in", "of", "about", "whose", "with", "on",
-            "belonging", "the", "a", "an", "is", "are", "and", "or", "by", "used", "will", "should", "can", ""}
+            "belonging", "being", "the", "a", "an", "is", "are", "and", "or", "by", "used", "will", "should", "can", ""}
 # "The name of the pipeline", "Specifies the name or the CloudTrail ARN of the trail", "The ID of the delivery".
 DOC_NAMES_RE = re.compile(r"^(?:specifies )?(?:the |a |an )?(?:unique )?(?:name|id|identifier)"
                           r"(?: or (?:the )?(?:[a-z]+ )?arn)? (?:of|for) (?:the |a |an )?(?P<phrase>.+)$")
@@ -1730,6 +1738,11 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         if len(kinds) == 1 or not by_members_key_is_empty(kinds, filled):
             full = [kind for kind in kinds if complete[kind]]
             kept += kinds if len(kinds) == 1 else (full if len(full) == 1 else [])
+        else:
+            # A type of no variables of its own is the account's one, which every request names, never an
+            # alternative to a create's own type: Glue's `catalog` beside the database `CreateDatabase` makes.
+            kept += [kind for kind in kinds if not [v for v in VARIABLE_RE.findall(formats[kind])
+                                                     if v not in KNOWN_VARIABLES]]
     specs = [{"types": kinds, "arn": arns[member]} for member, kinds in sorted(by_arn.items())]
     return specs + [{"type": kind, "fill": dict(sorted(filled[kind].items()))} for kind in types if kind in kept] + \
         also_filled(types, members, filled, kept, used, aliased or set(), shapes)
@@ -1837,23 +1850,49 @@ def creates_for(operation: str, types: list[str], formats: dict[str, str], membe
 
 def makes_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
               arn_members: set[str] | None = None, labels: dict[str, str] | None = None,
-              aliased: set[str] | None = None) -> list[dict]:
+              aliased: set[str] | None = None, models: dict[str, dict] | None = None) -> list[dict]:
     """The resource a create whose action acts on no resource type makes: of the one type of its namespace named as
     the operation is past its verb, or else related to that name, named as the rule names a type an action acts on,
     its variables nothing fills open. AWS checks the tagging action a create's tags need on the resource being
     tagged, so they are checked there (`CreateView` makes `view/<ViewName>/*`, `CreateSink` `sink/*`), and the create
-    itself stays checked on `*`."""
+    itself stays checked on `*`. So is the resource a create whose request carries tags makes when its action acts
+    on other types alone and the request names it in full, a field of a top-level structure included (`ConnectionInput.Name`
+    for the connection Glue's `CreateConnection` makes, whose action acts on its connection type and catalog), the
+    create itself staying checked on those."""
     name = operation.split(":", 1)[1]
-    if types or not CREATING_RE.match(name):
+    if not CREATING_RE.match(name):
         return []
     created = stem(CREATING_RE.sub("", name))
     kinds = [kind for kind in formats if stem(kind) == created] \
         or [kind for kind in formats if related(created, stem(kind))]
     if len(kinds) != 1:
         return []
+    if types:
+        return made_by_a_create_of_other_types(operation, types, formats, kinds[0], members, arn_members, labels,
+                                               aliased, models)
     return [resource for resource in resources_for(operation, kinds, formats, members, arn_members, labels,
                                                    aliased=aliased)
             if resource.get("type") == kinds[0]][:1]
+
+
+def made_by_a_create_of_other_types(operation: str, types: list[str], formats: dict[str, str], kind: str,
+                                    members: dict[str, str], arn_members: set[str] | None,
+                                    labels: dict[str, str] | None, aliased: set[str] | None,
+                                    models: dict[str, dict] | None) -> list[dict]:
+    """The resource of the type a create whose action acts on other types alone makes, when its request carries tags
+    (a top-level member named `Tags`, `TagList` or the like) and names every variable of it, as the rules name a type
+    an action acts on and from the fields of a top-level structure its documentation reads; none otherwise."""
+    name = operation.split(":", 1)[1]
+    if kind in types or any(related(stem(CREATING_RE.sub("", name)), stem(other)) for other in types) or not models:
+        return []
+    shapes = member_shapes(models, name)
+    if not any(stem(member) == "tag" for member in shapes):
+        return []
+    found = with_documented(operation, [kind], formats, models,
+                            resources_for(operation, [kind], formats, members, arn_members, labels, shapes, aliased))
+    variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
+    return [resource for resource in found if resource.get("type") == kind and variables
+            and set(resource.get("fill", {})) == set(variables) and set(resource) == {"type", "fill"}][:1]
 
 
 def by_members_key_is_empty(kinds: list[str], filled: dict[str, dict[str, str]]) -> bool:
@@ -1866,10 +1905,10 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
              shapes: dict[str, str] | None = None) -> str | None:
     """The member that fills the variable: one of a compatible kind whose stem relates to the variable's,
     or, for the variable named after the type or a type's only one, a member named after the type, or a
-    bare `Name` or `Id` among those `bare` gives, of a compatible kind, or else a string member whose botocore
-    shape is named after the type, of a compatible kind (Parameter Store's `Path` and `GetParameterHistory`'s
-    `Name` hold a `PSParameterName`); the closest of them, one qualified by the type's own name first (a
-    snapshot's `SnapshotClusterIdentifier` before `ClusterIdentifier`), and a string before a list. A variable the
+    bare `Name` or `Id` among those `bare` gives, of a compatible kind, or else a string or list member whose
+    botocore shape is named after the type, of a compatible kind (Parameter Store's `Path` and
+    `GetParameterHistory`'s `Name` hold a `PSParameterName`, Glue's `TablesToDelete` a `BatchDeleteTableNameList`);
+    the closest of them, one qualified by the type's own name first (a snapshot's `SnapshotClusterIdentifier` before `ClusterIdentifier`), and a string before a list. A variable the
     reference names `ResourceId` is the type's own id (`ingestion/${ResourceId}`)."""
     # A `ResourceId` variable is filled by a member named so (CreateOpsMetadata's, `opsmetadata/${ResourceId}`) before
     # one named after the type; a bare `Id` is not, being whatever the operation is about.
@@ -1890,7 +1929,10 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
         candidates = [member for member in names if compatible(member, variable)
                       and member in bare and member.lower() in BARE]
     if not candidates and (related(variable_stem, kind_stem) or variables == 1):
-        candidates = [member for member in names if member in (shapes or {}) and not names[member].endswith("[]")
+        # A list names the type when its own list shape is named for the type's names (`BatchDeleteTableNameList`),
+        # not when it holds a name's shape.
+        candidates = [member for member in names if member in (shapes or {})
+                      and (not names[member].endswith("[]") or shapes[member].endswith("List"))
                       and "." not in member and stem(shapes[member]) and related(stem(shapes[member]), kind_stem)
                       and compatible(shapes[member], variable) and compatible(member, variable)]
     if not candidates:
@@ -2136,7 +2178,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if creates:
         entry["creates"] = creates
     makes = makes_for(operation, types, formats, members, arn_members,
-                      path_labels(models, operation.split(":", 1)[1]), alias_members(models, operation.split(":", 1)[1]))
+                      path_labels(models, operation.split(":", 1)[1]), alias_members(models, operation.split(":", 1)[1]),
+                      models)
     if makes:
         entry["makes"] = makes
     named = _named(resources) | _named(creates) | _named(makes)
@@ -3292,8 +3335,9 @@ def validate(document: dict) -> list[str]:
         for created in entry.get("creates", []) if isinstance(entry.get("creates", []), list) else [None]:
             problems += _created_problems(operation, created, set(types), formats.get(namespace, {}))
         for made in entry.get("makes", []) if isinstance(entry.get("makes", []), list) else [None]:
-            if types or not isinstance(made, dict) or set(made) != {"type", "fill"}:
-                problems.append(f"{operation} makes {made!r}, which is no type's variables of a create acting on none")
+            if not isinstance(made, dict) or set(made) != {"type", "fill"} or made.get("type") in types:
+                problems.append(f"{operation} makes {made!r}, which is no type's variables of a create acting on "
+                                "none or on other types alone")
             else:
                 problems += _resource_problems(operation, made, {made["type"]}, formats.get(namespace, {}))
         targets = entry.get("targets")

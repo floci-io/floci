@@ -306,8 +306,9 @@ public final class RequestResources {
 
     /**
      * As {@link #created(String, ContainerRequestContext, String, String, String, Map)}, for a request whose tags need
-     * the {@code tagging} action: a create whose action acts on no resource type tags the resource it makes
-     * ({@code makes}) where that action acts on the resource's type, as AWS checks a tagging action on the resource
+     * the {@code tagging} action: a create whose action acts on no resource type, or on other types alone (Glue's
+     * {@code CreateConnection}), tags the resource it makes ({@code makes}) where that action acts on the resource's
+     * type, as AWS checks a tagging action on the resource
      * being tagged, and its tags go where the operation is checked otherwise (a Cloud Map namespace, whose
      * {@code TagResource} acts on no type, on {@code *}); a null {@code tagging}, or one the table does not hold, acts
      * on it.

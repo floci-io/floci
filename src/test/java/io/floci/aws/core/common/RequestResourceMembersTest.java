@@ -418,6 +418,12 @@ class RequestResourceMembersTest {
                 Map.of(), Map.of(), null, Map.of(), false, null)),
                 parseUnchecked("{\"namespaces\":{\"a\":[]}," + formats + ",\"operations\":{\"a:Op\":{\"types\":[],"
                         + "\"resources\":[]," + makes + "}}}").makes().get("a:Op"));
+        // So does a create acting on other types alone (Glue's CreateConnection, on its connection type).
+        String kinds = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
+                + "\"kind\":\"arn:${Partition}:a:${Region}:${Account}:kind/${KindName}\"}}";
+        assertEquals(List.of("thing"), parseUnchecked("{\"namespaces\":{\"a\":[]}," + kinds
+                + ",\"operations\":{\"a:Op\":{\"types\":[\"kind\"],\"resources\":[]," + makes + "}}}")
+                .makes().get("a:Op").getFirst().types());
         for (String bad : List.of("\"types\":[\"thing\"],\"resources\":[]," + makes, "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"type\":\"thing\",\"fill\":{},\"made\":true}]", "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"types\":[\"thing\"],\"arn\":\"ThingArn\"}]")) {
@@ -546,11 +552,11 @@ class RequestResourceMembersTest {
     }
 
     /**
-     * Each resource a create whose action acts on no type makes, from a request naming it, is where its tags go, and
-     * the create itself names none.
+     * Each resource a create whose action acts on no type, or on other types alone, makes, from a request naming it,
+     * is where its tags go, and a create acting on no type names nothing itself.
      */
     @TestFactory
-    Stream<DynamicTest> everyResourceACreateActingOnNoTypeMakesIsWhereItsTagsGo() {
+    Stream<DynamicTest> everyResourceACreateMakesIsWhereItsTagsGo() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         return table.makes().entrySet().stream().map(operation -> DynamicTest.dynamicTest(operation.getKey(), () -> {
             String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
@@ -570,8 +576,10 @@ class RequestResourceMembersTest {
                     "000000000000");
             assertEquals(List.of(expected), RequestResources.created(operation.getKey(), null, json(body.toString()),
                     "aws", "us-east-1", "000000000000", labels), body + " " + labels);
-            assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
-                    "us-east-1", "000000000000", null, labels));
+            if (table.types().getOrDefault(operation.getKey(), List.of()).isEmpty()) {
+                assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
+                        "us-east-1", "000000000000", null, labels));
+            }
         }));
     }
 

@@ -1860,6 +1860,137 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /** The user's JSON-protocol request to the target, {@code <prefix>.<operation>}, with the body. */
+    /**
+     * A Glue table is checked on the account's catalog, its database and itself, the types AWS gives
+     * {@code glue:GetTable}, so a grant on all three allows it, the same grant refuses another table of the database,
+     * a grant leaving out the catalog refuses it, and a deny scoped to the table holds under an allow on everything.
+     */
+    @Test
+    void aGlueTableIsCheckedOnTheCatalogItsDatabaseAndItself() {
+        String database = "res_db_" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        glue("CreateTable", "{\"DatabaseName\":\"" + database + "\",\"TableInput\":{\"Name\":\"orders\"}}")
+                .statusCode(200);
+        cleanup.register(() -> glue("DeleteTable", "{\"DatabaseName\":\"" + database + "\",\"Name\":\"orders\"}"));
+        String catalog = allowOn("glue:GetTable", glueArn + "catalog");
+        String scoped = allowOn("glue:GetTable", glueArn + "database/" + database) + ","
+                + allowOn("glue:GetTable", glueArn + "table/" + database + "/orders");
+
+        User user = user("res-glue-table");
+        user.policy(catalog + "," + scoped);
+        getTable(user, database, "orders").statusCode(200);
+        refusedJson(getTable(user, database, "other"), "glue:GetTable");
+        user.policy(scoped);
+        refusedJson(getTable(user, database, "orders"), "glue:GetTable");
+        user.policy(allowOn("glue:GetTable", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"glue:GetTable\",\"Resource\":\""
+                + glueArn + "table/" + database + "/orders\"}");
+        refusedJson(getTable(user, database, "orders"), "glue:GetTable");
+    }
+
+    /** A Glue database is checked on the catalog and {@code database/<name>}, and a job on {@code job/<name>}. */
+    @Test
+    void aGlueDatabaseAndAJobAreCheckedOnTheArnsGlueGivesThem() {
+        String database = "res_db_" + suffix();
+        String job = "res-job-" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        glue("CreateJob", "{\"Name\":\"" + job + "\",\"Role\":\"arn:aws:iam::" + ACCOUNT + ":role/glue\","
+                + "\"Command\":{\"Name\":\"glueetl\",\"ScriptLocation\":\"s3://scripts/job.py\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + job + "\"}"));
+
+        User user = user("res-glue-db");
+        user.policy(allowOn("glue:GetDatabase", glueArn + "catalog") + ","
+                + allowOn("glue:GetDatabase", glueArn + "database/" + database) + ","
+                + allowOn("glue:GetJob", glueArn + "job/" + job));
+        send(user, "glue", "AWSGlue.GetDatabase", "1.1", "{\"Name\":\"" + database + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetDatabase", "1.1", "{\"Name\":\"" + database + "_other\"}"),
+                "glue:GetDatabase");
+        send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + job + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + job + "-other\"}"), "glue:GetJob");
+    }
+
+    /**
+     * What Glue's batch deletes name, the tables of {@code TablesToDelete} and the connections of
+     * {@code ConnectionNameList}, is checked one by one, so a deny scoped to one of them holds under an allow on
+     * everything.
+     */
+    @Test
+    void aGlueBatchDeleteIsCheckedOnEachTableAndConnectionItNames() {
+        String database = "res_db_" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+
+        User user = user("res-glue-batch");
+        user.policy(allowOn("glue:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":[\"glue:BatchDeleteTable\","
+                + "\"glue:BatchDeleteConnection\"],\"Resource\":[\"" + glueArn + "table/" + database + "/kept\",\""
+                + glueArn + "connection/kept-" + database + "\"]}");
+        refusedJson(send(user, "glue", "AWSGlue.BatchDeleteTable", "1.1", "{\"DatabaseName\":\"" + database
+                + "\",\"TablesToDelete\":[\"gone\",\"kept\"]}"), "glue:BatchDeleteTable");
+        send(user, "glue", "AWSGlue.BatchDeleteTable", "1.1", "{\"DatabaseName\":\"" + database
+                + "\",\"TablesToDelete\":[\"gone\"]}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.BatchDeleteConnection", "1.1", "{\"ConnectionNameList\":[\"gone-"
+                + database + "\",\"kept-" + database + "\"]}"), "glue:BatchDeleteConnection");
+        send(user, "glue", "AWSGlue.BatchDeleteConnection", "1.1", "{\"ConnectionNameList\":[\"gone-" + database
+                + "\"]}").statusCode(200);
+    }
+
+    /**
+     * A Glue database's creation is checked on the catalog and the database its {@code DatabaseInput.Name} names, and
+     * a connection's tags on the connection its {@code ConnectionInput.Name} names, the resource they go on.
+     */
+    @Test
+    void aGlueCreateIsCheckedOnWhatItsInputNames() {
+        String database = "res_db_" + suffix();
+        String connection = "res-conn-" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        cleanup.register(() -> glue("DeleteConnection", "{\"ConnectionName\":\"" + connection + "\"}"));
+
+        User user = user("res-glue-create");
+        user.policy(allowOn("glue:CreateDatabase", glueArn + "catalog") + ","
+                + allowOn("glue:CreateDatabase", glueArn + "database/" + database));
+        refusedJson(send(user, "glue", "AWSGlue.CreateDatabase", "1.1",
+                "{\"DatabaseInput\":{\"Name\":\"" + database + "_other\"}}"), "glue:CreateDatabase");
+        send(user, "glue", "AWSGlue.CreateDatabase", "1.1", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}")
+                .statusCode(200);
+
+        String create = "{\"ConnectionInput\":{\"Name\":\"" + connection + "\",\"ConnectionType\":\"JDBC\","
+                + "\"ConnectionProperties\":{\"JDBC_CONNECTION_URL\":\"jdbc:postgresql://db:5432/app\"}},"
+                + "\"Tags\":{\"team\":\"data\"}}";
+        user.policy(allowOn("glue:CreateConnection", "*") + "," + allowOn("glue:TagResource", "*")
+                + ",{\"Effect\":\"Deny\",\"Action\":\"glue:TagResource\",\"Resource\":\"" + glueArn + "connection/"
+                + connection + "\"}");
+        refusedJson(send(user, "glue", "AWSGlue.CreateConnection", "1.1", create), "glue:TagResource");
+        user.policy(allowOn("glue:CreateConnection", "*") + ","
+                + allowOn("glue:TagResource", glueArn + "connection/" + connection));
+        send(user, "glue", "AWSGlue.CreateConnection", "1.1", create).statusCode(200);
+    }
+
+    /** A Glue workflow run is checked on the workflow its {@code Name} names. */
+    @Test
+    void aGlueWorkflowRunIsCheckedOnItsWorkflow() {
+        String workflow = "res-wf-" + suffix();
+        User user = user("res-glue-run");
+        user.policy(allowOn("glue:GetWorkflowRun", "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":workflow/" + workflow));
+        refusedJson(send(user, "glue", "AWSGlue.GetWorkflowRun", "1.1",
+                "{\"Name\":\"" + workflow + "-other\",\"RunId\":\"wr_0\"}"), "glue:GetWorkflowRun");
+        send(user, "glue", "AWSGlue.GetWorkflowRun", "1.1", "{\"Name\":\"" + workflow + "\",\"RunId\":\"wr_0\"}")
+                .body(not(containsString("AccessDeniedException")));
+    }
+
+    private static ValidatableResponse glue(String operation, String body) {
+        return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
+    }
+
+    private static ValidatableResponse getTable(User user, String database, String table) {
+        return send(user, "glue", "AWSGlue.GetTable", "1.1",
+                "{\"DatabaseName\":\"" + database + "\",\"Name\":\"" + table + "\"}");
+    }
+
     private static ValidatableResponse send(User user, String service, String target, String version, String body) {
         return user.json(service, target, version).body(body).post("/").then();
     }
