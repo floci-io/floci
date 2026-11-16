@@ -3712,7 +3712,7 @@ public class ApiGatewayExecuteController {
         ctx.put("domainName", AwsEndpoints.executeApiHost(apiId, arnRegion));
         ctx.put("domainPrefix", apiId);
         ObjectNode identity = ctx.putObject("identity");
-        identity.put("sourceIp", "127.0.0.1");
+        identity.put("sourceIp", routeContext.sourceIp());
         identity.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
         return event;
@@ -3762,7 +3762,7 @@ public class ApiGatewayExecuteController {
         http.put("method", httpMethod);
         http.put("path", preservedPath);
         http.put("protocol", "HTTP/1.1");
-        http.put("sourceIp", "127.0.0.1");
+        http.put("sourceIp", routeContext.sourceIp());
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
 
@@ -4131,7 +4131,7 @@ public class ApiGatewayExecuteController {
         http.put("method", httpMethod);
         http.put("path", preservedPath);
         http.put("protocol", "HTTP/1.1");
-        http.put("sourceIp", "127.0.0.1");
+        http.put("sourceIp", routeContext.sourceIp());
         http.put("userAgent", headers.getHeaderString("User-Agent") != null
                 ? headers.getHeaderString("User-Agent") : "");
 
