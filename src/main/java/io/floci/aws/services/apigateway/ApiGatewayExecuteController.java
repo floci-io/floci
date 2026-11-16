@@ -27,6 +27,7 @@ import io.floci.aws.core.common.CookieHeaders;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.ResteasyRequests;
+import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.core.common.auth.SigV4AuthorizationHeader;
 import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigateway.model.ApiKey;
@@ -54,6 +55,7 @@ import io.floci.aws.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
+import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.lambda.LambdaArnUtils;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
@@ -149,6 +151,28 @@ public class ApiGatewayExecuteController {
     private final CloudMapInstanceResolver cloudMapInstanceResolver;
     private final AwsServiceIntegrationMapper awsServiceIntegrationMapper;
     private final HttpProxyInvoker httpProxyInvoker;
+    private final ServiceCallAuthorizer serviceCallAuthorizer;
+
+    public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
+                                       ApiGatewayV2Service apiGatewayV2Service,
+                                       LambdaService lambdaService, RegionResolver regionResolver,
+                                       ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
+                                       AwsServiceRouter serviceRouter,
+                                       WebSocketConnectionManager webSocketConnectionManager,
+                                       ElbV2Service elbV2Service,
+                                       SqsQueryHandler sqsQueryHandler,
+                                       ApiGatewayExecuteRouteContext routeContext,
+                                       JwtSignatureVerifier jwtSignatureVerifier,
+                                       RequestContext requestContext,
+                                       ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
+                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator,
+                                       CloudMapInstanceResolver cloudMapInstanceResolver,
+                                       HttpProxyInvoker httpProxyInvoker) {
+        this(apiGatewayService, cognitoAuthorizer, apiGatewayV2Service, lambdaService, regionResolver, objectMapper,
+                vtlEngine, serviceRouter, webSocketConnectionManager, elbV2Service, sqsQueryHandler, routeContext,
+                jwtSignatureVerifier, requestContext, sigV4Authorizer, restLambdaAuthorizer,
+                authorizerPolicyEvaluator, cloudMapInstanceResolver, httpProxyInvoker, null);
+    }
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -165,7 +189,8 @@ public class ApiGatewayExecuteController {
                                        ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
                                        AuthorizerPolicyEvaluator authorizerPolicyEvaluator,
                                        CloudMapInstanceResolver cloudMapInstanceResolver,
-                                       HttpProxyInvoker httpProxyInvoker) {
+                                       HttpProxyInvoker httpProxyInvoker,
+                                       ServiceCallAuthorizer serviceCallAuthorizer) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -190,6 +215,7 @@ public class ApiGatewayExecuteController {
         this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
         this.cloudMapInstanceResolver = cloudMapInstanceResolver;
         this.httpProxyInvoker = httpProxyInvoker;
+        this.serviceCallAuthorizer = serviceCallAuthorizer;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -607,6 +633,10 @@ public class ApiGatewayExecuteController {
         if (functionName == null) {
             return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
                     "Cannot resolve function from URI: " + integration.getUri());
+        }
+        if (!apiGatewayMayInvoke(integration, functionName,
+                buildMethodArn(region, apiId, stageName, httpMethod, resource.getPath()))) {
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500, "Internal server error");
         }
 
         String requestId = routeContext.requestId(headers);
@@ -1481,6 +1511,23 @@ public class ApiGatewayExecuteController {
     }
 
     /**
+     * Whether the function policy lets API Gateway invoke {@code functionName} for this method. An
+     * integration with {@code credentials} invokes as that role instead, so the function policy is
+     * not consulted for it.
+     */
+    private boolean apiGatewayMayInvoke(Integration integration, String functionName, String methodArn) {
+        if (serviceCallAuthorizer == null
+                || (integration.getCredentials() != null && !integration.getCredentials().isBlank())) {
+            return true;
+        }
+        AwsArnUtils.Arn source = AwsArnUtils.parse(methodArn);
+        String functionArn = LambdaArnUtils.functionArn(functionName, source.partition(), source.region(),
+                source.accountId());
+        return serviceCallAuthorizer.authorize("apigateway", "lambda:InvokeFunction", functionArn, methodArn,
+                source.accountId()) == Decision.ALLOW;
+    }
+
+    /**
      * Extracts function name from integration URI like
      * {@code arn:aws:apigateway:...:lambda:path/2015-03-31/functions/{fnArn}/invocations}.
      * Delegates to {@link LambdaArnUtils#extractFunctionReferenceFromUri(String)}.
@@ -1975,6 +2022,11 @@ public class ApiGatewayExecuteController {
                 if (functionName == null || functionName.isBlank()) {
                     throw new AwsException("InvalidParameterValueException",
                             "Cannot resolve Lambda function name from URI: " + integration.getUri(), 400);
+                }
+                if (!apiGatewayMayInvoke(integration, functionName,
+                        buildMethodArn(region, scope.apiId(), stageName, httpMethod, resource.getPath()))) {
+                    return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
+                            "Internal server error");
                 }
                 byte[] payload = transformedBody != null ? transformedBody.getBytes(StandardCharsets.UTF_8) : new byte[0];
                 InvokeResult invokeResult = lambdaService.invokeTarget(region, functionName, payload, InvocationType.RequestResponse);

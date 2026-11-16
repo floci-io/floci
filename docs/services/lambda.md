@@ -142,6 +142,21 @@ part in authorizing calls to the function:
   authorized against the function as its name gives it, as the Service Reference lists the function
   alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
+- An API Gateway REST API whose `AWS_PROXY` or `AWS` integration names the function invokes it on
+  its own behalf. The function policy has to allow `lambda:InvokeFunction` to
+  `apigateway.amazonaws.com`, as `AddPermission --principal apigateway.amazonaws.com` writes it,
+  and a function with no policy refuses the call. `aws:SourceArn` is the method's execute-api ARN,
+  `arn:aws:execute-api:<region>:<account>:<api-id>/<stage>/<METHOD>/<resource path>`, built from
+  the resource path template such as `items/{id}`, and `aws:SourceAccount` is the API's account.
+  For an `ANY` method, `<METHOD>` is the request's verb, as in a Lambda authorizer's `methodArn`;
+  this was not measured on AWS. A refused call is answered with `500` and
+  `{"message": "Internal server error"}`; see [API Gateway](api-gateway.md#integration-settings).
+  A call to a function that does not exist is refused the same way, since Lambda authorizes a call
+  before it looks the function up (not measured through API Gateway); with enforcement off it is
+  still answered with `404` and `Function not found`. An integration that names `credentials`
+  invokes the function as that role, so the function policy does not decide it. Other services
+  that invoke a function, such as EventBridge rules and Scheduler, event source mappings and Pipes,
+  are not checked against the function policy.
 - `aws:PrincipalOrgID` is in the request context for a caller whose account is in an organization,
   so a grant added with `PrincipalOrgID` admits the callers of that organization and no others. A
   caller in no organization carries no value for the key, and such a grant then admits none.
