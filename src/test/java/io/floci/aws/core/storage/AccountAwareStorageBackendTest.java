@@ -29,9 +29,32 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class AccountAwareStorageBackendTest {
+
+    @Test
+    void keysIncludingLegacyFiltersOwnershipWithoutReadingOrMigratingValues() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<>());
+        String account = "000000000000";
+        String other = "111111111111";
+        String shared = "rule:us-east-1:default/old/name";
+        raw.put(shared, "legacy");
+        raw.put(account + "/" + shared, "explicit");
+        raw.put(other + "/rule:us-east-1:default/foreign", "foreign");
+        raw.put("unrelated", "unrelated");
+        Set<String> before = raw.keys();
+        clearInvocations(raw);
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, account);
+
+        assertEquals(Set.of(shared), storage.keysIncludingLegacyForAccount(account, key -> key.startsWith("rule:")));
+        assertEquals(Set.of("rule:us-east-1:default/foreign"),
+                storage.keysIncludingLegacyForAccount(other, key -> key.startsWith("rule:")));
+        verify(raw, times(2)).keys();
+        verifyNoMoreInteractions(raw);
+        assertEquals(before, raw.keys());
+    }
 
     @Test
     void getInAccountReadsTheNamedAccountOutsideAnyRequest() {

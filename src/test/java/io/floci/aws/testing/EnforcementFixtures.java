@@ -1,5 +1,6 @@
 package io.floci.aws.testing;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.restassured.filter.Filter;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
@@ -421,6 +422,12 @@ public final class EnforcementFixtures {
             request = request.formParam(params[i], params[i + 1]);
         }
         return request.when().post("/").then();
+    }
+
+    /** A single-action, single-resource IAM statement, ready to place in a policy's Statement array. */
+    public static String statement(String effect, String action, String resource) {
+        return JsonNodeFactory.instance.objectNode().put("Effect", effect).put("Action", action)
+                .put("Resource", resource).toPrettyString();
     }
 
     private static RequestSpecification s3(int port, String authorization) {
