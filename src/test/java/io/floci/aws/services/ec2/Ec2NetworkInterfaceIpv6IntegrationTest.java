@@ -235,6 +235,20 @@ class Ec2NetworkInterfaceIpv6IntegrationTest {
         assertEquals("UnsupportedOperation", error.awsErrorDetails().errorCode());
     }
 
+    @Test
+    void secondaryIpv4AndIpv6CountsAreAppliedTogether() {
+        Fixture fixture = fixture();
+        String eni = create(fixture, request -> request.secondaryPrivateIpAddressCount(2).ipv6AddressCount(2));
+
+        NetworkInterface described = describe(fixture, eni);
+        assertEquals(3, described.privateIpAddresses().size());
+        assertEquals(3L, described.privateIpAddresses().stream().map(address -> address.privateIpAddress())
+                .distinct().count());
+        assertEquals(1L, described.privateIpAddresses().stream().filter(address -> address.primary()).count());
+        assertEquals(2, addresses(described).size());
+        assertNotEquals(addresses(described).get(0), addresses(described).get(1));
+    }
+
     private Fixture fixture() {
         return fixture(64);
     }

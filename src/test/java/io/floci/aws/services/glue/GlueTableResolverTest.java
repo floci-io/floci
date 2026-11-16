@@ -261,4 +261,17 @@ class GlueTableResolverTest {
 
         assertThat(GlueTableResolver.readPlan(table).fromClause(), equalTo("read_csv_auto('s3://bucket/events/**')"));
     }
+
+    @Test
+    void aJavaDatePatternTranslatesToAStrptimeFormat() {
+        assertThat(GlueTableResolver.strptimeFormat("yyyy/MM/dd/HH"), is("%Y/%m/%d/%H"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyyMMdd'T'HHmmss"), is("%Y%m%dT%H%M%S"));
+        assertThat(GlueTableResolver.strptimeFormat("yy-MM-dd 100%"), is("%y-%m-%d 100%%"));
+        // A doubled quote is one quote, inside a quoted section or outside one, as Java's formatter reads it.
+        assertThat(GlueTableResolver.strptimeFormat("yyyy'foo''bar'MMdd"), is("%Yfoo'bar%m%d"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyy''MM"), is("%Y'%m"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyy'unclosed"), nullValue());
+        assertThat(GlueTableResolver.strptimeFormat("EEE, dd MMM yyyy"), nullValue());
+        assertThat(GlueTableResolver.strptimeFormat(" "), nullValue());
+    }
 }

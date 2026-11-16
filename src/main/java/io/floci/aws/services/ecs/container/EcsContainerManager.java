@@ -1174,8 +1174,8 @@ public class EcsContainerManager {
                 .filter(def -> def.getPortMappings() != null && !def.getPortMappings().isEmpty())
                 .findFirst()
                 .orElse(definitions.getFirst());
-        ec2Service.attachContainerToVpc(region, vpcId,
-                task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
+        ec2Service.attachContainerToVpc(AwsArnUtils.accountOrDefault(task.getTaskArn(), regionResolver.getAccountId()),
+                region, vpcId, task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
                 containerIds.get(holder.getName()), task.getPrivateIpAddress());
     }
 
@@ -1370,8 +1370,9 @@ public class EcsContainerManager {
                                 .stream().map(PrefixListEntry::getCidr).toList()));
             }
             firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
-                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(),
-                    namespace.transportAddress(), Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
+                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(), eni.getIpv6Addresses(),
+                    namespace.transportAddress(), namespace.transportIpv6Address(), Set.copyOf(groupIds), groups),
+                    namespace.helperId(), prefixLists);
             task.setNetworkInterfaceId(eniId);
             task.setPrivateIpAddress(eni.getPrivateIpAddress());
             return new PreparedNetwork(eni, namespace);

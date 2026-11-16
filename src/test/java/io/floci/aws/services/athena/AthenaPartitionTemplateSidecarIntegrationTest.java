@@ -92,6 +92,37 @@ class AthenaPartitionTemplateSidecarIntegrationTest {
         assertEquals(EXPECTED_ROW, queryEuInMarch("sales_hive"));
     }
 
+    /**
+     * In the default layout each value takes its key's declared type, not the one DuckDB would guess from the folder
+     * name: a string key holding a date stays a string, and a date key's folder holding a value no date is is one
+     * projection never generates, so it is not read.
+     */
+    @Test
+    void defaultLayoutTypesEachValueAsItsKeyDeclares() {
+        table("sales_typed", "typed", null, "typed/region=2026-03-14/dt=2026-03-14/part.parquet",
+                "typed/region=eu/dt=latest/part.parquet");
+
+        assertEquals(List.of(Map.of("region", "2026-03-14", "region_type", "VARCHAR", "dt_type", "DATE")),
+                query("SELECT region, typeof(region) AS region_type, typeof(dt) AS dt_type FROM "
+                        + view("sales_typed")));
+    }
+
+    /** A date projected with a format in the default layout is read through that format: dt=20260314 is March 14. */
+    @Test
+    void defaultLayoutParsesAFormattedDateProjection() {
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("classification", "parquet");
+        parameters.put("projection.enabled", "true");
+        parameters.put("projection.region.type", "injected");
+        parameters.put("projection.dt.type", "date");
+        parameters.put("projection.dt.format", "yyyyMMdd");
+        parameters.put("projection.dt.range", "20260101,NOW");
+        register("sales_compact", "compact", parameters, List.of(column("region", "string"), column("dt", "date")),
+                "compact/region=eu/dt=20260314/part.parquet");
+
+        assertEquals(EXPECTED_ROW, queryEuInMarch("sales_compact"));
+    }
+
     @Test
     void templateWithBareValuesMapsEachFolderToItsKey() {
         table("sales_bare", "bare", "bare/${region}/${dt}/", "bare/eu/2026-03-14/part.parquet");
