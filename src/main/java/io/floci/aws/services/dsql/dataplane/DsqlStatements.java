@@ -1,9 +1,13 @@
 package io.floci.aws.services.dsql.dataplane;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * The statements of a query as Aurora DSQL reads them. DSQL's own syntax ({@code CREATE INDEX
@@ -30,6 +34,17 @@ public final class DsqlStatements {
     private static final Set<String> ROLE_KINDS = Set.of("ROLE", "USER", "GROUP");
     private static final Set<String> ROLE_SPECIFIERS = Set.of("CURRENT_ROLE", "CURRENT_USER", "SESSION_USER", "PUBLIC",
             "NONE");
+    private static final Set<String> RENAME_TARGETS = Set.of("RENAME", "COLUMN", "CONSTRAINT", "ATTRIBUTE");
+    private static final Pattern SIMPLE_IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_$]*");
+    /**
+     * The role procedures Floci itself calls, with their signatures: on a shared server a client's
+     * own call would hand role DDL to the database without its names translated.
+     */
+    private static final Map<String, String> INTERNAL_ROUTINES = Map.of(
+            "run_role_ddl", "text",
+            "drop_roles", "text[], boolean",
+            "aws_iam_grant", "text, text",
+            "aws_iam_revoke", "text, text");
 
     private DsqlStatements() {
     }
@@ -40,13 +55,21 @@ public final class DsqlStatements {
 
     /** The statements of {@code query}, each rewritten as DSQL reads it, in order. */
     public static List<Statement> rewrite(String query) {
+        return rewrite(query, RoleNames.IDENTITY);
+    }
+
+    /**
+     * The statements of {@code query}, each rewritten as DSQL reads it, in order, with the roles
+     * it names as {@code names} has them in the database.
+     */
+    public static List<Statement> rewrite(String query, RoleNames names) {
         List<Statement> statements = new ArrayList<>();
         for (List<Token> tokens : split(tokenize(query))) {
             if (tokens.isEmpty()) {
                 continue;
             }
             String text = query.substring(tokens.get(0).start(), tokens.get(tokens.size() - 1).end());
-            statements.add(rewrite(text, tokens));
+            statements.add(rewrite(text, tokens, names));
         }
         return statements;
     }
@@ -68,6 +91,14 @@ public final class DsqlStatements {
      * needed rewriting, the query exactly as the client sent it.
      */
     public static Query rewriteQuery(String query) {
+        return rewriteQuery(query, RoleNames.IDENTITY);
+    }
+
+    /**
+     * The whole query as the database runs it, with the roles it names as {@code names} has them
+     * in the database. With {@link RoleNames#IDENTITY} it is {@link #rewriteQuery(String)}.
+     */
+    public static Query rewriteQuery(String query, RoleNames names) {
         List<String> parts = new ArrayList<>();
         List<String> tags = new ArrayList<>();
         boolean changed = false;
@@ -76,7 +107,7 @@ public final class DsqlStatements {
                 continue;
             }
             String text = query.substring(tokens.get(0).start(), tokens.get(tokens.size() - 1).end());
-            Statement statement = rewrite(text, tokens);
+            Statement statement = rewrite(text, tokens, names);
             changed |= statement.commandTag() != null || !statement.sql().equals(text);
             parts.add(statement.sql());
             tags.add(statement.commandTag());
@@ -88,6 +119,100 @@ public final class DsqlStatements {
     public static String reject(String state, String message, String detail) {
         return "SELECT sys._reject(" + literal(state) + ", " + literal(message)
                 + (detail == null ? "" : ", " + literal(detail)) + ")";
+    }
+
+    /**
+     * The statement with each role it names as {@code names} has it in the database, then rewritten
+     * as DSQL reads it. A name too long to carry the backend's prefix within PostgreSQL's 63-byte
+     * identifier, counted in UTF-8 bytes, refuses the statement.
+     */
+    private static Statement rewrite(String text, List<Token> tokens, RoleNames names) {
+        if (names.isIdentity()) {
+            return rewrite(text, tokens);
+        }
+        Statement internal = internalRoutineCall(tokens);
+        if (internal != null) {
+            return internal;
+        }
+        int base = tokens.get(0).start();
+        StringBuilder translated = new StringBuilder();
+        int copied = 0;
+        boolean changed = false;
+        for (int index : roleNamePositions(tokens)) {
+            Token token = tokens.get(index);
+            String logical = identifier(token);
+            String backend = names.toBackend(logical, token.type() == Type.QUOTED_IDENTIFIER);
+            if (backend.equals(logical)) {
+                continue;
+            }
+            // PostgreSQL would truncate a longer name, and a login by the full name would not find it.
+            if (logical.getBytes(StandardCharsets.UTF_8).length > PrefixedRoleNames.MAX_LOGICAL
+                    || backend.getBytes(StandardCharsets.UTF_8).length > PrefixedRoleNames.MAX_IDENTIFIER_BYTES) {
+                return rejected("42602", "role name \"" + logical + "\" is too long for Floci's external backend (max "
+                        + PrefixedRoleNames.MAX_LOGICAL + " bytes)");
+            }
+            translated.append(text, copied, token.start() - base)
+                    .append(roleIdentifier(backend, token.type() == Type.QUOTED_IDENTIFIER));
+            copied = token.end() - base;
+            changed = true;
+        }
+        if (!changed) {
+            return rewrite(text, tokens);
+        }
+        String sql = translated.append(text, copied, text.length()).toString();
+        return rewrite(sql, tokenize(sql));
+    }
+
+    /**
+     * A call the client wrote to one of Floci's internal routines, refused as PostgreSQL refuses a
+     * routine that does not exist: {@code sys.run_role_ddl}, {@code sys.drop_roles},
+     * {@code sys.aws_iam_grant} and {@code sys.aws_iam_revoke}, and any {@code sys._*} routine,
+     * each qualified with {@code sys}: an unqualified name may be the client's own table or function. Read from the client's tokens, before Floci adds calls of its own.
+     */
+    private static Statement internalRoutineCall(List<Token> tokens) {
+        for (int i = 0; i + 1 < tokens.size(); i++) {
+            if (!isName(tokens, i) || !"(".equals(tokens.get(i + 1).text()) || tokens.get(i + 1).type() != Type.SYMBOL) {
+                continue;
+            }
+            String routine = identifier(tokens.get(i));
+            boolean qualified = i >= 2 && ".".equals(tokens.get(i - 1).text()) && tokens.get(i - 1).type() == Type.SYMBOL;
+            boolean inSys = qualified && isName(tokens, i - 2) && "sys".equals(identifier(tokens.get(i - 2)));
+            boolean internal = inSys && (INTERNAL_ROUTINES.containsKey(routine) || routine.startsWith("_"));
+            if (internal) {
+                String kind = "CALL".equals(word(tokens, qualified ? i - 3 : i - 1)) ? "procedure" : "function";
+                String signature = INTERNAL_ROUTINES.getOrDefault(routine, argumentTypes(tokens, i + 1));
+                return rejected("42883", kind + " sys." + routine + "(" + signature + ") does not exist");
+            }
+        }
+        return null;
+    }
+
+    /** The arguments of the call whose parenthesis is at {@code open}, each of an unknown type. */
+    private static String argumentTypes(List<Token> tokens, int open) {
+        List<String> types = new ArrayList<>();
+        int depth = 0;
+        boolean argument = false;
+        for (int i = open + 1; i < tokens.size(); i++) {
+            Token token = tokens.get(i);
+            boolean symbol = token.type() == Type.SYMBOL;
+            if (symbol && "(".equals(token.text())) {
+                depth++;
+            } else if (symbol && ")".equals(token.text())) {
+                if (depth == 0) {
+                    break;
+                }
+                depth--;
+            } else if (symbol && ",".equals(token.text()) && depth == 0) {
+                types.add("unknown");
+                argument = false;
+                continue;
+            }
+            argument = true;
+        }
+        if (argument) {
+            types.add("unknown");
+        }
+        return String.join(", ", types);
     }
 
     private static Statement rewrite(String text, List<Token> tokens) {
@@ -470,6 +595,242 @@ public final class DsqlStatements {
 
     private static Statement rejected(String state, String message) {
         return new Statement(reject(state, message, null), null);
+    }
+
+    // ── Role names ────────────────────────────────────────────────────────────
+
+    /**
+     * The indexes of the tokens that name a role where the statement's grammar places one: role
+     * DDL and the role lists of {@code GRANT} and {@code REVOKE}, ownership ({@code OWNER TO},
+     * {@code REASSIGN} and {@code DROP OWNED}), {@code SET ROLE}, {@code SET SESSION AUTHORIZATION},
+     * {@code CREATE SCHEMA ... AUTHORIZATION}, policies, default privileges, {@code DROP ROLE} and
+     * {@code AWS IAM GRANT|REVOKE}. Specifiers are included; the caller leaves what
+     * {@link RoleNames} keeps as it is.
+     */
+    private static Set<Integer> roleNamePositions(List<Token> tokens) {
+        Set<Integer> at = new TreeSet<>();
+        String first = word(tokens, 0);
+        String second = word(tokens, 1);
+        switch (first) {
+            case "CREATE", "ALTER" -> {
+                boolean alter = "ALTER".equals(first);
+                if (ROLE_KINDS.contains(second) && !"MAPPING".equals(word(tokens, 2))) {
+                    roleDdlNames(tokens, alter, at);
+                } else if ("POLICY".equals(second)) {
+                    policyRoles(tokens, at);
+                } else if (!alter && "SCHEMA".equals(second)) {
+                    for (int i = 2; i <= 6 && i < tokens.size(); i++) {
+                        if ("AUTHORIZATION".equals(word(tokens, i))) {
+                            addName(tokens, i + 1, at);
+                            break;
+                        }
+                    }
+                } else if (alter && "DEFAULT".equals(second) && "PRIVILEGES".equals(word(tokens, 2))) {
+                    int i = 3;
+                    if ("FOR".equals(word(tokens, i)) && ("ROLE".equals(word(tokens, i + 1))
+                            || "USER".equals(word(tokens, i + 1)))) {
+                        i = roleList(tokens, i + 2, false, at);
+                    }
+                    while (i < tokens.size() && !"GRANT".equals(word(tokens, i)) && !"REVOKE".equals(word(tokens, i))) {
+                        i++;
+                    }
+                    grantRoles(tokens, i, at);
+                }
+                if (alter) {
+                    for (int i = 2; i + 2 < tokens.size(); i++) {
+                        // A column, constraint or attribute called owner, renamed, is not the OWNER TO clause.
+                        boolean renamed = RENAME_TARGETS.contains(word(tokens, i - 1));
+                        if (!renamed && "OWNER".equals(word(tokens, i)) && "TO".equals(word(tokens, i + 1))) {
+                            addName(tokens, i + 2, at);
+                        }
+                    }
+                }
+            }
+            case "GRANT", "REVOKE" -> grantRoles(tokens, 0, at);
+            case "SET" -> setRole(tokens, at);
+            case "DROP" -> {
+                if (ROLE_KINDS.contains(second)) {
+                    int i = 2;
+                    if ("IF".equals(word(tokens, i)) && "EXISTS".equals(word(tokens, i + 1))) {
+                        i += 2;
+                    }
+                    roleList(tokens, i, false, at);
+                } else if ("OWNED".equals(second) && "BY".equals(word(tokens, 2))) {
+                    roleList(tokens, 3, false, at);
+                }
+            }
+            case "REASSIGN" -> {
+                if ("OWNED".equals(second) && "BY".equals(word(tokens, 2))) {
+                    int i = roleList(tokens, 3, false, at);
+                    if ("TO".equals(word(tokens, i))) {
+                        addName(tokens, i + 1, at);
+                    }
+                }
+            }
+            case "AWS" -> {
+                String third = word(tokens, 2);
+                if ("IAM".equals(second) && ("GRANT".equals(third) || "REVOKE".equals(third))) {
+                    addName(tokens, 3, at);
+                }
+            }
+            default -> {
+            }
+        }
+        return at;
+    }
+
+    /**
+     * {@code CREATE|ALTER ROLE|USER|GROUP name}: the role, the role lists of its options
+     * ({@code IN ROLE}, {@code IN GROUP}, {@code ROLE}, {@code ADMIN}, {@code USER}) and a new name
+     * after {@code RENAME TO}. What follows {@code SET} or {@code RESET} names a parameter, not a role.
+     */
+    private static void roleDdlNames(List<Token> tokens, boolean alter, Set<Integer> at) {
+        if (!(alter && "ALL".equals(word(tokens, 2)))) {
+            addName(tokens, 2, at);
+        }
+        int i = 3;
+        while (i < tokens.size()) {
+            String word = word(tokens, i);
+            if ("SET".equals(word) || "RESET".equals(word)) {
+                return;
+            }
+            if ("RENAME".equals(word) && "TO".equals(word(tokens, i + 1))) {
+                addName(tokens, i + 2, at);
+                return;
+            }
+            if ("IN".equals(word) && ("ROLE".equals(word(tokens, i + 1)) || "GROUP".equals(word(tokens, i + 1)))) {
+                i = roleList(tokens, i + 2, false, at);
+            } else if ("ROLE".equals(word) || "ADMIN".equals(word) || "USER".equals(word)) {
+                i = roleList(tokens, i + 1, false, at);
+            } else {
+                i++;
+            }
+        }
+    }
+
+    /**
+     * {@code GRANT} or {@code REVOKE} from {@code g}: of a role, the roles granted and the grantees;
+     * of privileges {@code ON} an object, the grantees; and the role after {@code GRANTED BY}.
+     */
+    private static void grantRoles(List<Token> tokens, int g, Set<Integer> at) {
+        boolean grant = "GRANT".equals(word(tokens, g));
+        if (!grant && !"REVOKE".equals(word(tokens, g))) {
+            return;
+        }
+        String preposition = grant ? "TO" : "FROM";
+        int on = -1;
+        for (int i = g + 1; i < tokens.size() && on < 0; i++) {
+            if ("ON".equals(word(tokens, i))) {
+                on = i;
+            }
+        }
+        Set<Integer> found = new TreeSet<>();
+        int i;
+        if (on < 0) {
+            i = g + 1;
+            if (!grant && "OPTION".equals(word(tokens, i + 1)) && "FOR".equals(word(tokens, i + 2))) {
+                i += 3;
+            }
+            i = roleList(tokens, i, false, found);
+        } else {
+            i = on + 1;
+            while (i < tokens.size() && !preposition.equals(word(tokens, i))) {
+                i++;
+            }
+        }
+        if (!preposition.equals(word(tokens, i))) {
+            return;
+        }
+        i = roleList(tokens, i + 1, true, found);
+        for (; i + 1 < tokens.size(); i++) {
+            if ("GRANTED".equals(word(tokens, i)) && "BY".equals(word(tokens, i + 1))) {
+                addName(tokens, i + 2, found);
+                break;
+            }
+        }
+        at.addAll(found);
+    }
+
+    /** {@code CREATE|ALTER POLICY name ON table ... TO role, ...}, but not {@code RENAME TO}. */
+    private static void policyRoles(List<Token> tokens, Set<Integer> at) {
+        for (int i = 3; i < tokens.size(); i++) {
+            String word = word(tokens, i);
+            if ("USING".equals(word) || "WITH".equals(word) || "RENAME".equals(word) || "(".equals(tokens.get(i).text())) {
+                return;
+            }
+            if ("TO".equals(word)) {
+                roleList(tokens, i + 1, false, at);
+                return;
+            }
+        }
+    }
+
+    /**
+     * {@code SET [SESSION|LOCAL] ROLE name} (or {@code TO} or {@code =} name) and
+     * {@code SET [SESSION|LOCAL] SESSION AUTHORIZATION name}.
+     */
+    private static void setRole(List<Token> tokens, Set<Integer> at) {
+        int i = 1;
+        String scope = word(tokens, i);
+        if (("SESSION".equals(scope) || "LOCAL".equals(scope)) && !"AUTHORIZATION".equals(word(tokens, i + 1))) {
+            i++;
+        }
+        if ("ROLE".equals(word(tokens, i))) {
+            int value = i + 1;
+            if ("TO".equals(word(tokens, value)) || value < tokens.size() && "=".equals(tokens.get(value).text())
+                    && tokens.get(value).type() == Type.SYMBOL) {
+                value++;
+            }
+            addName(tokens, value, at);
+        } else if ("SESSION".equals(word(tokens, i)) && "AUTHORIZATION".equals(word(tokens, i + 1))) {
+            addName(tokens, i + 2, at);
+        }
+    }
+
+    /**
+     * The names from {@code from} on, separated by commas, each preceded by {@code GROUP} where
+     * {@code grantees} allows it; the index after the list.
+     */
+    private static int roleList(List<Token> tokens, int from, boolean grantees, Set<Integer> at) {
+        int i = from;
+        while (i < tokens.size()) {
+            if (grantees && "GROUP".equals(word(tokens, i))) {
+                i++;
+            }
+            if (!isName(tokens, i)) {
+                return i;
+            }
+            at.add(i);
+            i++;
+            Token next = i < tokens.size() ? tokens.get(i) : null;
+            if (next == null || next.type() != Type.SYMBOL || !",".equals(next.text())) {
+                return i;
+            }
+            i++;
+        }
+        return i;
+    }
+
+    private static void addName(List<Token> tokens, int index, Set<Integer> at) {
+        if (isName(tokens, index)) {
+            at.add(index);
+        }
+    }
+
+    private static boolean isName(List<Token> tokens, int index) {
+        if (index < 0 || index >= tokens.size()) {
+            return false;
+        }
+        Type type = tokens.get(index).type();
+        return type == Type.WORD || type == Type.QUOTED_IDENTIFIER;
+    }
+
+    /** {@code name} as an identifier: quoted when it was or when PostgreSQL would fold it otherwise. */
+    private static String roleIdentifier(String name, boolean quoted) {
+        if (!quoted && SIMPLE_IDENTIFIER.matcher(name).matches()) {
+            return name;
+        }
+        return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
     // ── Tokens ────────────────────────────────────────────────────────────────
