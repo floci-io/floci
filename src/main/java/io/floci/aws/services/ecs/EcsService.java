@@ -6459,12 +6459,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return task;
     }
 
+    /**
+     * ECS services are cluster and Region specific: a name resolves only in the request's cluster
+     * and Region, and an ARN only when it is that service's own ARN, so an ARN naming another
+     * cluster or Region resolves to nothing rather than to a service elsewhere.
+     */
     private EcsServiceModel resolveService(String clusterName, String serviceId, String region) {
-        EcsServiceModel svc = services.get(serviceKey(region, clusterName, serviceId));
-        if (svc != null) { return svc; }
-        return services.values().stream()
-                .filter(s -> s.getServiceArn().equals(serviceId) || s.getServiceName().equals(serviceId))
-                .findFirst().orElse(null);
+        if (serviceId == null) {
+            return null;
+        }
+        if (AwsArnUtils.looksLikeArn(serviceId)) {
+            EcsServiceModel svc = services.get(serviceKey(region, clusterName, extractServiceName(serviceId)));
+            return svc != null && serviceId.equals(svc.getServiceArn()) ? svc : null;
+        }
+        return services.get(serviceKey(region, clusterName, serviceId));
     }
 
     private EcsServiceModel resolveServiceOrThrow(String clusterName, String serviceId, String region) {
