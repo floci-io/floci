@@ -8,6 +8,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
+import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.json.JsonArray;
@@ -18,10 +19,12 @@ import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,6 +38,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class EcrRegistryDataPlane {
 
+    private static final Logger LOG = Logger.getLogger(EcrRegistryDataPlane.class);
     private static final Pattern ECR_HOST = Pattern.compile(
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?:\\.floci\\.io)?(?::[0-9]+)?$");
     private static final String MANIFESTS_PATH = "/manifests/";
@@ -298,8 +302,7 @@ public class EcrRegistryDataPlane {
                     failUnlessGone(context, 502);
                     return;
                 }
-                copyResponseHeaders(context, upstreamResponse.result(), request);
-                upstreamResponse.result().pipeTo(context.response()).onComplete(ignored -> exchange.end());
+                handleRegistryResponse(context, request, exchange, upstreamResponse.result());
             });
             Buffer waitingBody = exchange.replayBody();
             if (waitingBody == null) {
@@ -315,6 +318,69 @@ public class EcrRegistryDataPlane {
                 });
             }
         });
+    }
+
+    private void handleRegistryResponse(RoutingContext context, RegistryRequest request, Exchange exchange,
+                                        HttpClientResponse upstream) {
+        if (exchange.ended()) {
+            return;
+        }
+        Runnable update = exchange.holdingWriteLock() ? manifestMetadataUpdate(context, request, upstream) : null;
+        if (update == null) {
+            forwardResponse(context, request, exchange, upstream);
+            return;
+        }
+        upstream.pause();
+        exchange.updatingManifestMetadata = true;
+        vertx.executeBlocking(() -> {
+            try {
+                update.run();
+            } catch (RuntimeException firstFailure) {
+                LOG.debugv(firstFailure, "Retrying ECR manifest metadata update for {0}", request.storageRepositoryName());
+                update.run();
+            }
+            return null;
+        }, false).onComplete(result -> {
+            exchange.updatingManifestMetadata = false;
+            if (result.failed()) {
+                LOG.warnv(result.cause(), "Registry accepted {0} {1}, but the ECR manifest metadata update failed",
+                        context.request().method(), request.backendUri());
+            }
+            if (exchange.endRequested) {
+                exchange.end();
+            } else {
+                forwardResponse(context, request, exchange, upstream);
+            }
+        });
+    }
+
+    private Runnable manifestMetadataUpdate(RoutingContext context, RegistryRequest request,
+                                             HttpClientResponse upstream) {
+        HttpMethod method = context.request().method();
+        if (method == HttpMethod.PUT && upstream.statusCode() == 201) {
+            String digest = upstream.getHeader("Docker-Content-Digest");
+            if (digest != null && !digest.isBlank()) {
+                Instant pushedAt = Instant.now();
+                return () -> ecrService.recordImagePush(request.accountId(), request.region(),
+                        request.repositoryName(), digest, pushedAt);
+            }
+        }
+        if (method == HttpMethod.DELETE && upstream.statusCode() == 202) {
+            String path = context.request().path();
+            String digest = path.substring(path.lastIndexOf('/') + 1);
+            // Registry V2 deletes a manifest by digest. A tag alone does not identify this metadata.
+            if (digest.contains(":")) {
+                return () -> ecrService.removeImagePush(request.accountId(), request.region(),
+                        request.repositoryName(), digest);
+            }
+        }
+        return null;
+    }
+
+    private static void forwardResponse(RoutingContext context, RegistryRequest request, Exchange exchange,
+                                        HttpClientResponse upstream) {
+        copyResponseHeaders(context, upstream, request);
+        upstream.pipeTo(context.response()).onComplete(ignored -> exchange.end());
     }
 
     private static void registryUnavailable(RoutingContext context) {
@@ -361,7 +427,7 @@ public class EcrRegistryDataPlane {
     }
 
     private static void copyResponseHeaders(RoutingContext context,
-                                            io.vertx.core.http.HttpClientResponse upstream,
+                                            HttpClientResponse upstream,
                                             RegistryRequest request) {
         context.response().setStatusCode(upstream.statusCode());
         upstream.headers().forEach(header -> {
@@ -419,6 +485,8 @@ public class EcrRegistryDataPlane {
         private final AtomicBoolean admissionReleased = new AtomicBoolean();
         private Buffer waitingBody;
         private boolean waitingBodyRead;
+        private boolean updatingManifestMetadata;
+        private boolean endRequested;
         private HttpClient client;
 
         private Exchange(String immutableTag, String writeLockRepository, boolean isWrite) {
@@ -498,6 +566,11 @@ public class EcrRegistryDataPlane {
         }
 
         private void end() {
+            if (updatingManifestMetadata) {
+                // Keep the repository lock until the metadata write finishes, even on disconnect.
+                endRequested = true;
+                return;
+            }
             if (!ended.compareAndSet(false, true)) {
                 return;
             }
