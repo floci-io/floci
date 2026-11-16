@@ -161,23 +161,8 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
         if (created) {
             sesService.createConfigurationSet(new ConfigurationSet(name), ctx.region());
         }
-        try {
-            resource.setPhysicalId(name);
-            ReplacementCleanup.record(resource, ctx, attributesBefore, replacing);
-        } catch (RuntimeException failure) {
-            if (created) {
-                try {
-                    delete(CONFIGURATION_SET_TYPE, name, ctx.region());
-                    resource.setPhysicalId(ctx.priorPhysicalId());
-                    resource.getAttributes().clear();
-                    resource.getAttributes().putAll(attributesBefore);
-                } catch (RuntimeException cleanupFailure) {
-                    ReplacementCleanup.recordOrphan(resource, name, CONFIGURATION_SET_TYPE, ctx.region());
-                    failure.addSuppressed(cleanupFailure);
-                }
-            }
-            throw failure;
-        }
+        resource.setPhysicalId(name);
+        ReplacementCleanup.record(resource, ctx, attributesBefore, replacing);
     }
 
     @Override
