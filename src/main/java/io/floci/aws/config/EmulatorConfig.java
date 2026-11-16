@@ -2250,6 +2250,9 @@ public interface EmulatorConfig {
         @WithDefault("4")
         int yarnMaxWorkerNodes();
 
+        /** Apache Pig for a {@code docker} cluster's Pig steps, which no AWS image carries; off unless enabled. */
+        EmrPigConfig pig();
+
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
          * container a previous run of <em>this same</em> Floci left on the daemon (matched by the
@@ -2261,6 +2264,37 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean reconcileContainersOnStartup();
+    }
+
+    interface EmrPigConfig {
+        /**
+         * When true, a {@code docker} cluster whose {@code Applications} name Pig has Apache Pig in the image its steps
+         * run in, downloaded from {@link #urls()} when Floci makes that image, and its Pig steps run it. Off by default,
+         * as the download is Apache's, not AWS's, and about 470 MB.
+         *
+         * Env var: FLOCI_SERVICES_EMR_PIG_ENABLED
+         */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Where Floci downloads Apache Pig's binary distribution from, the first that answers: Apache's download CDN,
+         * which serves current releases, then its archive, which keeps every release.
+         *
+         * Env var: FLOCI_SERVICES_EMR_PIG_URLS
+         */
+        @WithDefault("https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,"
+                + "https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz")
+        List<String> urls();
+
+        /**
+         * The SHA-256 of the distribution {@link #urls()} name; one downloaded with another fails the step, and no
+         * image is made of it.
+         *
+         * Env var: FLOCI_SERVICES_EMR_PIG_SHA256
+         */
+        @WithDefault("6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a")
+        String sha256();
     }
 
     interface WafV2ServiceConfig {

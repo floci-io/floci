@@ -67,6 +67,7 @@ class EmrServiceContainerStepsTest {
     private static final String REPORT = "s3://bucket/jobs/report.py";
     private static final String DRIVER_FAILED = "The Spark driver exited with code 1.";
     private static final String INSTALL = "s3://bucket/bootstrap/install.sh";
+    private static final String PIG = "[{\"Name\": \"Hadoop\"}, {\"Name\": \"Pig\"}]";
     private static final String ERROR_CODE_PAGES = "https://docs.aws.amazon.com/emr/latest/ManagementGuide/";
     // The id of the image a bootstrap kept, which the cluster's steps run in.
     private static final String IMAGE = "sha256:" + "2".repeat(64);
@@ -599,7 +600,7 @@ class EmrServiceContainerStepsTest {
         // Its release's image with Hadoop's services, as it has no Hive, made on the step's thread: its steps and its
         // primary node's HDFS and YARN run in it, the NodeManager offering what Floci gives it.
         assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
-                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "false")), fixture.releaseImages.asked);
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "false", "false")), fixture.releaseImages.asked);
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, fixture.clusterStorage.hdfs.get(0).get(2));
@@ -779,7 +780,7 @@ class EmrServiceContainerStepsTest {
 
         // Its release has no Hive image, so emr-7.5.0's gives the Hadoop its image holds for the node's daemons.
         assertEquals(List.of(List.of("emr-spark-8.1.0", "public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest",
-                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "false")), fixture.releaseImages.asked);
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "false", "false")), fixture.releaseImages.asked);
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, fixture.clusterStorage.hdfs.get(0).get(2));
@@ -815,7 +816,7 @@ class EmrServiceContainerStepsTest {
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(SparkJobRunner.Engine.HIVE, job.engine());
         assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
-                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true")), fixture.releaseImages.asked);
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true", "false")), fixture.releaseImages.asked);
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
         assertEquals(hdfsStorage(cluster).withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"), job.storage());
     }
@@ -984,7 +985,9 @@ class EmrServiceContainerStepsTest {
     void aStepFlociDoesNotRunHandedOffBeforeATeardownEndsAsAStoppedDriverAndStartsNoOther() {
         EmrStep pig = sparkStep("query", "CONTINUE");
         pig.setArgs(List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/query.pig"));
-        EmrCluster cluster = service.runJobFlow(cluster("pig", true, pig, sparkStep("next", "CONTINUE")), REGION);
+        EmrCluster requested = cluster("pig", true, pig, sparkStep("next", "CONTINUE"));
+        requested.setApplications(PIG);
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
         service.stopManagedContainers();
 
         fixture.runStepThread();
@@ -1015,9 +1018,12 @@ class EmrServiceContainerStepsTest {
 
     @Test
     void aStepFlociDoesNotRunFailsWithoutRunning() {
+        // A cluster that installs Pig, which Floci adds only with floci.services.emr.pig.enabled.
         EmrStep pig = sparkStep("query", "CONTINUE");
         pig.setArgs(List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/query.pig"));
-        EmrCluster cluster = service.runJobFlow(cluster("pig", true, pig), REGION);
+        EmrCluster requested = cluster("pig", true, pig);
+        requested.setApplications(PIG);
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
 
         fixture.runStepThread();
 
@@ -1025,6 +1031,46 @@ class EmrServiceContainerStepsTest {
         assertEquals("FAILED", failed.getState());
         assertEquals(EmrSparkSteps.NOT_RUN, failed.getFailureMessage());
         assertEquals(List.of(), runner.jobs);
+        assertEquals(List.of(), fixture.releaseImages.asked);
+    }
+
+    @Test
+    void aPigStepOnAClusterWithoutPigRunsEmrsPigScriptWhichFindsNoPig() {
+        EmrStep pig = sparkStep("query", "CONTINUE");
+        List<String> args = List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/query.pig");
+        pig.setArgs(args);
+        service.runJobFlow(cluster("no-pig", true, pig), REGION);
+
+        fixture.runStepThread();
+
+        // EMR's pig-script says "Pig isn't installed." there, and the step fails with its exit code.
+        assertEquals(args, runner.jobs.get(0).command());
+        assertFalse(runner.jobs.get(0).environment().containsKey("FLOCI_PIG_PROPERTIES"));
+    }
+
+    @Test
+    void aPigStepWithFlocisPigRunsEmrsPigScriptOnTezInTheReleasesImageWithPig() {
+        EmrService withPig = fixture.withPig();
+        EmrStep pig = sparkStep("query", "CONTINUE");
+        List<String> args = List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/query.pig");
+        pig.setArgs(args);
+        EmrCluster requested = cluster("pig", true, pig);
+        requested.setApplications(PIG);
+        requested.setConfigurations("[{\"Classification\": \"pig-properties\", \"Properties\": "
+                + "{\"pig.exec.reducers.max\": \"8\"}}]");
+        withPig.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "false", "true")),
+                fixture.releaseImages.asked);
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(args, job.command());
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
+        assertEquals("exectype = tez\nmapreduce.job.working.dir = /user/${user.name}\npig.stats.notaskreport = true\n"
+                + "yarn.app.mapreduce.client.max-retries = 1\npig.exec.reducers.max = 8",
+                job.environment().get("FLOCI_PIG_PROPERTIES"));
     }
 
     @Test
@@ -1495,7 +1541,7 @@ class EmrServiceContainerStepsTest {
         assertEquals(stepId, job.runId());
         // The release's EMR Serverless image with its EMR Serverless Hive image's Hive, made on the step's thread.
         assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
-                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true")), fixture.releaseImages.asked);
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true", "false")), fixture.releaseImages.asked);
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
         assertNull(job.customImage());
         assertEquals(List.of("hive-script", "--run-hive-script", "--args"), job.command());
@@ -1539,7 +1585,8 @@ class EmrServiceContainerStepsTest {
         fixture.runStepThread();
 
         assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
-                "registry.internal/emr-serverless/hive/emr-7.5.0:20250425", "true")), fixture.releaseImages.asked);
+                "registry.internal/emr-serverless/hive/emr-7.5.0:20250425", "true", "false")),
+                fixture.releaseImages.asked);
         assertEquals(SparkJobRunner.Engine.SPARK, runner.jobs.get(0).engine());
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, runner.jobs.get(0).imageTemplate());
     }
@@ -2216,7 +2263,9 @@ class EmrServiceContainerStepsTest {
     void aClusterWhoseStepsNoContainerRanHasNoStorage() {
         EmrStep query = sparkStep("query", "CONTINUE");
         query.setArgs(new ArrayList<>(List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/q.pig")));
-        EmrCluster cluster = service.runJobFlow(cluster("unrun", true, query), REGION);
+        EmrCluster requested = cluster("unrun", true, query);
+        requested.setApplications(PIG);
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
         fixture.runStepThread();
 
         service.terminateJobFlows(List.of(cluster.getId()));

@@ -149,6 +149,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final String imageTemplate;
     private final String hiveImageTemplate;
     private final String dockerNetwork;
+    // Whether a cluster whose Applications name Pig gets Apache Pig in its image (floci.services.emr.pig.enabled).
+    private final boolean pigEnabled;
     // What the NodeManager of a cluster that runs YARN offers its containers.
     private final ClusterStorage.Yarn nodeManager;
     private final int maxWorkerNodes;
@@ -290,6 +292,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         this.imageTemplate = config.services().emr().imageTemplate().orElse(null);
         this.hiveImageTemplate = config.services().emr().hiveImageTemplate().orElse(null);
         this.dockerNetwork = config.services().emr().dockerNetwork().orElse(null);
+        this.pigEnabled = config.services().emr().pig().enabled();
         this.nodeManager = new ClusterStorage.Yarn(config.services().emr().yarnNodeMemoryMb(),
                 config.services().emr().yarnNodeVcores());
         this.maxWorkerNodes = config.services().emr().yarnMaxWorkerNodes();
@@ -1683,8 +1686,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step, cluster.getReleaseLabel(),
                     cluster.getApplications(), cluster.getConfigurations(), SNAPSHOT_MAPPER);
             boolean yarn = runsYarn(cluster);
+            boolean pig = withPig(cluster);
+            boolean pigMissing = !pig && EmrSparkSteps.installsPig(cluster.getReleaseLabel(), cluster.getApplications(),
+                    SNAPSHOT_MAPPER);
             List<String> application = hive == null ? EmrSparkSteps.application(step, yarn) : null;
-            List<String> command = hive == null && application == null ? EmrSparkSteps.command(step) : null;
+            List<String> command = hive == null && application == null ? EmrSparkSteps.command(step, pigMissing)
+                    : null;
             SparkJobRunner.Storage storage = null;
             if ((hive != null || application != null || command != null) && clusterStorage != null) {
                 storage = clusterStorage.volumes(cluster.getId());
@@ -1730,7 +1737,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         application != null ? application : List.of(), command, Duration.ZERO,
                         EmrSparkSteps.logFolder(cluster, step), null,
-                        EmrSparkSteps.environment(step, cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
+                        stepEnvironment(step, cluster, command != null && pig), List.of(),
                         storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
@@ -1895,13 +1902,30 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
         boolean withHive = EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(),
                 SNAPSHOT_MAPPER);
-        if (!withHive && !runsYarn(cluster)) {
+        boolean withPig = withPig(cluster);
+        if (!withHive && !withPig && !runsYarn(cluster)) {
             return null;
         }
         String release = cluster.getReleaseLabel();
         String spark = EmrServerlessSparkRunner.image(imageTemplate, release);
         String hive = hdfsImage(release);
-        return () -> releaseImages.image(release, spark, hive, withHive);
+        return () -> releaseImages.image(release, spark, hive, withHive, withPig);
+    }
+
+    // Whether a cluster's image has Floci's Pig: it installs Pig, and floci.services.emr.pig.enabled adds it.
+    private boolean withPig(EmrCluster cluster) {
+        return pigEnabled && EmrSparkSteps.installsPig(cluster.getReleaseLabel(), cluster.getApplications(),
+                SNAPSHOT_MAPPER);
+    }
+
+    // The variables a step that is not a Hive step runs with: its cluster's spark-env exports and its own Properties
+    // (see EmrSparkSteps.environment), and for a command on a cluster with Floci's Pig, its Pig configuration.
+    private static Map<String, String> stepEnvironment(EmrStep step, EmrCluster cluster, boolean pig) {
+        Map<String, String> variables = EmrSparkSteps.environment(step, cluster.getConfigurations(), SNAPSHOT_MAPPER);
+        if (pig) {
+            variables.putAll(EmrSparkSteps.pigEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+        }
+        return variables;
     }
 
     /**
