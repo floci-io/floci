@@ -768,6 +768,23 @@
         "UpdateTargetAccountConfiguration": {"method": "PATCH", "requestUri": "/experimentTemplates/{id}/targetAccountConfigurations/{accountId}"}
       }
     },
+    "glue-iceberg-rest": {
+      "credentialScope": "glue",
+      "apiVersion": "apache-iceberg-1.6.1",
+      "documented": {"page": "https://docs.aws.amazon.com/glue/latest/dg/iceberg-rest-apis.html", "definitions": ["https://raw.githubusercontent.com/apache/iceberg/apache-iceberg-1.6.1/open-api/rest-catalog-open-api.yaml"], "pageDiffers": ["DeleteNamespace: the page gives DELETE/iceberg/v1/catalogs/{catalog}/namespces/{ns}, its definition DELETE /v1/{prefix}/namespaces/{namespace}", "CreateTable: the page gives GET /iceberg/v1/catalogs/{catalog}/namespaces/{ns}/tables, its definition POST /v1/{prefix}/namespaces/{namespace}/tables"], "retrieved": "2026-11-15"},
+      "operations": {
+        "CreateDatabase": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces"},
+        "CreateTable": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables"},
+        "DeleteDatabase": {"method": "DELETE", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}"},
+        "DeleteTable": {"method": "DELETE", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}"},
+        "GetCatalog": {"method": "GET", "requestUri": "/iceberg/v1/config"},
+        "GetDatabase": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces", "alternatives": [{"requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}", "located": {}}]},
+        "GetTable": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}", "alternatives": [{"method": "HEAD", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}", "located": {}}]},
+        "GetTables": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables"},
+        "UpdateDatabase": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/properties"},
+        "UpdateTable": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}"}
+      }
+    },
     "guardduty": {
       "credentialScope": "guardduty",
       "apiVersion": "2017-11-28",

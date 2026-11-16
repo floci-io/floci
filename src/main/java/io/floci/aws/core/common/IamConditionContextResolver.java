@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
@@ -80,6 +81,8 @@ public class IamConditionContextResolver {
     /** Set by {@code ResourceArnBuilder.readJsonBody}, which runs earlier in the same filter pass. */
     static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
     private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
+    /** Set on a request that carries none of its operation's members, see {@link #readNoMembers}. */
+    private static final String NO_MEMBERS = "floci.noRequestMembers";
     /** Prefixes the action whose numbered EC2 targets {@link #heldTargets} looked up for the request. */
     private static final String HELD_TARGETS = "floci.heldTargets.";
     private static final String REQUEST_TAG_PREFIX = "aws:RequestTag/";
@@ -1196,6 +1199,21 @@ public class IamConditionContextResolver {
     // ── Request body access ─────────────────────────────────────────────────────
 
     /**
+     * Has every reader of the request's members read none from it: its JSON body reads as one naming nothing, and its
+     * form, its raw body and a Query request's parameters as absent. A request a route AWS documents outside botocore
+     * takes is another API's, so a member its body gives was added by the caller, naming a resource or giving a
+     * condition key a value its handler never acts on.
+     */
+    static void readNoMembers(ContainerRequestContext ctx) {
+        ctx.setProperty(NO_MEMBERS, Boolean.TRUE);
+        ctx.setProperty(BUFFERED_JSON_BODY, JsonNodeFactory.instance.objectNode());
+    }
+
+    private static boolean carriesNoMembers(ContainerRequestContext ctx) {
+        return Boolean.TRUE.equals(ctx.getProperty(NO_MEMBERS));
+    }
+
+    /**
      * The decoded form parameters of a Query-protocol request, buffered once per request and
      * restored for the controller that reads the form next. A repeated key keeps its first
      * value, which is the value the Query handlers read through {@code getFirst}, so the
@@ -1203,6 +1221,9 @@ public class IamConditionContextResolver {
      */
     @SuppressWarnings("unchecked")
     static Map<String, String> formParameters(ContainerRequestContext ctx) {
+        if (carriesNoMembers(ctx)) {
+            return Map.of();
+        }
         if ("GET".equalsIgnoreCase(ctx.getMethod()) && IamActionRegistry.isQueryRequest(ctx)) {
             Map<String, String> parameters = new LinkedHashMap<>();
             ctx.getUriInfo().getQueryParameters().forEach((key, values) -> {
@@ -1242,8 +1263,14 @@ public class IamConditionContextResolver {
         return parameters;
     }
 
-    /** Reads the entity fully and puts an equivalent stream back for downstream readers. */
+    /**
+     * Reads the entity fully and puts an equivalent stream back for downstream readers; none for a request that
+     * carries no members, whose entity is left to its handler.
+     */
     static byte[] bufferEntity(ContainerRequestContext ctx) {
+        if (carriesNoMembers(ctx)) {
+            return null;
+        }
         InputStream in = ctx.getEntityStream();
         if (in == null) {
             return null;

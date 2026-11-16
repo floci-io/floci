@@ -2275,7 +2275,15 @@ OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operatio
 versions, Access Analyzer's `ListAnalyzers` and `ValidatePolicy`, and GuardDuty's operations of no
 resource type are checked by their routes, and so are OpenSearch Service's domain operations, Access
 Analyzer's analyzer operations, Security Hub's hub operations and GuardDuty's detector operations, the
-table of request resources reading the resource they name. Every route Floci serves of AWS Lake
+table of request resources reading the resource they name. AWS Glue's Iceberg REST endpoint, which no botocore
+model describes, is routed by the routes AWS's Glue Developer Guide documents for it: each row of its page is the
+Glue operation its IAM action and CloudTrail event name, on the method and path of the Apache Iceberg REST catalog
+operation the row links, so `CreateTable` is `glue:CreateTable` on `POST
+/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables`, the page's own `GET` aside. A regeneration carries
+these routes over, `tools/aws/regen_rest_routes.py --fetch-documented` reads them again and `--verify` checks them
+against the page. A request these routes take is Apache Iceberg's and carries none of the Glue operation's members,
+so nothing reads one from it, not the table of request resources, a condition key or a create's tags: each route is
+checked on the account's catalog, and a Glue member a caller adds to an Iceberg body names nothing. Every route Floci serves of AWS Lake
 Formation and Amazon Inspector is one AWS authorizes on no resource type, as is every one of Amazon Macie's but
 `CreateMember`, so those are checked by their routes alone. `CreateMember`, on `POST /members`, is checked on the
 account's members, `member/*`, as nothing botocore or the Service Reference says names the member it makes by its
