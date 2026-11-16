@@ -22,7 +22,18 @@ import java.util.function.Consumer;
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
                                String accountId, String stackName, String priorPhysicalId,
                                Consumer<StackEvent> progress, JsonNode priorProperties,
-                               PropertyChanges changes) {
+                               PropertyChanges changes, String delegatedRoleBoundaryArn) {
+
+    /**
+     * The context as every provisioner but the IAM role one needs it: no delegation cap, which is
+     * what a stack created by any ordinary caller carries.
+     */
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties,
+                            PropertyChanges changes) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, changes, null);
+    }
 
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,
                             String accountId, String stackName, String priorPhysicalId,
@@ -202,6 +213,24 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
         } catch (NumberFormatException e) {
             throw new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
         }
+    }
+
+    /**
+     * Resolves an optional boolean property, or null when it is absent or explicitly null. An intrinsic
+     * that resolves to empty ({@code AWS::NoValue}) stays null too. Any other value has to be true or
+     * false in any case, the string forms CloudFormation also accepts included; anything else, a
+     * whitespace-only intrinsic result included, is refused rather than read as false.
+     */
+    public Boolean resolveOptionalBoolean(JsonNode props, String name) {
+        String value = resolveOptional(props, name);
+        if (value == null || (value.isEmpty() && !props.get(name).isTextual())) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (!"true".equalsIgnoreCase(trimmed) && !"false".equalsIgnoreCase(trimmed)) {
+            throw new AwsException("ValidationError", "Value of property " + name + " must be a boolean.", 400);
+        }
+        return Boolean.parseBoolean(trimmed);
     }
 
     /**

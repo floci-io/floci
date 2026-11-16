@@ -1,6 +1,7 @@
 package io.floci.aws.services.glue.model;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -14,6 +15,9 @@ public class Table {
     private String name;
     @JsonProperty("DatabaseName")
     private String databaseName;
+    @JsonProperty("CatalogId")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String catalogId;
     @JsonProperty("Description")
     private String description;
     @JsonProperty("Owner")
@@ -52,6 +56,8 @@ public class Table {
     public void setName(String name) { this.name = name; }
     public String getDatabaseName() { return databaseName; }
     public void setDatabaseName(String databaseName) { this.databaseName = databaseName; }
+    public String getCatalogId() { return catalogId; }
+    public void setCatalogId(String catalogId) { this.catalogId = catalogId; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
     public String getOwner() { return owner; }

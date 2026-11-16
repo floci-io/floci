@@ -10,6 +10,10 @@ management console work against the published endpoints.
 Only the **RabbitMQ** engine and the `SINGLE_INSTANCE` deployment mode are supported;
 `CreateBroker` rejects `ACTIVEMQ` and the multi-AZ deployment modes.
 
+Brokers are Regional, as on AWS: a broker is listed, described, rebooted and deleted only in the
+Region it was created in. Its name is unique in the account, across its Regions, so `CreateBroker`
+refuses a name another Region of the account already uses with a `ConflictException`.
+
 ## Supported Actions
 
 | Action | Description |

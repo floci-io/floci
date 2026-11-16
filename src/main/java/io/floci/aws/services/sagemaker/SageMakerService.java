@@ -33,6 +33,9 @@ import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
+
 @ApplicationScoped
 public class SageMakerService {
     private static final Logger LOG = Logger.getLogger(SageMakerService.class);
@@ -486,10 +489,11 @@ public class SageMakerService {
     }
 
     public ModelResource modelForEndpoint(EndpointResource ep) {
-        EndpointConfigResource cfg = endpointConfig(ep.region, ep.endpointConfigName)
+        EndpointConfigResource cfg = getInAccount(endpointConfigStore, ep.accountId, regionKey(ep.region, ep.endpointConfigName))
                 .orElseThrow(() -> validation("Could not find endpoint configuration \"" + ep.endpointConfigName + "\"."));
         String modelName = String.valueOf(cfg.productionVariants.get(0).get("ModelName"));
-        return model(ep.region, modelName).orElseThrow(() -> validation("Could not find model \"" + modelName + "\"."));
+        return getInAccount(modelStore, ep.accountId, regionKey(ep.region, modelName))
+                .orElseThrow(() -> validation("Could not find model \"" + modelName + "\"."));
     }
 
     /**
@@ -499,12 +503,13 @@ public class SageMakerService {
      * of publishing it, because the endpoint it belongs to is gone or has moved on.
      */
     synchronized boolean finalizeEndpointStart(EndpointResource ep) {
-        EndpointResource current = endpointStore.get(regionKey(ep.region, ep.endpointName)).orElse(null);
+        String key = regionKey(ep.region, ep.endpointName);
+        EndpointResource current = getInAccount(endpointStore, ep.accountId, key).orElse(null);
         if (current == null || current.generation != ep.generation) {
             return false;
         }
         ep.lastModifiedTime = nowMillis();
-        endpointStore.put(regionKey(ep.region, ep.endpointName), ep);
+        putInAccount(endpointStore, ep.accountId, key, ep);
         return true;
     }
 
@@ -516,14 +521,14 @@ public class SageMakerService {
      */
     public synchronized boolean updateTrainingJob(TrainingJobResource job) {
         String key = regionKey(job.region, job.trainingJobName);
-        TrainingJobResource current = trainingJobStore.get(key).orElse(null);
+        TrainingJobResource current = getInAccount(trainingJobStore, job.accountId, key).orElse(null);
         if (current == null || !Objects.equals(current.trainingJobArn, job.trainingJobArn)
                 || current.creationTime != job.creationTime) {
             LOG.debugv("SageMaker training job {0} is no longer the stored job; discarding its run update",
                     job.trainingJobName);
             return false;
         }
-        trainingJobStore.put(key, job);
+        putInAccount(trainingJobStore, job.accountId, key, job);
         return true;
     }
 

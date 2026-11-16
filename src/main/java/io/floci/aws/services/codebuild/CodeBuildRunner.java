@@ -19,11 +19,15 @@ import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.floci.aws.services.codebuild.model.Build;
 import io.floci.aws.services.codebuild.model.BuildPhase;
 import io.floci.aws.services.codebuild.model.Project;
+import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.VpcContainerLeases;
+import io.floci.aws.services.ec2.VpcDependencyProvider;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
@@ -63,7 +67,10 @@ import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 @ApplicationScoped
-public class CodeBuildRunner implements ContainerTeardown {
+public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider {
+
+    /** The label naming the Floci process that created a build container, set by {@link #buildLabels}. */
+    static final String RUN_LABEL = "io.floci.codebuild.run";
 
     private static final Logger LOG = Logger.getLogger(CodeBuildRunner.class);
     private static final int FAILURE_OUTPUT_CHARS = 512;
@@ -79,6 +86,10 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final ContainerDetector containerDetector;
     private final RegionResolver regionResolver;
     private final ContainerReachableEndpoint containerEndpoint;
+    /** The VPC address each running build's container holds, given back once the container is gone. */
+    private final VpcContainerLeases vpcLeases;
+    /** This run's build containers, so a later run knows the ones a crash leaves for leftovers. */
+    private final RunLabelledContainers runContainers;
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -94,7 +105,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                            EmulatorConfig config,
                            ContainerDetector containerDetector,
                            RegionResolver regionResolver,
-                           ContainerReachableEndpoint containerEndpoint) {
+                           ContainerReachableEndpoint containerEndpoint,
+                           Ec2Service ec2Service) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -106,6 +118,8 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
         this.containerEndpoint = containerEndpoint;
+        this.vpcLeases = new VpcContainerLeases(ec2Service, "CodeBuild build", () -> dockerClient);
+        this.runContainers = new RunLabelledContainers(lifecycleManager, config, "codebuild", RUN_LABEL, LOG);
     }
 
     /**
@@ -119,6 +133,7 @@ public class CodeBuildRunner implements ContainerTeardown {
             if (runningContainers.remove(entry.getKey(), entry.getValue())) {
                 try {
                     lifecycleManager.stopAndRemove(entry.getValue(), null);
+                    vpcLeases.releaseIfGone(entry.getValue());
                 } catch (Exception e) {
                     LOG.warnv("Failed to stop CodeBuild container for build {0} on shutdown: {1}",
                             entry.getKey(), e.getMessage());
@@ -233,13 +248,15 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .withHostDockerInternalOnLinux()
                     .withPrivileged(privileged)
                     .withLogRotation()
-                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                            "codebuild", buildId, regionResolver.getAccountId(), region))
+                    .withLabels(buildLabels(buildId, region))
                     .build();
 
+            // Build state does not outlive the process, so a crash's build containers have nothing left to finish.
+            runContainers.removeLeftovers();
             ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
             containerId = info.containerId();
             runningContainers.put(executionId, containerId);
+            joinVpcNetwork(region, build, containerId);
 
             logHandle = logStreamer.attach(containerId, logGroup, logStream, region, "codebuild:" + buildId);
 
@@ -395,10 +412,54 @@ public class CodeBuildRunner implements ContainerTeardown {
             } else if (logHandle != null) {
                 try { logHandle.close(); } catch (Exception ignored) {}
             }
+            // Whoever removed the container, shutdown included, its address goes back once Docker confirms it gone.
+            if (containerId != null) {
+                vpcLeases.releaseIfGone(containerId);
+            }
             if (workspace != null) {
                 deleteDirectory(workspace);
             }
         }
+    }
+
+    /**
+     * Puts a build whose project has a {@code vpcConfig} on its VPC's Docker network, at an address leased from its
+     * first subnet, before any phase runs: CodeBuild runs such a build with a network interface in one of the
+     * project's subnets, so it reaches what the VPC holds (a database, a cache) by private address. The configuration
+     * is the one StartBuild took from the project, so a later UpdateProject does not move a build already started.
+     * The build runs outside the StartBuild request, so the account comes from its ARN.
+     */
+    private void joinVpcNetwork(String region, Build build, String containerId) {
+        Map<String, Object> vpcConfig = build.getVpcConfig();
+        Object subnets = vpcConfig == null ? null : vpcConfig.get("subnets");
+        if (subnets instanceof List<?> subnetIds && !subnetIds.isEmpty()
+                && subnetIds.getFirst() instanceof String subnetId) {
+            String vpcId = vpcConfig.get("vpcId") instanceof String id ? id : null;
+            vpcLeases.join(AwsArnUtils.parse(build.getArn()).accountId(), region, vpcId, subnetId, containerId,
+                    build.getId());
+        }
+    }
+
+    /** A build container's labels: its resource identity, and the deployment and run that created it. */
+    private Map<String, String> buildLabels(String buildId, String region) {
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
+                "codebuild", buildId, regionResolver.getAccountId(), region));
+        labels.putAll(runContainers.labels());
+        return labels;
+    }
+
+    /**
+     * A running build's network interface is in its subnet, so DeleteSubnet refuses it until the build ends, as on
+     * AWS; a project's {@code vpcConfig} alone holds no interface.
+     */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        return vpcLeases.holdsSubnet(regionResolver.getAccountId(), region, subnetId);
+    }
+
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return vpcLeases.holdsVpc(regionResolver.getAccountId(), region, vpcId);
     }
 
     private String resolveAndAcquireSource(String region, Build build, Project project,

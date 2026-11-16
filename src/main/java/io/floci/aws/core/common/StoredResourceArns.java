@@ -25,9 +25,12 @@ import java.util.Optional;
  * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
  * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
  * invitations and shares of other accounts they act on; Secrets Manager, for the secret a name or an ARN names,
- * random suffix included, and its tags); looked up lazily by {@code ResourceArnBuilder} and
- * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
- * ARN is of, so IAM never depends on that service directly.</p>
+ * random suffix included, and its tags; EventBridge Scheduler, for its default schedule group and its groups' tags;
+ * CloudFormation, for the stack or the stack set a name names, whose id it minted, and the tags of a stack, a stack set
+ * or a change set; S3 Tables, for the table a request names by its table bucket, namespace and name, and the tags of a
+ * table bucket or a table); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver}
+ * through {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on
+ * that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

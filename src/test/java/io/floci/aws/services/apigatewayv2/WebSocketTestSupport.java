@@ -1,6 +1,7 @@
 package io.floci.aws.services.apigatewayv2;
 
-import java.io.ByteArrayOutputStream;
+import io.floci.aws.testing.LambdaCodeFixtures;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
@@ -14,8 +15,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 
@@ -34,14 +33,8 @@ public final class WebSocketTestSupport {
      * Creates a Base64-encoded ZIP file containing a single index.js with the given handler code.
      * Used to create Lambda function deployment packages in tests.
      */
-    public static String createLambdaZip(String handlerCode) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write(handlerCode.getBytes());
-            zos.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(baos.toByteArray());
+    public static String createLambdaZip(String handlerCode) {
+        return LambdaCodeFixtures.nodeJsZipBase64(handlerCode);
     }
 
     // ──────────────────────────── Lambda cleanup ────────────────────────────

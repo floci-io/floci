@@ -350,6 +350,41 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * Fetches this version's own POM and parses its {@code <dependencies>}/{@code <parent>}
+     * elements with {@link PomDependencies}. Tries the standard release name
+     * ({@code <artifactId>-<version>.pom}) first, through {@link #fetchPackageVersionAsset}
+     * rather than a dedicated route: the overwhelmingly common case, and avoids a second network
+     * round trip for it. A {@code -SNAPSHOT} version's real POM is not named that way at all —
+     * {@code mvn deploy} writes it under a timestamped unique-snapshot name instead (e.g.
+     * {@code artifact-1.0-20261115.120000-1.pom}) — so a miss falls back to the real directory
+     * listing {@link #listPackageVersionAssetNames} already exposes and picks whichever entry
+     * ends in {@code .pom} there (the lexicographically greatest one, i.e. the most recent
+     * timestamp, if more than one snapshot deploy's files are still present). That fallback also
+     * means a genuine Reposilite error (not a real 404) surfaces as the same {@link
+     * IllegalStateException} {@link #listPackageVersionAssetNames} already throws for an
+     * unexpected status, rather than this method silently reporting an empty dependency list for
+     * a version whose POM fetch merely failed.
+     */
+    @Override
+    public List<CodeArtifactService.PackageDependency> listPackageVersionDependencies(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version) {
+        Optional<byte[]> pom = fetchPackageVersionAsset(repositoryContainerId, domain, repository, namespace,
+                packageName, version, packageName + "-" + version + ".pom");
+        if (pom.isEmpty()) {
+            String pomName = listPackageVersionAssetNames(repositoryContainerId, domain, repository, namespace,
+                    packageName, version).stream()
+                    .filter(name -> name.endsWith(".pom"))
+                    .max(String::compareTo)
+                    .orElse(null);
+            pom = pomName == null ? Optional.empty()
+                    : fetchPackageVersionAsset(repositoryContainerId, domain, repository, namespace, packageName,
+                            version, pomName);
+        }
+        return pom.map(PomDependencies::parse).orElse(List.of());
+    }
+
+    /**
      * Enumerates every version directory beneath the artifact itself (the same {@code files}
      * array {@link #listPackageVersionAssetNames} already reads one level down, here kept to its
      * {@code DIRECTORY} entries, inverted from that method's own {@code FILE}-only filter), then

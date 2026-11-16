@@ -16,6 +16,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ApplicationDefaultsTest {
 
+    private static JsonNode productionConfig() throws IOException {
+        return new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+    }
+
     @Test
     void productionConfigEnablesCloudTrailByDefault() throws IOException {
         try (InputStream configStream = getClass().getClassLoader().getResourceAsStream("application.yml")) {
@@ -33,7 +37,7 @@ class ApplicationDefaultsTest {
 
     @Test
     void productionConfigUsesExpectedRequestSizeLimit() throws IOException {
-        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+        JsonNode config = productionConfig();
 
         assertEquals(2048,
                 config.path("floci").path("protocols").path("max-request-size").asInt(),
@@ -42,7 +46,7 @@ class ApplicationDefaultsTest {
 
     @Test
     void productionConfigUsesTheAwsSqsMaximumMessageSize() throws IOException, NoSuchMethodException {
-        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+        JsonNode config = productionConfig();
 
         assertEquals(1048576,
                 config.path("floci").path("services").path("sqs").path("max-message-size").asInt(),
@@ -58,7 +62,7 @@ class ApplicationDefaultsTest {
 
     @Test
     void productionConfigListensOnLoopbackWithoutNetworkExposureConsent() throws IOException, NoSuchMethodException {
-        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+        JsonNode config = productionConfig();
 
         assertEquals("127.0.0.1", config.path("quarkus").path("http").path("host").asText(),
                 "production application.yml should listen on loopback by default");
@@ -74,7 +78,7 @@ class ApplicationDefaultsTest {
 
     @Test
     void productionConfigDoesNotSeedIamDeployerPrincipalByDefault() throws IOException {
-        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+        JsonNode config = productionConfig();
 
         assertFalse(config.path("floci")
                         .path("services")
@@ -86,7 +90,7 @@ class ApplicationDefaultsTest {
 
     @Test
     void productionConfigRejectsPrivateJwtTargetsByDefault() throws Exception {
-        JsonNode config = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile());
+        JsonNode config = productionConfig();
 
         assertFalse(config.path("floci")
                         .path("security")
@@ -111,19 +115,11 @@ class ApplicationDefaultsTest {
                 "a stock Floci should refuse a PostgreSQL IAM token generated for another endpoint, as RDS does");
     }
 
+    // Catches: a max-connections in application.yml that silently disagrees with the @WithDefault fallback.
     @Test
-    void productionConfigSizesTheDockerPoolForTheLambdaRuntimeApiPortRange() throws IOException, NoSuchMethodException {
-        JsonNode floci = new YAMLMapper().readTree(Path.of("src/main/resources/application.yml").toFile())
-                .path("floci");
-        int maxConnections = floci.path("docker").path("max-connections").asInt();
-        JsonNode lambda = floci.path("services").path("lambda");
-        int runtimeApiPorts = lambda.path("runtime-api-max-port").asInt()
-                - lambda.path("runtime-api-base-port").asInt() + 1;
-
-        assertTrue(maxConnections >= 2 * runtimeApiPorts,
-                "each live Lambda container holds two Docker connections (log follow and exit watcher), so "
-                        + "max-connections " + maxConnections + " should cover the " + runtimeApiPorts
-                        + " containers the runtime API port range allows");
+    void productionConfigDeclaresTheDockerPoolAtItsDefault() throws IOException, NoSuchMethodException {
+        int maxConnections = productionConfig()
+                .path("floci").path("docker").path("max-connections").asInt();
 
         WithDefault fallback = EmulatorConfig.DockerConfig.class
                 .getMethod("maxConnections")
@@ -133,23 +129,40 @@ class ApplicationDefaultsTest {
                 "the @WithDefault must match application.yml, which wins over it");
     }
 
+    // Catches: a streaming pool too small for the Lambda containers the runtime API port range allows,
+    // so log streams, exit watchers and extensions fail to get a connection well before that limit.
+    @Test
+    void productionConfigSizesTheStreamingDockerPoolForTheLambdaRuntimeApiPortRange() throws IOException {
+        JsonNode floci = productionConfig()
+                .path("floci");
+        int streamingMaxConnections = floci.path("docker").path("streaming-max-connections").asInt();
+        JsonNode lambda = floci.path("services").path("lambda");
+        int runtimeApiPorts = lambda.path("runtime-api-max-port").asInt()
+                - lambda.path("runtime-api-base-port").asInt() + 1;
+
+        assertTrue(streamingMaxConnections >= 4 * runtimeApiPorts,
+                "each live Lambda container holds a streaming connection for its log follow, its exit watcher "
+                        + "and each extension, so streaming-max-connections " + streamingMaxConnections
+                        + " should cover the " + runtimeApiPorts
+                        + " containers the runtime API port range allows with two extensions each");
+    }
+
     // Catches: streaming-max-connections declared and documented but absent from the shipped
     // application.yml, or a yml value that silently disagrees with the @WithDefault fallback.
     @Test
     void productionConfigDeclaresTheStreamingDockerPoolAtItsDefault() throws IOException, NoSuchMethodException {
-        JsonNode streamingMaxConnections = new YAMLMapper()
-                .readTree(Path.of("src/main/resources/application.yml").toFile())
+        JsonNode streamingMaxConnections = productionConfig()
                 .path("floci").path("docker").path("streaming-max-connections");
 
         assertFalse(streamingMaxConnections.isMissingNode(),
                 "streaming-max-connections should be declared in application.yml");
-        assertEquals(512, streamingMaxConnections.asInt());
+        assertEquals(2048, streamingMaxConnections.asInt());
 
         WithDefault fallback = EmulatorConfig.DockerConfig.class
                 .getMethod("streamingMaxConnections")
                 .getAnnotation(WithDefault.class);
         assertNotNull(fallback, "streamingMaxConnections should declare a fallback default");
-        assertEquals("512", fallback.value(),
+        assertEquals("2048", fallback.value(),
                 "the @WithDefault must match application.yml, which wins over it");
     }
 
@@ -157,8 +170,7 @@ class ApplicationDefaultsTest {
     // value that silently disagrees with the @WithDefault fallback.
     @Test
     void productionConfigDeclaresTheDockerLeaseTimeoutAtItsDefault() throws IOException, NoSuchMethodException {
-        JsonNode leaseTimeout = new YAMLMapper()
-                .readTree(Path.of("src/main/resources/application.yml").toFile())
+        JsonNode leaseTimeout = productionConfig()
                 .path("floci").path("docker").path("connection-request-timeout-seconds");
 
         assertFalse(leaseTimeout.isMissingNode(),
@@ -177,8 +189,7 @@ class ApplicationDefaultsTest {
     // silently disagrees with the @WithDefault fallback.
     @Test
     void productionConfigDeclaresTheDockerApiTimeoutAtItsDefault() throws IOException, NoSuchMethodException {
-        JsonNode apiTimeout = new YAMLMapper()
-                .readTree(Path.of("src/main/resources/application.yml").toFile())
+        JsonNode apiTimeout = productionConfig()
                 .path("floci").path("docker").path("api-timeout-seconds");
 
         assertFalse(apiTimeout.isMissingNode(), "api-timeout-seconds should be declared in application.yml");

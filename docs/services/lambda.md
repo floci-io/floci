@@ -43,6 +43,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `ListCodeSigningConfigs` | List the configurations in the region |
 | `CreateFunctionUrlConfig` | Provision a function URL |
 | `GetFunctionUrlConfig` | Read function URL config |
+| `ListFunctionUrlConfigs` | List a function's URL configurations across its unpublished version and aliases, with marker pagination |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
 | `ListTags` | List tags on a function or event source mapping |
@@ -115,15 +116,18 @@ part in authorizing calls to the function:
 - Provisioned-concurrency configuration operations also act in the account named by the function
   reference. Cross-account access requires that function's policy to allow the caller.
 - Other operations act on the caller's own function of the name the ARN gives, whatever account
-  the ARN names, and are authorized against that function. Floci does not serve them on another
-  account's function, which AWS allows through a function policy.
+  the ARN names, and are authorized against both the function the ARN names and the caller's own
+  function of that name. Floci does not serve them on another account's function, which AWS allows
+  through a function policy.
 - Within one account, a statement naming the caller grants on its own. One naming only the
   account, as `AddPermission --principal <account-id>` writes it, delegates to the account, so the
   caller's identity policy has to allow the call too.
-- An invoke or provisioned-concurrency configuration operation is authorized against the version or
-  alias it names, in the function name or in `Qualifier`. A grant added with `Qualifier` covers that
-  version or alias only, and a grant on the function does not cover a qualified operation.
-  Other operations are authorized against the unqualified function.
+- A version or alias written into the function name is part of the function an operation is
+  authorized against, so a grant added with `Qualifier` covers a call naming that version or alias,
+  and a grant on the function does not. `Qualifier` itself names a version or alias only for the
+  provisioned-concurrency configuration operations, which act on it; every other operation is
+  authorized against the function as its name gives it, as the Service Reference lists the function
+  alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
 - `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
   admits no caller.
@@ -463,13 +467,20 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+`ListFunctionUrlConfigs` lists the unpublished function's URL and its alias URLs.
+It accepts `MaxItems` from 1 through 50, defaulting to 50, and resumes with `Marker`.
+Pagination uses Lambda's shared validation: out-of-range integers return
+`ValidationException`, non-integers return `SerializationException`, and an invalid
+marker returns `InvalidParameterValueException` with `Invalid pagination key.`.
+Missing or inaccessible function references return `ResourceNotFoundException`.
+
 A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
 
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
 [China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
-`CreateFunctionUrlConfig` is an `InvalidParameterValueException` in those regions, and an
-`AWS::Lambda::Url` in a CloudFormation stack there fails with it. See
+`CreateFunctionUrlConfig` and `ListFunctionUrlConfigs` return `InvalidParameterValueException`
+in those regions, and an `AWS::Lambda::Url` in a CloudFormation stack there fails with it. See
 [AWS Partitions](../configuration/partitions.md).
 
 **Versions:** `CreateFunction` and `UpdateFunctionCode` honour `Publish`, publishing a version
@@ -510,6 +521,11 @@ same-named layer of the caller's own, matching the live service, which answers t
 validate each `Layers` ARN in the caller's own account eagerly against that storage, matching
 real AWS - an unresolvable one is rejected with `InvalidParameterValueException: Layer version
 ... does not exist.`, not silently accepted.
+
+`DeleteLayerVersion` accepts either a layer name or an unversioned layer ARN, with
+`VersionNumber` supplied separately. ARN deletion resolves the stored version in the ARN's
+region and removes its archive. IAM checks use that same layer-version ARN; another
+account's ARN cannot select a same-named layer in the caller's account.
 
 An ARN naming another account or another partition is answered on the live service by the layer's
 resource policy: an AWS-managed public layer resolves, and everything else is
@@ -657,7 +673,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED` | `true` | Fire durable execution timers (waits, step retries, execution timeouts, retention expiry) |
 | `FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_INTERVAL_SECONDS` | `1` | How often the durable sweep runs |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API range |
-| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions. Each running container also holds two Docker connections, so a wider range needs a matching `FLOCI_DOCKER_MAX_CONNECTIONS` |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions. Each running container also holds two streaming Docker connections plus one per extension, so a wider range needs a matching `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` |
 | `FLOCI_SERVICES_LAMBDA_CODE_PATH` | `./data/lambda-code` | Directory where Lambda ZIP files are stored |
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
 | `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` | `60` | Wait before the first retry of a failed asynchronous invocation (seconds); the second waits twice this, `0` retries back to back |

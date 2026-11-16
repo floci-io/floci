@@ -94,6 +94,11 @@ The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
 these same entries. Catalog consumers also use their ARM64 architecture and
 CPU/memory capacity for launch validation and container resource limits.
 
+`RunInstances` refuses an AMI whose architecture the instance type cannot run, as
+AWS does. An `x86_64` AMI on `m6g.large` answers `InvalidParameterValue` with
+`The architecture 'arm64' of the specified instance type does not match the
+architecture 'x86_64' of the specified AMI.`, so a Graviton type needs an `arm64` AMI.
+
 The values were captured from AWS `DescribeInstanceTypes` in `us-east-1` on
 2026-11-04, including each size's network-card/interface limits and each family's
 generation and encryption-in-transit flags. The capture reports C6gn as previous
@@ -305,6 +310,7 @@ User data is returned as the original base64-decoded bytes, without decompressin
 | `GET /latest/meta-data/mac` | MAC address of first ENI |
 | `GET /latest/meta-data/security-groups` | Security group names |
 | `GET /latest/meta-data/placement/availability-zone` | AZ |
+| `GET /latest/meta-data/placement/availability-zone-id` | AZ ID (for example `use1-az1`), the same ID `DescribeSubnets` reports for the zone |
 | `GET /latest/meta-data/placement/region` | Region |
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |
@@ -1278,7 +1284,7 @@ When `floci.services.ec2.volume-block-devices` is enabled (the default), attache
 - **Restart reconciliation**: When an instance container stops and starts, or when Floci restarts, attached volume device nodes are automatically restored inside the target container. Backing raw files remain preserved across reboots in persistent storage.
 - **Metadata-only tracking**: Disabling `floci.services.ec2.volume-block-devices`, EC2 mock mode, unavailable Docker, or a missing or stopped target container retains metadata-only attachment without failing the API call. Stopped instances have their device nodes restored when started. Once physical attachment is attempted, helper, loop-device, or guest device-creation failures return `InternalError` without recording a successful attachment; partial guest devices and loop devices allocated by the failed attempt are cleaned up on a best-effort basis so attachment can be retried. Reused loop devices are retained on failure. Insufficient privileges can cause these failures. Restart reconciliation logs device-restoration failures and keeps the existing attachment records for a later retry.
 - **Platform requirements**: Requires a Linux Docker environment (native Linux Docker daemon, or Colima / Docker Desktop with a Linux virtual machine) and privileged instance containers.
-- **Unmodeled aspects**: Multi-attach is tracked at metadata level only. Automated filesystem formatting (volumes start unformatted like real EBS block devices) and volume encryption at the block layer are not modeled. Root volume backing is logical (container rootfs); `ModifyVolume` updates recorded root volume metadata without modifying container storage, while EBS data volume size increases expand the underlying raw backing file and refresh any attached loop device. Volume type, IOPS, and throughput changes remain recorded metadata without altering device characteristics.
+- **Unmodeled aspects**: Multi-attach is tracked at metadata level only. Automated filesystem formatting (volumes start unformatted like real EBS block devices) and volume encryption at the block layer are not modeled. Root volume backing is logical (container rootfs); when `DeleteOnTermination` is enabled, termination removes its metadata and tags without invoking a raw block-device helper. Failed-launch rollback also skips that helper when deleting a logical root that termination preserved. Data volumes still use their backing-storage cleanup; `ModifyVolume` updates recorded root volume metadata without modifying container storage, while EBS data volume size increases expand the underlying raw backing file and refresh any attached loop device. Volume type, IOPS, and throughput changes remain recorded metadata without altering device characteristics.
 
 Validation matches AWS behavior:
 - Unknown volumes are rejected with `InvalidVolume.NotFound`.
@@ -1291,6 +1297,11 @@ Validation matches AWS behavior:
 | Action | Description |
 |--------|-------------|
 | DescribeSnapshots | Lists or returns stored snapshots, filterable by id and owner. |
+| CreateSnapshot | Snapshots a volume. The snapshot takes the volume's size and encryption, is owned by the caller and accepts `snapshot` tags from `TagSpecification`. |
+| DeleteSnapshot | Deletes a snapshot and its tags. A snapshot a registered AMI still uses fails with `InvalidSnapshot.InUse`. |
+| CopySnapshot | Copies a snapshot from `SourceRegion` into the request's region as a new snapshot the caller owns. |
+
+`CreateSnapshot` answers `pending`, as AWS does, and the copy completes within the call, so `DescribeSnapshots` reports the snapshot `completed` on the first poll. Snapshots hold no volume data: a volume created from one gets its size and encryption, not its contents. A copy reports `vol-ffffffff` as its volume, stays encrypted when its source is, and is encrypted when `Encrypted=true` or the destination region's encryption by default says so. The source's tags are not copied. All three actions honor `DryRun`: a request the real call would refuse keeps that error, and one that would succeed returns `DryRunOperation` and changes nothing.
 
 ### Flow Logs
 

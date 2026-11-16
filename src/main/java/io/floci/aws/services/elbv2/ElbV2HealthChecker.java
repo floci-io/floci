@@ -154,8 +154,7 @@ public class ElbV2HealthChecker implements Resettable {
     }
 
     public boolean isHealthy(String tgArn, TargetDescription target, int port) {
-        String state = getState(tgArn, target.getId(), port);
-        return "healthy".equals(state) || "initial".equals(state);
+        return "healthy".equals(getState(tgArn, target.getId(), port));
     }
 
     void probeAll(String tgArn, TargetGroup tg) {

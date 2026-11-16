@@ -20,6 +20,8 @@ class PropertyChangesReplacementTest {
         assertTrue(between("{\"Name\":\"a.example.\"}", "{\"Name\":\"b.example.\"}").requiresReplacement());
         assertTrue(between("{\"Name\":\"a.example.\",\"DelegationSetId\":\"N1\"}",
                 "{\"Name\":\"a.example.\"}").requiresReplacement());
+        assertTrue(PropertyChanges.between(TYPE, true, MAPPER.readTree("{\"Name\":\"a.example.\"}"), null)
+                .requiresReplacement());
     }
 
     @Test

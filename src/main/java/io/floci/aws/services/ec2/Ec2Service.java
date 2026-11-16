@@ -354,6 +354,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // a concurrent allocation, which reads persisted resources to see what is taken, cannot pick
     // the same address in between. Taken after imageRegistryLock where a caller holds both.
     private final Object privateIpAllocationLock = new Object();
+    private final Object amazonProvidedIpv6AllocationLock = new Object();
     /** Host part (1-254) of the last 203.0.113.0/24 address handed out; guarded by the allocation lock. */
     private int documentationHost;
 
@@ -2253,6 +2254,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     private final Object imageRegistryLock = new Object();
 
+    /** The volume id AWS reports on a snapshot made by CopySnapshot, which has no source volume. */
+    private static final String COPIED_SNAPSHOT_VOLUME_ID = "vol-ffffffff";
+
     /**
      * The monitor guarding the AMI registry against a launch and a deregistration interleaving.
      * Exposed package-private so a test can hold it and land a tombstone at a chosen point in a
@@ -3135,13 +3139,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // Tags are per account and per region, so each side keeps its own; both go with the attachment.
             TransitGatewayPeeringAttachment.TgwInfo requester = attachment.getRequesterTgwInfo();
             TransitGatewayPeeringAttachment.TgwInfo accepter = attachment.getAccepterTgwInfo();
-            if (tags instanceof AccountAwareStorageBackend<?> tagsByAccount) {
-                tagsByAccount.deleteForAccount(requester.getOwnerId(), key(requester.getRegion(), attachmentId));
-                tagsByAccount.deleteForAccount(accepter.getOwnerId(), key(accepter.getRegion(), attachmentId));
-            } else {
-                removeTags(requester.getRegion(), attachmentId);
-                removeTags(accepter.getRegion(), attachmentId);
-            }
+            removeTags(requester.getOwnerId(), requester.getRegion(), attachmentId);
+            removeTags(accepter.getOwnerId(), accepter.getRegion(), attachmentId);
             attachment.setState("deleted");
             return attachment;
         }
@@ -4274,6 +4273,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             if (inst.getLaunchTime() != null) {
                                 eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
                             }
+                            // Caller-supplied ENI defaults to false; an implicit interface defaults to true.
+                            eni.setDeleteOnTermination(suppliedEni == null);
                             inst.getNetworkInterfaces().add(eni);
                             if (suppliedEni != null) {
                                 // The standalone record stays authoritative rather than being folded into the
@@ -4526,11 +4527,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .noneMatch(imageArchitecture.get()::equals))
                 .ifPresent(type -> {
                     throw new AwsException("InvalidParameterValue",
-                            "The architecture '" + imageArchitecture.get()
-                                    + "' of the specified image does not match the architecture supported by instance type '"
-                                    + instanceType + "'.",
+                            "The architecture '" + instanceTypeArchitecture(type)
+                                    + "' of the specified instance type does not match the architecture '"
+                                    + imageArchitecture.get() + "' of the specified AMI.",
                             400);
                 });
+    }
+
+    /** The architecture RunInstances names for an instance type: x86_64 for a type that also runs i386. */
+    private static String instanceTypeArchitecture(Ec2InstanceTypeCatalog.CatalogInstanceType type) {
+        return type.supportedArchitectures.contains("x86_64") ? "x86_64" : type.supportedArchitectures.getFirst();
     }
 
     private String architectureFor(String region, String imageId, String instanceType) {
@@ -5105,6 +5111,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(inst -> Objects.equals(primaryInterfaceId(inst), address.getNetworkInterfaceId()))
                 .map(Instance::getInstanceId)
                 .orElse(null);
+    }
+
+    /** The standalone record for an interface id, or null when it is implicit/launch-created. */
+    public NetworkInterface getNetworkInterface(String region, String networkInterfaceId) {
+        if (networkInterfaceId == null || networkInterfaceId.isBlank()) {
+            return null;
+        }
+        return networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
     }
 
     /** The instance a standalone interface is attached to, or null. */
@@ -6494,9 +6508,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
         if (amazonProvidedIpv6CidrBlock) {
-            vpc.getIpv6CidrBlockAssociationSet().add(amazonProvidedIpv6Association(region));
+            synchronized (amazonProvidedIpv6AllocationLock) {
+                vpc.getIpv6CidrBlockAssociationSet().add(amazonProvidedIpv6Association(region));
+                vpcs.put(key(region, vpcId), vpc);
+            }
+        } else {
+            vpcs.put(key(region, vpcId), vpc);
         }
-        vpcs.put(key(region, vpcId), vpc);
         declareVpcNetwork(region, vpcId, cidrBlock);
 
         createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
@@ -6936,10 +6954,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (attachmentTopologyLock(region)) {
             synchronized (lockFor(key(region, vpcId))) {
                 Vpc vpc = getRequiredVpc(region, vpcId);
-                VpcIpv6CidrBlockAssociation assoc = amazonProvidedIpv6Association(region);
-                vpc.getIpv6CidrBlockAssociationSet().add(assoc);
-                vpcs.put(key(region, vpcId), vpc);
-                return assoc;
+                synchronized (amazonProvidedIpv6AllocationLock) {
+                    VpcIpv6CidrBlockAssociation assoc = amazonProvidedIpv6Association(region);
+                    vpc.getIpv6CidrBlockAssociationSet().add(assoc);
+                    vpcs.put(key(region, vpcId), vpc);
+                    return assoc;
+                }
             }
         }
     }
@@ -6953,9 +6973,35 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * fourth group folds into the "::".
      */
     private VpcIpv6CidrBlockAssociation amazonProvidedIpv6Association(String region) {
-        String block = CidrCanonicalizer.canonicalize(
-                "2600:1f18:" + randomHex(4) + ":" + randomHex(2) + "00::/56").orElseThrow();
+        // AWS gives each VPC its own Amazon-provided block, so a block another VPC holds, in any account of this
+        // deployment, is drawn again.
+        Set<String> held = new HashSet<>();
+        for (Vpc vpc : vpcs instanceof AccountAwareStorageBackend<Vpc> aware
+                ? aware.scanAllAccounts() : vpcs.scan(k -> true)) {
+            if (vpc.getIpv6CidrBlockAssociationSet() == null) {
+                continue;
+            }
+            for (VpcIpv6CidrBlockAssociation association : vpc.getIpv6CidrBlockAssociationSet()) {
+                held.add(association.getIpv6CidrBlock());
+            }
+        }
+        String block = unusedAmazonProvidedIpv6Block(held, () -> CidrCanonicalizer.canonicalize(
+                "2600:1f18:" + randomHex(4) + ":" + randomHex(2) + "00::/56").orElseThrow());
         return new VpcIpv6CidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), block, region);
+    }
+
+    /**
+     * The first drawn block no VPC holds. After 64 draws that are all held, the request is refused with
+     * InsufficientCidrBlocks rather than handing out a block twice.
+     */
+    static String unusedAmazonProvidedIpv6Block(Set<String> held, Supplier<String> draw) {
+        for (int attempt = 0; attempt < 64; attempt++) {
+            String block = draw.get();
+            if (!held.contains(block)) {
+                return block;
+            }
+        }
+        throw new AwsException("InsufficientCidrBlocks", "No Amazon-provided IPv6 CIDR block is available.", 400);
     }
 
     private boolean vpcHasAssociatedIpv6CidrBlock(Vpc vpc) {
@@ -6972,8 +7018,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         vpc.getCidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
                         // The same operation disassociates either family; AWS takes one association id and
                         // does not ask which set it belongs to.
-                        vpc.getIpv6CidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
-                        vpcs.put(key(region, vpc.getVpcId()), vpc);
+                        synchronized (amazonProvidedIpv6AllocationLock) {
+                            vpc.getIpv6CidrBlockAssociationSet().removeIf(a -> a.getAssociationId().equals(associationId));
+                            vpcs.put(key(region, vpc.getVpcId()), vpc);
+                        }
                     }
                 }
             }
@@ -9819,6 +9867,139 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
+    /**
+     * CreateSnapshot of an EBS volume. The snapshot takes the volume's size and encryption and is
+     * owned by the caller. AWS reports it as {@code pending} until the data is copied; Floci's
+     * copy completes within the call, so the stored snapshot is {@code completed} and a caller
+     * that waits for that state returns on its first poll. With {@code dryRun} the volume must
+     * still exist, and the request is then answered with DryRunOperation, nothing created.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateSnapshot.html">CreateSnapshot</a>
+     */
+    public Snapshot createSnapshot(String region, String volumeId, String description, List<Tag> snapshotTags,
+                                   boolean dryRun) {
+        if (volumeId == null || volumeId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VolumeId", 400);
+        }
+        return withVolumeLock(volumeId, () -> {
+            Volume volume = volumes.get(key(region, volumeId)).flatMap(v -> settleEndedHolders(region, v))
+                    .orElseThrow(() -> new AwsException("InvalidVolume.NotFound",
+                            "The volume '" + volumeId + "' does not exist.", 400));
+            if (dryRun) {
+                throw dryRunOperation();
+            }
+            Snapshot snapshot = newSnapshot(region, "snap-" + randomHex(17), volumeId, volume.getSize(),
+                    description, volume.isEncrypted());
+            storeSnapshot(region, snapshot, snapshotTags);
+            return snapshot;
+        });
+    }
+
+    /**
+     * DeleteSnapshot. A snapshot backing a registered AMI is refused with InvalidSnapshot.InUse:
+     * "You cannot delete a snapshot of the root device of an EBS volume used by a registered AMI.
+     * You must first deregister the AMI before you can delete the snapshot." With {@code dryRun}
+     * the snapshot must still exist and be unused, and the request is then answered with
+     * DryRunOperation, the snapshot and its tags left in place.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DeleteSnapshot.html">DeleteSnapshot</a>
+     */
+    public void deleteSnapshot(String region, String snapshotId, boolean dryRun) {
+        if (snapshotId == null || snapshotId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SnapshotId", 400);
+        }
+        // Under the lock registration publishes snapshot references under, so an AMI being
+        // registered on this snapshot is either seen here or sees the snapshot gone, and under the
+        // snapshot's own lock, which a tag write holds, so CreateTags cannot tag it after it is gone.
+        synchronized (imageRegistryLock) {
+            synchronized (lockFor(key(region, snapshotId))) {
+                deleteSnapshotLocked(region, snapshotId, dryRun);
+            }
+        }
+    }
+
+    private void deleteSnapshotLocked(String region, String snapshotId, boolean dryRun) {
+        if (snapshots.get(key(region, snapshotId)).isEmpty()) {
+            throw new AwsException("InvalidSnapshot.NotFound",
+                    "The snapshot '" + snapshotId + "' does not exist.", 400);
+        }
+        Optional<Image> user = registeredImages.scan(k -> true).stream()
+                .filter(image -> region.equals(image.getRegion()))
+                .filter(image -> !DEREGISTERED_STATE.equals(image.getState()))
+                .filter(image -> image.getBlockDeviceMappings().stream()
+                        .map(BlockDeviceMapping::getEbs)
+                        .filter(Objects::nonNull)
+                        .anyMatch(ebs -> snapshotId.equals(ebs.getSnapshotId())))
+                .findFirst();
+        if (user.isPresent()) {
+            throw new AwsException("InvalidSnapshot.InUse",
+                    "The snapshot " + snapshotId + " is currently in use by " + user.get().getImageId(), 400);
+        }
+        if (dryRun) {
+            throw dryRunOperation();
+        }
+        snapshots.delete(key(region, snapshotId));
+        removeTags(region, snapshotId);
+    }
+
+    /**
+     * CopySnapshot. As with CopyImage the request's own region is the destination and
+     * {@code SourceRegion} names where the source lives. The copy is an independent snapshot with
+     * its own id, owned by the caller; it stays encrypted when the source is, and becomes
+     * encrypted when the request or the destination's encryption by default says so. Tags are not
+     * copied: "User-defined tags are not copied from the source snapshot to the snapshot copy."
+     * With {@code dryRun} the source must still exist, and the request is then answered with
+     * DryRunOperation, nothing copied.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopySnapshot.html">CopySnapshot</a>
+     */
+    public Snapshot copySnapshot(String destinationRegion, String sourceRegion, String sourceSnapshotId,
+                                 String description, boolean encrypted, List<Tag> snapshotTags,
+                                 boolean dryRun) {
+        if (sourceRegion == null || sourceRegion.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SourceRegion", 400);
+        }
+        if (sourceSnapshotId == null || sourceSnapshotId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter SourceSnapshotId", 400);
+        }
+        Snapshot source = snapshots.get(key(sourceRegion, sourceSnapshotId))
+                .orElseThrow(() -> new AwsException("InvalidSnapshot.NotFound",
+                        "The snapshot '" + sourceSnapshotId + "' does not exist.", 400));
+        if (dryRun) {
+            throw dryRunOperation();
+        }
+        Snapshot copy = newSnapshot(destinationRegion, "snap-" + randomHex(17), COPIED_SNAPSHOT_VOLUME_ID,
+                source.getVolumeSize(), description,
+                source.isEncrypted() || encrypted || ebsEncryptionByDefault(destinationRegion));
+        storeSnapshot(destinationRegion, copy, snapshotTags);
+        return copy;
+    }
+
+    /** A completed snapshot record owned by the caller, not yet stored. */
+    private Snapshot newSnapshot(String region, String snapshotId, String volumeId, Integer volumeSize,
+                                 String description, boolean encrypted) {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotId(snapshotId);
+        snapshot.setVolumeId(volumeId);
+        snapshot.setVolumeSize(volumeSize);
+        snapshot.setOwnerId(callerAccountId());
+        snapshot.setState("completed");
+        snapshot.setDescription(description != null ? description : "");
+        snapshot.setStartTime(Instant.now());
+        snapshot.setEncrypted(encrypted);
+        snapshot.setRegion(region);
+        return snapshot;
+    }
+
+    private void storeSnapshot(String region, Snapshot snapshot, List<Tag> snapshotTags) {
+        if (snapshotTags != null && !snapshotTags.isEmpty()) {
+            snapshot.setTags(new ArrayList<>(snapshotTags));
+            putTags(region, snapshot.getSnapshotId(), new ArrayList<>(snapshotTags));
+        }
+        snapshots.put(key(region, snapshot.getSnapshotId()), snapshot);
+    }
+
     // ─── Launch Templates ─────────────────────────────────────────────────────
 
     public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
@@ -10580,16 +10761,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private Snapshot snapshotFrom(String region, String snapshotId, Image image, BlockDeviceMapping mapping) {
         EbsBlockDevice ebs = mapping.getEbs();
-        Snapshot snapshot = new Snapshot();
-        snapshot.setSnapshotId(snapshotId);
-        snapshot.setOwnerId(callerAccountId());
-        snapshot.setState("completed");
-        snapshot.setDescription("Created by RegisterImage for " + image.getName());
-        snapshot.setStartTime(Instant.now());
-        snapshot.setVolumeSize(ebs.getVolumeSize());
-        snapshot.setEncrypted(Boolean.TRUE.equals(ebs.getEncrypted()));
-        snapshot.setRegion(region);
-        return snapshot;
+        return newSnapshot(region, snapshotId, null, ebs.getVolumeSize(),
+                "Created by RegisterImage for " + image.getName(), Boolean.TRUE.equals(ebs.getEncrypted()));
     }
 
     private boolean matchesSnapshotFilters(Snapshot snapshot, List<Map.Entry<String, List<String>>> filters) {
@@ -10679,6 +10852,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // it and then together exceed it, and a rejected request writes nothing.
         withTagWriteLocks(region, resourceIds, () -> {
             for (String resourceId : resourceIds) {
+                // Checked again under the lock DeleteSnapshot deletes under, so a snapshot deleted
+                // since the check above is not left with tags and no resource.
+                if (resourceId.startsWith("snap-")) {
+                    requireFound(snapshots.get(key(region, resourceId)).isPresent(),
+                            "InvalidSnapshot.NotFound", "The snapshot '" + resourceId + "' does not exist.");
+                }
                 requireWithinTagLimit(region, resourceId, tagList);
             }
             if (dryRun) {
@@ -12912,11 +13091,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (side == null || side.getRegion() == null) {
                 continue;
             }
-            if (tags instanceof AccountAwareStorageBackend<?> tagsByAccount && side.getOwnerId() != null) {
-                tagsByAccount.deleteForAccount(side.getOwnerId(), key(side.getRegion(), id));
-            } else {
-                removeTags(side.getRegion(), id);
-            }
+            removeTags(side.getOwnerId(), side.getRegion(), id);
         }
     }
 
@@ -15718,56 +15893,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     continue;
                 }
                 foundIds.add(eni.getNetworkInterfaceId());
-                NetworkInterface ni = new NetworkInterface();
-                ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
-                ni.setSubnetId(eni.getSubnetId());
-                ni.setVpcId(eni.getVpcId());
-                ni.setDescription(eni.getDescription());
-                ni.setOwnerId(eni.getOwnerId());
-                ni.setStatus(eni.getStatus());
-                ni.setMacAddress(eni.getMacAddress());
-                ni.setPrivateIpAddress(eni.getPrivateIpAddress());
-                ni.setPrivateDnsName(eni.getPrivateDnsName());
-                ni.setSourceDestCheck(eni.isSourceDestCheck());
-                ni.setGroups(new ArrayList<>(eni.getGroups()));
-                // Phase 3: availability zone, tags, interface type
-                if (inst.getPlacement() != null) {
-                    ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
-                }
-                // A network interface's tags are its OWN, never the instance's. AWS tags
-                // exactly the resource types a RunInstances TagSpecification names, so an
-                // interface created for an instance whose specification said
-                // ResourceType=instance carries no tags until something tags the eni- id
-                // itself - and DescribeTags never listed these copied tags either, so
-                // DescribeNetworkInterfaces disagreed with DescribeTags about the same
-                // resource. Read the interface's own entry in the tag store instead:
-                // CreateTags on the eni- id writes it, and so does a RunInstances
-                // TagSpecification with ResourceType=network-interface.
-                Optional<List<Tag>> tagList = tagsOf(safeAccount, region, eni.getNetworkInterfaceId());
-                ni.getTagSet().addAll(tagList.orElse(List.of()));
-
-                NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
-                att.setAttachmentId(eni.getAttachmentId());
-                att.setDeviceIndex(eni.getDeviceIndex());
-                att.setStatus("attached");
-                att.setInstanceId(inst.getInstanceId());
-                att.setInstanceOwnerId(eni.getOwnerId());
-                // Phase 3: attachTime from instance launchTime, deleteOnTermination
-                if (inst.getLaunchTime() != null) {
-                    att.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
-                }
-                att.setDeleteOnTermination(true);
-                ni.setAttachment(att);
-
-                // Phase 3: privateIpAddressesSet - primary IP
-                NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
-                primaryIp.setPrivateIpAddress(eni.getPrivateIpAddress());
-                primaryIp.setPrivateDnsName(eni.getPrivateDnsName());
-                primaryIp.setPrimary(true);
+                NetworkInterface ni = synthesizeImplicitNetworkInterface(inst, eni, region, safeAccount);
                 // Look up EIP association for this instance
                 addressForInstance(inst.getInstanceId()).ifPresent(addr ->
-                        primaryIp.setAssociation(networkInterfaceAssociation(addr, eni.getOwnerId())));
-                ni.getPrivateIpAddresses().add(primaryIp);
+                        ni.getPrivateIpAddresses().getFirst().setAssociation(
+                                networkInterfaceAssociation(addr, eni.getOwnerId())));
 
                 // Phase 4: apply filters
                 if (!matchesFilters(ni, filters, region)) {
@@ -16007,6 +16137,85 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /** Builds the standalone record describeNetworkInterfaces would otherwise synthesize for an
+     *  implicit (launch-created) interface, so a kept (DeleteOnTermination=false) interface is
+     *  reported identically whether or not it has been promoted to the standalone store. */
+    private NetworkInterface synthesizeImplicitNetworkInterface(Instance inst, InstanceNetworkInterface eni,
+                                                               String region, String accountId) {
+        NetworkInterface ni = new NetworkInterface();
+        ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
+        ni.setSubnetId(eni.getSubnetId());
+        ni.setVpcId(eni.getVpcId());
+        ni.setDescription(eni.getDescription());
+        ni.setOwnerId(eni.getOwnerId());
+        ni.setStatus(eni.getStatus());
+        ni.setMacAddress(eni.getMacAddress());
+        ni.setPrivateIpAddress(eni.getPrivateIpAddress());
+        ni.setPrivateDnsName(eni.getPrivateDnsName());
+        ni.setSourceDestCheck(eni.isSourceDestCheck());
+        ni.setGroups(new ArrayList<>(eni.getGroups()));
+        if (inst.getPlacement() != null) {
+            ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
+        }
+        // A network interface's tags are its OWN, never the instance's. AWS tags
+        // exactly the resource types a RunInstances TagSpecification names, so an
+        // interface created for an instance whose specification said
+        // ResourceType=instance carries no tags until something tags the eni- id
+        // itself - and DescribeTags never listed these copied tags either, so
+        // DescribeNetworkInterfaces disagreed with DescribeTags about the same
+        // resource. Read the interface's own entry in the tag store instead:
+        // CreateTags on the eni- id writes it, and so does a RunInstances
+        // TagSpecification with ResourceType=network-interface.
+        Optional<List<Tag>> tagList = tagsOf(accountId, region, eni.getNetworkInterfaceId());
+        ni.getTagSet().addAll(tagList.orElse(List.of()));
+        NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
+        att.setAttachmentId(eni.getAttachmentId());
+        att.setDeviceIndex(eni.getDeviceIndex());
+        att.setStatus("attached");
+        att.setInstanceId(inst.getInstanceId());
+        att.setInstanceOwnerId(eni.getOwnerId());
+        if (inst.getLaunchTime() != null) {
+            att.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+        }
+        att.setDeleteOnTermination(eni.isDeleteOnTermination());
+        ni.setAttachment(att);
+        NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
+        primaryIp.setPrivateIpAddress(eni.getPrivateIpAddress());
+        primaryIp.setPrivateDnsName(eni.getPrivateDnsName());
+        primaryIp.setPrimary(true);
+        ni.getPrivateIpAddresses().add(primaryIp);
+        return ni;
+    }
+
+    /** Sets DeleteOnTermination on the launched instance's network interfaces for an explicit request param. */
+    public void setNetworkInterfaceDeleteOnTermination(String region, String instanceId, boolean value) {
+        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        if (inst == null) return;
+        for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+            NetworkInterface ni = networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).orElse(null);
+            if (ni == null) {
+                // Implicit (auto-created) interface: honor the flag. When false, create a standalone
+                // record so the interface is returned to "available" on termination instead of deleted.
+                eni.setDeleteOnTermination(value);
+                if (!value) {
+                    NetworkInterface standalone = synthesizeImplicitNetworkInterface(inst, eni, region, callerAccountId());
+                    NetworkInterfaceAttachment att = standalone.getAttachment();
+                    att.setDeleteOnTermination(false);
+                    standalone.setStatus("in-use");
+                    networkInterfaces.put(key(region, eni.getNetworkInterfaceId()), standalone);
+                }
+            } else {
+                // Supplied (caller-created) interface: honor the flag on both copies.
+                eni.setDeleteOnTermination(value);
+                if (ni.getAttachment() != null) {
+                    ni.getAttachment().setDeleteOnTermination(value);
+                    networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+                }
+            }
+        }
+        instances.put(key(region, instanceId), inst);
+    }
+
     /**
      * Deletes a standalone ENI and gives the lease its primary address took back to the VPC
      * network. A requested primary took no lease, so any it carries is a failed launch's, given
@@ -16204,6 +16413,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * another instance since stays.
      */
     public List<Map<String, String>> rollBackLaunch(String region, Reservation launch) {
+        Set<String> rootVolumeIds = launch.getInstances().stream()
+                .map(Instance::getRootVolumeId).filter(Objects::nonNull).collect(Collectors.toSet());
         try {
             return terminateInstances(region, launch.getInstances().stream().map(Instance::getInstanceId).toList());
         } finally {
@@ -16211,7 +16422,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 String k = key(region, volumeId);
                 withVolumeLock(volumeId, () -> volumes.get(k)
                         .filter(current -> current.getAttachments().isEmpty())
-                        .ifPresent(current -> deleteVolumeRecord(region, k, current)));
+                        .ifPresent(current -> deleteVolumeRecord(region, k, current, rootVolumeIds.contains(volumeId))));
             }
         }
     }
@@ -16254,7 +16465,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 boolean attachedElsewhere = vol.getAttachments().stream()
                         .anyMatch(other -> !inst.getInstanceId().equals(other.getInstanceId()));
                 if (att.isDeleteOnTermination() && !attachedElsewhere) {
-                    deleteVolumeRecord(region, storeKey, vol);
+                    deleteVolumeRecord(region, storeKey, vol, root);
                     return;
                 }
                 vol.getAttachments().remove(att);
@@ -16267,9 +16478,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /** Deletes a volume, its block device and its tags. Called under the volume's lock. */
-    private void deleteVolumeRecord(String region, String storeKey, Volume vol) {
-        if (volumeBlockDeviceManager != null) {
+    /** Deletes metadata and tags, plus backing storage for data volumes. Called under the volume's lock. */
+    private void deleteVolumeRecord(String region, String storeKey, Volume vol, boolean logicalRoot) {
+        if (!logicalRoot && volumeBlockDeviceManager != null) {
             volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
         }
         volumes.delete(storeKey);

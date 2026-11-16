@@ -8,8 +8,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
@@ -74,6 +76,71 @@ class EcsDescribeServicesIntegrationTest {
     private static Response describe(String cluster, String service) {
         return call("DescribeServices",
                 "{\"cluster\":\"" + cluster + "\",\"services\":[\"" + service + "\"]}");
+    }
+
+    @Test
+    void codeDeployServiceStartsWithAPrimaryTaskSet() {
+        seedClusterAndTaskDef("blue-cluster", "blue-task");
+        Response created = call("CreateService", """
+                {"cluster":"blue-cluster","serviceName":"blue-service",
+                 "taskDefinition":"blue-task","desiredCount":0,
+                 "deploymentController":{"type":"CODE_DEPLOY"}}
+                """);
+        String taskDefinition = created.path("service.taskDefinition");
+
+        Response described = describe("blue-cluster", "blue-service");
+        described.then()
+                .body("services[0].taskSets", hasSize(1))
+                .body("services[0].taskSets[0].status", equalTo("PRIMARY"))
+                .body("services[0].taskSets[0].taskDefinition", equalTo(taskDefinition))
+                .body("services[0].taskSets[0].computedDesiredCount", equalTo(0))
+                .body("services[0].deployments", hasSize(0));
+
+        String taskSetArn = described.path("services[0].taskSets[0].taskSetArn");
+        created.then().body("service.taskSets[0].taskSetArn", equalTo(taskSetArn));
+        call("DescribeTaskSets", """
+                {"cluster":"blue-cluster","service":"blue-service"}
+                """).then().body("taskSets[0].taskSetArn", equalTo(taskSetArn));
+    }
+
+    @Test
+    void codeDeployPrimaryTaskSetOwnsTheScheduledWorkload() {
+        call("CreateCluster", """
+                {"clusterName":"blue-running-cluster"}
+                """);
+        call("RegisterTaskDefinition", """
+                {"family":"blue-running-task","networkMode":"awsvpc",
+                 "requiresCompatibilities":["FARGATE"],"cpu":"256","memory":"512",
+                 "containerDefinitions":[{"name":"web","image":"nginx"}]}
+                """);
+        Response created = call("CreateService", """
+                {"cluster":"blue-running-cluster","serviceName":"blue-running-service",
+                 "taskDefinition":"blue-running-task","desiredCount":1,"launchType":"FARGATE",
+                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-default-us-east-1-a"]}},
+                 "deploymentController":{"type":"CODE_DEPLOY"}}
+                """);
+        String primaryId = created.path("service.taskSets[0].id");
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
+                describe("blue-running-cluster", "blue-running-service").then()
+                        .body("services[0].runningCount", equalTo(1))
+                        .body("services[0].taskSets", hasSize(1))
+                        .body("services[0].taskSets[0].id", equalTo(primaryId))
+                        .body("services[0].taskSets[0].computedDesiredCount", equalTo(1))
+                        .body("services[0].taskSets[0].runningCount", equalTo(1))
+                        .body("services[0].taskSets[0].pendingCount", equalTo(0))
+                        .body("services[0].taskSets[0].stabilityStatus", equalTo("STEADY_STATE")));
+
+        Response listed = call("ListTasks", """
+                {"cluster":"blue-running-cluster","serviceName":"blue-running-service"}
+                """);
+        listed.then().body("taskArns", hasSize(1));
+        String taskArn = listed.path("taskArns[0]");
+        call("DescribeTasks", """
+                {"cluster":"blue-running-cluster","tasks":["%s"]}
+                """.formatted(taskArn)).then().body("tasks[0].startedBy", equalTo(primaryId));
+        call("DeleteService", """
+                {"cluster":"blue-running-cluster","service":"blue-running-service","force":true}
+                """).then().body("service.taskSets", hasSize(0));
     }
 
     @Test

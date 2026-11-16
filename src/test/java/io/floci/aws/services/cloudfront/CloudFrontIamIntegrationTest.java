@@ -2,20 +2,19 @@ package io.floci.aws.services.cloudfront;
 
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
+import io.floci.aws.testing.SignedRestRequests;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
@@ -139,18 +138,6 @@ class CloudFrontIamIntegrationTest {
 
     private Response send(AwsRequestSigner signer, String method, String path, String body, Map<String, String> headers)
             throws Exception {
-        URI uri = endpoint.resolve(path);
-        byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
-        // The signer signs the extra headers but returns only its own, so the request carries both.
-        RequestSpecification request = given().urlEncodingEnabled(false).headers(headers)
-                .headers(signer.headersFor(method, uri, headers, bytes));
-        if (body != null) {
-            request = request.contentType("application/xml").body(bytes);
-        }
-        return request.request(method, uri);
-    }
-
-    private static void denied(Response response, String action) {
-        response.then().statusCode(403).body(containsString("not authorized to perform: " + action));
+        return SignedRestRequests.send(endpoint, signer, method, path, body, "application/xml", headers);
     }
 }

@@ -7,8 +7,6 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,7 +18,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -30,11 +27,11 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -113,23 +110,6 @@ class RedshiftInterceptorIntegrationTest {
      */
     private static String simpleQueryJdbcUrl(Cluster cluster) {
         return jdbcUrl(cluster) + "?preferQueryMode=simple";
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
-        return waitForConnection(jdbcUrl(cluster), username, password);
-    }
-
-    private static Connection waitForConnection(String jdbcUrl, String username, String password) throws SQLException {
-        try {
-            return Awaitility.await()
-                    .atMost(Duration.ofSeconds(30))
-                    .pollDelay(Duration.ZERO)
-                    .pollInterval(Duration.ofMillis(500))
-                    .ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(jdbcUrl, username, password), Objects::nonNull);
-        } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(jdbcUrl, username, password); // throw original
-        }
     }
 
     @Test

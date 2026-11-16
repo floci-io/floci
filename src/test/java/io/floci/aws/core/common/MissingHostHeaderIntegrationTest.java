@@ -65,6 +65,21 @@ class MissingHostHeaderIntegrationTest {
     }
 
     @Test
+    void http10WithInvalidHostHeaderServesHealth() throws Exception {
+        String response = rawRequest("GET /_floci/health HTTP/1.0\r\nHost: a b\r\n\r\n");
+
+        assertThat(response, startsWith("HTTP/1.0 200 OK"));
+    }
+
+    @Test
+    void http11WithInvalidHostHeaderIsRejected() throws Exception {
+        String response = rawRequest(
+                "GET /_floci/health HTTP/1.1\r\nHost: a b\r\nConnection: close\r\n\r\n");
+
+        assertThat(response, startsWith("HTTP/1.1 400 Bad Request"));
+    }
+
+    @Test
     void http11WithoutHostHeaderIsRejected() throws Exception {
         String response = rawRequest("GET /_floci/health HTTP/1.1\r\nConnection: close\r\n\r\n");
 

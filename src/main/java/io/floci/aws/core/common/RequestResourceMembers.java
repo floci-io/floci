@@ -55,13 +55,15 @@ final class RequestResourceMembers {
     private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
+    /** A word of a child type's own and one id, which its format appends to its parent's whole resource. */
+    private static final Pattern NESTED_ID = Pattern.compile("[/:][A-Za-z][A-Za-z0-9-]*[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way. */
     private static final List<String> FOUND_ONLY = List.of("arnOf", "fixed");
     /** The keys of a resource read from a member holding its ARN. */
     private static final Set<String> ARN_KEYS = Set.of("types", "arn", "made", "endpoint");
     /** The keys of a resource whose format's variables members fill, or its service finds by them. */
     private static final Set<String> FILL_KEYS = Set.of("type", "fill", "when", "unless", "arnOf", "account", "fixed",
-            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults");
+            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults", "partialArn");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
@@ -221,13 +223,25 @@ final class RequestResourceMembers {
      * variable that is the one of another type's format names that type's default when the request leaves it out
      * ({@code defaults}, the member mapped to the type), which the service gives: an ECS service of a request with no
      * {@code cluster} is on the default cluster. One member of {@code find} may be a list, each of whose values the
-     * service finds (ECS's {@code taskDefinitions[]}).
+     * service finds (ECS's {@code taskDefinitions[]}). A
+     * {@code partialArn} type's members may give its ARN with the leading parts left out, its account and resource
+     * ({@code 123456789012:function:my-function}) or its Region too, which the reader completes in the request's
+     * partition, and Region where the value leaves that out.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
-                    Map<String, String> defaults) {
+                    Map<String, String> defaults, boolean partialArn) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                 Map<String, String> defaults) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, defaults, false);
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -261,9 +275,11 @@ final class RequestResourceMembers {
     /**
      * A resource a create makes under a parent its action acts on, from a member holding the parent's ARN: the
      * parent's resource with its leading type word {@code parentWord} replaced by {@code childWord} and an open
-     * id appended after {@code separator} ({@code listener/app/<lb>/<id>/*} under {@code loadbalancer/app/...}).
+     * id appended after {@code infix} ({@code listener/app/<lb>/<id>/*} under {@code loadbalancer/app/...}, infix
+     * {@code /}), or the parent's whole resource with a word of the child's own before the open id
+     * ({@code bucket/<name>/table/*} under {@code bucket/<name>}, infix {@code /table/}).
      */
-    record Created(String type, String parent, Member arn, String parentWord, String childWord, String separator) {
+    record Created(String type, String parent, Member arn, String parentWord, String childWord, String infix) {
     }
 
     /** An ordered heterogeneous id list; unsupported ids retain wildcard authorization. */
@@ -290,7 +306,7 @@ final class RequestResourceMembers {
 
     /**
      * The file: each operation's resources, the resource types its action acts on, the resources it creates under a
-     * parent and the one a create whose action acts on no type makes ({@code makes}), as
+     * parent and the one a create whose action acts on no type, or on other types alone, makes ({@code makes}), as
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
      * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
      * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
@@ -425,10 +441,10 @@ final class RequestResourceMembers {
             actsOn.put(operation.getKey(), types);
             List<Resource> made = new ArrayList<>();
             for (JsonNode resource : operation.getValue().path("makes")) {
-                if (!types.isEmpty() || !resource.isObject() || resource.size() != 2 || !resource.has("type")
-                        || !resource.has("fill")) {
+                if (!resource.isObject() || resource.size() != 2 || !resource.has("type") || !resource.has("fill")
+                        || types.contains(resource.get("type").asText())) {
                     throw new IllegalStateException(RESOURCE_NAME + " makes " + resource + " for " + operation.getKey()
-                            + ", no type's variables of a create acting on none");
+                            + ", no type's variables of a create acting on none or on other types alone");
                 }
                 made.add(resource(operation.getKey(), resource, formats.getOrDefault(namespace, Map.of())));
             }
@@ -684,9 +700,15 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " takes " + type + "'s account for " + operation
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
+        boolean partialArn = resource.has("partialArn");
+        if (partialArn && (!resource.path("partialArn").isBoolean() || !resource.path("partialArn").booleanValue()
+                || fill.isEmpty())) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + type + " for " + operation
+                    + " from a partial ARN " + resource.path("partialArn") + ", not true for a type its members fill");
+        }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(arnOf), account,
                 Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault, whenDefault, unlessDefault,
-                defaults(operation, type, resource.path("defaults"), fill, formats));
+                defaults(operation, type, resource.path("defaults"), fill, formats), partialArn);
     }
 
     /**
@@ -765,15 +787,18 @@ final class RequestResourceMembers {
         String parent = created.path("parent").asText("");
         Matcher child = formats.containsKey(type) ? RESOURCE_PART.matcher(formats.get(type).format()) : null;
         Matcher under = formats.containsKey(parent) ? RESOURCE_PART.matcher(formats.get(parent).format()) : null;
+        boolean nested = child != null && under != null && child.matches() && under.matches()
+                && child.group(1).equals(under.group(1));
         if (child == null || under == null || !child.matches() || !under.matches()
-                || child.group(1).equals(under.group(1)) || !child.group(2).startsWith(under.group(2))
-                || !APPENDED_ID.matcher(child.group(2).substring(under.group(2).length())).matches()) {
+                || !child.group(2).startsWith(under.group(2))
+                || !(nested ? NESTED_ID : APPENDED_ID).matcher(child.group(2).substring(under.group(2).length()))
+                        .matches()) {
             throw new IllegalStateException(RESOURCE_NAME + " creates a " + type + " for " + operation
                     + " under a " + parent + ", no parent of it");
         }
-        String separator = child.group(2).substring(under.group(2).length(), under.group(2).length() + 1);
+        String appended = child.group(2).substring(under.group(2).length());
         return new Created(type, parent, member(operation, created.path("arn").asText("")), under.group(1),
-                child.group(1), separator);
+                child.group(1), appended.substring(0, appended.indexOf("${")));
     }
 
     private static Member member(String operation, String path) {

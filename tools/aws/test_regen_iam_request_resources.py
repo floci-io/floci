@@ -383,6 +383,86 @@ def write_models(root, models: dict[str, dict]):
         (directory / "service-2.json").write_text(json.dumps(value), encoding="utf-8")
 
 
+def tables_model() -> dict:
+    """A rest-json model naming a table by its table bucket's ARN, its namespace and its name, as S3 Tables does: in its
+    path, documented as the table's name or holding a `TableName`, and in `GetTable`'s query string beside an optional
+    `tableArn`."""
+    def table_members(location: str, name_doc: str) -> dict:
+        return {"tableBucketARN": {"shape": "TableBucketARN", "location": location, "locationName": "tableBucketARN",
+                                   "documentation": "<p>The Amazon Resource Name (ARN) of the table bucket that "
+                                                    "contains the table.</p>"},
+                "namespace": {"shape": "NamespaceName", "location": location, "locationName": "namespace",
+                              "documentation": "<p>The namespace associated with the table.</p>"},
+                "name": {"shape": "TableName", "location": location, "locationName": "name",
+                         "documentation": name_doc}}
+    get = table_members("querystring", "<p>The name of the table.</p>")
+    get["tableArn"] = {"shape": "TableARN", "location": "querystring", "locationName": "tableArn",
+                       "documentation": "<p>The Amazon Resource Name (ARN) of the table.</p>"}
+    return {"metadata": {"protocol": "rest-json"},
+            "operations": {
+                "DeleteTable": {"http": {"method": "DELETE",
+                                         "requestUri": "/tables/{tableBucketARN}/{namespace}/{name}"},
+                                "input": {"shape": "DeleteIn"}},
+                "GetTablePolicy": {"http": {"method": "GET",
+                                            "requestUri": "/tables/{tableBucketARN}/{namespace}/{name}/policy"},
+                                   "input": {"shape": "PolicyIn"}},
+                "GetTable": {"http": {"method": "GET", "requestUri": "/get-table"}, "input": {"shape": "GetIn"}},
+                "GetTableBucket": {"http": {"method": "GET", "requestUri": "/buckets/{tableBucketARN}"},
+                                   "input": {"shape": "BucketIn"}}},
+            "shapes": {
+                "DeleteIn": {"type": "structure", "required": ["tableBucketARN", "namespace", "name"],
+                             "members": table_members("uri", "<p>The name of the table.</p>")},
+                "PolicyIn": {"type": "structure", "required": ["tableBucketARN", "namespace", "name"],
+                             "members": table_members("uri", "<p>The table name.</p>")},
+                "GetIn": {"type": "structure", "members": get},
+                "BucketIn": {"type": "structure", "required": ["tableBucketARN"],
+                             "members": {"tableBucketARN": table_members("uri", "")["tableBucketARN"]}},
+                "TableBucketARN": {"type": "string", "pattern": "(arn:aws[-a-z0-9]*:[a-z0-9]+:[-a-z0-9]*:[0-9]{12}"
+                                                                ":bucket/[a-z0-9_-]{3,63})"},
+                "TableARN": {"type": "string", "pattern": "(arn:aws[-a-z0-9]*:[a-z0-9]+:[-a-z0-9]*:[0-9]{12}"
+                                                          ":bucket/[a-z0-9_-]{3,63}/table/[0-9a-f_-]{36})"},
+                "NamespaceName": {"type": "string"},
+                "TableName": {"type": "string"}}}
+
+
+def test_a_type_ending_in_a_minted_id_is_found_by_the_path_members_naming_it():
+    formats = {"Table": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}/table/${TableID}",
+               "TableBucket": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}"}
+    models = {"s3tables": tables_model()}
+    found = {"type": "Table", "fill": {}, "find": ["tableBucketARN", "namespace", "name"]}
+
+    def resources(operation: str, types: list[str]) -> list[dict]:
+        return r.entry_for(f"s3tables:{operation}", {"action": f"s3tables:{operation}", "types": types},
+                           formats, models)["resources"]
+
+    # Its table bucket's ARN scopes the table rather than holding the table's ARN, and the table's name fills no
+    # variable of the bucket: the table is found by all three, documented as its name or holding a `TableName`.
+    assert resources("DeleteTable", ["Table"]) == [found]
+    assert resources("GetTablePolicy", ["Table"]) == [found]
+    # The same from a query string, unless the request gives the table's own ARN.
+    assert resources("GetTable", ["Table"]) == [{"types": ["Table"], "arn": "tableArn"},
+                                                dict(found, when={"tableArn": [None]})]
+    # A type its ARN member holds, of one variable, is read as before.
+    assert resources("GetTableBucket", ["TableBucket"]) == [{"types": ["TableBucket"], "arn": "tableBucketARN"}]
+
+
+def test_a_create_making_a_type_nested_under_its_parent_names_it_from_the_parents_arn():
+    formats = {"Table": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}/table/${TableID}",
+               "TableBucket": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}"}
+    # The table's format is the bucket's whole with a word of its own and the table's id, so a create acting on the
+    # bucket makes a table under it, whose tags are checked there.
+    assert r.child_id(formats["Table"], formats["TableBucket"]) == "TableID"
+    assert r.creates_for("s3tables:CreateTable", ["TableBucket"], formats,
+                         members("tableBucketARN", "namespace", "name")) == [
+        {"type": "Table", "parent": "TableBucket", "arn": "tableBucketARN"}]
+    # A namespace is no type of its own here, so creating one makes nothing.
+    assert r.creates_for("s3tables:CreateNamespace", ["TableBucket"], formats,
+                         members("tableBucketARN", "namespace")) == []
+    # The same word with no word of the child's own between is no child.
+    assert r.child_id("arn:${Partition}:svc:${Region}:${Account}:thing/${ThingName}/${PartId}",
+                      "arn:${Partition}:svc:${Region}:${Account}:thing/${ThingName}") is None
+
+
 def test_rest_arn_alternatives_and_integer_shapes_fill_versioned_resources(isolated, tmp_path):
     formats = {
         "product": "arn:${Partition}:svc:${Region}:${Account}:product:${ProductName}",
@@ -533,6 +613,16 @@ def test_an_account_member_typed_elsewhere_in_the_service_is_inferred_only_for_n
     assert r.account_members(models, "CreateThing") == []
     assert r.account_members(models, "ListThings") == [member]
     assert r.account_members(models, "CreateOther") == [member]
+
+
+def test_an_account_member_naming_another_records_account_gives_none(tmp_path):
+    # CloudFormation's StackInstanceAccount is the account of a StackInstance, not of the stack set it belongs to.
+    service = model({"DescribeStackInstance": {"StackInstanceAccount": "AccountId", "OwnerAccount": "AccountId"}})
+    service["shapes"]["AccountId"]["pattern"] = "^[0-9]{12}$"
+    service["shapes"]["StackInstance"] = {"type": "structure", "members": {}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.account_members(models, "DescribeStackInstance") == ["OwnerAccount"]
 
 
 def test_account_member_inference_does_not_cross_service_models(tmp_path):
@@ -1002,18 +1092,32 @@ def test_the_vendored_file_is_well_formed():
     assert not any("when" in resource or "unless" in resource
                    for operation, entry in operations.items() if operation.startswith("events:")
                    and "endpoint" in json.dumps(entry) for resource in entry["resources"])
-    # A state machine's version or alias is checked on the state machine.
-    assert document["unqualified"] == {"lambda": ["function"], "ssm": ["parameter"], "states": ["statemachine"]}
+    # A state machine's version or alias is checked on the state machine; a Lambda function's is checked qualified.
+    assert document["unqualified"] == {"ssm": ["parameter"], "states": ["statemachine"]}
     assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
-    assert {operation for operation in operations if operation.startswith("lambda:")} == {
-        "lambda:GetLayerVersion", "lambda:GetLayerVersionByArn"}
+    # Lambda is read whole: a partial ARN names a function, a provisioned concurrency config acts on the version or
+    # alias its Qualifier names, the action the reference gives it, and AddPermission's SourceAccount is its source's.
+    assert "lambda" in document["namespaces"] and "lambda" not in document["handBuilt"]
+    assert operations["lambda:Invoke"]["resources"] == [
+        {"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True}]
+    assert operations["lambda:PublishVersion"]["resources"] == [
+        {"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True}]
+    assert operations["lambda:GetProvisionedConcurrencyConfig"]["resources"] == [
+        {"type": kind, "fill": {"FunctionName": "FunctionName", variable: "Qualifier"},
+         "arnOf": {"FunctionName": "function"}, "partialArn": True}
+        for kind, variable in (("function alias", "Alias"), ("function version", "Version"))]
+    assert not any("account" in resource for resource in operations["lambda:AddPermission"]["resources"])
+    assert operations["lambda:GetMicrovm"]["resources"] == [{"types": ["microvmImage"], "through": "microvmIdentifier"}]
+    assert operations["lambda:SendDurableExecutionCallbackSuccess"]["resources"] == [
+        {"types": ["durable execution"], "through": "CallbackId"}]
+    assert operations["lambda:GetWebFunctionEndpoint"]["resources"][0]["arnOf"] == {"functionName": "webFunction"}
     # A listener is made under a load balancer, and a rule under a listener.
     assert operations["elasticloadbalancing:CreateListener"]["creates"] == [
         {"type": f"listener/{kind}", "parent": f"loadbalancer/{kind}/", "arn": "LoadBalancerArn"}
         for kind in ("app", "gwy", "net")]
     assert operations["elasticloadbalancing:CreateRule"]["creates"] == [
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
-    assert set(document["handBuilt"]) >= {"lambda", "s3", "sqs"}
+    assert set(document["handBuilt"]) >= {"s3", "sqs"}
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
@@ -1860,6 +1964,44 @@ def test_a_member_whose_service_uses_its_default_when_left_out_names_that_defaul
     assert r.with_optional_qualifier([service], {"cluster"}) == [dict(service, unless={"cluster": [None]})]
 
 
+GROUPS = {"schedule": "arn:${Partition}:scheduler:${Region}:${Account}:schedule/${GroupName}/${ScheduleName}",
+          "schedule-group": "arn:${Partition}:scheduler:${Region}:${Account}:schedule-group/${GroupName}"}
+
+
+def test_a_member_whose_service_assumes_its_default_when_omitted_names_that_default():
+    # EventBridge Scheduler names the type after "default", in each of the three ways botocore puts it.
+    for doc in ("<p>The name of the schedule group to associate with this schedule. If you omit this, the default "
+                "schedule group is used.</p>",
+                "<p>The name of the schedule group associated with this schedule. If you omit this, EventBridge "
+                "Scheduler assumes that the schedule is associated with the default group.</p>",
+                "<p>The name of the schedule group with which the schedule is associated. You must provide this value "
+                "in order for EventBridge Scheduler to find the schedule you want to update. If you omit this value, "
+                "EventBridge Scheduler assumes the group is associated to the default group.</p>"):
+        defaulted = r.defaulted_members(cluster_model("GetSchedule", {"GroupName": doc}), "GetSchedule")
+        assert set(defaulted) == {"GroupName"}
+        schedule = {"type": "schedule", "fill": {"GroupName": "GroupName", "ScheduleName": "Name"}}
+        assert r.with_documented_defaults([schedule], GROUPS, defaulted) == [
+            dict(schedule, defaults={"GroupName": "schedule-group"})]
+    # A filter naming no default names none.
+    listing = cluster_model("ListSchedules", {"GroupName": "<p>If specified, only lists the schedules whose associated "
+                                                           "schedule group matches the given filter.</p>"})
+    assert r.defaulted_members(listing, "ListSchedules") == {}
+
+
+def test_a_resource_of_a_default_pair_takes_no_default_of_its_own():
+    # EventBridge documents EventBusName "If you omit this, the default event bus is used", and a rule on the
+    # default bus is the pair's other resource, which applies when the request leaves the bus out.
+    formats = {"event-bus": "arn:${Partition}:events:${Region}:${Account}:event-bus/${EventBusName}",
+               "rule-on-custom-event-bus": "arn:${Partition}:events:${Region}:${Account}:rule/${EventBusName}/"
+                                           "${RuleName}"}
+    custom = {"type": "rule-on-custom-event-bus", "fill": {"EventBusName": "EventBusName", "RuleName": "Name"},
+              "unlessDefault": {"EventBusName": "event-bus"}}
+    assert r.with_documented_defaults([custom], formats, {"EventBusName": "event-bus"}) == [custom]
+    unpaired = {key: value for key, value in custom.items() if key != "unlessDefault"}
+    assert r.with_documented_defaults([unpaired], formats, {"EventBusName": "event-bus"}) == [
+        dict(unpaired, defaults={"EventBusName": "event-bus"})]
+
+
 def test_a_member_documented_as_a_name_or_an_arn_of_another_type_may_give_that_types_arn():
     for doc in (CLUSTER_DOC, "<p>The short name or full ARN of the cluster that hosts the task.</p>",
                 # AWS's own typo, the "of" left out.
@@ -2110,3 +2252,178 @@ def test_eip_operations_read_scalar_targets_from_models(operation, members, kind
     action = "ec2:" + operation
     entry = r.entry_for(action, {"action": action, "types": kinds}, formats, {"ec2": ec2})
     assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]
+
+
+QUALIFIED_FORMATS = {"function": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}",
+                     "function alias": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Alias}",
+                     "function version": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Version}"}
+
+
+def _qualified_model() -> dict:
+    functions = model({"Invoke": {"FunctionName": "FunctionName", "Qualifier": "String"},
+                       "GetConfig": {"FunctionName": "FunctionName", "Qualifier": "String"},
+                       "CreateAlias": {"FunctionName": "FunctionName", "Name": "String", "FunctionVersion": "String"},
+                       "ListAliases": {"FunctionName": "FunctionName", "FunctionVersion": "String"},
+                       "Publish": {"FunctionName": "FunctionName"}})
+    functions["shapes"]["FunctionName"] = {"type": "string", "pattern": (
+        r"(arn:(aws[a-zA-Z-]*)?:svc:)?([a-z]{2}(-gov)?-[a-z]+-\d{1}:)?(\d{12}:)?(function:)?([a-zA-Z0-9-_\.]+)"
+        r"(:(\$LATEST|[a-zA-Z0-9-_]+))?")}
+    docs = {("Invoke", "Qualifier"): "<p>Specify a version or alias to invoke a published version of the function.</p>",
+            ("GetConfig", "Qualifier"): "<p>The version number or alias name.</p>",
+            ("CreateAlias", "FunctionVersion"): "<p>The function version that the alias invokes.</p>",
+            ("ListAliases", "FunctionVersion"): "<p>Specify a function version to only list aliases that invoke that "
+                                                "version.</p>"}
+    for (operation, member), text in docs.items():
+        functions["shapes"][operation + "In"]["members"][member]["documentation"] = text
+    return functions
+
+
+def test_a_member_documented_as_a_version_or_alias_names_the_qualified_types_an_action_acts_on():
+    functions = {"svc": _qualified_model()}
+    assert r.qualified_kinds(QUALIFIED_FORMATS) == {
+        "function": {"alias": "function alias", "version": "function version"}}
+    assert r.qualifier_members(functions, "Invoke", {"alias", "version"}) == ["Qualifier"]
+    assert r.qualifier_members(functions, "GetConfig", {"alias", "version"}) == ["Qualifier"]
+    # What an alias points to, or a filter naming aliases, is no qualifier of the request's function.
+    assert r.qualifier_members(functions, "CreateAlias", {"alias", "version"}) == []
+    assert r.qualifier_members(functions, "ListAliases", {"alias", "version"}) == []
+    named = [{"type": "function", "fill": {"FunctionName": "FunctionName"}}]
+    members = {"FunctionName": "FunctionName", "Qualifier": "Qualifier"}
+    # An action acting on the type alone is checked on it as its members name it.
+    assert r.with_qualifier(named, ["function"], QUALIFIED_FORMATS, members, functions, "Invoke") == named
+    # An action acting on the qualified types names each by the function and the qualifier.
+    assert r.with_qualifier([], ["function alias", "function version"], QUALIFIED_FORMATS, members, functions,
+                            "GetConfig") == [
+        {"type": "function alias", "fill": {"FunctionName": "FunctionName", "Alias": "Qualifier"},
+         "arnOf": {"FunctionName": "function"}},
+        {"type": "function version", "fill": {"FunctionName": "FunctionName", "Version": "Qualifier"},
+         "arnOf": {"FunctionName": "function"}}]
+    # A request with no qualifier member is as it was.
+    assert r.with_qualifier(named, ["function"], QUALIFIED_FORMATS, {"FunctionName": "FunctionName"}, functions,
+                            "Publish") == named
+
+
+def test_a_member_whose_pattern_takes_an_arn_without_its_leading_parts_names_its_type_by_a_partial_arn():
+    functions = {"svc": _qualified_model()}
+    assert r.partial_arn_members(functions, "Publish", QUALIFIED_FORMATS) == {
+        "FunctionName": {"function", "function alias", "function version"}}
+    # A pattern that does not spell the type's resource word takes no partial ARN of it.
+    functions["svc"]["shapes"]["FunctionName"]["pattern"] = "[a-zA-Z0-9-_:]+"
+    assert r.partial_arn_members(functions, "Publish", QUALIFIED_FORMATS) == {}
+    marked = r.with_partial_arns([{"type": "function", "fill": {"FunctionName": "FunctionName"}},
+                                  {"types": ["function"], "arn": "Other"}], {"FunctionName": {"function"}})
+    assert marked == [{"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True},
+                      {"types": ["function"], "arn": "Other"}]
+
+
+def test_an_account_id_beside_an_arn_of_the_same_name_is_that_arns_account(tmp_path):
+    write_models(tmp_path, {"svc": model({"AddPermission": {"FunctionName": "String", "SourceArn": "String",
+                                                            "SourceAccount": "AccountId"},
+                                          "GetThing": {"ThingName": "String", "OwnerAccount": "AccountId"}})})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.account_members(models, "AddPermission") == []
+    assert r.account_members(models, "GetThing") == ["OwnerAccount"]
+
+
+def test_a_record_field_named_after_the_end_of_a_types_name_reaches_that_type_and_a_request_names_it_by_its_identifier():
+    formats = {"microvmImage": "arn:${Partition}:svc:${Region}:${Account}:microvm-image:${MicrovmImageName}"}
+    vms = model({"GetMicrovm": {"microvmIdentifier": "String"}})
+    vms["shapes"]["MicrovmItem"] = {"type": "structure", "members": {
+        "microvmId": {"shape": "String"}, "imageArn": {"shape": "String"}, "state": {"shape": "String"}}}
+    models = {"svc": vms}
+    assert r.through_members(models, formats) == {"microvmId": ["microvmImage"]}
+    assert r.with_through([], ["microvmImage"], {"microvmIdentifier": "microvmIdentifier"},
+                          {"microvmId": ["microvmImage"]}) == [{"types": ["microvmImage"], "through": "microvmIdentifier"}]
+
+
+def test_an_operation_documented_as_acting_on_a_thing_in_a_resource_reaches_that_resource_through_the_things_id():
+    formats = {"durable execution": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Version}"
+                                    "/durable-execution/${ExecutionName}/${ExecutionId}"}
+    callbacks = model({"SendCallbackSuccess": {"CallbackId": "String"}, "Other": {"CallbackId": "String"}})
+    callbacks["operations"]["SendCallbackSuccess"]["documentation"] = (
+        "<p>Sends a successful completion response for a callback operation in a durable execution.</p>")
+    assert r.documented_through({"svc": callbacks}, formats) == {"CallbackId": {"durable execution"}}
+    callbacks["operations"]["SendCallbackSuccess"]["documentation"] = "<p>Sends a response for a callback.</p>"
+    assert r.documented_through({"svc": callbacks}, formats) == {}
+
+
+def test_a_path_member_documented_as_either_a_name_or_an_arn_takes_the_arn_of_the_thing_it_leads_with():
+    assert r._documented_name_or_arn(
+        "<p>The web function to retrieve. You can specify either of the following:</p> <ul> <li> <p>The function "
+        "name, for example <code>my-function</code>.</p> </li> <li> <p>The function ARN.</p> </li> </ul>",
+        located=True) == "web-function"
+    # A body member keeps the phrasings it had.
+    assert r._documented_name_or_arn("<p>The web function. You can specify either of the following: The function "
+                                     "name. The function ARN.</p>") is None
+
+
+def test_clients_sharing_an_endpoint_keep_every_type_an_arn_member_may_name_and_others_narrow_by_the_arns_word():
+    formats = {"function": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}",
+               "eventSourceMapping": "arn:${Partition}:svc:${Region}:${Account}:event-source-mapping:${UUID}",
+               "image": "arn:${Partition}:svc:${Region}:${Account}:image:${ImageName}"}
+    tags = model({"TagResource": {"Resource": "TaggableArn"}})
+    tags["shapes"]["TaggableArn"] = {"type": "string",
+                                     "pattern": "arn:aws:svc:[a-z0-9-]+:[0-9]{12}:(function:[a-z]+|event-source-mapping:[a-f0-9-]+)"}
+    resources = [{"types": ["eventSourceMapping", "function", "image"], "arn": "Resource"}]
+    assert r.narrowed(resources, set(), tags, "TagResource", formats) == [
+        {"types": ["eventSourceMapping", "function"], "arn": "Resource"}]
+    assert r.narrowed(resources, set(), tags, "TagResource", formats, arn_types=False) == resources
+
+
+def test_input_and_list_suffixes_stem_away_like_the_others():
+    # Glue names what a create makes in a `<Type>Input` structure, and a batch's names in a `<Type>NameList`.
+    assert r.stem("DatabaseInput") == "database"
+    assert r.stem("ConnectionNameList") == "connection"
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingNameList[]")) == [
+        {"type": "thing", "fill": {"ThingName": "ThingNameList[]"}}]
+
+
+def test_a_list_whose_botocore_shape_is_named_after_the_type_fills_it():
+    # Glue's BatchDeleteTable names its tables by TablesToDelete, a BatchDeleteTableNameList.
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingsToDelete[]"),
+                           shapes={"ThingsToDelete": "BatchDeleteThingNameList"}) == [
+        {"type": "thing", "fill": {"ThingName": "ThingsToDelete[]"}}]
+    # A list whose shape is named after nothing the action acts on names nothing.
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingsToDelete[]"),
+                           shapes={"ThingsToDelete": "BatchDeleteNameList"}) == []
+
+
+def test_a_type_of_no_variables_stays_beside_a_creates_own_unnamed_type():
+    # Glue's CreateDatabase names its database only in a field the documented rule reads; the account's catalog,
+    # of no variables, is checked all the same rather than dropped as its alternative.
+    assert r.resources_for("svc:CreatePool", ["catalog", "pool"], FORMATS, members("Description")) == [
+        {"type": "catalog", "fill": {}}]
+
+
+def test_being_ends_a_types_name_in_documentation():
+    # "Name of the workflow being run", Glue's GetWorkflowRun's Name.
+    formats = {"workflow": "arn:${Partition}:svc:${Region}:${Account}:workflow/${WorkflowName}"}
+    assert r.doc_names("name of the workflow being run", "workflow", formats)
+    assert not r.doc_names("name of the workflowrun being run", "workflow", formats)
+
+
+def widget_model(tags: bool) -> dict:
+    """A create whose action acts on the widget's kind alone, naming the widget it makes in `WidgetInput.Name`, and
+    carrying tags when asked, as Glue's CreateConnection does."""
+    service = model({"CreateWidget": {"KindName": "String"}})
+    service["shapes"]["WidgetInput"] = {"type": "structure", "members": {
+        "Name": {"shape": "String", "documentation": "<p>The name of the widget.</p>"},
+        "Description": {"shape": "String", "documentation": "<p>The description of the widget.</p>"}}}
+    service["shapes"]["Tags"] = {"type": "map", "key": {"shape": "String"}, "value": {"shape": "String"}}
+    service["shapes"]["CreateWidgetIn"]["members"]["WidgetInput"] = {"shape": "WidgetInput"}
+    if tags:
+        service["shapes"]["CreateWidgetIn"]["members"]["Tags"] = {"shape": "Tags"}
+    return {"svc": service}
+
+
+def test_a_create_acting_on_other_types_alone_tags_what_it_makes_when_it_names_it_in_full():
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}",
+               "kind": "arn:${Partition}:svc:${Region}:${Account}:kind/${KindName}"}
+    made = r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True))
+    assert made == [{"type": "widget", "fill": {"WidgetName": "WidgetInput.Name"}}]
+    # Without tags, what it makes is not needed; and a create acting on the type it makes is checked on it.
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(False)) == []
+    assert r.makes_for("svc:CreateWidget", ["widget"], formats, members("KindName"), models=widget_model(True)) == []
+    # One whose request does not name every variable of what it makes leaves it to the action's own resources.
+    formats["widget"] = "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}/${WidgetId}"
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True)) == []

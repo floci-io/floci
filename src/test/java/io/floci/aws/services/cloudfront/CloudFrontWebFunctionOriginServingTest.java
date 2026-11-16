@@ -7,8 +7,8 @@ import io.floci.aws.services.cloudfront.model.Origin;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.lambdaweb.LambdaWebCodeBuckets;
 import io.floci.aws.services.lambdaweb.LambdaWebRoles;
-import io.floci.aws.services.lambdaweb.LambdaWebZips;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -91,7 +91,7 @@ class CloudFrontWebFunctionOriginServingTest {
                                  String functionName, String authType) {
         LambdaWebRoles.trustLambda(iamService, ROLE);
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         String domain = given().contentType("application/json")
                 .body("""
                         {"functionName": "%s",

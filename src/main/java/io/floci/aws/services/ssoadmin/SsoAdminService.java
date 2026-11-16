@@ -11,6 +11,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -2102,7 +2103,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
 
     public AssignmentDeletionOperation getAssignmentDeletionOperation(String instanceArn, String requestId) {
         requireInstance(instanceArn);
-        if (requestId == null || !requestId.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+        if (!UuidShapes.matchesLowerCase(requestId)) {
             throw validation("AccountAssignmentDeletionRequestId must be a UUID.");
         }
         return assignmentDeletionOperations.get(requestId)
@@ -2111,7 +2112,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
 
     public PermissionSetProvisioningOperation getPermissionSetProvisioningOperation(String instanceArn, String requestId) {
         requireInstance(instanceArn);
-        if (requestId == null || !requestId.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+        if (!UuidShapes.matchesLowerCase(requestId)) {
             throw validation("ProvisionPermissionSetRequestId must be a UUID.");
         }
         return permissionSetProvisioningOperations.get(requestId)
@@ -2145,7 +2146,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
 
     public AssignmentOperation getAssignmentOperation(String instanceArn, String requestId) {
         requireInstance(instanceArn);
-        if (requestId == null || !requestId.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+        if (!UuidShapes.matchesLowerCase(requestId)) {
             throw validation("AccountAssignmentCreationRequestId must be a UUID.");
         }
         return assignmentOperations.get(requestId).orElseThrow(() -> notFound("Assignment operation not found: " + requestId));

@@ -27,6 +27,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -105,6 +106,11 @@ public class RedshiftAuditLogPublisher {
         registrations.put(registryKey(accountId, target.identifier()), new Registration(region, target));
     }
 
+    /** The target registered under {@code identifier}, which a caller that only knows the backend publishes for. */
+    public Optional<RedshiftAuditTarget> registeredTarget(String accountId, String identifier) {
+        return Optional.ofNullable(registrations.get(registryKey(accountId, identifier))).map(Registration::target);
+    }
+
     public void unregister(String accountId, String clusterIdentifier) {
         registrations.remove(registryKey(accountId, clusterIdentifier));
     }
@@ -153,7 +159,7 @@ public class RedshiftAuditLogPublisher {
      * Builds the target of a cluster for the publish overloads, which must never fail the statement being audited:
      * a cluster whose stored logging settings are malformed is reported and treated as having no target.
      */
-    private static RedshiftAuditTarget targetOf(Cluster cluster) {
+    public static RedshiftAuditTarget targetOf(Cluster cluster) {
         try {
             return RedshiftAuditTarget.of(cluster);
         } catch (RuntimeException ex) {

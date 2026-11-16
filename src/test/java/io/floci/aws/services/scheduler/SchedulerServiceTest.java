@@ -3,6 +3,7 @@ package io.floci.aws.services.scheduler;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.scheduler.model.DeadLetterConfig;
 import io.floci.aws.services.scheduler.model.FlexibleTimeWindow;
@@ -46,6 +47,51 @@ class SchedulerServiceTest {
         return req;
     }
 
+
+    /**
+     * Tagging and untagging put a new map in place of the group's, never changing the one a tag lookup may be
+     * copying, so a lookup during either reads one whole set.
+     */
+    @Test
+    void taggingReplacesTheGroupsTagsAndLeavesTheOldSetWhole() {
+        ScheduleGroup group = service.createScheduleGroup("tags", Map.of("team", "data"), REGION);
+        Map<String, String> before = group.getTags();
+
+        service.tagScheduleGroup("tags", REGION, Map.of("owner", "alice"));
+        Map<String, String> tagged = service.getScheduleGroup("tags", REGION).getTags();
+        service.untagScheduleGroup("tags", REGION, List.of("team"));
+
+        assertEquals(Map.of("team", "data"), before);
+        assertEquals(Map.of("team", "data", "owner", "alice"), tagged);
+        assertEquals(Map.of("owner", "alice"), service.getScheduleGroup("tags", REGION).getTags());
+    }
+
+    /**
+     * The tags IAM gives a resource-tag condition: the schedule group's, read on its whole ARN in the account and
+     * Region it names, a pre-multi-account entry of the default account in place; none for anything else, the default
+     * group before a request stores it among them.
+     */
+    @Test
+    void storedTagsReadsTheScheduleGroupItsArnNames() {
+        InMemoryStorage<String, ScheduleGroup> raw = new InMemoryStorage<>();
+        SchedulerService accounts = new SchedulerService(new AccountAwareStorageBackend<>(raw, null, "000000000000"),
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+        ScheduleGroup group = accounts.createScheduleGroup("tagged", Map.of("team", "data"), REGION);
+
+        assertEquals(Map.of("team", "data"), accounts.storedTags(group.getArn()));
+        assertEquals(Map.of(), accounts.storedTags(group.getArn().replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), accounts.storedTags(group.getArn().replace(REGION, "eu-west-1")));
+        String schedule = group.getArn().replace("schedule-group/tagged", "schedule/tagged/s");
+        assertEquals(Map.of(), accounts.storedTags(schedule));
+        assertEquals(Map.of(), accounts.storedTags(accounts.findDefault("schedule-group", REGION).orElseThrow()));
+
+        String legacyArn = group.getArn().replace("tagged", "legacy");
+        ScheduleGroup legacy = new ScheduleGroup("legacy", legacyArn, "ACTIVE", Instant.now(), Instant.now());
+        legacy.getTags().put("team", "old");
+        raw.put("group:" + REGION + ":legacy", legacy);
+        assertEquals(Map.of("team", "old"), accounts.storedTags(legacyArn));
+        assertTrue(raw.get("group:" + REGION + ":legacy").isPresent());
+    }
     @Test
     void getOrCreateDefaultGroup() {
         ScheduleGroup group = service.getOrCreateDefaultGroup(REGION);

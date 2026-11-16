@@ -26,6 +26,10 @@ import jakarta.ws.rs.core.UriInfo;
  * ({@code arn:aws:<service>:<region>:<account>:<resource>}) and dispatches to the
  * matching {@link TagHandler}.
  *
+ * <p>A service whose IAM resources the generated table reads whole is served here only on the routes its AWS model
+ * gives ({@link TagDispatcher#resolveHandler(String, UriInfo)}): the bare {@code /tags}, or an ARN whose
+ * {@code /} is not encoded, is refused for it, as AWS has no such route for that service.
+ *
  * <p>The resolution and wire-shape logic lives in {@link TagDispatcher}, shared with
  * {@link V1TagsController}, which does the same job for the services AWS puts on
  * {@code /v1/tags/{resourceArn}} instead.
@@ -43,15 +47,17 @@ public class SharedTagsController extends AbstractTagsController {
 
     @GET
     public Response listTagsByQuery(@Context HttpHeaders headers,
+                                    @Context UriInfo uriInfo,
                                     @QueryParam("resourceArn") String arn) {
+        dispatcher().resolveHandler(arn, uriInfo);
         return dispatcher().listTagsForArn(headers, arn);
     }
 
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
-    public Response tagResourceByBody(@Context HttpHeaders headers, String body) {
+    public Response tagResourceByBody(@Context HttpHeaders headers, @Context UriInfo uriInfo, String body) {
         String arn = dispatcher().readResourceArn(body);
-        TagHandler handler = dispatcher().resolveHandler(arn);
+        TagHandler handler = dispatcher().resolveHandler(arn, uriInfo);
         return dispatcher().doTagResource(headers, handler, arn, body,
                 Response.ok(dispatcher().emptyObject()).build());
     }
@@ -60,7 +66,8 @@ public class SharedTagsController extends AbstractTagsController {
     public Response untagResourceByQuery(@Context HttpHeaders headers,
                                          @Context UriInfo uriInfo,
                                          @QueryParam("resourceArn") String arn) {
+        TagHandler handler = dispatcher().resolveHandler(arn, uriInfo);
         return dispatcher().untagResourceForArn(headers, uriInfo, arn,
-                Response.ok(dispatcher().emptyObject()).build());
+                Response.ok(dispatcher().emptyObject()).build(), handler);
     }
 }

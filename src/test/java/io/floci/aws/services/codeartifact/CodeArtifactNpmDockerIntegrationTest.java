@@ -753,6 +753,40 @@ class CodeArtifactNpmDockerIntegrationTest {
                         + copiedVersion.path("dist").path("tarball").asText());
     }
 
+    @Test
+    @Order(25)
+    void listPackageVersionDependenciesReadsAllFourDependencyMapsFromTheRealSidecar() {
+        String packageName = "listdeps-npm-pkg";
+        byte[] tarball = "list-deps-npm-tarball-bytes".getBytes(StandardCharsets.UTF_8);
+        String envelope = "{\"name\":\"" + packageName + "\",\"versions\":{\"1.0.0\":{\"name\":\"" + packageName
+                + "\",\"version\":\"1.0.0\","
+                + "\"dependencies\":{\"@types/node\":\"^18.0.0\"},"
+                + "\"devDependencies\":{\"jest\":\"^29.0.0\"},"
+                + "\"peerDependencies\":{\"react\":\">=16\"},"
+                + "\"optionalDependencies\":{\"fsevents\":\"^2.0.0\"},"
+                + "\"dist\":{\"tarball\":\"http://ignored/" + packageName + "-1.0.0.tgz\"}}},\"_attachments\":{\""
+                + packageName + "-1.0.0.tgz\":{\"content_type\":\"application/octet-stream\",\"data\":\""
+                + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length + "}}}";
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json").body(envelope)
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/package/version/dependencies?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm"
+                        + "&package=" + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("package", equalTo(packageName))
+                .body("dependencies.size()", equalTo(4))
+                .extract().jsonPath();
+        List<String> packageNames = body.getList("dependencies.package", String.class);
+        List<String> namespaces = body.getList("dependencies.namespace", String.class);
+        assertTrue(packageNames.contains("node"));
+        assertEquals("types", namespaces.get(packageNames.indexOf("node")));
+        assertTrue(packageNames.contains("jest"));
+        assertTrue(packageNames.contains("react"));
+        assertTrue(packageNames.contains("fsevents"));
+    }
+
     /**
      * The real-world gap this closes: {@code ListPackageVersionAssets} used to not exist at all.
      * Confirms the bridge enumerates npm's one-asset-per-version packument entry against the real

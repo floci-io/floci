@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.LambdaException;
@@ -21,7 +20,7 @@ import software.amazon.awssdk.services.lambda.model.PublishLayerVersionResponse;
 import java.net.URI;
 import java.util.UUID;
 
-import static io.floci.aws.services.lambda.LambdaLayerFixtures.layerArchive;
+import static io.floci.aws.services.lambda.LambdaLayerFixtures.publishLayerVersion;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -53,17 +52,10 @@ class LambdaLayerNameArnIamIntegrationTest {
 
     private void verifyLayerPermissions(Region layerRegion, Region requestRegion, boolean arnSelector) throws Exception {
         String name = "layer-iam-" + UUID.randomUUID();
-        byte[] archive = layerArchive();
         PublishLayerVersionResponse published;
         try (LambdaClient owner = AwsTestClients.create(LambdaClient.builder(), ACCOUNT, layerRegion, endpoint)) {
-            published = owner.publishLayerVersion(request -> request.layerName(name)
-                    .content(content -> content.zipFile(SdkBytes.fromByteArray(archive))));
+            published = publishLayerVersion(owner, name, ACCOUNT, layerRegion, endpoint, cleanup);
         }
-        cleanup.register(() -> {
-            try (LambdaClient owner = AwsTestClients.create(LambdaClient.builder(), ACCOUNT, layerRegion, endpoint)) {
-                owner.deleteLayerVersion(request -> request.layerName(name).versionNumber(published.version()));
-            }
-        });
 
         String user = "layer-reader-" + UUID.randomUUID();
         String authorization = auth(ACCOUNT, requestRegion.id(), "iam");

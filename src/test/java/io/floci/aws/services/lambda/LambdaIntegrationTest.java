@@ -1,6 +1,7 @@
 package io.floci.aws.services.lambda;
 
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
@@ -585,13 +586,7 @@ class LambdaIntegrationTest {
     @Order(40)
     void getFunction_codeLocation_isDownloadableAndByteExact() throws Exception {
         // Build a real zip with a nodejs handler file (extractZipCode verifies it).
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write("exports.handler = async () => ({ statusCode: 200 });\n".getBytes());
-            zos.closeEntry();
-        }
-        String zipB64 = Base64.getEncoder().encodeToString(baos.toByteArray());
+        String zipB64 = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ statusCode: 200 });\n");
 
         given()
             .contentType("application/json")
@@ -647,15 +642,10 @@ class LambdaIntegrationTest {
                 "downloaded package must be byte-identical to the uploaded zip");
 
         // Redeploy overwrites in place (stable key), no stale package accumulates.
-        ByteArrayOutputStream baos2 = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos2)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write("exports.handler = async () => ({ statusCode: 201 });\n".getBytes());
-            zos.closeEntry();
-        }
+        String replacementArchive = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ statusCode: 201 });\n");
         given()
             .contentType("application/json")
-            .body("{ \"ZipFile\": \"%s\" }".formatted(Base64.getEncoder().encodeToString(baos2.toByteArray())))
+            .body("{ \"ZipFile\": \"%s\" }".formatted(replacementArchive))
         .when()
             .put(BASE_PATH + "/functions/code-dl-fn/code")
         .then()

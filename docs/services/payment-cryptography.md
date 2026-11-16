@@ -75,9 +75,10 @@
 - **The key exchange:** `ExportKey` and `ImportKey` take the form of the key material the
   request names, one form per request. A key leaves under a TR-31 block the service wraps
   with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, under
-  a TR-34 key block the service signs and wraps for the receiver, or under a key the two
-  parties agreed with ECDH; it comes back under the same protections, and a public key comes
-  back under the certificate that carries it. A key that is not exportable
+  a TR-34 key block the service signs and wraps for the receiver, under an AS2805 cryptogram
+  the receiver's key encryption key protects, or under a key the two parties agreed with ECDH;
+  it comes back under the same protections, and a public key comes back under the certificate
+  that carries it. A key that is not exportable
   does not leave, a key pair has no material a key block could carry, and a counterparty's
   certificate that the named authority did not sign is refused. An export may name an initial
   DUKPT key by its serial number, and the derived key leaves instead of the base derivation
@@ -121,16 +122,27 @@
   parameters issued, and a request that names none, or that names a wrapping key instead,
   is refused with the reason rather than with a key that is not found.
 - **The headers a TR-34 export names:** a request may narrow the modes of use and the
-  exportability of the key, and the header the block carries says so, the same as it does
-  for a TR-31 block. A TR-34 block's header names the key and carries nothing else, so a
-  request that names optional blocks is refused.
+  exportability of the key, and it may name a version and optional blocks, and the header
+  the block carries says so, the same as it does for a TR-31 block.
 - **The nonce of a TR-34 block:** the nonce binds the block to the exchange, and it is
   optional in the model, so a block made without one is read without the freshness it
   carries. A request that names no nonce expects a block that carries none, so a block that
   carries one may not come in under a request that names none.
-- **The AS2805 form is not made.** A request that asks for it is refused with the error that
-  says so, rather than answered with something of another kind, and the refusal names the
-  forms the service serves.
+- **The AS2805 key cryptogram:** a key leaves under a key encryption key, bound to its
+  purpose by the AS2805 variant, and comes back the same way. The variant is exclusive-ored
+  into the key before it is encrypted, and the cryptogram carries a tag over the whole of
+  it, so a cryptogram that was changed does not open at all: the tag catches a wrong
+  wrapping key and a wrong variant as well as a changed ciphertext. The variants served
+  are `TERMINAL_MAJOR_KEY_VARIANT_00`, `DATA_ENCRYPTION_KEY_VARIANT_22`,
+  `MESSAGE_AUTHENTICATION_KEY_VARIANT_24` and `PIN_ENCRYPTION_KEY_VARIANT_28`. A variant
+  says what the key is for, so a key may only leave under the variant that matches its own
+  usage, and the wrapping key has to be at least as strong as the key it carries, on the
+  import as well as on the export.
+- **The bytes of an AS2805 cryptogram are this emulator's own.** The layout of the standard
+  is not published, so the cryptogram this service reads and writes is its own
+  construction. A cryptogram another producer built does not open here, and one this
+  service built does not open there. The fields, the variant mapping and the key rules are
+  the ones the service publishes, and those are what it implements.
 - **The block headers a request names:** an export may name the modes of use, the
   exportability, the version and the optional blocks of the TR-31 block it produces, and
   the block carries them. An optional block is written with its length in hexadecimal, and

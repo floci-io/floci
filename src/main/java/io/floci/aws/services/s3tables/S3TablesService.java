@@ -4,8 +4,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3tables.model.Namespace;
 import io.floci.aws.services.s3tables.model.S3Table;
 import io.floci.aws.services.s3tables.model.TableBucket;
@@ -19,20 +22,25 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @ApplicationScoped
 public class S3TablesService {
     private static final Logger LOG = Logger.getLogger(S3TablesService.class);
     private static final String BUCKET_PREFIX = "bucket/";
+    private static final String TABLE_INFIX = "/table/";
+    private static final int LIST_PAGE_SIZE = 1000;
 
     private final StorageBackend<String, TableBucket> store;
     private final RegionResolver regionResolver;
+    private final S3Service s3Service;
 
     @Inject
-    public S3TablesService(StorageFactory factory, RegionResolver regionResolver) {
+    public S3TablesService(StorageFactory factory, RegionResolver regionResolver, S3Service s3Service) {
         this.store = factory.create("s3tables", "s3tables.json", new TypeReference<Map<String, TableBucket>>() {});
         this.regionResolver = regionResolver;
+        this.s3Service = s3Service;
     }
 
     public synchronized TableBucket createTableBucket(String name, Object encryptionConfiguration,
@@ -59,6 +67,11 @@ public class S3TablesService {
         return bucket;
     }
 
+    public synchronized Object getTableBucketEncryption(String tableBucketArn, String region) {
+        Object configuration = getTableBucket(tableBucketArn, region).getEncryptionConfiguration();
+        return configuration == null ? Map.of("sseAlgorithm", "AES256") : configuration;
+    }
+
     public synchronized List<TableBucket> listTableBuckets(String prefix, String region) {
         return store.scan(key -> key.startsWith(region + "::")).stream()
                 .filter(bucket -> prefix == null || bucket.getName().startsWith(prefix))
@@ -72,6 +85,11 @@ public class S3TablesService {
             throw conflict("The table bucket is not empty.");
         }
         store.delete(storageKey(region, bucket.getName()));
+    }
+
+    public synchronized Object getTableBucketStorageClass(String tableBucketArn, String region) {
+        Object configuration = getTableBucket(tableBucketArn, region).getStorageClassConfiguration();
+        return configuration == null ? Map.of("storageClass", "STANDARD") : configuration;
     }
 
     public synchronized Namespace createNamespace(String tableBucketArn, List<String> namespace, String region) {
@@ -119,16 +137,99 @@ public class S3TablesService {
         if (namespace.getTables().containsKey(name)) {
             throw conflict("The table already exists.");
         }
-        S3Table table = new S3Table(name, bucket.getArn() + "/table/" + name, namespaceName, format,
+        // AWS ends a table's ARN in an id it mints, not the table's name, so tables of one name in two namespaces
+        // differ, and a rename keeps it.
+        S3Table table = new S3Table(name, bucket.getArn() + TABLE_INFIX + UUID.randomUUID(), namespaceName, format,
                 versionToken(), metadataLocation(metadata), now(), regionResolver.getAccountId(), metadata,
                 encryptionConfiguration, storageClassConfiguration, tags);
+        table.setWarehouseLocation(createWarehouse(region));
         namespace.getTables().put(name, table);
-        persist(bucket, region);
+        try {
+            persist(bucket, region);
+        } catch (RuntimeException e) {
+            namespace.getTables().remove(name);
+            deleteWarehouse(table.getWarehouseLocation());
+            throw e;
+        }
         return table;
     }
 
     public synchronized S3Table getTable(String tableBucketArn, String namespaceName, String name, String region) {
-        return getTable(getTableBucket(tableBucketArn, region), namespaceName, name);
+        TableBucket bucket = getTableBucket(tableBucketArn, region);
+        S3Table table = getTable(bucket, namespaceName, name);
+        withWarehouses(bucket, List.of(table), region);
+        return table;
+    }
+
+    /**
+     * The table {@code tableArn} names, as {@code GetTable} reads it when given one: in the table bucket the ARN's
+     * resource starts with, whichever namespace holds it. A table persisted before ARNs ended in a minted id keeps
+     * the name-based ARN it was stored with, and is found by it.
+     */
+    public synchronized S3Table getTableByArn(String tableArn, String region) {
+        int infix = tableArn == null ? -1 : tableArn.lastIndexOf(TABLE_INFIX);
+        if (infix < 0) {
+            throw notFound("The table does not exist.");
+        }
+        TableBucket bucket = getTableBucket(tableArn.substring(0, infix), region);
+        S3Table table = bucket.getNamespaces().values().stream()
+                .flatMap(namespace -> namespace.getTables().values().stream())
+                .filter(candidate -> tableArn.equals(candidate.getArn()))
+                .findFirst()
+                .orElseThrow(() -> notFound("The table does not exist."));
+        withWarehouses(bucket, List.of(table), region);
+        return table;
+    }
+
+    /**
+     * The ARN of the table a request names by its table bucket's ARN, its namespace and its name, as IAM asks for it
+     * before the handler runs; empty when there is no such table. Reads only: a table without a warehouse yet keeps
+     * it so.
+     */
+    public synchronized Optional<String> tableArn(String tableBucketArn, String namespaceName, String name,
+                                                  String region) {
+        try {
+            return Optional.of(getTable(getTableBucket(tableBucketArn, region), namespaceName, name).getArn());
+        } catch (AwsException e) {
+            if (!"NotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The tags of the table bucket or the table stored under {@code arn}, in the account and Region the ARN names, by
+     * key, which IAM gives a resource-tag condition; empty when there is none. Reads that one bucket's entry, a
+     * pre-multi-account one of the default account in place, and matches the bucket, or a table of it, on the whole
+     * ARN, leaving both as they are.
+     */
+    public synchronized Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "s3tables")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.resource().startsWith(BUCKET_PREFIX)) {
+            return Map.of();
+        }
+        String rest = parsed.resource().substring(BUCKET_PREFIX.length());
+        String bucketName = rest.contains("/") ? rest.substring(0, rest.indexOf('/')) : rest;
+        TableBucket bucket = stored(parsed.accountId(), storageKey(parsed.region(), bucketName)).orElse(null);
+        if (bucket == null) {
+            return Map.of();
+        }
+        if (arn.equals(bucket.getArn())) {
+            return Map.copyOf(bucket.getTags());
+        }
+        if (!arn.startsWith(bucket.getArn() + TABLE_INFIX)) {
+            return Map.of();
+        }
+        return bucket.getNamespaces().values().stream()
+                .flatMap(namespace -> namespace.getTables().values().stream())
+                .filter(table -> arn.equals(table.getArn()))
+                .findFirst()
+                .<Map<String, String>>map(table -> Map.copyOf(table.getTags()))
+                .orElse(Map.of());
     }
 
     public synchronized List<S3Table> listTables(String tableBucketArn, String namespaceName, String prefix, String region) {
@@ -139,16 +240,94 @@ public class S3TablesService {
         } else {
             tables.addAll(getNamespace(bucket, namespaceName).getTables().values());
         }
-        return tables.stream().filter(table -> prefix == null || table.getName().startsWith(prefix))
+        List<S3Table> listed = tables.stream().filter(table -> prefix == null || table.getName().startsWith(prefix))
                 .sorted(Comparator.comparing(S3Table::getName)).toList();
+        withWarehouses(bucket, listed, region);
+        return listed;
     }
 
     public synchronized void deleteTable(String tableBucketArn, String namespaceName, String name, String region) {
         TableBucket bucket = getTableBucket(tableBucketArn, region);
         Namespace namespace = getNamespace(bucket, namespaceName);
-        getTable(bucket, namespaceName, name);
+        S3Table table = getTable(bucket, namespaceName, name);
+        // The warehouse goes first: if emptying it fails, the table is still there to delete again.
+        deleteWarehouse(table.getWarehouseLocation());
         namespace.getTables().remove(name);
         persist(bucket, region);
+    }
+
+    /**
+     * Gives each table persisted before tables had a warehouse one of its own, so every response
+     * that reports {@code warehouseLocation} has one. A save that fails takes the new warehouses
+     * back out.
+     */
+    private void withWarehouses(TableBucket bucket, List<S3Table> tables, String region) {
+        List<S3Table> backfilled = new ArrayList<>();
+        for (S3Table table : tables) {
+            if (table.getWarehouseLocation() == null) {
+                table.setWarehouseLocation(createWarehouse(region));
+                backfilled.add(table);
+            }
+        }
+        if (backfilled.isEmpty()) {
+            return;
+        }
+        try {
+            persist(bucket, region);
+        } catch (RuntimeException e) {
+            for (S3Table table : backfilled) {
+                deleteWarehouse(table.getWarehouseLocation());
+                table.setWarehouseLocation(null);
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Creates the bucket that holds a table's data and metadata files and returns its location, as
+     * S3 Tables gives every table a warehouse of its own: an Iceberg client such as Spark's
+     * {@code S3TablesCatalog} writes there and commits with {@code UpdateTableMetadataLocation}.
+     */
+    private String createWarehouse(String region) {
+        String name = UUID.randomUUID() + S3Service.TABLE_WAREHOUSE_BUCKET_SUFFIX;
+        s3Service.createBucket(name, region);
+        return "s3://" + name;
+    }
+
+    /** Deletes a table's warehouse with everything in it, as deleting an S3 Tables table deletes its data. */
+    private void deleteWarehouse(String warehouseLocation) {
+        if (warehouseLocation == null || !warehouseLocation.startsWith("s3://")) {
+            return;
+        }
+        String name = warehouseLocation.substring("s3://".length());
+        try {
+            String keyMarker = null;
+            String versionIdMarker = null;
+            do {
+                S3Service.ListVersionsResult versions = s3Service.listObjectVersions(name, null, null, LIST_PAGE_SIZE,
+                        keyMarker, versionIdMarker);
+                for (S3Object version : versions.versions()) {
+                    s3Service.deleteObject(name, version.getKey(), version.getVersionId());
+                }
+                keyMarker = versions.isTruncated() ? versions.nextKeyMarker() : null;
+                versionIdMarker = versions.isTruncated() ? versions.nextVersionIdMarker() : null;
+            } while (keyMarker != null);
+            String continuation = null;
+            do {
+                S3Service.ListObjectsResult page = s3Service.listObjectsWithPrefixes(name, null, null, LIST_PAGE_SIZE,
+                        continuation, null);
+                for (S3Object object : page.objects()) {
+                    s3Service.deleteObject(name, object.getKey());
+                }
+                continuation = page.isTruncated() ? page.nextContinuationToken() : null;
+            } while (continuation != null);
+            s3Service.deleteBucket(name);
+        } catch (AwsException e) {
+            if (!"NoSuchBucket".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Warehouse bucket {0} was already gone", name);
+        }
     }
 
     public synchronized S3Table renameTable(String tableBucketArn, String namespaceName, String name, String newNamespaceName,
@@ -168,7 +347,6 @@ public class S3TablesService {
         sourceNamespace.getTables().remove(name);
         table.setNamespace(targetNamespaceName);
         table.setName(targetName);
-        table.setArn(bucket.getArn() + "/table/" + targetName);
         touch(table);
         targetNamespace.getTables().put(targetName, table);
         persist(bucket, region);
@@ -186,6 +364,7 @@ public class S3TablesService {
         table.setMetadataLocation(metadataLocation);
         touch(table);
         persist(bucket, region);
+        withWarehouses(bucket, List.of(table), region);
         return table;
     }
 
@@ -306,6 +485,13 @@ public class S3TablesService {
 
     private String storageKey(String region, String name) {
         return region + "::" + name;
+    }
+
+    /** The bucket stored under {@code key} in the account, or the default account's legacy one, read only. */
+    private Optional<TableBucket> stored(String accountId, String key) {
+        return store instanceof AccountAwareStorageBackend<TableBucket> aware
+                ? aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key))
+                : store.get(key);
     }
 
     private String resourceName(String arn, String prefix) {

@@ -82,8 +82,8 @@ NAMESPACES = (
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
     "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticmapreduce",
     "emr-serverless", "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda", "logs", "pipes",
-    "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "sagemaker", "scheduler",
-    "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
+    "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
+    "scheduler", "secretsmanager", "servicecatalog", "ses", "sns", "ssm", "states", "swf", "textract",
     "transcribe", "transfer", "translate",
 )
 
@@ -113,7 +113,6 @@ NOT_COVERED = {
     "mq": "REST routes no rule maps yet",
     "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented",
     "rum": "REST routes no rule maps yet",
-    "s3tables": "REST routes no rule maps yet",
 }
 
 # A member that names a role: Role, RoleArn, RoleName, their plurals, and an Update or Override of one.

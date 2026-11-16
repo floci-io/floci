@@ -466,22 +466,37 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 JSON `PutMetricData` accepts a gzip-compressed body (`Content-Encoding: gzip`), which the AWS
 CLI, boto3 and the other SDKs that call CloudWatch over JSON send by default for any body of
 10 KiB or more. With signature validation and IAM enforcement on, the signature is checked over
-the compressed bytes as sent and IAM decides the request before the body is decompressed. As on
-the CBOR protocol, the decompressed body is limited to 10 MiB: a larger one returns HTTP 413
-`PayloadTooLargeException`, a body that cannot be decompressed returns HTTP 400
+the compressed bytes as sent and IAM decides the request before the body is decompressed. The
+decompressed body is limited to 5 MiB: a larger one returns HTTP 413
+`RequestEntityTooLargeException`, a body that cannot be decompressed returns HTTP 400
 `InvalidRequestException`, and an empty body reads as no input. Other JSON operations do not
 decompress their body.
+
+JSON and Query metric publication require finite numeric values in the inclusive range -2^360
+through 2^360. They reject incomplete `StatisticValues` sets and datums combining `Value` with
+`StatisticValues` before storing any part of the batch. Missing statistics return `MissingParameter`;
+invalid values and non-object statistics return `InvalidParameterValue`; combining scalar and
+statistics returns `InvalidParameterCombination`. JSON bodies use the corresponding SDK exception
+shape names. The console's supported numeric values use the same bounds.
 
 **Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
 
 JSON 1.0 requests name their operation in `X-Amz-Target` with the `GraniteServiceVersion20100801.`
 prefix the AWS SDKs send, or with `CloudWatchVersion20130116.`, the prefix of the CloudWatch
 console's API. Both get the same signature validation and IAM checks. The console prefix serves
-four operations on the same metrics and alarms, with these request members: `ListMetrics`
+five operations on the same metrics and alarms, with these request members: `PutMetricData`
+(`Namespace`, `MetricData`), `ListMetrics`
 (`Namespace`, `MetricName`, `Dimensions`, `NextToken`), `DescribeAlarms` (`AlarmNames`,
 `AlarmNamePrefix`, `MaxRecords`, `NextToken`), `GetMetricStatistics` (`Namespace`, `MetricName`,
 `Dimensions`, `StartTime`, `EndTime`, `Period`, `Statistics`, `Unit`) and `DeleteAlarms`
 (`AlarmNames`). Every result comes back at once, so `MaxRecords` and `NextToken` change nothing.
+Console metric publication accepts a nonempty array of metric objects with either a finite
+numeric `Value` or a complete numeric `StatisticValues` object (`SampleCount`, `Sum`, `Minimum`,
+`Maximum`, with positive sample count), with string dimension names and values. Timestamps may
+be finite numeric epochs or valid ISO-8601/epoch strings. It rejects malformed batches, conflicting
+scalar/statistic-set readings, and unsupported datum fields such as `Values`, `Counts` and
+`StorageResolution` before storing any metrics. This supported subset is not complete console
+API parity.
 It returns HTTP 400 `UnsupportedOperation` for every other operation, such as the console's
 `GetMetricData` with `Defaults` and `Metrics`; for a request that sets any other member, such as
 `StateValue`, `ExtendedStatistics` or the console's `CountOnlyRequest`, to a value other than

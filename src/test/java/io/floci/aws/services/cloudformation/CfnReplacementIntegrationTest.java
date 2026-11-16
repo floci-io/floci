@@ -11,13 +11,19 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.Parameter;
+import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.ecr.model.RepositoryNotFoundException;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.ParameterType;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +49,7 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -103,6 +110,22 @@ class CfnReplacementIntegrationTest {
             CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
             "True", true, "repl-sng-b");
 
+    private static final String SQS_TYPE = "AWS::SQS::Queue";
+    private static final String S3_TYPE = "AWS::S3::Bucket";
+    private static final String DDB_KEYS = "\"BillingMode\": \"PAY_PER_REQUEST\","
+            + " \"KeySchema\": [{\"AttributeName\": \"id\", \"KeyType\": \"HASH\"}],"
+            + " \"AttributeDefinitions\": [{\"AttributeName\": \"id\", \"AttributeType\": \"S\"}]";
+
+    /**
+     * A {@code type} whose {@code nameProperty} is {@code name} by {@code Fn::If} on {@code Named}, which is
+     * {@code Fn::Equals} of {@code equalsArgs}, and {@code AWS::NoValue} otherwise.
+     */
+    private static String namedByCondition(String type, String nameProperty, String name, String equalsArgs) {
+        return subjectStack("", "", type, "\"" + nameProperty + "\": {\"Fn::If\": [\"Named\", \"" + name
+                + "\", {\"Ref\": \"AWS::NoValue\"}]}").replace("\"Resources\"",
+                "\"Conditions\": {\"Named\": {\"Fn::Equals\": " + equalsArgs + "}}, \"Resources\"");
+    }
+
     static Stream<Row> rows() {
         String app = appConfigApplication("replacement-orders");
         return Stream.of(
@@ -134,6 +157,27 @@ class CfnReplacementIntegrationTest {
                                 + " \"HostedZoneConfig\": {\"Comment\": \"second\"}",
                         "False", false, null),
                 SUBNET_GROUP_REPLACED,
+                createOnlyRow("SQS queue explicit QueueName removed", "", "", SQS_TYPE,
+                        "\"QueueName\": \"repl-q-removed\"", "\"VisibilityTimeout\": 30", "True", false, null),
+                new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue",
+                        namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"x\"]"),
+                        namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"y\"]"),
+                        "Subject", "True", true, null),
+                createOnlyRow("S3 bucket explicit BucketName removed", "", "", S3_TYPE,
+                        "\"BucketName\": \"repl-s3-removed\"", "", "True", false, null),
+                new Row("S3 bucket BucketName dropped by Fn::If choosing AWS::NoValue",
+                        namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"x\"]"),
+                        namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"y\"]"),
+                        "Subject", "True", true, null),
+                new Row("log group whose whole Properties block is dropped",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"LogGroupName\": \"repl-dropped-properties\"}}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "Subject", "True", true, null),
+                createOnlyRow("ECR repository RepositoryName removed", "", "", "AWS::ECR::Repository",
+                        "\"RepositoryName\": \"repl-ecr-named\"", "", "True", false, null),
+                createOnlyRow("DynamoDB table explicit TableName removed", "", "", "AWS::DynamoDB::Table",
+                        DDB_KEYS + ", \"TableName\": \"repl-ddb-removed\"", DDB_KEYS, "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
@@ -503,6 +547,75 @@ class CfnReplacementIntegrationTest {
             } else {
                 assertEquals(before, after, row.label() + ": the update keeps the resource");
             }
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aRenamedEcrRepositoryLeavesNoRepositoryUnderTheOldName() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "repl-ecr-" + suffix;
+        String first = "repl-ecr-a-" + suffix;
+        String second = "repl-ecr-b-" + suffix;
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1);
+             EcrClient ecr = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack,
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + first + "\""),
+                    "CREATE_COMPLETE");
+            assertEquals(first, ecr.describeRepositories(request -> request.repositoryNames(first))
+                    .repositories().getFirst().repositoryName());
+
+            createUpdateChangeSet(client, stack, "rename",
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + second + "\""));
+            assertEquals(List.of("True"), replacement(client, stack, "rename", "Subject"));
+            executeAndAwaitUpdate(client, stack, "rename");
+
+            assertEquals(second, physicalId(client, stack, "Subject"));
+            assertEquals(second, ecr.describeRepositories(request -> request.repositoryNames(second))
+                    .repositories().getFirst().repositoryName());
+            assertThrows(RepositoryNotFoundException.class,
+                    () -> ecr.describeRepositories(request -> request.repositoryNames(first)),
+                    "the old repository is deleted once the update completes");
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aRenamedEcrRepositoryThatStillHoldsAnImageIsKept() throws Exception {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the registry data plane");
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "repl-ecr-full-" + suffix;
+        String first = "repl-ecr-full-a-" + suffix;
+        String second = "repl-ecr-full-b-" + suffix;
+        byte[] config = "{\"architecture\":\"amd64\",\"os\":\"linux\"}".getBytes(StandardCharsets.UTF_8);
+        String configDigest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(config));
+        String manifest = "{\"schemaVersion\": 2, \"mediaType\": \"application/vnd.docker.distribution.manifest.v2+json\","
+                + " \"config\": {\"mediaType\": \"application/vnd.docker.container.image.v1+json\", \"size\": "
+                + config.length + ", \"digest\": \"" + configDigest + "\"}, \"layers\": []}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1);
+             EcrClient ecr = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack,
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + first + "\""),
+                    "CREATE_COMPLETE");
+            String upload = ecr.initiateLayerUpload(request -> request.repositoryName(first)).uploadId();
+            ecr.uploadLayerPart(request -> request.repositoryName(first).uploadId(upload)
+                    .partFirstByte(0L).partLastByte((long) config.length - 1).layerPartBlob(SdkBytes.fromByteArray(config)));
+            ecr.completeLayerUpload(request -> request.repositoryName(first).uploadId(upload)
+                    .layerDigests(configDigest));
+            ecr.putImage(request -> request.repositoryName(first).imageManifest(manifest).imageTag("v1"));
+
+            createUpdateChangeSet(client, stack, "rename",
+                    subjectStack("", "", "AWS::ECR::Repository", "\"RepositoryName\": \"" + second + "\""));
+            executeAndAwaitUpdate(client, stack, "rename");
+
+            assertEquals(second, physicalId(client, stack, "Subject"));
+            assertEquals(1, ecr.listImages(request -> request.repositoryName(first)).imageIds().size(),
+                    "the old repository still holds its image: ECR refuses to delete a non-empty repository");
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
