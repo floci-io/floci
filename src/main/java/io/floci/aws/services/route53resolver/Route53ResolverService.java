@@ -517,9 +517,10 @@ public class Route53ResolverService {
     /**
      * Deletes a rule no VPC is associated with. AWS refuses one that still is, with {@code ResourceInUseException}:
      * a rule is disassociated from every VPC it was associated with before it is deleted. Deleting it would leave
-     * associations whose rule, and so whose Region, is gone.
+     * associations whose rule, and so whose Region, is gone. {@code synchronized} with
+     * {@link #associateResolverRule}, so an association can't be stored between the check and the deletion.
      */
-    public ObjectNode deleteResolverRule(String id, String region) {
+    public synchronized ObjectNode deleteResolverRule(String id, String region) {
         ObjectNode rule = require(ruleStore, id, "resolver rule", region);
         boolean associated = ruleAssociationStore.scan(key -> true).stream()
                 .anyMatch(association -> id.equals(text(association, "ResolverRuleId")));
@@ -552,7 +553,7 @@ public class Route53ResolverService {
 
     // ---------- Resolver rule associations ----------
 
-    public ObjectNode associateResolverRule(JsonNode request, String region) {
+    public synchronized ObjectNode associateResolverRule(JsonNode request, String region) {
         String ruleId = requireText(request, "ResolverRuleId", INVALID_PARAMETER);
         String vpcId = requireText(request, "VPCId", INVALID_PARAMETER);
         require(ruleStore, ruleId, "resolver rule", region);
