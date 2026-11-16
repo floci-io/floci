@@ -97,7 +97,16 @@ public final class RdsRequests {
     /** Creates a PostgreSQL instance with database {@code appdb} and returns its endpoint port. */
     public static int createPostgresInstance(String id, String masterUsername, String masterPassword,
                                              boolean iamDatabaseAuthentication) {
-        return rds("CreateDBInstance")
+        return createPostgresInstance(id, masterUsername, masterPassword, iamDatabaseAuthentication, null);
+    }
+
+    /**
+     * Creates a PostgreSQL instance with database {@code appdb}, in DB parameter group
+     * {@code parameterGroupName} unless it is null, and returns its endpoint port.
+     */
+    public static int createPostgresInstance(String id, String masterUsername, String masterPassword,
+                                             boolean iamDatabaseAuthentication, String parameterGroupName) {
+        RequestSpecification request = rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", id)
                 .formParam("Engine", "postgres")
                 .formParam("MasterUsername", masterUsername)
@@ -105,7 +114,11 @@ public final class RdsRequests {
                 .formParam("DBName", "appdb")
                 .formParam("AllocatedStorage", "20")
                 .formParam("DBInstanceClass", "db.t3.micro")
-                .formParam("EnableIAMDatabaseAuthentication", iamDatabaseAuthentication)
+                .formParam("EnableIAMDatabaseAuthentication", iamDatabaseAuthentication);
+        if (parameterGroupName != null) {
+            request.formParam("DBParameterGroupName", parameterGroupName);
+        }
+        return request
         .when().post("/").then().statusCode(200)
                 .extract().xmlPath()
                 .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");

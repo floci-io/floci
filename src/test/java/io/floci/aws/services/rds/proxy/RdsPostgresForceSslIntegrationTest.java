@@ -13,6 +13,7 @@ import java.sql.Statement;
 import java.util.Properties;
 
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
+import static io.floci.aws.testing.RdsRequests.createPostgresInstance;
 import static io.floci.aws.testing.RdsRequests.deleteInstance;
 import static io.floci.aws.testing.RdsRequests.rds;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -44,17 +45,7 @@ class RdsPostgresForceSslIntegrationTest {
         String dbId = "force-ssl-" + suffix;
         createInstanceParameterGroup(group, "postgres16");
         try {
-            int port = rds("CreateDBInstance")
-                    .formParam("DBInstanceIdentifier", dbId)
-                    .formParam("Engine", "postgres")
-                    .formParam("MasterUsername", MASTER_USER)
-                    .formParam("MasterUserPassword", MASTER_PASSWORD)
-                    .formParam("DBName", "appdb")
-                    .formParam("AllocatedStorage", "20")
-                    .formParam("DBInstanceClass", "db.t3.micro")
-                    .formParam("DBParameterGroupName", group)
-            .when().post("/").then().statusCode(200).extract().xmlPath()
-                    .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+            int port = createPostgresInstance(dbId, MASTER_USER, MASTER_PASSWORD, false, group);
 
             assertThat(selectOne(port, "disable"), equalTo(1));
 

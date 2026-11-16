@@ -1327,7 +1327,8 @@ a non-CA server certificate followed by Floci's shared root CA, so strict TLS
 clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
 The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
 or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
-`rds.endpointHost` resolves to.
+`rds.endpointHost` resolves to. A PostgreSQL database whose parameter group sets `rds.force_ssl`
+to `1` refuses connections that do not negotiate TLS; see [Parameter groups](#parameter-groups).
 
 The shared CA is the same one used by ACM, IoT, and EKS. It is persisted at
 `{storage.persistent-path}/tls/floci-root-ca.crt`, with its owner-only private key in

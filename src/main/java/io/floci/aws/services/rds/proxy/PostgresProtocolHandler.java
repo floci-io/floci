@@ -31,7 +31,8 @@ import java.util.function.BiConsumer;
  *
  * <p>Flow:
  * <ol>
- *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation)
+ *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation), refusing one sent
+ *       without TLS when {@code rds.force_ssl} requires it
  *   <li>Challenge client with AuthenticationCleartextPassword
  *   <li>Read client password
  *   <li>Validate (IAM SigV4 or plain password)
