@@ -375,6 +375,39 @@ See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.h
   `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
   `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
 
+## SUPER and VARBYTE
+
+A cluster's database has the `SUPER` and `VARBYTE` types and the functions that make and read them. `VARBYTE(n)`, `VARBINARY(n)`
+and `BINARY VARYING(n)` in `CREATE TABLE` and `ALTER TABLE` are the same type.
+
+| Function | Result |
+|---|---|
+| `JSON_PARSE(varchar or varbyte)` | The `SUPER` value of a JSON document; an error when it is not JSON. NULL for NULL. |
+| `CAN_JSON_PARSE(varchar or varbyte)` | `true` when `JSON_PARSE` takes it, `false` otherwise and for an empty string, NULL for NULL. |
+| `JSON_SERIALIZE(super)` | The JSON text of a `SUPER` value, the string `null` for NULL. |
+| `JSON_TYPEOF(super)` | `object`, `array`, `string`, `number`, `boolean` or `null`. |
+| `FROM_VARBYTE(varbyte, format)` | The string of a binary value in `hex`, `binary`, `utf8` (also `utf-8` and `utf_8`) or `base64`. |
+| `TO_VARBYTE(string, format)` | The binary value of a string in one of those formats; an odd number of hexadecimal digits gets a leading `0`. |
+
+```sql
+CREATE TABLE events (id INT, doc SUPER, raw VARBYTE(64));
+INSERT INTO events VALUES (1, JSON_PARSE('{"a":[1,2]}'), TO_VARBYTE('6162', 'hex'));
+SELECT JSON_SERIALIZE(doc), FROM_VARBYTE(raw, 'utf8') FROM events;
+```
+
+Floci keeps both as PostgreSQL domains, `varbyte` over `bytea` and `super` over `jsonb`, so some things differ from Amazon Redshift:
+
+- The length of `VARBYTE(n)` is not enforced.
+- A `SUPER` object's keys are in `jsonb` order, shorter keys first and then by bytes, not in the order the JSON gave them.
+- A `VARBYTE` column read as it is comes back in PostgreSQL's `bytea` form (`\x6162`), not as `6162`. Read it with `FROM_VARBYTE(value, 'hex')`.
+- A `VARCHAR` or an integer does not cast to `VARBYTE`: use `TO_VARBYTE`.
+- PartiQL navigation into a `SUPER` value (`doc.a[0]`), `JSON_SIZE`, `IS_OBJECT`, `IS_ARRAY` and the other `SUPER` functions are not supported.
+- `JSON_TYPEOF` of an untyped literal is ambiguous with PostgreSQL's own `json_typeof`: give it a `JSON_PARSE` result or a `::super` cast.
+
+See AWS's [SUPER type](https://docs.aws.amazon.com/redshift/latest/dg/r_SUPER_type.html),
+[VARBYTE type](https://docs.aws.amazon.com/redshift/latest/dg/r_VARBYTE_type.html) and
+[JSON_PARSE](https://docs.aws.amazon.com/redshift/latest/dg/JSON_PARSE.html).
+
 ## Cross-region snapshot copy
 
 `EnableSnapshotCopy` makes a background sweep (`FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS`, 60 by default) copy the cluster's snapshots to the destination Region.
