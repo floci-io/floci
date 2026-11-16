@@ -8,9 +8,11 @@ import jakarta.ws.rs.core.UriInfo;
 final class S3QueryParams {
 
     private final MultivaluedMap<String, String> decoded;
+    private final String rawQuery;
 
     S3QueryParams(UriInfo uriInfo) {
         this.decoded = ResteasyRequests.queryParameters(uriInfo);
+        this.rawQuery = ResteasyRequests.rawQuery(uriInfo);
     }
 
     MultivaluedMap<String, String> decoded() {
@@ -18,7 +20,7 @@ final class S3QueryParams {
     }
 
     boolean has(String name) {
-        return decoded.containsKey(name);
+        return decoded.containsKey(name) || S3RequestParser.hasQueryParamInString(rawQuery, name);
     }
 
     String first(String name) {
