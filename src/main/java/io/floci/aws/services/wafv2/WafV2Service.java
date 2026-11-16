@@ -14,6 +14,7 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.wafv2.model.IpSet;
 import io.floci.aws.services.wafv2.model.RegexPatternSet;
 import io.floci.aws.services.wafv2.model.RuleGroup;
+import io.floci.aws.services.wafv2.model.WafV2Resource;
 import io.floci.aws.services.wafv2.model.WebAcl;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -384,13 +385,13 @@ public class WafV2Service {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn) {
-        return tagsOf(taggable(resourceArn));
+        return taggable(resourceArn).getTags();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
         validateTags(tags);
-        Object resource = taggable(resourceArn);
-        Map<String, String> current = tagsOf(resource);
+        WafV2Resource resource = taggable(resourceArn);
+        Map<String, String> current = resource.getTags();
         Map<String, String> merged = new LinkedHashMap<>(current);
         merged.putAll(tags);
         requireTagCount(merged.size());
@@ -400,14 +401,14 @@ public class WafV2Service {
 
     public void untagResource(String resourceArn, List<String> keys) {
         keys.forEach(key -> requireValidTagKey(key, "TAG_KEYS"));
-        Object resource = taggable(resourceArn);
-        keys.forEach(tagsOf(resource)::remove);
+        WafV2Resource resource = taggable(resourceArn);
+        keys.forEach(resource.getTags()::remove);
         persistTagged(resource);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private Object taggable(String resourceArn) {
+    private WafV2Resource taggable(String resourceArn) {
         if (resourceArn == null) {
             throw new AwsException("WAFInvalidParameterException", "ResourceARN is required.", 400);
         }
@@ -430,20 +431,7 @@ public class WafV2Service {
         throw new AwsException("WAFNonexistentItemException", "Resource not found: " + resourceArn, 400);
     }
 
-    private Map<String, String> tagsOf(Object resource) {
-        if (resource instanceof WebAcl a) {
-            return a.getTags();
-        } else if (resource instanceof IpSet i) {
-            return i.getTags();
-        } else if (resource instanceof RegexPatternSet r) {
-            return r.getTags();
-        } else if (resource instanceof RuleGroup g) {
-            return g.getTags();
-        }
-        throw new AwsException("WAFNonexistentItemException", "Resource not found.", 400);
-    }
-
-    private void persistTagged(Object resource) {
+    private void persistTagged(WafV2Resource resource) {
         if (resource instanceof WebAcl a) {
             webAclStore.put(keyOf(a), a);
         } else if (resource instanceof IpSet i) {
@@ -456,11 +444,11 @@ public class WafV2Service {
     }
 
     /** The resource {@code arn} names, if the request's Region reaches it ({@link #reachableArn}). */
-    private <V> V scanArn(StorageBackend<String, V> store, String arn) {
+    private <V extends WafV2Resource> V scanArn(StorageBackend<String, V> store, String arn) {
         return reachableArn(arn).map(parsed -> {
             String prefix = parsed.region() + KEY_SEPARATOR;
             return store.scan(k -> k.startsWith(prefix)).stream()
-                    .filter(v -> arn.equals(arnOf(v)))
+                    .filter(v -> arn.equals(v.getArn()))
                     .findFirst().orElse(null);
         }).orElse(null);
     }
@@ -489,15 +477,7 @@ public class WafV2Service {
         }
     }
 
-    private String arnOf(Object v) {
-        if (v instanceof WebAcl a) return a.getArn();
-        if (v instanceof IpSet i) return i.getArn();
-        if (v instanceof RegexPatternSet r) return r.getArn();
-        if (v instanceof RuleGroup g) return g.getArn();
-        return null;
-    }
-
-    private <V> V require(StorageBackend<String, V> store, String scope, String id, String name) {
+    private <V extends WafV2Resource> V require(StorageBackend<String, V> store, String scope, String id, String name) {
         validateScope(scope);
         if (id == null) {
             throw new AwsException("WAFInvalidParameterException", "Id is required.", 400);
@@ -506,7 +486,7 @@ public class WafV2Service {
             throw new AwsException("WAFInvalidParameterException", "Name is required.", 400);
         }
         V resource = store.get(key(scope, id, regionResolver.getRegion())).orElseThrow(WafV2Service::nonexistentItem);
-        if (!name.equals(nameOf(resource))) {
+        if (!name.equals(resource.getName())) {
             throw nonexistentItem();
         }
         return resource;
@@ -518,10 +498,11 @@ public class WafV2Service {
     }
 
     /** The resource of {@code scope} named {@code name} in {@code region}: a name is unique within one Region. */
-    private <V> V findByName(StorageBackend<String, V> store, String scope, String name, String region) {
+    private <V extends WafV2Resource> V findByName(StorageBackend<String, V> store, String scope, String name,
+                                                   String region) {
         String prefix = homeRegion(scope, region) + KEY_SEPARATOR + scope + ":";
         return store.scan(k -> k.startsWith(prefix)).stream()
-                .filter(v -> name.equals(nameOf(v)))
+                .filter(v -> name.equals(v.getName()))
                 .findFirst().orElse(null);
     }
 
@@ -531,28 +512,9 @@ public class WafV2Service {
         return new ArrayList<>(store.scan(k -> k.startsWith(prefix)));
     }
 
-    private String scopeOf(Object v) {
-        if (v instanceof WebAcl a) return a.getScope();
-        if (v instanceof IpSet i) return i.getScope();
-        if (v instanceof RegexPatternSet r) return r.getScope();
-        if (v instanceof RuleGroup g) return g.getScope();
-        return null;
-    }
-
-    private String nameOf(Object v) {
-        if (v instanceof WebAcl a) return a.getName();
-        if (v instanceof IpSet i) return i.getName();
-        if (v instanceof RegexPatternSet r) return r.getName();
-        if (v instanceof RuleGroup g) return g.getName();
-        return null;
-    }
-
-    private <V> String rotate(V resource, StorageBackend<String, V> store) {
+    private <V extends WafV2Resource> String rotate(V resource, StorageBackend<String, V> store) {
         String next = UUID.randomUUID().toString();
-        if (resource instanceof WebAcl a) { a.setLockToken(next); }
-        else if (resource instanceof IpSet i) { i.setLockToken(next); }
-        else if (resource instanceof RegexPatternSet r) { r.setLockToken(next); }
-        else { RuleGroup g = (RuleGroup) resource; g.setLockToken(next); }
+        resource.setLockToken(next);
         store.put(keyOf(resource), resource);
         return next;
     }
@@ -707,31 +669,15 @@ public class WafV2Service {
      * Region it records it was created in, or else the default Region. Null for a {@code CLOUDFRONT} resource of a
      * partition without CloudFront, which no request reaches.
      */
-    private String keyOf(Object resource) {
-        String arn = arnOf(resource);
+    private String keyOf(WafV2Resource resource) {
+        String arn = resource.getArn();
         String region = AwsArnUtils.isArnFor(arn, "wafv2") ? AwsArnUtils.parse(arn).region()
-                : Optional.ofNullable(regionOf(resource)).orElseGet(regionResolver::getDefaultRegion);
+                : Optional.ofNullable(resource.getRegion()).orElseGet(regionResolver::getDefaultRegion);
         try {
-            return key(scopeOf(resource), idOf(resource), region);
+            return key(resource.getScope(), resource.getId(), region);
         } catch (AwsException e) {
             return null;
         }
-    }
-
-    private String regionOf(Object v) {
-        if (v instanceof WebAcl a) return a.getRegion();
-        if (v instanceof IpSet i) return i.getRegion();
-        if (v instanceof RegexPatternSet r) return r.getRegion();
-        if (v instanceof RuleGroup g) return g.getRegion();
-        return null;
-    }
-
-    private String idOf(Object v) {
-        if (v instanceof WebAcl a) return a.getId();
-        if (v instanceof IpSet i) return i.getId();
-        if (v instanceof RegexPatternSet r) return r.getId();
-        if (v instanceof RuleGroup g) return g.getId();
-        return null;
     }
 
     private String buildArn(String scope, String type, String name, String id, String region) {
