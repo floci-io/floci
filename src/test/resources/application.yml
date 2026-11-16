@@ -419,6 +419,8 @@ floci:
       mock: true
       backend-keep-alive: true
       backend-keep-alive-timeout-seconds: 60
+
+      alb-zone-rule: aws
     codebuild:
       enabled: true
       # docker-network: floci-network
