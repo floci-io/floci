@@ -395,9 +395,11 @@ services:
 
     Proxy and target-group settings are persisted and round-trip through the RDS Query API and
     CloudFormation. Pool sizing, borrow timeout, idle timeout, TLS, init-query, and session-pinning
-    settings are currently control-plane metadata; the TCP relay does not yet implement those data-plane
-    behaviors. `DefaultAuthScheme=IAM_AUTH` is supported for control-plane workflows, but a real-mode
-    proxy using that scheme cannot register a target until backend IAM authentication is implemented.
+    settings are currently control-plane metadata; the TCP relay does not yet implement those
+    data-plane behaviors. `SessionPinningFilters` is accepted and stored on every engine family; AWS
+    documents it as effective only for the MySQL engine family. `DefaultAuthScheme=IAM_AUTH` is
+    supported for control-plane workflows, but a real-mode proxy using that scheme cannot register a
+    target until backend IAM authentication is implemented.
     Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
     `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
     matching the RDS API contract.
