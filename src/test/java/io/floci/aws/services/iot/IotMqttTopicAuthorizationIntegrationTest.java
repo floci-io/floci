@@ -86,17 +86,21 @@ class IotMqttTopicAuthorizationIntegrationTest {
         String thing = "a" + System.nanoTime();
         String otherTopic = "things/b" + thing + "/telemetry";
         MqttClient listener = connectPlain("listener-" + System.nanoTime());
-        MqttClient client = connectTls(thingDevice(thing), thing);
+        MqttClient client = null;
         try {
+            client = connectTls(thingDevice(thing), thing);
+            MqttClient device = client;
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
             listener.subscribe(otherTopic, 1, (topic, message) -> received.add(topic));
 
-            assertThrows(MqttException.class, () -> client.publish(otherTopic, "x".getBytes(StandardCharsets.UTF_8), 1, false));
+            assertThrows(MqttException.class, () -> device.publish(otherTopic, "x".getBytes(StandardCharsets.UTF_8), 1, false));
 
-            assertFalse(client.isConnected());
+            assertFalse(device.isConnected());
             assertNull(received.poll(1, TimeUnit.SECONDS));
         } finally {
-            closeV3(client);
+            if (client != null) {
+                closeV3(client);
+            }
             closeV3(listener);
         }
     }
