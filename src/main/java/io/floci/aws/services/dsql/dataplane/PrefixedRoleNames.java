@@ -19,7 +19,11 @@ public final class PrefixedRoleNames implements RoleNames {
      */
     static final int MAX_LOGICAL = 35;
 
-    private static final Set<String> SPECIFIERS = Set.of(
+    /**
+     * The role specifiers PostgreSQL reads as keywords where a role name goes, folded to lower
+     * case; {@link DsqlStatements} reads the same set.
+     */
+    static final Set<String> SPECIFIERS = Set.of(
             "public", "current_user", "current_role", "session_user", "none", "default");
 
     private final String prefix;

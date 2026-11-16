@@ -32,8 +32,6 @@ public final class DsqlStatements {
     private static final String RESERVED_PREFIX = "dsql.";
     private static final Set<String> ISOLATION_PARAMETERS = Set.of("default_transaction_isolation", "transaction_isolation");
     private static final Set<String> ROLE_KINDS = Set.of("ROLE", "USER", "GROUP");
-    private static final Set<String> ROLE_SPECIFIERS = Set.of("CURRENT_ROLE", "CURRENT_USER", "SESSION_USER", "PUBLIC",
-            "NONE");
     /** What PostgreSQL 16 lets {@code REVOKE <option> OPTION FOR} take back of a role's grant. */
     private static final Set<String> ROLE_GRANT_OPTIONS = Set.of("ADMIN", "INHERIT", "SET");
     private static final Set<String> RENAME_TARGETS = Set.of("RENAME", "COLUMN", "CONSTRAINT", "ATTRIBUTE");
@@ -512,7 +510,7 @@ public final class DsqlStatements {
         for (int i = at; i < tokens.size(); i += 2) {
             Token name = tokens.get(i);
             // A role specifier PostgreSQL refuses here is left for PostgreSQL to refuse.
-            boolean specifier = name.type() == Type.WORD && ROLE_SPECIFIERS.contains(name.upper());
+            boolean specifier = name.type() == Type.WORD && PrefixedRoleNames.SPECIFIERS.contains(name.folded());
             if (specifier || name.type() != Type.WORD && name.type() != Type.QUOTED_IDENTIFIER) {
                 return null;
             }

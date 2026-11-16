@@ -143,6 +143,8 @@ class DsqlStatementsTest {
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "SET search_path TO probe",
         "DROP ROLE CURRENT_USER",
+        "DROP ROLE session_user",
+        "DROP ROLE DEFAULT",
         "DROP ROLE IF EXISTS",
         "DROP ROLE a b",
         "DROP ROLE a,",
