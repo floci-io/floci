@@ -265,9 +265,12 @@ EventBridge bus. Cluster operations also notify their member instances. Instance
 use `RDS DB Instance Event` and IDs `RDS-EVENT-0087` (stopped) and `RDS-EVENT-0088`
 (started); cluster events use `RDS DB Cluster Event` and `RDS-EVENT-0150` / `0151`.
 The resource ARN appears in both `resources` and `detail.SourceArn`, alongside
-`SourceType`, `SourceIdentifier`, `Date`, `Message`, `EventID` and
+`SourceType` (`DB_INSTANCE` for instances, `CLUSTER` for clusters),
+`SourceIdentifier`, `Date`, `Message`, `EventID` and
 `EventCategories: ["notification"]`, following the
 [AWS event examples](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Events.overview.html).
+The [Aurora cluster example](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_Events.overview.html)
+documents the cluster-specific source type.
 
 Events are emitted after the backend and proxies finish the operation. Rejected or failed
 operations do not emit success notifications. Delivery is best effort, with no replay after

@@ -38,7 +38,7 @@ public class RdsEventPublisher {
         AwsArnUtils.Arn resource = AwsArnUtils.parse(arn);
         ObjectNode detail = objectMapper.createObjectNode();
         detail.putArray("EventCategories").add("notification");
-        detail.put("SourceType", cluster ? "DB_CLUSTER" : "DB_INSTANCE");
+        detail.put("SourceType", cluster ? "CLUSTER" : "DB_INSTANCE");
         detail.put("SourceArn", arn);
         detail.put("SourceIdentifier", identifier);
         detail.put("Date", Instant.now().toString());
@@ -71,7 +71,8 @@ public class RdsEventPublisher {
             RequestScopes.runAs(event.accountId(), event.region(), () -> eventBridgeService.publishServiceEvent(
                     "aws.rds", event.detailType(), event.detail(), event.arn(), event.region()));
         } catch (RuntimeException e) {
-            // Event delivery is best effort and must not turn a completed database operation into a fault.
+            // The RDS transition has already committed. Even an unexpected delivery defect must
+            // not report a failed stop/start after it succeeded; retain its cause in the warning.
             LOG.warnv(e, "Could not publish RDS lifecycle event for {0}", event.arn());
         }
     }

@@ -2,14 +2,18 @@ package io.floci.aws.services.rds;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.eventbridge.EventBridgeService;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -53,19 +57,24 @@ class RdsEventPublisherTest {
         EventBridgeService eventBridge = mock(EventBridgeService.class);
         RdsEventPublisher publisher = new RdsEventPublisher(eventBridge, new ObjectMapper());
         List<String> details = new ArrayList<>();
+        IllegalStateException failure = new IllegalStateException("target unavailable");
         doAnswer(invocation -> {
             details.add(invocation.getArgument(2));
             if (details.size() == 1) {
-                throw new IllegalStateException("target unavailable");
+                throw failure;
             }
             return null;
         }).when(eventBridge).publishServiceEvent(anyString(), anyString(), anyString(), anyString(), anyString());
         String arn = "arn:aws:rds:eu-west-2:111122223333:cluster:one";
         publisher.queue(arn, "one", true, false);
         publisher.queue(arn, "one", true, true);
-        publisher.publishQueued();
+        List<LogRecord> records = LogCapture.capture(RdsEventPublisher.class, publisher::publishQueued);
         assertEquals(2, details.size());
         assertTrue(details.getFirst().contains("RDS-EVENT-0150"));
         assertTrue(details.getLast().contains("RDS-EVENT-0151"));
+        assertEquals(1, records.size());
+        assertEquals(Level.WARNING.intValue(), records.getFirst().getLevel().intValue());
+        assertSame(failure, records.getFirst().getThrown());
+        assertTrue(LogCapture.formatted(records.getFirst()).contains(arn));
     }
 }
