@@ -632,6 +632,7 @@ class EmrServerlessSparkRunnerTest {
                 .thenReturn(new LaunchImage(pulled, null));
         EmrServerlessSparkRunner runner = runner(builder);
         when(lifecycle.create(any(), eq("linux/arm64"))).thenReturn("driver");
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
 
         // The executors' worker type naming the same custom image.
         runner.run(customImageJob(custom).withExecutors(new SparkJobRunner.Executors(2, custom, 0, 0, 0, null))
