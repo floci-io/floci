@@ -1,6 +1,6 @@
 package io.floci.aws.services.elbv2;
 
-import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.testing.AlbFixtures;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
@@ -10,14 +10,11 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Action;
-import software.amazon.awssdk.services.elasticloadbalancingv2.model.DeleteLoadBalancerRequest;
-import software.amazon.awssdk.services.elasticloadbalancingv2.model.DeleteTargetGroupRequest;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Listener;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Rule;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetGroupTuple;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,22 +24,18 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @QuarkusTest
 class ElbV2ForwardConfigIntegrationTest {
 
+    private static final String ACCOUNT = "000000000000";
+
     private ElasticLoadBalancingV2Client elb;
     private String loadBalancerArn;
     private String targetGroupArn;
 
     @BeforeEach
     void createResources() {
-        elb = AwsTestClients.create(ElasticLoadBalancingV2Client.builder(), "000000000000", Region.US_EAST_1);
+        elb = AwsTestClients.create(ElasticLoadBalancingV2Client.builder(), ACCOUNT, Region.US_EAST_1);
         String suffix = UUID.randomUUID().toString().substring(0, 8);
-        loadBalancerArn = elb.createLoadBalancer(request -> request.name("forward-" + suffix)
-                .type("application").subnets(List.of(
-                        Ec2Service.defaultSubnetId("us-east-1", "a"),
-                        Ec2Service.defaultSubnetId("us-east-1", "b"))))
-                .loadBalancers().getFirst().loadBalancerArn();
-        targetGroupArn = elb.createTargetGroup(request -> request.name("forward-" + suffix)
-                .protocol("HTTP").port(80).targetType("ip"))
-                .targetGroups().getFirst().targetGroupArn();
+        loadBalancerArn = AlbFixtures.createLoadBalancer(ACCOUNT, "forward-" + suffix);
+        targetGroupArn = AlbFixtures.createTargetGroup(ACCOUNT, "forward-" + suffix, "ip", 80);
     }
 
     @AfterEach
@@ -52,12 +45,12 @@ class ElbV2ForwardConfigIntegrationTest {
         }
         try {
             if (loadBalancerArn != null) {
-                elb.deleteLoadBalancer(DeleteLoadBalancerRequest.builder().loadBalancerArn(loadBalancerArn).build());
+                AlbFixtures.deleteLoadBalancer(ACCOUNT, loadBalancerArn);
             }
         } finally {
             try {
                 if (targetGroupArn != null) {
-                    elb.deleteTargetGroup(DeleteTargetGroupRequest.builder().targetGroupArn(targetGroupArn).build());
+                    AlbFixtures.deleteTargetGroup(ACCOUNT, targetGroupArn);
                 }
             } finally {
                 elb.close();
