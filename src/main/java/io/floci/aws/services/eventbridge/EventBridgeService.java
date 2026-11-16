@@ -746,30 +746,41 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
         validateTagResourceArn(resourceArn, region);
         String resource = AwsArnUtils.parse(resourceArn).resource();
+        if ("event-bus/default".equals(resource)) {
+            getOrCreateDefaultBus(region);
+        }
+        return requireTagResource(resourceArn, region, resource).tags();
+    }
+
+    private record TagResource(String arn, Map<String, String> tags, Runnable save) {}
+
+    private Optional<TagResource> findTagResource(String accountId, String region, String resource) {
         if (resource.startsWith("event-bus/")) {
-            String busName = resource.substring("event-bus/".length());
-            if (busName.isBlank()) {
-                throw new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 400);
-            }
-            return describeEventBus(busName, region).getTags();
+            String key = busKey(region, resource.substring("event-bus/".length()));
+            return accountGet(busStore, accountId, key)
+                    .map(bus -> new TagResource(bus.getArn(), bus.getTags(),
+                            () -> accountPut(busStore, accountId, key, bus)));
         }
         if (resource.startsWith("rule/")) {
             RuleRef ref = parseRuleResource(resource);
             String key = ruleKey(region, ref.busName(), ref.ruleName());
-            return ruleStore.get(key)
-                    .map(Rule::getTags)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Resource not found: " + resourceArn, 400));
+            return accountGet(ruleStore, accountId, key)
+                    .map(rule -> new TagResource(rule.getArn(), rule.getTags(),
+                            () -> accountPut(ruleStore, accountId, key, rule)));
         }
         if (resource.startsWith("archive/")) {
-            String archiveName = resource.substring("archive/".length());
-            String key = archiveKey(region, archiveName);
-            return archiveStore.get(key)
-                    .map(Archive::getTags)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Archive not found: " + archiveName, 400));
+            String key = archiveKey(region, resource.substring("archive/".length()));
+            return accountGet(archiveStore, accountId, key)
+                    .map(archive -> new TagResource(archive.getArchiveArn(), archive.getTags(),
+                            () -> accountPut(archiveStore, accountId, key, archive)));
         }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 400);
+        return Optional.empty();
+    }
+
+    private TagResource requireTagResource(String resourceArn, String region, String resource) {
+        return findTagResource(regionResolver.getAccountId(), region, resource)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Resource not found: " + resourceArn, 400));
     }
 
     /** EventBridge tag operations only address resources in the caller's account and Region. */
@@ -809,79 +820,19 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
         validateTagResourceArn(resourceArn, region);
         String resource = AwsArnUtils.parse(resourceArn).resource();
-        if (resource.startsWith("archive/")) {
-            String archiveName = resource.substring("archive/".length());
-            String key = archiveKey(region, archiveName);
-            Archive archive = archiveStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Archive not found: " + archiveName, 400));
-            archive.getTags().putAll(tags);
-            archiveStore.put(key, archive);
-            resourceGroupsTaggingService.tagResources(List.of(resourceArn), tags, region);
-            return;
-        }
-        if (resource.startsWith("event-bus/")) {
-            String busName = resource.substring("event-bus/".length());
-            String key = busKey(region, busName);
-            EventBus bus = busStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Resource not found: " + resourceArn, 400));
-            bus.getTags().putAll(tags);
-            busStore.put(key, bus);
-            resourceGroupsTaggingService.tagResources(List.of(resourceArn), tags, region);
-            return;
-        }
-        if (resource.startsWith("rule/")) {
-            RuleRef ref = parseRuleResource(resource);
-            String key = ruleKey(region, ref.busName(), ref.ruleName());
-            Rule rule = ruleStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Resource not found: " + resourceArn, 400));
-            rule.getTags().putAll(tags);
-            ruleStore.put(key, rule);
-            resourceGroupsTaggingService.tagResources(List.of(resourceArn), tags, region);
-            return;
-        }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 400);
+        TagResource target = requireTagResource(resourceArn, region, resource);
+        target.tags().putAll(tags);
+        target.save().run();
+        resourceGroupsTaggingService.tagResources(List.of(resourceArn), tags, region);
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
         validateTagResourceArn(resourceArn, region);
         String resource = AwsArnUtils.parse(resourceArn).resource();
-        if (resource.startsWith("archive/")) {
-            String archiveName = resource.substring("archive/".length());
-            String key = archiveKey(region, archiveName);
-            Archive archive = archiveStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Archive not found: " + archiveName, 400));
-            tagKeys.forEach(archive.getTags()::remove);
-            archiveStore.put(key, archive);
-            resourceGroupsTaggingService.untagResources(List.of(resourceArn), tagKeys, region);
-            return;
-        }
-        if (resource.startsWith("event-bus/")) {
-            String busName = resource.substring("event-bus/".length());
-            String key = busKey(region, busName);
-            EventBus bus = busStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Resource not found: " + resourceArn, 400));
-            tagKeys.forEach(bus.getTags()::remove);
-            busStore.put(key, bus);
-            resourceGroupsTaggingService.untagResources(List.of(resourceArn), tagKeys, region);
-            return;
-        }
-        if (resource.startsWith("rule/")) {
-            RuleRef ref = parseRuleResource(resource);
-            String key = ruleKey(region, ref.busName(), ref.ruleName());
-            Rule rule = ruleStore.get(key)
-                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                            "Resource not found: " + resourceArn, 400));
-            tagKeys.forEach(rule.getTags()::remove);
-            ruleStore.put(key, rule);
-            resourceGroupsTaggingService.untagResources(List.of(resourceArn), tagKeys, region);
-            return;
-        }
-        throw new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 400);
+        TagResource target = requireTagResource(resourceArn, region, resource);
+        tagKeys.forEach(target.tags()::remove);
+        target.save().run();
+        resourceGroupsTaggingService.untagResources(List.of(resourceArn), tagKeys, region);
     }
 
     // ──────────────────────────── Permissions ────────────────────────────
@@ -1928,19 +1879,12 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         if (!regionResolver.partitionForRegion(arn.region()).equals(arn.partition())) {
             return Map.of();
         }
-        if (arn.resource().startsWith("event-bus/")) {
-            String name = arn.resource().substring("event-bus/".length());
-            return accountGet(busStore, arn.accountId(), busKey(arn.region(), name))
-                    .filter(bus -> resourceArn.equals(bus.getArn()))
-                    .map(EventBus::getTags).map(LinkedHashMap::new).orElseGet(LinkedHashMap::new);
+        if (!arn.resource().startsWith("event-bus/") && !arn.resource().startsWith("rule/")) {
+            return Map.of();
         }
-        if (arn.resource().startsWith("rule/")) {
-            RuleRef ref = parseRuleResource(arn.resource());
-            return accountGet(ruleStore, arn.accountId(), ruleKey(arn.region(), ref.busName(), ref.ruleName()))
-                    .filter(rule -> resourceArn.equals(rule.getArn()))
-                    .map(Rule::getTags).map(LinkedHashMap::new).orElseGet(LinkedHashMap::new);
-        }
-        return Map.of();
+        return findTagResource(arn.accountId(), arn.region(), arn.resource())
+                .filter(target -> resourceArn.equals(target.arn()))
+                .map(TagResource::tags).map(LinkedHashMap::new).orElseGet(LinkedHashMap::new);
     }
 
     /** The Region's default event bus, which a request naming no bus acts on. */

@@ -56,21 +56,25 @@ class EventBridgeServiceTest {
 
     private EventBridgeService service;
     private TargetDispatcher dispatcherMock;
+    private StorageBackend<String, EventBus> busStore;
     private StorageBackend<String, Rule> ruleStore;
+    private StorageBackend<String, Archive> archiveStore;
     private StorageBackend<String, Replay> replayStore;
     private ReplayDispatcher replayDispatcherMock;
 
     @BeforeEach
     void setUp() {
         dispatcherMock = mock(TargetDispatcher.class);
-        ruleStore = new InMemoryStorage<>();
+        busStore = spy(new InMemoryStorage<>());
+        ruleStore = spy(new InMemoryStorage<>());
+        archiveStore = spy(new InMemoryStorage<>());
         replayStore = new InMemoryStorage<>();
         replayDispatcherMock = mock(ReplayDispatcher.class);
         service = new EventBridgeService(
-                new InMemoryStorage<>(),
+                busStore,
                 ruleStore,
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                archiveStore,
                 new InMemoryStorage<>(),
                 replayStore,
                 new InMemoryStorage<>(),
@@ -182,6 +186,50 @@ class EventBridgeServiceTest {
                 service.listTagsForResource(foreignAccountArn, REGION));
 
         assertEquals("ResourceNotFoundException", error.getErrorCode());
+    }
+
+    @Test
+    void tagOperationsPersistBusRuleAndArchiveTagsThroughTheSharedLookup() {
+        EventBus bus = service.createEventBus("tagged-bus", null, null, REGION);
+        Rule defaultRule = service.putRule("tagged-rule", null, null, "rate(1 minute)",
+                RuleState.ENABLED, null, null, null, REGION);
+        Rule customRule = service.putRule("tagged-rule", bus.getName(), null, "rate(1 minute)",
+                RuleState.ENABLED, null, null, null, REGION);
+        Archive archive = service.createArchive("tagged-archive", bus.getArn(), null, null, 0, REGION);
+        Mockito.clearInvocations(busStore, ruleStore, archiveStore);
+
+        for (String arn : List.of(bus.getArn(), defaultRule.getArn(), customRule.getArn(), archive.getArchiveArn())) {
+            service.tagResource(arn, Map.of("owner", arn, "remove", "value"), REGION);
+            assertEquals(Map.of("owner", arn, "remove", "value"), service.listTagsForResource(arn, REGION));
+            service.untagResource(arn, List.of("remove"), REGION);
+            assertEquals(Map.of("owner", arn), service.listTagsForResource(arn, REGION));
+        }
+
+        verify(busStore, Mockito.times(2)).put(anyString(), any());
+        verify(ruleStore, Mockito.times(4)).put(anyString(), any());
+        verify(archiveStore, Mockito.times(2)).put(anyString(), any());
+        Mockito.clearInvocations(busStore, ruleStore, archiveStore);
+        for (String arn : List.of(bus.getArn(), defaultRule.getArn(), customRule.getArn())) {
+            Map<String, String> snapshot = service.storedTags(arn);
+            assertEquals(Map.of("owner", arn), snapshot);
+            snapshot.clear();
+            assertEquals(Map.of("owner", arn), service.listTagsForResource(arn, REGION));
+            assertTrue(service.storedTags(arn.replace(":000000000000:", ":111111111111:")).isEmpty());
+        }
+        assertTrue(service.storedTags(archive.getArchiveArn()).isEmpty());
+        verify(busStore, never()).put(anyString(), any());
+        verify(ruleStore, never()).put(anyString(), any());
+        verify(archiveStore, never()).put(anyString(), any());
+    }
+
+    @Test
+    void iamTagLookupDoesNotCreateTheDefaultBusButListingStillDoes() {
+        assertTrue(service.storedTags(DEFAULT_BUS).isEmpty());
+        assertTrue(busStore.isEmpty());
+        verify(busStore, never()).put(anyString(), any());
+
+        assertTrue(service.listTagsForResource(DEFAULT_BUS, REGION).isEmpty());
+        assertFalse(busStore.isEmpty());
     }
 
     @Test
