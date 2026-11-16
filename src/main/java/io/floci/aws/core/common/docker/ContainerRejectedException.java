@@ -14,11 +14,13 @@ public class ContainerRejectedException extends RuntimeException {
     }
 
     /**
-     * Whether the daemon answered a create with a client error other than a name conflict or a
-     * missing object. Those two keep their own types: callers recover from or report them.
+     * Whether the daemon answered a create with a client error that a retry would get again. A
+     * name conflict and a missing object keep their own types, since callers recover from or
+     * report them, and a timeout (408) or throttling (429) stays retryable.
      */
     static boolean isRejection(DockerException e) {
         int status = e.getHttpStatus();
-        return status >= 400 && status < 500 && status != 404 && status != 409;
+        return status >= 400 && status < 500
+                && status != 404 && status != 408 && status != 409 && status != 429;
     }
 }

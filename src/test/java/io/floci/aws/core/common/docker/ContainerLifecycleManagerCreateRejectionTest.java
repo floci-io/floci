@@ -10,6 +10,8 @@ import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -77,6 +79,15 @@ class ContainerLifecycleManagerCreateRejectionTest {
         failCreateWith(new BadRequestException("invalid mount config"));
 
         assertThrows(ContainerRejectedException.class, () -> manager().create(spec()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {408, 429})
+    void createKeepsATimeoutOrThrottlingRetryable(int status) {
+        DockerException temporary = new DockerException("try again later", status);
+        failCreateWith(temporary);
+
+        assertSame(temporary, assertThrows(DockerException.class, () -> manager().create(spec())));
     }
 
     @Test
