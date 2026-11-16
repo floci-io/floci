@@ -205,17 +205,18 @@ class CfnReplacementIntegrationTest {
                                 + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-novalue\","
                                 + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
                         "Subject", "False", false, null),
-                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue over a dynamic reference",
+                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue while a tag reads another stack's output",
                         "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
                                 + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
                                 + " \"Properties\": {\"RetentionInDays\": 7}}}}",
                         "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
                                 + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
                                 + " \"Properties\": {\"RetentionInDays\": 14,"
-                                + " \"KmsKeyId\": {\"Fn::ImportValue\": \"repl-missing-export\"},"
-                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"{{resolve:ssm:repl-name}}\","
+                                + " \"Tags\": [{\"Key\": \"source\", \"Value\": {\"Fn::GetStackOutput\":"
+                                + " {\"StackName\": \"" + OUTPUT_SOURCE + "\", \"OutputName\": \"Out\"}}}],"
+                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-output\","
                                 + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
-                        "Subject", "False", false, null),
+                        "Subject", "False", false, stack -> createOutputSource()),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
@@ -231,6 +232,7 @@ class CfnReplacementIntegrationTest {
                         "Subject", "True", true, null));
     }
 
+    private static final String OUTPUT_SOURCE = "repl-output-source";
     private static final String HOSTED = "hosted";
     private static final String REF_A = "{\"Ref\": \"NameA\"}";
     private static final String REF_B = "{\"Ref\": \"NameB\"}";
@@ -246,6 +248,9 @@ class CfnReplacementIntegrationTest {
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
             CfnStackWaits.createStack(client, stack, row.before(), "CREATE_COMPLETE");
             String before = physicalId(client, stack, "Subject");
+            if (row.afterCreate() != null) {
+                row.afterCreate().accept(stack);
+            }
 
             createUpdateChangeSet(client, stack, "change", row.after());
             assertEquals(List.of(row.preview()), replacement(client, stack, "change", "Subject"), row.label());
@@ -264,6 +269,18 @@ class CfnReplacementIntegrationTest {
             }
         } finally {
             CfnStackWaits.deleteStack(stack);
+            if (row.afterCreate() != null) {
+                CfnStackWaits.deleteStack(OUTPUT_SOURCE);
+            }
+        }
+    }
+
+    private static void createOutputSource() {
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, OUTPUT_SOURCE, "{\"Resources\": {\"Source\": {\"Type\":"
+                    + " \"AWS::SSM::Parameter\", \"Properties\": {\"Type\": \"String\", \"Value\": \"v\"}}},"
+                    + " \"Outputs\": {\"Out\": {\"Value\": \"output-value\"}}}", "CREATE_COMPLETE");
         }
     }
 
