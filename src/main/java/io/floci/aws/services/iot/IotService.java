@@ -602,17 +602,34 @@ public class IotService {
         return isAllowed(authorizerPolicies(documents, clientId, sourceIp, domainName), "iot:Connect", "client/" + clientId);
     }
 
+    /**
+     * The policies of a device's certificate, re-read on every check, so an attach, a detach or a
+     * new default version applies to a session that is already open.
+     */
     public ConnectionPolicies devicePolicies(RegisteredDevice device, String clientId, String sourceIp, String domainName) {
         return new ConnectionPolicies(() -> attachedPolicyDocuments(device.certificate().getCertificateArn(), device.region(), device.accountId()),
                 connectionVariables(device, clientId, sourceIp, domainName), device.region(), device.accountId());
     }
 
+    /** The policies a custom authorizer returned, fixed for the session at connect. */
     public ConnectionPolicies authorizerPolicies(List<String> documents, String clientId, String sourceIp, String domainName) {
         // ponytail: the broker has no request context, so a custom-auth client connects to the default account and region.
         return new ConnectionPolicies(() -> documents, basicConnectionVariables(clientId, sourceIp, domainName),
                 regionResolver.getDefaultRegion(), regionResolver.getDefaultAccountId());
     }
 
+    /**
+     * Decides {@code action} on the IoT ARN of {@code resource} in the policies' account and region:
+     * {@code iot:Connect} on {@code client/<clientId>}, {@code iot:Publish} and {@code iot:Receive} on
+     * {@code topic/<topic>}, {@code iot:Subscribe} on {@code topicfilter/<filter>}. The documents are
+     * evaluated as they are written, with the connection's variables offered as condition keys. The
+     * {@code ${...}} placeholders are the evaluator's to resolve, from that same context, because the
+     * developer guide gives IoT no policy language of its own: its policies "follow the same
+     * conventions as IAM policies" and "the same policy evaluation logic", and a variable is one
+     * "that can be used in AWS IoT Core policies in the Resource or Condition block", which is where
+     * that resolver substitutes and the only place AWS says a variable has meaning. No policy means
+     * deny; an explicit deny wins.
+     */
     public boolean isAllowed(ConnectionPolicies policies, String action, String resource) {
         List<String> documents = policies.documents().get();
         if (documents.isEmpty()) {
