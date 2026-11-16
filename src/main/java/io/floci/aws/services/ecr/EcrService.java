@@ -652,13 +652,14 @@ public class EcrService implements ResourceProvider, Resettable {
         String key = key(region, account, repositoryName);
         Repository repo = repoStore.get(key).orElseThrow(() -> notFound(repositoryName, account));
 
-        // Check whether the registry has any tagged images for this repo.
+        // Check whether the registry has any images for this repo, tagged or not.
         // A test double with no HTTP client means no backing registry exists,
         // so there is nothing to clean up. Any failure against a real client
         // aborts the delete: an unreachable registry cannot prove the repo
         // empty (non-force must not bypass RepositoryNotEmptyException) and
         // force must not orphan pullable images behind deleted metadata.
         List<String> tags;
+        boolean untaggedImages = false;
         boolean registryAvailable = true;
         if (registryManager.httpClient() == null) {
             // Test double without an HTTP layer (Mockito default): no backing
@@ -667,6 +668,10 @@ public class EcrService implements ResourceProvider, Resettable {
             registryAvailable = false;
         } else try {
             tags = listTagsOrThrow(account, region, repositoryName);
+            if (tags.isEmpty() && !force) {
+                untaggedImages = holdsImage(account, region, repositoryName,
+                        resolveRegistryRepoNameStrict(account, region, repositoryName));
+            }
         } catch (Exception e) {
             if (isRegistryUnreachable(e)) {
                 throw new AwsException("ServerException",
@@ -679,7 +684,7 @@ public class EcrService implements ResourceProvider, Resettable {
                             + e.getMessage(),
                     500);
         }
-        if (!tags.isEmpty() && !force) {
+        if ((!tags.isEmpty() || untaggedImages) && !force) {
             throw new AwsException("RepositoryNotEmptyException",
                     "The repository with name '" + repositoryName
                             + "' in registry with id '" + account + "' cannot be deleted because it still contains images",
@@ -1931,6 +1936,22 @@ public class EcrService implements ResourceProvider, Resettable {
                 repositoryName, cause.getMessage());
         return new AwsException("ServerException",
                 "Could not delete images from repository '" + repositoryName + "'", 500);
+    }
+
+    /**
+     * Whether the registry still holds a manifest of the repository, for a repository with no tags.
+     * The registry cannot list manifests, so candidates come from the push record every manifest
+     * write leaves in {@code imageMetaStore}; one counts only while the registry has its manifest.
+     */
+    private boolean holdsImage(String account, String region, String repositoryName, String internal)
+            throws IOException, InterruptedException {
+        String metaPrefix = key(region, account, repositoryName) + "::";
+        for (ImageMetadata meta : imageMetaStore.scan(k -> k.startsWith(metaPrefix))) {
+            if (registryManager.httpClient().headManifestDigestStrict(internal, meta.getDigest(), null) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
