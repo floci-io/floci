@@ -2,6 +2,8 @@ package io.floci.aws.services.athena;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class TrinoSqlCompatibilityTest {
@@ -74,6 +76,113 @@ class TrinoSqlCompatibilityTest {
         String sql = "SELECT json_extract(col, '$.a[*]'), json_extract_scalar(col, p), json_size(col, '$..a')";
 
         assertEquals(sql, TrinoSqlCompatibility.translate(sql));
+    }
+
+    /** The shape of a facet query: one row per (column name, value) pair of each source row. */
+    @Test
+    void aMultiArgumentUnnestBecomesALateralSubqueryWithOneUnnestPerArray() {
+        assertEquals("SELECT facet.column_name, facet.value FROM events "
+                        + "CROSS JOIN LATERAL (SELECT unnest(ARRAY['region', 'status']), "
+                        + "unnest(ARRAY[CAST(region AS VARCHAR), status])) AS facet (column_name, value) "
+                        + "WHERE facet.value <> ''",
+                TrinoSqlCompatibility.translate("SELECT facet.column_name, facet.value FROM events "
+                        + "CROSS JOIN UNNEST(ARRAY['region', 'status'], ARRAY[CAST(region AS VARCHAR), status]) "
+                        + "AS facet (column_name, value) WHERE facet.value <> ''"));
+    }
+
+    /** Access Graph's facet query writes the source over several lines, as some clients send CRLF. */
+    @Test
+    void aMultiLineUnnestIsRewrittenWhateverItsLineBreaks() {
+        for (String lineBreak : List.of("\n", "\r\n")) {
+            String sql = String.join(lineBreak, "FROM \"flagged_raw_data\"", "\tCROSS JOIN UNNEST(",
+                    "\t\tARRAY['identity', 'target_resource'],", "\t\tARRAY[CAST(identity AS VARCHAR), target_resource]",
+                    "\t) AS facet (column_name, value)", "\tWHERE facet.value <> ''");
+
+            assertEquals("FROM \"flagged_raw_data\"" + lineBreak + "\tCROSS JOIN LATERAL (SELECT "
+                            + "unnest(ARRAY['identity', 'target_resource']), "
+                            + "unnest(ARRAY[CAST(identity AS VARCHAR), target_resource])) AS facet (column_name, value)"
+                            + lineBreak + "\tWHERE facet.value <> ''",
+                    TrinoSqlCompatibility.translate(sql));
+        }
+    }
+
+    @Test
+    void aFirstCommaOrLeftJoinSourceAndAnAliasWithoutAsAreRewrittenToo() {
+        assertEquals("SELECT * FROM LATERAL (SELECT unnest(a), unnest(b)) AS u (x, y)",
+                TrinoSqlCompatibility.translate("SELECT * FROM UNNEST(a, b) AS u (x, y)"));
+        assertEquals("SELECT * FROM t, LATERAL (SELECT unnest(a), unnest(b)) AS u (x, y)",
+                TrinoSqlCompatibility.translate("SELECT * FROM t, UNNEST(a, b) u (x, y)"));
+        assertEquals("SELECT * FROM t LEFT JOIN LATERAL (SELECT unnest(a), unnest(b)) AS u (x, y) ON TRUE",
+                TrinoSqlCompatibility.translate("SELECT * FROM t LEFT JOIN unnest (a, b) AS u (x, y) ON TRUE"));
+    }
+
+    /** Commas inside an array, a call, a literal or a CASE belong to that argument, not to UNNEST's list. */
+    @Test
+    void commasInsideAnUnnestArgumentDoNotSplitIt() {
+        assertEquals("SELECT * FROM t CROSS JOIN LATERAL (SELECT unnest(ARRAY[f(a, b), 'c,d']), "
+                        + "unnest(ARRAY[CASE WHEN k IN ('x', 'y') THEN NULL ELSE k END, z])) AS u (p, q)",
+                TrinoSqlCompatibility.translate("SELECT * FROM t CROSS JOIN UNNEST(ARRAY[f(a, b), 'c,d'], "
+                        + "ARRAY[CASE WHEN k IN ('x', 'y') THEN NULL ELSE k END, z]) AS u (p, q)"));
+    }
+
+    @Test
+    void eachUnnestArgumentIsTranslatedItself() {
+        assertEquals("SELECT * FROM t CROSS JOIN LATERAL (SELECT unnest(CAST(json_parse(a) AS JSON[])), "
+                        + "unnest(b)) AS u (x, y)",
+                TrinoSqlCompatibility.translate(
+                        "SELECT * FROM t CROSS JOIN UNNEST(CAST(json_parse(a) AS ARRAY<JSON>), b) AS u (x, y)"));
+    }
+
+    /** A line comment in an argument would otherwise run on over the rest of the rewritten source. */
+    @Test
+    void commentsInAnUnnestSourceAreDroppedAndQuotedNamesKeepTheirQuoting() {
+        assertEquals("SELECT * FROM t CROSS JOIN LATERAL (SELECT unnest(a), unnest(b)) AS \"U\" (\"Key\", \"v w\")",
+                TrinoSqlCompatibility.translate("SELECT * FROM t CROSS JOIN UNNEST(a -- names\n, b /* values */) "
+                        + "/* c */ AS -- d\n \"U\" (\"Key\" /* k */, \"v w\" -- v\n)"));
+    }
+
+    /**
+     * Without a column list there is nothing to name the subquery's columns; with WITH ORDINALITY, a list that
+     * doesn't name every array, or a clause keyword where an alias would be, the source is left for DuckDB to report.
+     * So is a function only named like it.
+     */
+    @Test
+    void unnestSourcesTheRewriteCannotKeepFaithfulAreLeftAsWritten() {
+        for (String sql : List.of(
+                "SELECT * FROM t CROSS JOIN UNNEST(a, b) AS u",
+                "SELECT * FROM t CROSS JOIN UNNEST(a, b) WHERE (x, y) = (1, 2)",
+                "SELECT * FROM t CROSS JOIN UNNEST(a, b) WITH ORDINALITY AS u (x, y, n)",
+                "SELECT * FROM t CROSS JOIN UNNEST(a, b) AS u (x)",
+                "SELECT * FROM t CROSS JOIN UNNEST(a, b) AS u (x, y + 1)",
+                "SELECT * FROM t CROSS JOIN UNNEST(a) AS u (x)",
+                "SELECT * FROM t CROSS JOIN my_unnest(a, b) AS u (x, y)",
+                "SELECT * FROM t CROSS JOIN my_schema.unnest(a, b) AS u (x, y)",
+                "SELECT * FROM t CROSS JOIN UNNEST(a, b")) {
+            assertEquals(sql, TrinoSqlCompatibility.translate(sql));
+        }
+    }
+
+    @Test
+    void unnestInsideALiteralAQuotedIdentifierOrACommentIsNotRewritten() {
+        String sql = "SELECT 'UNNEST(a, b) AS u (x, y)' AS \"UNNEST(a, b) AS u (x, y)\" "
+                + "/* UNNEST(a, b) AS u (x, y) */ FROM t -- UNNEST(a, b) AS u (x, y)";
+
+        assertEquals(sql, TrinoSqlCompatibility.translate(sql));
+    }
+
+    @Test
+    void everyMultiArgumentUnnestInTheQueryIsRewritten() {
+        assertEquals("SELECT * FROM t CROSS JOIN LATERAL (SELECT unnest(a), unnest(b)) AS u (x, y) "
+                        + "CROSS JOIN LATERAL (SELECT unnest(c), unnest(d)) AS v (p, q)",
+                TrinoSqlCompatibility.translate("SELECT * FROM t CROSS JOIN UNNEST(a, b) AS u (x, y) "
+                        + "CROSS JOIN UNNEST(c, d) AS v (p, q)"));
+    }
+
+    /** Brackets count when splitting arguments, so a JSON function given an array element still gets its path. */
+    @Test
+    void aJsonPathAfterAnArrayElementArgumentIsTranslated() {
+        assertEquals("SELECT json_extract_scalar(ARRAY['{\"a\":1}', '{}'][1], '/a')",
+                TrinoSqlCompatibility.translate("SELECT json_extract_scalar(ARRAY['{\"a\":1}', '{}'][1], '$.a')"));
     }
 
     @Test

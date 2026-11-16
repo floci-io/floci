@@ -3,6 +3,7 @@ package io.floci.aws.services.athena;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -27,6 +28,8 @@ import java.util.regex.Pattern;
  *       which can name any member, a bracketed {@code ["a\"b"]} included. A path with a wildcard
  *       keeps its JSONPath form, and the macros still turn a computed path's bracketed members
  *       ({@code $["a b"]}) into DuckDB's {@code $."a b"}.</li>
+ *   <li>a multi-argument {@code UNNEST} source, which DuckDB's one-argument {@code unnest} rejects, into a
+ *       lateral subquery holding one {@code unnest} per array (see {@link #multiArgumentUnnest}).</li>
  * </ul>
  */
 final class TrinoSqlCompatibility {
@@ -49,6 +52,10 @@ final class TrinoSqlCompatibility {
 
     private static final List<String> CAST_FUNCTIONS = List.of("TRY_CAST", "CAST");
     private static final List<String> PATH_FUNCTIONS = List.of("JSON_EXTRACT_SCALAR", "JSON_EXTRACT", "JSON_SIZE");
+    /** Words that can follow a {@code FROM} source without naming it, so never an alias given without {@code AS}. */
+    private static final Set<String> CLAUSE_KEYWORDS = Set.of("WHERE", "ON", "USING", "JOIN", "CROSS", "INNER",
+            "LEFT", "RIGHT", "FULL", "NATURAL", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "UNION",
+            "INTERSECT", "EXCEPT", "WINDOW", "WITH");
     private static final Pattern MULTI_WORD_TYPE = Pattern.compile(
             "DOUBLE\\s+PRECISION|(TIMESTAMP|TIME)(\\s*\\(\\s*\\d+\\s*\\))?\\s+WITH(OUT)?\\s+TIME\\s+ZONE",
             Pattern.CASE_INSENSITIVE);
@@ -56,7 +63,7 @@ final class TrinoSqlCompatibility {
     private TrinoSqlCompatibility() {
     }
 
-    /** {@code sql} with Trino's cast types and literal JSON paths in DuckDB's syntax. */
+    /** {@code sql} with Trino's cast types, literal JSON paths and multi-argument UNNEST in DuckDB's syntax. */
     static String translate(String sql) {
         if (sql == null) {
             return null;
@@ -68,6 +75,12 @@ final class TrinoSqlCompatibility {
             if (skipped > i) {
                 out.append(sql, i, skipped);
                 i = skipped;
+                continue;
+            }
+            Rewrite unnest = multiArgumentUnnest(sql, i);
+            if (unnest != null) {
+                out.append(unnest.text());
+                i = unnest.end();
                 continue;
             }
             String function = functionAt(sql, i);
@@ -104,6 +117,112 @@ final class TrinoSqlCompatibility {
         String path = arguments.get(1);
         String pointer = jsonPointerLiteral(path.trim());
         return translate(arguments.get(0)) + "," + (pointer == null ? translate(path) : " " + pointer);
+    }
+
+    /** The text replacing a construct, and the index just past the construct it replaces. */
+    private record Rewrite(String text, int end) {
+    }
+
+    /**
+     * The multi-argument {@code UNNEST} source starting at {@code i}, rewritten for DuckDB; null for anything else.
+     *
+     * <p>Trino zips the arrays of a multi-argument {@code UNNEST} into one row per position, padding the shorter ones
+     * with NULL, a NULL array counting as an empty one:
+     *
+     * <pre>CROSS JOIN UNNEST(names, vals) AS facet (column_name, value)</pre>
+     *
+     * DuckDB's {@code unnest} takes one argument, but a {@code SELECT} holding several {@code unnest} calls zips them
+     * the same way, NULL padding included, so the source becomes a lateral subquery with one call per array:
+     *
+     * <pre>CROSS JOIN LATERAL (SELECT unnest(names), unnest(vals)) AS facet (column_name, value)</pre>
+     *
+     * Checked against Athena (engine v3): the shorter array on either side, a NULL array beside another, both empty
+     * under {@code CROSS JOIN} (no rows) and under {@code LEFT JOIN ... ON TRUE} (one row of NULLs). The column list
+     * names the subquery's columns, as in Trino, rather than aliases inside it: DuckDB would resolve an array that
+     * names an outer column called like an earlier alias to that alias. Each array is translated too, so a
+     * {@code CAST(... AS ARRAY<JSON>)} in one still becomes DuckDB's, and comments in the arrays or the column list are
+     * dropped, so a line comment cannot run on over the text around it.
+     *
+     * <p>Any {@code UNNEST(} with two or more arguments, an alias and a column list naming one column per array is
+     * rewritten; that is only ever a {@code FROM} source. Without a column list, with one that doesn't name every
+     * array, or with a clause keyword where an alias given without {@code AS} would be, the source is left as written
+     * for DuckDB to reject. A single-argument {@code UNNEST} of an array needs nothing: DuckDB runs it as Athena does,
+     * {@code WITH ORDINALITY} included.
+     *
+     * <p>TODO: left as written are a multi-argument {@code UNNEST ... WITH ORDINALITY}, one without a column list,
+     * which Trino names by position, and a {@code MAP} argument, which Athena expands into key and value columns (a
+     * single-argument {@code UNNEST} of a {@code MAP} fails on DuckDB too).
+     */
+    private static Rewrite multiArgumentUnnest(String sql, int i) {
+        // A name ending in unnest, or a qualified one (schema.unnest), is some other function.
+        if (!sql.regionMatches(true, i, "UNNEST", 0, 6)
+                || i > 0 && (isIdentifierChar(sql.charAt(i - 1)) || sql.charAt(i - 1) == '.')) {
+            return null;
+        }
+        int open = skipSpaceAndComments(sql, i + 6);
+        int close = open < sql.length() && sql.charAt(open) == '(' ? matchingParen(sql, open) : -1;
+        if (close < 0) {
+            return null;
+        }
+        List<String> arrays = splitTopLevel(sql.substring(open + 1, close), true);
+        if (arrays.size() < 2) {
+            return null;
+        }
+        // The alias, after an optional AS; without AS, a word that ends the source is not one.
+        int aliasStart = skipSpaceAndComments(sql, close + 1);
+        boolean as = sql.regionMatches(true, aliasStart, "AS", 0, 2) && identifierEnd(sql, aliasStart) == aliasStart + 2;
+        if (as) {
+            aliasStart = skipSpaceAndComments(sql, aliasStart + 2);
+        }
+        int aliasEnd = identifierEnd(sql, aliasStart);
+        String alias = sql.substring(aliasStart, aliasEnd);
+        if (alias.isEmpty() || !as && CLAUSE_KEYWORDS.contains(alias.toUpperCase(Locale.ROOT))) {
+            return null;
+        }
+        int columnsOpen = skipSpaceAndComments(sql, aliasEnd);
+        int columnsClose = columnsOpen < sql.length() && sql.charAt(columnsOpen) == '(' ? matchingParen(sql, columnsOpen) : -1;
+        if (columnsClose < 0) {
+            return null;
+        }
+        String columnList = withoutComments(sql.substring(columnsOpen + 1, columnsClose));
+        List<String> columns = splitTopLevel(columnList, true).stream().map(String::strip).toList();
+        if (columns.size() != arrays.size()
+                || !columns.stream().allMatch(column -> !column.isEmpty() && identifierEnd(column, 0) == column.length())) {
+            return null;
+        }
+        StringBuilder lateral = new StringBuilder("LATERAL (SELECT ");
+        for (int k = 0; k < arrays.size(); k++) {
+            lateral.append(k > 0 ? ", " : "").append("unnest(")
+                    .append(translate(withoutComments(arrays.get(k))).strip()).append(')');
+        }
+        return new Rewrite(lateral.append(") AS ").append(alias).append(" (").append(String.join(", ", columns))
+                .append(')').toString(), columnsClose + 1);
+    }
+
+    /** The index of the first character at or after {@code i} that is neither whitespace nor in a comment. */
+    private static int skipSpaceAndComments(String sql, int i) {
+        while (i < sql.length()) {
+            if (Character.isWhitespace(sql.charAt(i))) {
+                i++;
+            } else if (sql.startsWith("--", i) || sql.startsWith("/*", i)) {
+                i = skipLiteralOrComment(sql, i);
+            } else {
+                break;
+            }
+        }
+        return i;
+    }
+
+    /** The index just past the bare or double-quoted identifier at {@code i}, or {@code i} when none starts there. */
+    private static int identifierEnd(String sql, int i) {
+        if (i < sql.length() && sql.charAt(i) == '"') {
+            return skipQuoted(sql, i);
+        }
+        int end = i;
+        while (end < sql.length() && isIdentifierChar(sql.charAt(end))) {
+            end++;
+        }
+        return end;
     }
 
     /**
@@ -404,8 +523,8 @@ final class TrinoSqlCompatibility {
     }
 
     /**
-     * {@code parameters} split at its top-level commas, skipping quoted identifiers and, for
-     * function arguments, string literals and comments too.
+     * {@code parameters} split at its top-level commas, outside parentheses and brackets, skipping quoted
+     * identifiers and, for function arguments, string literals and comments too.
      */
     private static List<String> splitTopLevel(String parameters, boolean sql) {
         List<String> parts = new ArrayList<>();
@@ -419,9 +538,9 @@ final class TrinoSqlCompatibility {
                 i = skipped;
                 continue;
             }
-            if (c == '<' && !sql || c == '(') {
+            if (c == '<' && !sql || c == '(' || c == '[') {
                 depth++;
-            } else if (c == '>' && !sql || c == ')') {
+            } else if (c == '>' && !sql || c == ')' || c == ']') {
                 depth--;
             } else if (c == ',' && depth == 0) {
                 parts.add(parameters.substring(start, i));
