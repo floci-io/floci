@@ -938,9 +938,17 @@ public class ElbV2QueryHandler {
         xml.elem("Type", safe(a.getType()));
         if (a.getOrder() != null) xml.elem("Order", String.valueOf(a.getOrder()));
         if (a.getTargetGroupArn() != null) xml.elem("TargetGroupArn", a.getTargetGroupArn());
-        if (!a.getTargetGroups().isEmpty() || a.getTargetGroupArn() == null && "forward".equals(a.getType())) {
+        boolean shortFormForward = "forward".equals(a.getType())
+                && a.getTargetGroupArn() != null && a.getTargetGroups().isEmpty();
+        if (!a.getTargetGroups().isEmpty() || "forward".equals(a.getType())) {
             xml.start("ForwardConfig");
             xml.start("TargetGroups");
+            if (shortFormForward) {
+                xml.start("member")
+                        .elem("TargetGroupArn", a.getTargetGroupArn())
+                        .elem("Weight", "1")
+                        .end("member");
+            }
             for (Action.TargetGroupTuple t : a.getTargetGroups()) {
                 xml.start("member");
                 xml.elem("TargetGroupArn", safe(t.getTargetGroupArn()));
@@ -948,9 +956,9 @@ public class ElbV2QueryHandler {
                 xml.end("member");
             }
             xml.end("TargetGroups");
-            if (a.getStickinessEnabled() != null) {
+            if (a.getStickinessEnabled() != null || shortFormForward) {
                 xml.start("TargetGroupStickinessConfig")
-                   .elem("Enabled", String.valueOf(a.getStickinessEnabled()));
+                   .elem("Enabled", String.valueOf(Boolean.TRUE.equals(a.getStickinessEnabled())));
                 if (a.getStickinessDurationSeconds() != null) {
                     xml.elem("DurationSeconds", String.valueOf(a.getStickinessDurationSeconds()));
                 }
