@@ -89,9 +89,8 @@ public final class CfnCreateOnlyProperties {
 
     /**
      * True when the value at any create-only pointer of the type differs between the old and the new
-     * properties. A top-level name compares the whole value (a value added where none existed is not a
-     * change, as before). A nested pointer {@code A/B/C} compares the values at that path: present on
-     * one side only is a change, absent on both is not. A {@code *} segment compares every array
+     * properties. A pointer compares the values at that path, a top-level name included: a value added, removed or
+     * changed is a change, absent on both sides is not. A {@code *} segment compares every array
      * element's subtree.
      */
     public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps) {
@@ -106,7 +105,7 @@ public final class CfnCreateOnlyProperties {
     /** {@link #createOnlyValueChanged} for one pointer of the type's table. */
     public static boolean createOnlyPointerChanged(String pointer, JsonNode oldProps, JsonNode newProps) {
         String[] segments = pointer.split("/");
-        return pointerChanged(oldProps, newProps, segments, 0, segments.length == 1);
+        return pointerChanged(oldProps, newProps, segments, 0);
     }
 
     /** The subtrees of the properties that sit under one create-only pointer. */
@@ -125,12 +124,8 @@ public final class CfnCreateOnlyProperties {
         return out;
     }
 
-    private static boolean pointerChanged(JsonNode oldNode, JsonNode newNode, String[] segments, int index,
-                                          boolean topLevel) {
+    private static boolean pointerChanged(JsonNode oldNode, JsonNode newNode, String[] segments, int index) {
         if (index == segments.length) {
-            if (topLevel) {
-                return oldNode != null && !oldNode.equals(newNode);
-            }
             return oldNode == null ? newNode != null : !oldNode.equals(newNode);
         }
         if (oldNode == null && newNode == null) {
@@ -149,7 +144,7 @@ public final class CfnCreateOnlyProperties {
             for (int i = 0; i < size; i++) {
                 JsonNode o = oldNode != null && oldNode.isArray() ? oldNode.get(i) : null;
                 JsonNode n = newNode != null && newNode.isArray() ? newNode.get(i) : null;
-                if (pointerChanged(o, n, segments, index + 1, false)) {
+                if (pointerChanged(o, n, segments, index + 1)) {
                     return true;
                 }
             }
@@ -157,7 +152,7 @@ public final class CfnCreateOnlyProperties {
         }
         JsonNode o = oldNode != null && oldNode.isObject() ? oldNode.get(segments[index]) : null;
         JsonNode n = newNode != null && newNode.isObject() ? newNode.get(segments[index]) : null;
-        return pointerChanged(o, n, segments, index + 1, segments.length == 1);
+        return pointerChanged(o, n, segments, index + 1);
     }
 
     private static void collect(JsonNode node, String[] segments, int index, List<JsonNode> out) {

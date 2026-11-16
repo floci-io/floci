@@ -113,7 +113,8 @@ class DsqlSessionRecordIntegrationTest {
         String network = containerBuilder.resolveDockerNetwork(config.services().dsql().dockerNetwork()).orElse(null);
         ContainerLifecycleManager.EndpointInfo address =
                 lifecycleManager.resolveEndpoint(containers.get(0).getId(), PORT, network);
-        return new DsqlDatabases.Backend(address.host(), address.port());
+        return new DsqlDatabases.Backend(address.host(), address.port(), "postgres", "dbowner", null,
+                RoleNames.IDENTITY, BackendCredentials.TRUST);
     }
 
     private String single(String sql) throws SQLException {

@@ -2894,16 +2894,21 @@ public class RedshiftService implements ManagedSecretRotator {
         if (DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)) {
             throw new AwsException("InvalidParameterValue", "The default parameter group name is reserved.", 400);
         }
-        if (parameterGroups.get(regionalKey(parameterGroupName)).isPresent()) {
-            throw new AwsException("ClusterParameterGroupAlreadyExists", "Cluster parameter group " + parameterGroupName + " already exists", 400);
-        }
-
         ClusterParameterGroup group = new ClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
         if (tags != null) {
             group.setTags(new LinkedHashMap<>(tags));
         }
-        parameterGroups.put(regionalKey(parameterGroupName), group);
-        parameterGroups.flush();
+        // The free-name check and the write under the service's lock (mutate), so two creates of one name can't both
+        // pass the check; the event is emitted after it.
+        mutate(() -> {
+            if (parameterGroups.get(regionalKey(parameterGroupName)).isPresent()) {
+                throw new AwsException("ClusterParameterGroupAlreadyExists",
+                        "Cluster parameter group " + parameterGroupName + " already exists", 400);
+            }
+            parameterGroups.put(regionalKey(parameterGroupName), group);
+            parameterGroups.flush();
+            return group;
+        });
         emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_CREATED, parameterGroupName,
                 "Cluster parameter group '" + parameterGroupName + "' was created.");
         return group;
@@ -3193,17 +3198,28 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public ClusterSubnetGroup createClusterSubnetGroup(String name, String description, String vpcId,
                                                        List<String> subnetIds, Map<String, String> tags) {
-        if (subnetGroups.get(regionalKey(name)).isPresent()) {
-            throw new AwsException("ClusterSubnetGroupAlreadyExists", "Cluster subnet group " + name + " already exists", 400);
-        }
+        // A name taken already is refused before EC2 is asked about the subnets, as before.
+        requireFreeSubnetGroupName(name);
         ClusterSubnetGroup group = new ClusterSubnetGroup(name, description, vpcId, subnetIds);
         if (tags != null) {
             group.setTags(new LinkedHashMap<>(tags));
         }
         resolveSubnets(group);
-        subnetGroups.put(regionalKey(name), group);
-        subnetGroups.flush();
-        return group;
+        // The free-name check again, with the write, under the service's lock (mutate), so two creates of one name
+        // can't both pass it; EC2 is asked about the subnets before it.
+        return mutate(() -> {
+            requireFreeSubnetGroupName(name);
+            subnetGroups.put(regionalKey(name), group);
+            subnetGroups.flush();
+            return group;
+        });
+    }
+
+    private void requireFreeSubnetGroupName(String name) {
+        if (subnetGroups.get(regionalKey(name)).isPresent()) {
+            throw new AwsException("ClusterSubnetGroupAlreadyExists",
+                    "Cluster subnet group " + name + " already exists", 400);
+        }
     }
 
     /**

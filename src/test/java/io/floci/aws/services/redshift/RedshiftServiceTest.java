@@ -40,6 +40,7 @@ import io.floci.aws.services.redshiftserverless.model.Namespace;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
+import io.floci.aws.testing.ParkingStore;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.BeforeEach;
@@ -75,6 +76,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -4178,6 +4180,52 @@ class RedshiftServiceTest {
 
         assertThrows(AwsException.class, () ->
                 service.createClusterSubnetGroup("existing", "d", "vpc-1", List.of("subnet-1")));
+    }
+
+    /** Two creates of one subnet group name at once: the second waits for the first, then finds the name taken. */
+    @Test
+    void twoCreatesOfOneSubnetGroupNameCanNotBothSucceed() throws Exception {
+        ParkingStore<ClusterSubnetGroup> groups = backedByParkingStore(subnetGroupBackend);
+
+        assertOnlyTheFirstCreateSucceeds(groups,
+                () -> service.createClusterSubnetGroup("racy", "d", "vpc-1", List.of("subnet-1")),
+                "ClusterSubnetGroupAlreadyExists");
+
+        assertEquals(Set.of(regionalKey("racy")), groups.keys());
+    }
+
+    /** As above, for a cluster parameter group. */
+    @Test
+    void twoCreatesOfOneParameterGroupNameCanNotBothSucceed() throws Exception {
+        ParkingStore<ClusterParameterGroup> groups = backedByParkingStore(parameterGroupBackend);
+
+        assertOnlyTheFirstCreateSucceeds(groups,
+                () -> service.createClusterParameterGroup("racy", "redshift-1.0", "d"),
+                "ClusterParameterGroupAlreadyExists");
+
+        assertEquals(Set.of(regionalKey("racy")), groups.keys());
+    }
+
+    /** {@code backend}'s reads and writes, served by a store a test can hold inside its next write. */
+    private static <V> ParkingStore<V> backedByParkingStore(AccountAwareStorageBackend<V> backend) {
+        ParkingStore<V> store = new ParkingStore<>();
+        when(backend.get(anyString())).thenAnswer(call -> store.get(call.getArgument(0)));
+        doAnswer(call -> {
+            store.put(call.getArgument(0), call.getArgument(1));
+            return null;
+        }).when(backend).put(anyString(), any());
+        return store;
+    }
+
+    /**
+     * Holds the first {@code create} inside its write, after its check that the name is free, and runs a second one:
+     * the second must wait for the first, then answer {@code alreadyExists}.
+     */
+    private static void assertOnlyTheFirstCreateSucceeds(ParkingStore<?> store, Runnable create, String alreadyExists)
+            throws Exception {
+        store.parkNextWrite();
+        assertOperationWaitsForParkedStore(store, create,
+                () -> assertEquals(alreadyExists, assertThrows(AwsException.class, create::run).getErrorCode()));
     }
 
     @Test
