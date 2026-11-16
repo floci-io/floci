@@ -651,6 +651,14 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized PaymentCryptographyKey putResourcePolicy(PaymentCryptographyKey key,
                                                                   String policy) {
         PaymentCryptographyKey current = liveKey(key);
+        if ("REPLICA".equals(current.getMultiRegionKeyType())) {
+            // A replica is read-only, and the reference attaches a policy to the primary
+            // alone.
+            throw new AwsException("ValidationException",
+                    "the key " + current.getArn() + " is a replica of a key in "
+                            + current.getPrimaryRegion() + ", and a policy may only be attached to "
+                            + "the primary", 400);
+        }
         current.setResourcePolicy(policy);
         storeKey(current);
         return current;

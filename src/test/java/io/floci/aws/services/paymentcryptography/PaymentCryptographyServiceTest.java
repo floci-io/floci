@@ -414,6 +414,18 @@ class PaymentCryptographyServiceTest {
               "Principal":{"AWS":"arn:aws:iam::444455556666:role/PaymentAuthRole"},
               "Action":["payment-cryptography:VerifyAuthRequestCryptogram"],"Resource":"*"}]}""";
 
+
+    @Test
+    void aPolicyIsNotAttachedToAReplica() {
+        // The reference attaches a policy to the primary key alone, so a replica takes none.
+        PaymentCryptographyKey primary = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey replica = service.findKey("us-west-2", primary.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.putResourcePolicy(replica, CROSS_ACCOUNT_POLICY));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
     @Test
     void thePolicyOfTheReferenceIsAttachedAndReadBack() {
         // The reference's own page shows these two policies, and the service keeps the

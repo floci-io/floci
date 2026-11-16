@@ -192,7 +192,6 @@
 - **The data plane is a service of its own:** the operations that use a key are on
   [the data plane's page](payment-cryptography-data.md), which is reached at its own
   routes.
-<<<<<<< HEAD
 - **Multi-Region key replication:** a key may be replicated to other Regions, so the same
   key material is usable in several of them. The key is created in the Region of the
   request and is the *Primary Region key* there; every other Region holds a *Replica
@@ -229,10 +228,6 @@
 - **The replication is in sync at once:** the service does not model the progress of a
   replication, so the status of a replica that is there is `SYNCHRONIZED` right away,
   where the reference answers `IN_PROGRESS` until the replication has finished.
-- **Not yet emulated:** the resource policy operations, the key usage operations, the key
-  restore operation, the multi-party approval operations and the certificate signing
-  request.
-=======
 - **Resource policies:** `PutResourcePolicy` attaches or replaces the policy stored on the
   key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
   a policy is answered with `ResourceNotFoundException` by both reads. A policy that names
@@ -240,12 +235,9 @@
   `PublicPolicyException`, as the reference refuses one. The resource a policy names must be
   every resource or the ARN of the key the policy is on, so a policy that names another key
   is refused. The reference attaches a policy to the primary key alone, so a replica takes
-  none; that follows the multi-region replication, which is not in this branch yet.
-- **Not yet emulated:** the multi-region replication operations, the key usage
-  operations, the key restore operation, the multi-party approval operations and the
-  certificate signing request.
->>>>>>> 81668aaae (feat(paymentcryptography): the resource policies of a key)
-
+  none and a request that names one is refused.
+- **Not yet emulated:** the key usage operations, the key restore operation, the
+  multi-party approval operations and the certificate signing request.
 ## Configuration
 
 | Variable | Default | Description |
