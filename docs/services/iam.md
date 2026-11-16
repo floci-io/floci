@@ -3156,8 +3156,9 @@ floci populates:
   tags), MicroVM images and network connectors, Glue for its schema registries and schemas and for the jobs,
   crawlers, triggers, workflows, connections, databases, tables and other resources it tags, Step Functions for its
   state machines, their versions and executions (the state machine's tags) and activities, CodeBuild for its
-  projects and report groups, Athena for its workgroups and data catalogs, and Redshift Serverless for its
-  namespaces, workgroups and snapshots. Tag keys differing only in case are one condition key holding every value.
+  projects and report groups, Athena for its workgroups and data catalogs, Redshift Serverless for its namespaces,
+  workgroups and snapshots, and DynamoDB for its tables and their indexes (the table's tags). Tag keys differing
+  only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

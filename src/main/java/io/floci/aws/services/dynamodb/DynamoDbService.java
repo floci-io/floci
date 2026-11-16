@@ -138,6 +138,9 @@ public class DynamoDbService {
     private final Object capacityLock = new Object();
     // Held from a resource policy revision check until the policy it allowed is stored.
     private final Object resourcePolicyLock = new Object();
+    // Held while a table's tags are copied, changed and put in place of the map it held, which is never changed. The
+    // copy is put one entry at a time, as the map always was, so ListTagsOfResource keeps the order it listed.
+    private final Object tagLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -3427,24 +3430,46 @@ public class DynamoDbService {
     // --- Tag Operations ---
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getTags() == null) {
-            table.setTags(new HashMap<>());
+        synchronized (tagLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            Map<String, String> updated = new HashMap<>();
+            if (table.getTags() != null) {
+                table.getTags().forEach(updated::put);
+            }
+            tags.forEach(updated::put);
+            table.setTags(updated);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
         }
-        table.getTags().putAll(tags);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
         LOG.debugv("Tagged resource: {0}", resourceArn);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getTags() != null) {
-            for (String key : tagKeys) {
-                table.getTags().remove(key);
+    /**
+     * Puts CreateTable's tags on the table it has just stored, under the lock TagResource takes, keeping a tag a
+     * TagResource already put on it in the meantime, as that came later.
+     */
+    void putCreationTags(TableDefinition table, Map<String, String> tags) {
+        synchronized (tagLock) {
+            Map<String, String> created = new HashMap<>();
+            tags.forEach(created::put);
+            if (table.getTags() != null) {
+                table.getTags().forEach(created::put);
             }
-            String storageKey = regionKey(region, table.getTableName());
-            tableStore.put(storageKey, table);
+            table.setTags(created);
+        }
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        synchronized (tagLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            if (table.getTags() != null) {
+                Map<String, String> updated = new HashMap<>();
+                table.getTags().forEach(updated::put);
+                tagKeys.forEach(updated::remove);
+                table.setTags(updated);
+                String storageKey = regionKey(region, table.getTableName());
+                tableStore.put(storageKey, table);
+            }
         }
         LOG.debugv("Untagged resource: {0}", resourceArn);
     }
@@ -3452,6 +3477,33 @@ public class DynamoDbService {
     public Map<String, String> listTagsOfResource(String resourceArn, String region) {
         TableDefinition table = findTableByArn(resourceArn, region);
         return table.getTags() != null ? table.getTags() : Map.of();
+    }
+
+    /**
+     * The tags of the table {@code arn} names, or of the table whose index it names, as an index inherits its table's
+     * tags: the table stored under the ARN's name in the account and Region it names, a pre-multi-account one of the
+     * default account read in place, matched on the whole ARN and, for an index, holding it. Empty for any other ARN,
+     * a stream's included, whose tags are its own and which Floci holds none of.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "dynamodb")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        boolean index = parts.length == 4 && "index".equals(parts[2]);
+        if (!"table".equals(parts[0]) || parts.length != 2 && !index) {
+            return Map.of();
+        }
+        TableDefinition table = AccountAwareStorageBackend.readInAccount(tableStore, parsed.accountId(),
+                regionKey(parsed.region(), parts[1])).orElse(null);
+        if (table == null || table.getTableArn() == null
+                || !arn.equals(index ? table.getTableArn() + "/index/" + parts[3] : table.getTableArn())
+                || index && !table.holdsIndex(parts[3])) {
+            return Map.of();
+        }
+        Map<String, String> tags = table.getTags();
+        return tags == null ? Map.of() : tags;
     }
 
     /** Result of a successful GetResourcePolicy call: the raw policy document and its revision id. */
