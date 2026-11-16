@@ -11,6 +11,7 @@ import io.floci.aws.services.autoscaling.model.AvailabilityZoneDistribution;
 import io.floci.aws.services.autoscaling.model.CapacityReservationSpecification;
 import io.floci.aws.services.autoscaling.model.InstanceMaintenancePolicy;
 import io.floci.aws.services.autoscaling.model.LaunchConfiguration;
+import io.floci.aws.services.autoscaling.model.LaunchConfigurationBlockDeviceMapping;
 import io.floci.aws.services.autoscaling.model.MixedInstancesPolicy;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
@@ -23,6 +24,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -46,6 +48,7 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
     private static final String GROUP = "AWS::AutoScaling::AutoScalingGroup";
 
     private static final String LAUNCH_CONFIGURATION = "AWS::AutoScaling::LaunchConfiguration";
+    private static final String LC_PROPERTIES = CfnRollback.USES_ATTR_PREFIX + "LaunchConfigurationProperties";
 
     private static final Logger LOG = Logger.getLogger(AutoScalingGroupCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -77,14 +80,29 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
-            case LAUNCH_CONFIGURATION -> autoScalingService.deleteLaunchConfiguration(region, physicalId);
+            case LAUNCH_CONFIGURATION -> deleteLaunchConfiguration(region, physicalId);
             case GROUP -> autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
             default -> throw unsupported(resourceType);
         }
     }
 
+    private void deleteLaunchConfiguration(String region, String physicalId) {
+        try {
+            autoScalingService.deleteLaunchConfiguration(region, physicalId);
+        } catch (AwsException failure) {
+            if (!"ValidationError".equals(failure.getErrorCode())
+                    || !autoScalingService.describeLaunchConfigurations(region, List.of(physicalId)).isEmpty()) {
+                throw failure;
+            }
+            LOG.debugv("Launch configuration {0} is already absent", physicalId);
+        }
+    }
+
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        if (LAUNCH_CONFIGURATION.equals(resource.getResourceType())) {
+            return ReplacementCleanup.rollback(resource, this::delete);
+        }
         if (GROUP.equals(resource.getResourceType())) {
             String rawSnapshot = resource.getAttributes().remove(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR);
             if (rawSnapshot != null) {
@@ -147,6 +165,9 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.ASG_UPDATE_SNAPSHOT_ATTR);
+        if (LAUNCH_CONFIGURATION.equals(resource.getResourceType())) {
+            ReplacementCleanup.clear(resource);
+        }
     }
 
     public record AsgSnapshot(
@@ -184,35 +205,99 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionLaunchConfiguration(StackResource r, JsonNode props, ProvisionContext ctx) {
         String region = ctx.region();
-        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "LaunchConfigurationName"),
-                r.getLogicalId(), 255, false);
-
-        // Launch configurations have no update API on real AWS at all (any property change replaces
-        // the resource), so provision() being re-invoked on every UpdateStack means a same-named one
-        // already on file must be left alone rather than re-created (createLaunchConfiguration throws
-        // AlreadyExists).
-        LaunchConfiguration lc = existingEntity(ctx, name, n -> requireLaunchConfiguration(region, n));
-        if (lc == null) {
-            String associatePublicIp = ctx.resolveOptional(props, "AssociatePublicIpAddress");
-            lc = autoScalingService.createLaunchConfiguration(region, name,
-                    ctx.resolveOptional(props, "InstanceId"),
-                    ctx.resolveOptional(props, "ImageId"),
-                    ctx.resolveOptional(props, "InstanceType"),
-                    ctx.resolveOptional(props, "KeyName"),
-                    ctx.resolveStringList(props, "SecurityGroups"),
-                    ctx.resolveOptional(props, "UserData"),
-                    ctx.resolveOptional(props, "IamInstanceProfile"),
-                    // Absent in the template means the subnet default applies, so
-                    // it stays null rather than collapsing to false.
-                    associatePublicIp == null || associatePublicIp.isBlank()
-                            ? null
-                            : Boolean.parseBoolean(associatePublicIp), null, List.of(), metadataOptions(props, ctx));
-            deleteRenamedResource(ctx, name, n -> autoScalingService.deleteLaunchConfiguration(region, n),
-                    "launch configuration");
+        String explicitName = ctx.resolveOptional(props, "LaunchConfigurationName");
+        String name = ctx.stablePhysicalName(explicitName, r.getLogicalId(), 255, false);
+        JsonNode resolved = ctx.engine().resolveNode(props);
+        List<LaunchConfigurationBlockDeviceMapping> mappings = blockDeviceMappings(props, ctx);
+        LaunchTemplateData.MetadataOptions metadata = metadataOptions(props, ctx);
+        LaunchConfiguration prior = existingEntity(ctx, ctx.priorPhysicalId(),
+                n -> requireLaunchConfiguration(region, n));
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.endRollbackRetry(r);
+            String stored = r.getAttributes().get(LC_PROPERTIES);
+            JsonNode previous = stored == null ? null : readLaunchConfigurationProperties(stored);
+            boolean unchanged = previous == null
+                    ? legacyLaunchConfigurationMatches(prior, props, ctx, mappings, metadata)
+                    : resolved.equals(previous);
+            boolean explicitNameRemoved = (explicitName == null || explicitName.isBlank())
+                    && (previous == null
+                            ? !ctx.isGeneratedPhysicalName(ctx.priorPhysicalId(), r.getLogicalId(), 255, false)
+                            : previous.hasNonNull("LaunchConfigurationName"));
+            if (unchanged && ctx.reusesPriorEntity(name) && !explicitNameRemoved && prior != null) {
+                r.getAttributes().put(LC_PROPERTIES, resolved.toString());
+                return;
+            }
+            if (explicitName != null && !explicitName.isBlank() && ctx.reusesPriorEntity(name)) {
+                throw new AwsException("ValidationError", "CloudFormation cannot replace a custom-named launch "
+                        + "configuration without a new LaunchConfigurationName.", 400);
+            }
+            if (explicitName == null || explicitName.isBlank()) {
+                name = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
+            }
         }
-        // Ref returns the launch configuration name.
+        Map<String, String> before = Map.copyOf(r.getAttributes());
+        String associatePublicIp = ctx.resolveOptional(props, "AssociatePublicIpAddress");
+        LaunchConfiguration lc = autoScalingService.createLaunchConfiguration(region, name,
+                ctx.resolveOptional(props, "InstanceId"), ctx.resolveOptional(props, "ImageId"),
+                ctx.resolveOptional(props, "InstanceType"), ctx.resolveOptional(props, "KeyName"),
+                ctx.resolveStringList(props, "SecurityGroups"), ctx.resolveOptional(props, "UserData"),
+                ctx.resolveOptional(props, "IamInstanceProfile"),
+                associatePublicIp == null || associatePublicIp.isBlank() ? null
+                        : Boolean.parseBoolean(associatePublicIp), null, mappings, metadata);
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
+        r.getAttributes().put(LC_PROPERTIES, resolved.toString());
+        ReplacementCleanup.record(r, ctx, before);
+    }
+
+    private JsonNode readLaunchConfigurationProperties(String stored) {
+        try {
+            return MAPPER.readTree(stored);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Invalid persisted launch configuration properties", e);
+        }
+    }
+
+    private boolean legacyLaunchConfigurationMatches(LaunchConfiguration prior, JsonNode props,
+            ProvisionContext ctx, List<LaunchConfigurationBlockDeviceMapping> mappings,
+            LaunchTemplateData.MetadataOptions metadata) {
+        if (prior == null) {
+            return false;
+        }
+        if (ctx.resolveOptional(props, "InstanceId") != null) {
+            JsonNode previous = ctx.priorProperties();
+            // A prior literal template proves the source without resolving old references using new parameters.
+            return previous != null && previous.path("InstanceId").isTextual()
+                    && previous.equals(ctx.engine().resolveNode(props));
+        }
+        String publicIp = ctx.resolveOptional(props, "AssociatePublicIpAddress");
+        Boolean associatePublicIp = publicIp == null || publicIp.isBlank() ? null : Boolean.parseBoolean(publicIp);
+        return Objects.equals(prior.getImageId(), ctx.resolveOptional(props, "ImageId"))
+                && Objects.equals(prior.getInstanceType(), ctx.resolveOptional(props, "InstanceType"))
+                && Objects.equals(prior.getKeyName(), ctx.resolveOptional(props, "KeyName"))
+                && Objects.equals(prior.getSecurityGroups(), ctx.resolveStringList(props, "SecurityGroups"))
+                && Objects.equals(prior.getUserData(), ctx.resolveOptional(props, "UserData"))
+                && Objects.equals(prior.getIamInstanceProfile(), ctx.resolveOptional(props, "IamInstanceProfile"))
+                && Objects.equals(prior.getAssociatePublicIpAddress(), associatePublicIp)
+                && MAPPER.valueToTree(prior.getBlockDeviceMappings()).equals(MAPPER.valueToTree(mappings))
+                && MAPPER.valueToTree(prior.getMetadataOptions()).equals(MAPPER.valueToTree(metadata));
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return LAUNCH_CONFIGURATION.equals(resource.getResourceType()) && ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return LAUNCH_CONFIGURATION.equals(resource.getResourceType())
+                ? ReplacementCleanup.cleanupPhysicalId(resource) : null;
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return LAUNCH_CONFIGURATION.equals(resource.getResourceType())
+                ? ReplacementCleanup.complete(resource, this::delete) : UpdateCleanupResult.notApplicable();
     }
 
     /**
@@ -239,6 +324,49 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
             options.setHttpPutResponseHopLimit(hopLimit.intValue());
         }
         return options;
+    }
+
+    private List<LaunchConfigurationBlockDeviceMapping> blockDeviceMappings(JsonNode props, ProvisionContext ctx) {
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode mappings = types.read("BlockDeviceMappings", props.get("BlockDeviceMappings"),
+                CfnPropertyTypes.propertyShape(LAUNCH_CONFIGURATION, "BlockDeviceMappings"));
+        types.finish();
+        List<LaunchConfigurationBlockDeviceMapping> result = new ArrayList<>();
+        if (mappings == null) {
+            return result;
+        }
+        for (JsonNode mapping : mappings) {
+            LaunchConfigurationBlockDeviceMapping value = new LaunchConfigurationBlockDeviceMapping();
+            value.setDeviceName(mapping.path("DeviceName").asText(null));
+            value.setVirtualName(mapping.path("VirtualName").asText(null));
+            if (mapping.hasNonNull("NoDevice")) {
+                value.setNoDevice(mapping.get("NoDevice").booleanValue());
+            }
+            JsonNode ebs = mapping.get("Ebs");
+            if (ebs != null && !ebs.isNull()) {
+                LaunchConfigurationBlockDeviceMapping.Ebs disk = new LaunchConfigurationBlockDeviceMapping.Ebs();
+                disk.setSnapshotId(ebs.path("SnapshotId").asText(null));
+                disk.setVolumeType(ebs.path("VolumeType").asText(null));
+                if (ebs.hasNonNull("VolumeSize")) {
+                    disk.setVolumeSize(ebs.get("VolumeSize").intValue());
+                }
+                if (ebs.hasNonNull("Iops")) {
+                    disk.setIops(ebs.get("Iops").intValue());
+                }
+                if (ebs.hasNonNull("Throughput")) {
+                    disk.setThroughput(ebs.get("Throughput").intValue());
+                }
+                if (ebs.hasNonNull("Encrypted")) {
+                    disk.setEncrypted(ebs.get("Encrypted").booleanValue());
+                }
+                if (ebs.hasNonNull("DeleteOnTermination")) {
+                    disk.setDeleteOnTermination(ebs.get("DeleteOnTermination").booleanValue());
+                }
+                value.setEbs(disk);
+            }
+            result.add(value);
+        }
+        return result;
     }
 
     private LaunchConfiguration requireLaunchConfiguration(String region, String name) {

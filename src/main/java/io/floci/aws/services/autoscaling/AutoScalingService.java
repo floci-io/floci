@@ -370,10 +370,18 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void deleteLaunchConfiguration(String region, String name) {
-        if (launchConfigs.remove(lcKey(region, name)) == null) {
+        String key = lcKey(region, name);
+        if (!launchConfigs.containsKey(key)) {
             throw new AwsException("ValidationError",
                     "Launch configuration '" + name + "' not found.", 400);
         }
+        boolean inUse = groups.values().stream().anyMatch(group -> region.equals(group.getRegion())
+                && name.equals(group.getLaunchConfigurationName()));
+        if (inUse) {
+            throw new AwsException("ResourceInUse",
+                    "Launch configuration '" + name + "' is in use by an Auto Scaling group.", 400);
+        }
+        launchConfigs.remove(key);
     }
 
     // ── Auto Scaling Groups ────────────────────────────────────────────────────
