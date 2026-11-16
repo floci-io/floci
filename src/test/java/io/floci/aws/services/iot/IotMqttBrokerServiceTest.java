@@ -2073,9 +2073,13 @@ class IotMqttBrokerServiceTest {
     }
 
     private static MqttSubscribeMessage subscribeMessage(String topicFilter) {
+        return subscribeMessage(topicFilter, MqttQoS.AT_MOST_ONCE);
+    }
+
+    private static MqttSubscribeMessage subscribeMessage(String topicFilter, MqttQoS qos) {
         MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
         when(requested.topicName()).thenReturn(topicFilter);
-        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_MOST_ONCE);
+        when(requested.qualityOfService()).thenReturn(qos);
         MqttSubscribeMessage message = mock(MqttSubscribeMessage.class);
         when(message.topicSubscriptions()).thenReturn(List.of(requested));
         return message;
@@ -2246,12 +2250,7 @@ class IotMqttBrokerServiceTest {
     private static void subscribeQos1(MqttEndpoint endpoint, String topicFilter) {
         ArgumentCaptor<Handler<MqttSubscribeMessage>> subscribe = handlerCaptor();
         verify(endpoint).subscribeHandler(subscribe.capture());
-        MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
-        when(requested.topicName()).thenReturn(topicFilter);
-        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_LEAST_ONCE);
-        MqttSubscribeMessage message = mock(MqttSubscribeMessage.class);
-        when(message.topicSubscriptions()).thenReturn(List.of(requested));
-        subscribe.getValue().handle(message);
+        subscribe.getValue().handle(subscribeMessage(topicFilter, MqttQoS.AT_LEAST_ONCE));
     }
 
     private static MqttEndpoint persistentEndpoint(String clientId) {

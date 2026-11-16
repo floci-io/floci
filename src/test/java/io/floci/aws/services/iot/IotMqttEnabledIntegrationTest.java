@@ -47,6 +47,7 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -944,14 +945,7 @@ class IotMqttEnabledIntegrationTest {
 
     private void awaitSessionsEnded(String clientId, int count) throws InterruptedException {
         String topic = "$aws/events/presence/disconnected/" + clientId;
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(2));
-        while (Instant.now().isBefore(deadline)) {
-            if (eventRecorder.recentEvents().stream().filter(event -> topic.equals(event.topic())).count() >= count) {
-                return;
-            }
-            Thread.sleep(25);
-        }
-        throw new AssertionError("MQTT session of " + clientId + " did not end");
+        awaitPublishedEvents(event -> topic.equals(event.topic()), count, "MQTT session of " + clientId + " did not end");
     }
 
     private String createQueue(String queueName) {
@@ -1087,16 +1081,20 @@ class IotMqttEnabledIntegrationTest {
     }
 
     private void awaitPublishedEvent(String topic, byte[] payload) throws InterruptedException {
+        awaitPublishedEvents(event -> topic.equals(event.topic()) && Arrays.equals(payload, event.payload()), 1,
+                "MQTT publish event was not recorded");
+    }
+
+    private void awaitPublishedEvents(Predicate<IotPublishEvent> matches, int count, String failure)
+            throws InterruptedException {
         Instant deadline = Instant.now().plus(Duration.ofSeconds(2));
         while (Instant.now().isBefore(deadline)) {
-            boolean found = eventRecorder.recentEvents().stream()
-                    .anyMatch(event -> topic.equals(event.topic()) && Arrays.equals(payload, event.payload()));
-            if (found) {
+            if (eventRecorder.recentEvents().stream().filter(matches).count() >= count) {
                 return;
             }
             Thread.sleep(25);
         }
-        throw new AssertionError("MQTT publish event was not recorded");
+        throw new AssertionError(failure);
     }
 
     /** An MQTT 3.1.1 CONNECT over a plain socket, so the test decides exactly which packets follow it. */
