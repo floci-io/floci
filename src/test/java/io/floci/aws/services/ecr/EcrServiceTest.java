@@ -568,6 +568,40 @@ class EcrServiceTest {
 
         when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(null);
         assertEquals(REPO, withMeta.deleteRepository(REPO, null, false, REGION).getRepositoryName());
+
+        // A push whose record write failed, and a record kept under the bare key of the
+        // pre-account store, still count as an image while the registry holds its manifest.
+        for (boolean legacy : new boolean[] {false, true}) {
+            InMemoryStorage<String, ImageMetadata> delegate = new InMemoryStorage<>() {
+                @Override
+                public void put(String key, ImageMetadata value) {
+                    if (!legacy) {
+                        throw new IllegalStateException("store down");
+                    }
+                    super.put(key, value);
+                }
+            };
+            EcrService other = new EcrService(new InMemoryStorage<>(),
+                    new AccountAwareStorageBackend<>(delegate, null, ACCOUNT), pullThroughCacheRuleStore,
+                    registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+            when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+            other.createRepository(REPO, null, null, null, null, null, null, REGION);
+            if (legacy) {
+                delegate.put(REGION + "::" + ACCOUNT + "::" + REPO + "::" + DELETE_DIGEST,
+                        new ImageMetadata(DELETE_DIGEST, Instant.now()));
+            } else {
+                assertThrows(IllegalStateException.class,
+                        () -> other.recordImagePush(ACCOUNT, REGION, REPO, DELETE_DIGEST, Instant.now()));
+            }
+
+            ex = assertThrows(AwsException.class, () -> other.deleteRepository(REPO, null, false, REGION),
+                    "legacy=" + legacy);
+            assertEquals("RepositoryNotEmptyException", ex.getErrorCode(), "legacy=" + legacy);
+
+            when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(null);
+            assertEquals(REPO, other.deleteRepository(REPO, null, false, REGION).getRepositoryName());
+            assertTrue(delegate.keys().stream().noneMatch(k -> k.contains("::" + REPO + "::")), "legacy=" + legacy);
+        }
     }
 
     @Test
