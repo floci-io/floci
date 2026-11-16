@@ -34,13 +34,20 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
-/** Owns the protected namespace and the Floci-only nftables table for each managed ENI. */
+/**
+ * Owns the network-namespace helpers that EC2 instances and ECS tasks run in: the protected namespace and the
+ * Floci-only nftables table for each managed ENI, and the shared namespace of an ECS task that only needs its
+ * containers on one {@code localhost}.
+ */
 @ApplicationScoped
 public class SecurityGroupFirewallManager {
 
     private static final Logger LOG = Logger.getLogger(SecurityGroupFirewallManager.class);
+    private static final String PROTECTED_HELPER_PREFIX = "sg";
+    private static final String SHARED_HELPER_PREFIX = "netns";
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -121,21 +128,63 @@ public class SecurityGroupFirewallManager {
                 .anyMatch(option -> option.toLowerCase(Locale.ROOT).contains("rootless"))) {
             throw new IllegalStateException("Security-group enforcement requires rootful Docker");
         }
-        ensureHelperImage();
-        String name = ContainerStorageHelper.resourceName(config, "sg", null,
+        ContainerBuilder.Builder builder = helperBuilder(PROTECTED_HELPER_PREFIX, service, resourceId, accountId,
+                region, dockerNetwork, portBindings, hostIp)
+                .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true",
+                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                .withLabels(extraLabels);
+        return startHelper(builder, resourceId, "protected",
+                helperId -> apply(helperId, SecurityGroupNftCompiler.initialRuleset()));
+    }
+
+    /**
+     * Starts a namespace helper that filters nothing, for containers that only need to share one network
+     * namespace, as the containers of an {@code awsvpc} task do on Fargate. It needs neither security-group
+     * enforcement nor rootful Docker: the helper holds the namespace, its published ports and
+     * {@code linkLocalIps}, and no nftables table.
+     */
+    public Namespace createSharedNamespace(String service, String resourceId, String accountId, String region,
+                                           Optional<String> dockerNetwork, Map<Integer, Integer> portBindings,
+                                           Map<String, String> extraLabels, String hostIp, List<String> linkLocalIps) {
+        ContainerBuilder.Builder builder = helperBuilder(SHARED_HELPER_PREFIX, service, resourceId, accountId,
+                region, dockerNetwork, portBindings, hostIp)
+                .withLabels(Map.of(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                .withLabels(extraLabels);
+        linkLocalIps.forEach(builder::withLinkLocalIp);
+        return startHelper(builder, resourceId, "shared", helperId -> { });
+    }
+
+    /**
+     * Removes the helper {@link #createSharedNamespace} started for {@code resourceId}, if there is one, and
+     * throws when Docker keeps it, since it may still hold host ports and a link-local address.
+     */
+    public void removeSharedNamespaceStrict(String resourceId) {
+        lifecycleManager.removeIfExistsStrict(sharedNamespaceName(resourceId));
+    }
+
+    /** The container name of the helper {@link #createSharedNamespace} starts for {@code resourceId}. */
+    public String sharedNamespaceName(String resourceId) {
+        return helperName(SHARED_HELPER_PREFIX, resourceId);
+    }
+
+    private String helperName(String prefix, String resourceId) {
+        return ContainerStorageHelper.resourceName(config, prefix, null,
                 resourceId.replaceAll("[^a-zA-Z0-9_.-]", "-"));
+    }
+
+    private ContainerBuilder.Builder helperBuilder(String prefix, String service, String resourceId, String accountId,
+                                                   String region, Optional<String> dockerNetwork,
+                                                   Map<Integer, Integer> portBindings, String hostIp) {
+        ensureHelperImage();
         ContainerBuilder.Builder builder = containerBuilder.newContainer(config.network().securityGroupEnforcement().helperImage())
-                .withName(name)
+                .withName(helperName(prefix, resourceId))
                 .withDockerNetwork(dockerNetwork)
                 // Workloads join this network namespace and use its resolver and hosts file.
                 .withEmbeddedDns()
                 .withHostDockerInternalOnLinux()
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of("exec sleep 2147483647"))
-                .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
-                .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true",
-                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
-                .withLabels(extraLabels);
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region));
         if (portBindings != null) {
             portBindings.forEach((containerPort, hostPort) -> {
                 if (hostIp == null) {
@@ -145,6 +194,12 @@ public class SecurityGroupFirewallManager {
                 }
             });
         }
+        return builder;
+    }
+
+    /** Starts the helper, then {@code prepare}s it; a helper that fails either step is removed. */
+    private Namespace startHelper(ContainerBuilder.Builder builder, String resourceId, String kind,
+                                  Consumer<String> prepare) {
         ContainerSpec spec = builder.build();
         String helperId = null;
         try {
@@ -152,15 +207,15 @@ public class SecurityGroupFirewallManager {
             Map<String, ContainerNetwork> networks = dockerClient.inspectContainerCmd(helperId).exec()
                     .getNetworkSettings().getNetworks();
             String ip = firstAddress(networks, ContainerNetwork::getIpAddress)
-                    .orElseThrow(() -> new IllegalStateException("Firewall helper has no Docker IP"));
-            apply(helperId, SecurityGroupNftCompiler.initialRuleset());
+                    .orElseThrow(() -> new IllegalStateException("Namespace helper has no Docker IP"));
+            prepare.accept(helperId);
             return new Namespace(helperId, ip, firstAddress(networks, ContainerNetwork::getGlobalIPv6Address)
                     .orElse(null));
         } catch (Exception e) {
             if (helperId != null) {
                 lifecycleManager.removeIfExists(helperId);
             }
-            throw new IllegalStateException("Cannot prepare protected network namespace for " + resourceId, e);
+            throw new IllegalStateException("Cannot prepare " + kind + " network namespace for " + resourceId, e);
         }
     }
 
