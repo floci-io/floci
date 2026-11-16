@@ -141,6 +141,8 @@ A delimited-text table that declares its CSV options (`field.delim` or `separato
 
 Only the tables a query names get views (by database and name; a name only a string literal or a comment holds doesn't count), since DuckDB binds every view of the batch before the query runs: a table whose view cannot be built (files that do not match its declared format or schema) then fails the queries that read it and no others. A query that reads `information_schema` or is a `SHOW` statement gets a view for every table.
 
+A table whose location holds no data, or only folder markers (keys ending in `/`), answers no rows with its declared columns as their types, as Athena does: its view selects no rows rather than reading the empty location, which DuckDB refuses to bind. Nested and binary columns take the types the engine reads them as (`array<string>` as `VARCHAR[]`, `binary` as `BLOB`). For a table with partition projection, only the objects its read path reaches count. A location holding another glob character (`?`, a bracket or a brace), which Athena does not take in a location, is read as before.
+
 ## Partition projection
 
 A Glue table with `projection.enabled` set to `true` is read the way Athena reads it, from its partition layout rather than from its whole location:

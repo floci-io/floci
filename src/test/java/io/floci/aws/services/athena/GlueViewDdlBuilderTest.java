@@ -7,6 +7,8 @@ import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
+import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3.model.S3Object;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,17 +22,35 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
 
 class GlueViewDdlBuilderTest {
 
     private GlueService glueService;
+    private S3Service s3;
     private GlueViewDdlBuilder builder;
 
     @BeforeEach
     void setUp() {
         glueService = Mockito.mock(GlueService.class);
-        builder = new GlueViewDdlBuilder(glueService);
+        s3 = Mockito.mock(S3Service.class);
+        // Every location holds a file each read glob here reaches, unless a test says otherwise.
+        when(s3.listObjects(anyString(), anyString(), isNull(), anyInt()))
+                .thenAnswer(call -> listing(call.getArgument(0), call.getArgument(1) + "region=a/dt=b/c/d/part-0"));
+        builder = new GlueViewDdlBuilder(glueService, s3);
+    }
+
+    private static List<S3Object> listing(String bucket, String... keys) {
+        return Arrays.stream(keys).map(key -> new S3Object(bucket, key, key.endsWith("/") ? 0 : 1, null, null))
+                .toList();
+    }
+
+    private void holds(String bucket, String prefix, String... keys) {
+        when(s3.listObjects(eq(bucket), eq(prefix), isNull(), anyInt())).thenReturn(listing(bucket, keys));
     }
 
     private Database createDatabase(String name) {
@@ -226,6 +246,60 @@ class GlueViewDdlBuilderTest {
                 + "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT \"id\" AS \"id\", "
                 + "\"region\" AS \"region\", \"dt\" AS \"dt\" "
                 + "FROM read_parquet('s3://b/hive/region=*/dt=*/**', union_by_name = true);\n", ddl);
+    }
+
+    /**
+     * Athena answers a table whose location holds no data with no rows, where reading the empty location fails to
+     * bind: such a table gets a view of no rows with its declared columns as their types. Folder markers hold no
+     * data, and a projected table's location counts only the objects its read glob reaches.
+     */
+    @Test
+    void aTableWhoseLocationHoldsNoDataGetsATypedViewOfNoRows() {
+        holds("lake", "events/");
+        String empty = "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT CAST(NULL AS BIGINT) AS \"id\", "
+                + "CAST(NULL AS VARCHAR) AS \"name\", CAST(NULL AS VARCHAR) AS \"dt\" LIMIT 0;\n";
+        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/events/")).contains(empty));
+
+        holds("lake", "events/", "events/", "events/dt=2026-11-16/");
+        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/events")).contains(empty));
+
+        holds("b", "hive/", "hive/_SUCCESS", "hive/other/part-0");
+        assertTrue(ddlFor(projectingParquetTable("s3://b/hive/", Map.of("projection.enabled", "true")))
+                .contains("SELECT CAST(NULL AS VARCHAR) AS \"id\", CAST(NULL AS VARCHAR) AS \"region\", "
+                        + "CAST(NULL AS DATE) AS \"dt\" LIMIT 0;\n"));
+        holds("b", "hive/", "hive/region=eu/dt=2026-11-16/part-0");
+        assertTrue(ddlFor(projectingParquetTable("s3://b/hive/", Map.of("projection.enabled", "true")))
+                .contains("FROM read_parquet('s3://b/hive/region=*/dt=*/**'"));
+    }
+
+    /** A location whose bucket is gone is read as before, so the query reports it. */
+    @Test
+    void aTableInAMissingBucketIsReadAsBefore() {
+        when(s3.listObjects(eq("gone"), anyString(), isNull(), anyInt()))
+                .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
+        assertTrue(ddlFor(headerlessTsvTable("events", "s3://gone/events/")).contains("read_csv('s3://gone/events/**'"));
+    }
+
+    /** A location holding a glob character the check does not model keeps the read, which the engine globs. */
+    @Test
+    void aLocationHoldingAnUnmodeledGlobIsReadAsBefore() {
+        holds("lake", "events?/");
+        holds("lake", "[ab]/");
+        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/events?/")).contains("read_csv('s3://lake/events?/**'"));
+        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/[ab]/")).contains("read_csv('s3://lake/[ab]/**'"));
+    }
+
+    /** The view of no rows types a nested or binary column as the engine reads it, not as text. */
+    @Test
+    void anEmptyViewTypesNestedAndBinaryColumns() {
+        holds("lake", "nested/");
+        Table table = tableWithColumns("nested", "s3://lake/nested/", List.of(column("tags", "array<string>"),
+                column("attrs", "map<string,int>"), column("who", "struct<name:string,ids:array<bigint>>"),
+                column("raw", "binary"), column("price", "decimal(10, 2)"), column("code", "varchar(8)")), null);
+        assertTrue(ddlFor(table).contains("AS SELECT CAST(NULL AS VARCHAR[]) AS \"tags\", "
+                + "CAST(NULL AS MAP(VARCHAR, INTEGER)) AS \"attrs\", "
+                + "CAST(NULL AS STRUCT(\"name\" VARCHAR, \"ids\" BIGINT[])) AS \"who\", CAST(NULL AS BLOB) AS \"raw\", "
+                + "CAST(NULL AS DECIMAL(10, 2)) AS \"price\", CAST(NULL AS VARCHAR) AS \"code\" LIMIT 0;\n"));
     }
 
     private Table headerlessTsvTable(String name, String location) {

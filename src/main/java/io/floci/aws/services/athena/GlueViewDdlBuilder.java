@@ -5,6 +5,7 @@ import io.floci.aws.services.glue.GlueTableResolver;
 import io.floci.aws.services.glue.PartitionProjection;
 import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Table;
+import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -26,10 +27,12 @@ public class GlueViewDdlBuilder {
     private static final String ICEBERG_EXTENSION_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
 
     private final GlueService glueService;
+    private final S3Service s3Service;
 
     @Inject
-    public GlueViewDdlBuilder(GlueService glueService) {
+    public GlueViewDdlBuilder(GlueService glueService, S3Service s3Service) {
         this.glueService = glueService;
+        this.s3Service = s3Service;
     }
 
     public String build(String contextDatabase) {
@@ -132,6 +135,13 @@ public class GlueViewDdlBuilder {
                 } else {
                     String readFn = GlueTableResolver.inferReadFunction(t);
                     String readPath = GlueTableResolver.readPath(t, normalizedLocation);
+                    // Reading a location that holds no data fails to bind, where Athena answers no rows.
+                    String empty = holdsNoData(readPath) ? GlueTableResolver.emptyProjection(t) : null;
+                    if (empty != null) {
+                        sb.append("CREATE OR REPLACE VIEW ").append(target).append(" AS SELECT ").append(empty)
+                                .append(";\n");
+                        continue;
+                    }
                     fromClause = GlueTableResolver.readExpression(t, readFn, readPath);
                 }
                 sb.append("CREATE OR REPLACE VIEW ")
@@ -150,6 +160,12 @@ public class GlueViewDdlBuilder {
             }
         }
         return usesIceberg;
+    }
+
+    /** Whether the S3 location a table is read from holds no data; false for one that is not in S3. */
+    private boolean holdsNoData(String readPath) {
+        TableLocation location = TableLocation.of(readPath);
+        return location != null && location.holdsNoData(s3Service);
     }
 
     /** Which views a query needs: a qualified view of a database's table, or an unqualified one of the context's. */

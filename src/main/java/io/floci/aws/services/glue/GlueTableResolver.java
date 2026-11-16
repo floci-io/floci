@@ -290,6 +290,76 @@ public final class GlueTableResolver {
     }
 
     /**
+     * A projection of no rows with the table's declared columns, each as its declared type, for a table whose
+     * location holds no data: Athena answers it with no rows, where a read of the empty location fails. Null for a
+     * table that declares no columns.
+     */
+    public static String emptyProjection(Table table) {
+        List<Column> declared = declaredColumns(table);
+        if (declared.isEmpty()) {
+            return null;
+        }
+        return declared.stream()
+                .map(column -> "CAST(NULL AS " + columnType(column.getType()) + ") AS " + quote(column.getName()))
+                .collect(Collectors.joining(", ")) + " LIMIT 0";
+    }
+
+    /**
+     * The DuckDB type a Glue (Hive) column type reads as, {@code array<T>}, {@code map<K,V>} and
+     * {@code struct<name:T,...>} nested as far as they go, {@code binary} as a BLOB; a scalar type as
+     * {@link #scalarType} gives it, and VARCHAR for one this does not know.
+     */
+    static String columnType(String glueType) {
+        String type = glueType == null ? "" : glueType.trim();
+        String lower = type.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(">")) {
+            if (lower.startsWith("array<")) {
+                return columnType(type.substring("array<".length(), type.length() - 1)) + "[]";
+            }
+            if (lower.startsWith("map<")) {
+                List<String> keyAndValue = topLevelParts(type.substring("map<".length(), type.length() - 1));
+                if (keyAndValue.size() == 2) {
+                    return "MAP(" + columnType(keyAndValue.get(0)) + ", " + columnType(keyAndValue.get(1)) + ")";
+                }
+            }
+            if (lower.startsWith("struct<")) {
+                List<String> fields = new ArrayList<>();
+                for (String field : topLevelParts(type.substring("struct<".length(), type.length() - 1))) {
+                    int colon = field.indexOf(':');
+                    if (colon <= 0) {
+                        return "VARCHAR";
+                    }
+                    fields.add(quote(field.substring(0, colon).trim().replace("`", "")) + " "
+                            + columnType(field.substring(colon + 1)));
+                }
+                return fields.isEmpty() ? "VARCHAR" : "STRUCT(" + String.join(", ", fields) + ")";
+            }
+            return "VARCHAR";
+        }
+        return "binary".equals(lower) ? "BLOB" : scalarType(type);
+    }
+
+    /** The comma-separated parts of a type list, a comma inside {@code <>} or {@code ()} not separating two. */
+    private static List<String> topLevelParts(String list) {
+        List<String> parts = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+        for (int i = 0; i < list.length(); i++) {
+            char c = list.charAt(i);
+            if (c == '<' || c == '(') {
+                depth++;
+            } else if (c == '>' || c == ')') {
+                depth--;
+            } else if (c == ',' && depth == 0) {
+                parts.add(list.substring(start, i));
+                start = i + 1;
+            }
+        }
+        parts.add(list.substring(start));
+        return parts;
+    }
+
+    /**
      * Whether the table is read as text with its own CSV options, which leaves every data column and
      * Hive partition value a VARCHAR for {@link #buildProjection} to give its declared type.
      */
