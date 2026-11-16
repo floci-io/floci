@@ -161,9 +161,10 @@ public class RedshiftServerlessRuntime {
     }
 
     /**
-     * Applies a new master password to the PostgreSQL role and to the proxy's backend leg. When the
-     * proxy step fails the role is put back to {@code oldPassword}, so the backend never requires a
-     * password the stored namespace does not hold.
+     * Applies a master password to the PostgreSQL role and to the proxy's backend leg. When the
+     * proxy step fails the role is put back to {@code oldPassword} when one is given, so the backend
+     * never requires a password the stored namespace does not hold. Putting a previous password back
+     * is the same change with the two passwords the other way round.
      */
     public void changeMasterPassword(String accountId, String region, String workgroupName,
                                      String masterUsername, String dbName, String oldPassword,
@@ -184,22 +185,10 @@ public class RedshiftServerlessRuntime {
         }
     }
 
-    /**
-     * Puts the role and the proxy back to {@code password} after a rotation the caller could not
-     * store. The proxy is only reset once the role is, so a failed role restore never leaves the two
-     * disagreeing; the failure propagates instead.
-     */
-    public void restoreMasterPassword(String accountId, String region, String workgroupName,
-                                      String masterUsername, String dbName, String password) {
-        String backendId = backendId(region, workgroupName);
-        containerManager.alterUserPassword(accountId, backendId, masterUsername, password, dbName);
-        proxyManager.updateMasterPassword(relayKey(accountId, backendId), password);
-    }
-
     public TempCredential issueCredential(String accountId, String region, String workgroupName,
                                           String dbUser, int durationSeconds) {
         return credentialBroker.issue(accountId, backendId(region, workgroupName), dbUser, List.of(),
-                durationSeconds);
+                durationSeconds, dbUser, true);
     }
 
     public String generatePassword() {

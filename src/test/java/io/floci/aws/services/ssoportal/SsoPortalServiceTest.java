@@ -2,8 +2,8 @@ package io.floci.aws.services.ssoportal;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
-import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.ssoadmin.SsoAdminService;
 import io.floci.aws.services.ssoadmin.model.Assignment;
@@ -45,8 +45,7 @@ class SsoPortalServiceTest {
         ssoAdminService = mock(SsoAdminService.class);
         organizationsService = mock(OrganizationsService.class);
         iamService = mock(IamService.class);
-        service = new SsoPortalService(oidcService, ssoAdminService, organizationsService, iamService,
-                new RegionResolver("cn-north-1", "000000000000"));
+        service = new SsoPortalService(oidcService, ssoAdminService, organizationsService, iamService);
     }
 
     @Test
@@ -62,7 +61,12 @@ class SsoPortalServiceTest {
                 new Assignment(accountId, permissionSetArn, principalId, "USER")));
         when(organizationsService.findAccountForPortal(accountId)).thenReturn(Optional.empty());
         when(ssoAdminService.permissionSetForPortal(permissionSetArn)).thenReturn(new PermissionSet(
-                permissionSetArn, "PlatformAdmins", null, "PT1H", Map.of(), Map.of(), null, null, Map.of()));
+                permissionSetArn, "PlatformAdmins", null, "PT1H", Map.of(), Map.of(), null, null, Map.of(), null));
+
+        String provisionedArn = "arn:aws-cn:iam::" + accountId
+                + ":role/aws-reserved/sso.amazonaws.com/cn-north-1/AWSReservedSSO_PlatformAdmins_1234567890abcdef";
+        when(ssoAdminService.provisionedRoleForPortal(permissionSetArn, accountId)).thenReturn(
+                new IamRole("AROAidentity", "AWSReservedSSO_PlatformAdmins_1234567890abcdef", "/", provisionedArn, null));
 
         PaginatedResult<PortalAccountInfo> accounts = service.listAccounts(accessToken, null, null);
         assertEquals(List.of(accountId), accounts.items().stream().map(a -> a.accountId()).toList());
@@ -70,14 +74,16 @@ class SsoPortalServiceTest {
         PaginatedResult<PortalRoleInfo> roles = service.listAccountRoles(accessToken, accountId, null, null);
         assertEquals("PlatformAdmins", roles.items().getFirst().roleName());
 
+        when(ssoAdminService.portalSessionName(any(), eq(principalId))).thenReturn(Optional.of("alice@example.com"));
         PortalRoleCredentials credentials = service.getRoleCredentials(accessToken, accountId, "PlatformAdmins");
         assertTrue(credentials.accessKeyId().startsWith("ASIA"));
         assertTrue(credentials.expiration() > System.currentTimeMillis());
 
         ArgumentCaptor<String> roleArn = ArgumentCaptor.forClass(String.class);
-        verify(iamService).registerSessionForAccount(eq(accountId), any(), any(), any(), roleArn.capture(), any(), eq(null));
-        assertEquals("arn:aws-cn:iam::" + accountId
-                + ":role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_PlatformAdmins_floci", roleArn.getValue());
+        // The role session is named after the Identity Store user, as IAM Identity Center names it.
+        verify(iamService).registerSessionForAccount(eq(accountId), any(), any(), any(), roleArn.capture(), any(), eq(null),
+                eq("alice@example.com"));
+        assertEquals(provisionedArn, roleArn.getValue());
     }
 
     @Test

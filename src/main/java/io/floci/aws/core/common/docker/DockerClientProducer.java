@@ -424,10 +424,9 @@ public class DockerClientProducer {
     /**
      * Control-plane DockerClient: create/start/stop/remove/copyArchive and every other
      * short-lived call in Floci. Kept on its own connection pool, separate from the
-     * {@link StreamingDocker} bean, so long-lived log-follow streams can never occupy every
-     * lease in this pool and starve these short calls until httpclient5's connection-request
-     * timeout fires. Exec-output and container-wait streams (CodeBuild phases, Lambda
-     * extensions and exit watchers, EKS audit followers) still use this pool.
+     * {@link StreamingDocker} bean, so long-lived streams can never occupy every lease in this
+     * pool and starve these short calls until httpclient5's connection-request timeout fires.
+     * CodeBuild phase execs, EKS audit followers and ECS Exec sessions still use this pool.
      */
     @Produces
     @ApplicationScoped
@@ -437,7 +436,8 @@ public class DockerClientProducer {
     }
 
     /**
-     * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}). Each
+     * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}), Lambda
+     * extension execs and Lambda exit watchers, and Lambda Web attach streams. Each
      * stream occupies a connection pool slot for its entire lifetime, so sharing the
      * control-plane pool meant a fan-out of many concurrent streams exhausted it and blocked
      * control-plane calls. Sized separately because {@code WarmPool}'s cap is per-function,
@@ -519,14 +519,14 @@ public class DockerClientProducer {
 
     /**
      * Wraps the control-plane transport in {@link RetryingDockerHttpClient} so every short-lived
-     * docker call survives a transient socket drop; the streaming transport stays unwrapped,
-     * its requests (log-follow, exec output) hold hijacked or long-lived streams that must never
-     * be replayed, and its exec-start calls are the one request retrying could turn into a
-     * re-run command.
+     * docker call survives a transient socket drop. The streaming transport replays only container
+     * waits, as the control-plane one does: its other requests (log follow, attach, exec output)
+     * hold hijacked or long-lived streams that must never be replayed, and its exec-start calls are
+     * the one request retrying could turn into a re-run command.
      */
     static DockerHttpClient wrapForRole(DockerHttpClient transport, String role) {
         if (!"control-plane".equals(role)) {
-            return transport;
+            return RetryingDockerHttpClient.forContainerWaits(transport);
         }
         LOG.info("Wrapping control-plane docker transport in transient-I/O retry");
         return new RetryingDockerHttpClient(transport);

@@ -89,6 +89,8 @@ public class DbInstance {
     private String dockerVolumeName;
     private String volumeId;
     private String containerStorageResourceId;
+    // Legacy records default to protected: only a confirmed never-started backend may change versions.
+    private boolean backendNeverStarted;
     private boolean backendCleanupRequired;
     private boolean managedSecretCleanupRequired;
 
@@ -295,6 +297,11 @@ public class DbInstance {
     public String getContainerStorageResourceId() { return containerStorageResourceId; }
     public void setContainerStorageResourceId(String containerStorageResourceId) {
         this.containerStorageResourceId = containerStorageResourceId;
+    }
+
+    public boolean isBackendNeverStarted() { return backendNeverStarted; }
+    public void setBackendNeverStarted(boolean backendNeverStarted) {
+        this.backendNeverStarted = backendNeverStarted;
     }
 
     public boolean isBackendCleanupRequired() { return backendCleanupRequired; }

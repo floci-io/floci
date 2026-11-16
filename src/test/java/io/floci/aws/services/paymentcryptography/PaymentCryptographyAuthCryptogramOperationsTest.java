@@ -147,6 +147,22 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
     }
 
     @Test
+    void aRequestWithoutItsDerivationAttributesIsRefusedByTheModel() {
+        // The shape check settles the members the model requires, so it is the refusal that
+        // answers, and the message a caller sees is its own.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cryptogram.generate(PaymentCryptographyTestFixtures.request(Map.of(
+                        "KeyIdentifier", "arn:aws:payment-cryptography:us-east-1:000000000000:key/"
+                                + "0123456789abcdef",
+                        "TransactionData", TRANSACTION_DATA,
+                        "MajorKeyDerivationMode", "EMV_OPTION_A")), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("failed to satisfy constraint"), refused.getMessage());
+        assertTrue(refused.getMessage().contains("SessionKeyDerivationAttributes"), refused.getMessage());
+    }
+
+    @Test
     void theEmv41DerivationIsRefusedRatherThanApproximated() {
         PaymentCryptographyKey key = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS", "DeriveKey");
 

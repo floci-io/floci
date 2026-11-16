@@ -131,13 +131,29 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private void provisionTable(StackResource r, JsonNode props, ProvisionContext ctx) {
         // A snapshot describes the update in flight; one an earlier update left behind is stale.
         r.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
+        if (ctx.isUpdate()) {
+            // Rolling this update back undoes it alone; only ContinueUpdateRollback retries the
+            // delete the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         CloudFormationTemplateEngine engine = ctx.engine();
         String region = ctx.region();
-        // TableName is create-only, so an update without one must keep the name generated on
-        // create rather than mint another: a fresh name here created a second table on every
-        // UpdateStack and re-pointed Ref at it.
-        String tableName = ctx.stablePhysicalName(ctx.resolveOptional(props, "TableName"),
-                r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
+        // The engine's change decides whether the update replaces the table: TableName and
+        // ImportSourceSpecification are create-only in the registry. A named table cannot be
+        // replaced under the same name.
+        boolean replaces = TABLE.equals(r.getResourceType()) && ctx.isUpdate() && ctx.priorPhysicalId() != null
+                && ctx.changes(TABLE, props).requiresReplacement();
+        String explicitName = ctx.resolveOptional(props, "TableName");
+        // Without a replacement, an update without a TableName keeps the name generated on create
+        // rather than minting another: a fresh name here created a second table on every
+        // UpdateStack and re-pointed Ref at it. A replacing update gets a fresh generated name.
+        String tableName = replaces && (explicitName == null || explicitName.isBlank())
+                ? ctx.generatePhysicalName(r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false)
+                : ctx.stablePhysicalName(explicitName, r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
+        if (replaces && ctx.reusesPriorEntity(tableName)) {
+            throw CfnExceptions.customNamedReplacement(tableName);
+        }
         JsonNode ttlSpec = props != null ? engine.resolveNode(props.get("TimeToLiveSpecification")) : null;
         boolean ttlDeclared = ttlSpec != null && !ttlSpec.isNull();
         if (ttlDeclared) {
@@ -230,10 +246,13 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         Scope scope = new Scope(ctx.accountId(), region);
+        boolean onDemand = "PAY_PER_REQUEST".equals(ctx.resolveOptional(props, "BillingMode"));
         TableDefinition table;
         boolean created = false;
         try {
-            table = dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
+            table = onDemand
+                    ? dynamoDb.tables().createOnDemandTable(scope, tableName, keySchema, attrDefs, gsis, lsis)
+                    : dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
             created = true;
         } catch (AwsException e) {
             if (!"ResourceInUseException".equals(e.getErrorCode())) {
@@ -304,6 +323,9 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             // starts from the previous attributes, so the stale entry has to be removed rather than
             // merely left unwritten.
             publishStreamArn(r, table);
+            // The table the prior physical id named is deleted once the update commits, and the new
+            // one is removed if the update rolls back.
+            ReplacementCleanup.record(r, ctx, attributesBefore, replaces, created);
         } catch (RuntimeException failure) {
             // A table this attempt created would outlive the failure otherwise: the create rollback
             // deletes only a resource that carries its physical id, and a replacing update puts the
@@ -321,7 +343,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
      * Deletes the table a failed provision created. A delete that fails on create leaves the table
      * owned by the resource, so the stack's create rollback retries it. On a replacing update the
      * engine puts the previous resource back and never learns this table, so the failure is
-     * reported as a rollback failure that names it.
+     * reported as a rollback failure that names it, and the table stays listed for a later commit or
+     * the stack delete to remove.
      */
     private void deleteCreatedTable(StackResource r, Scope scope, String tableName, boolean update,
                                     RuntimeException failure) {
@@ -335,6 +358,8 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             LOG.warnv("{0}", reason);
             if (update) {
                 r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, reason);
+                // The table this update created stays listed, so a later commit or the stack delete removes it.
+                ReplacementCleanup.recordOrphan(r, tableName, r.getResourceType(), scope.region());
             } else {
                 r.setPhysicalId(tableName);
                 r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
@@ -570,23 +595,38 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
-        return UpdateCleanupResult.notApplicable();
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
     }
 
     /**
      * Puts back the tags, stream setting, TTL setting and Kinesis streaming destinations an in-place
      * table update changed. All four go back or none is claimed: restoring one alone would report a
      * rollback while the others stayed changed. A snapshot without destinations leaves them as they
-     * are. Only an in-place {@code AWS::DynamoDB::Table} update takes the
-     * snapshot, so a global table or a replacing update still reports that rollback is not
-     * implemented. The snapshot is spent only once the restore succeeded: a restore that throws
-     * leaves it in place for the next attempt.
+     * are. Only an in-place {@code AWS::DynamoDB::Table} update takes the snapshot; a replacing update is
+     * undone by its recorded replacement and a global table reports that rollback is not implemented. The
+     * snapshot is spent only once the restore succeeded: a restore that throws leaves it in place for the
+     * next attempt.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
         String raw = resource.getAttributes().get(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
         if (raw == null) {
-            return false;
+            return ReplacementCleanup.rollback(resource, this::delete);
         }
         JsonNode snapshot;
         try {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.controltower.model.EnabledControl;
@@ -152,7 +153,7 @@ public class ControlTowerControlService {
     }
 
     public synchronized ControlOperation operation(String accountId, String region, String operationIdentifier) {
-        if (operationIdentifier == null || !operationIdentifier.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
+        if (!UuidShapes.matchesLowerCase(operationIdentifier)) {
             throw validation("operationIdentifier must be a UUID.");
         }
         ControlOperation operation = operations.get(operationKey(accountId, region, operationIdentifier));

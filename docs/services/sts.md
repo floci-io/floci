@@ -235,10 +235,44 @@ says what the maximum payload is, so no size is invented here to refuse a reques
 The signing key is the account's, minted on first use per algorithm and stored, so a restart does
 not invalidate a token already handed out. `RS256` signs with a 2048-bit RSA key and `ES384` with
 P-384, whose signature is the raw `R || S` pair JWS defines rather than the DER sequence a default
-ECDSA signer returns. What is not here yet is the other half of the feature: nothing publishes the
-verification key, so the `/.well-known/openid-configuration` and `/.well-known/jwks.json` documents
-the issuer URL would host are not served, and a relying party cannot verify one of these tokens
-against this emulator.
+ECDSA signer returns.
+
+### Verifying a token
+
+AWS publishes the verification keys at the issuer itself, under
+`/.well-known/openid-configuration` and `/.well-known/jwks.json`. The issuer's host
+(`https://<uuid>.tokens.sts.global.api.aws`) does not reach Floci, so the two documents are served
+under a Floci route keyed by the issuer's UUID, its first host label:
+
+| Route | Serves |
+|---|---|
+| `GET /_floci/sts/web-identity/<uuid>/.well-known/openid-configuration` | The OIDC discovery document |
+| `GET /_floci/sts/web-identity/<uuid>/.well-known/jwks.json` | The account's verification keys |
+
+A relying party fetches them without AWS credentials, as it would from AWS, and the UUID tells Floci
+which account's keys to answer with. The token's `iss` keeps AWS's form, and the discovery document
+names it as `issuer`, which is what a verifier compares, while `jwks_uri` points at the key route
+above. Point the relying party's JWKS URL (or its discovery URL) at Floci:
+
+```bash
+ISSUER=$(aws iam get-outbound-web-identity-federation-info --endpoint-url $AWS_ENDPOINT_URL \
+  --query IssuerIdentifier --output text)
+ID=$(echo "$ISSUER" | sed -E 's#https://([^.]+)\..*#\1#')
+curl -s "$AWS_ENDPOINT_URL/_floci/sts/web-identity/$ID/.well-known/jwks.json"
+```
+
+The key set holds one key per algorithm, in the shape of the sample the IAM User Guide gives: the
+`ES384` key with `kty` `EC`, `alg` and `crv` `P-384`, and the `RS256` key with `kty` `RSA`, its
+modulus and exponent. Both are minted on the first read if no token has used them yet, so a key set
+cached before the first token already holds that token's key. AWS does not publish its discovery
+document, so Floci's carries the members OpenID Connect Discovery requires and no more: `issuer`,
+`jwks_uri`, `response_types_supported`, `subject_types_supported` and
+`id_token_signing_alg_values_supported` (`RS256` and `ES384`).
+
+The documents stay served while the feature is disabled. The issuer outlives a disable, and so do
+the tokens already minted under it, which a relying party still has to verify until they expire.
+AWS does not document this either way, so it is Floci's reading. An issuer no account was given
+answers 404.
 
 ## Configuration
 
@@ -269,6 +303,59 @@ A session minted with another session's temporary credentials, which AWS does no
 key or one that belongs to another account, or by an IAM user since deleted and recreated under the same name, is not
 a valid credential: it is refused like an unknown access key. A key IAM does not know anywhere mints sessions that act
 as the account root, as the key itself does.
+
+## MFA
+
+`GetSessionToken` and `AssumeRole` read `SerialNumber` and `TokenCode`. AWS describes the pair on
+both: `SerialNumber` is "the identification number of the MFA device that is associated with the IAM
+user who is making the GetSessionToken call", and `TokenCode` is "the value provided by the MFA
+device", six digits. Floci holds the code to the seed of the virtual MFA device that serial names,
+with the one step of drift `EnableMFADevice` allows, and the device has to be enabled for the
+identity that signed the call: a serial naming a device enabled for somebody else authenticates
+nobody. The window is the wall clock's, as it is on the IAM actions that take codes, since the code
+comes from a device keeping time of its own rather than from the emulator's clock.
+
+A call that names neither parameter claims nothing and keeps whatever its own credentials carry, so
+a session minted behind a device assumes a role as an MFA-authenticated caller without naming the
+device again: "because temporary credentials returned by `GetSessionToken` include MFA information,
+you can check for MFA in individual API operations made by the credentials". A call that names
+either one is a claim of MFA and has to make it good, a code naming no device and a device with no
+code both proving nothing, and the code is spent once it authenticates: RFC 6238 has a verifier
+"MUST NOT accept the second attempt of the OTP generated for the same time step", so one code mints
+one session rather than every session its window allows. A key IAM holds nowhere is the one caller
+whose claim is taken as made, there being no identity behind it whose devices could be checked,
+which is the reading Floci already takes of such a key everywhere else. A claim that fails is
+refused with `AccessDenied` (403),
+which is the outcome AWS documents ("an incorrect MFA code causes the API to return an access denied
+error", and for `AssumeRole` "if the role being assumed requires MFA and if the TokenCode value is
+missing or expired, the AssumeRole call returns an access denied error"). The sentence Floci writes
+with it is its own, the one the IAM actions already write for a code that does not match, since AWS
+publishes no message for this refusal.
+
+What the authentication then buys differs by operation, and AWS draws the line itself. A
+`GetSessionToken` session carries it onward: a request signed with it has
+`aws:MultiFactorAuthPresent` as `true` and `aws:MultiFactorAuthAge` as the seconds since the device
+was used, which [IAM](iam.md#condition-keys-floci-populates) populates, "because temporary
+credentials returned by `GetSessionToken` include MFA information, you can check for MFA in
+individual API operations made by the credentials". An `AssumeRole` session does not: "the temporary
+credentials returned by `AssumeRole` do not include MFA information in the context, so you cannot
+check individual API operations for MFA", and "once the user has assumed the role, no further MFA
+checks are made". So a role session publishes the key as `false` whatever device got it issued, and
+Floci records none on it.
+
+The device a call presents is part of that request's own context, which is how a long-term key
+reaches an MFA-protected role at all. A trust policy may require it, AWS's own example being
+`"Condition": {"Bool": {"aws:MultiFactorAuthPresent": true}}`, and then "if the caller does not
+include valid MFA information, the request to assume the role is denied". The caller's own
+permission to make the call is read against that same context, since AWS denies such a request when
+"users have not been MFA authenticated, or if they provide an invalid MFA device identifier or
+invalid TOTP", so an identity policy conditioned on MFA for `sts:AssumeRole` is satisfied by the
+device the call carries.
+
+One difference from AWS is known and open: AWS says temporary credentials from a `GetSessionToken`
+request "can access IAM and AWS STS API operations *only* if you include MFA information in the
+request for credentials". Floci does not hold a session to that: one minted without a device reaches
+IAM and STS with whatever its user's policies allow.
 
 ## Trust Policy Enforcement
 
@@ -303,6 +390,11 @@ when its condition matches.
 `aws:PrincipalTag/<key>` contains the stored tags of the calling IAM user or assumed role.
 The target role's tags do not supply the caller's principal tags. A chained request reads the
 current caller role's tags; tags on the user that originally assumed it are not inherited.
+
+A trust policy with a statement whose `Effect` is not exactly `Allow` or `Deny`, or whose
+`Condition` is not an object of non-empty operator objects, lets no one assume the role, the same
+on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML`. IAM refuses such a document
+when it is written; Floci stores it as given, so the whole document is refused when it is read.
 
 ### Known limitations
 

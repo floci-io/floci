@@ -5,11 +5,8 @@ import com.github.dockerjava.api.command.BuildImageResultCallback;
 import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.core.common.Digests;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Map;
@@ -61,16 +58,9 @@ public final class LocallyBuiltHelperImage {
             } catch (NotFoundException missing) {
                 // Build the current Floci recipe in the daemon used for workloads.
             }
-            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
-                TarArchiveEntry entry = new TarArchiveEntry("Dockerfile");
-                entry.setSize(content.length);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
-            }
             try (BuildImageResultCallback callback = new BuildImageResultCallback()) {
-                String built = dockerClient.buildImageCmd(new ByteArrayInputStream(archive.toByteArray()))
+                String built = dockerClient.buildImageCmd(
+                                new ByteArrayInputStream(DockerBuildContext.ofDockerfile(content)))
                         .withTags(Set.of(image)).withPlatform(platform).withPull(true)
                         .withLabels(Map.of(RECIPE_LABEL, recipe)).exec(callback).awaitImageId();
                 if (built == null || built.isBlank()) {

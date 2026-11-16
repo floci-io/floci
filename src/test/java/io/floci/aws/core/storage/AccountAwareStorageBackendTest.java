@@ -4,6 +4,7 @@ import io.floci.aws.core.common.RequestContext;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -28,9 +29,75 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class AccountAwareStorageBackendTest {
+
+    @Test
+    void keysIncludingLegacyFiltersOwnershipWithoutReadingOrMigratingValues() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<>());
+        String account = "000000000000";
+        String other = "111111111111";
+        String shared = "rule:us-east-1:default/old/name";
+        raw.put(shared, "legacy");
+        raw.put(account + "/" + shared, "explicit");
+        raw.put(other + "/rule:us-east-1:default/foreign", "foreign");
+        raw.put("unrelated", "unrelated");
+        Set<String> before = raw.keys();
+        clearInvocations(raw);
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, account);
+
+        assertEquals(Set.of(shared), storage.keysIncludingLegacyForAccount(account, key -> key.startsWith("rule:")));
+        assertEquals(Set.of("rule:us-east-1:default/foreign"),
+                storage.keysIncludingLegacyForAccount(other, key -> key.startsWith("rule:")));
+        verify(raw, times(2)).keys();
+        verifyNoMoreInteractions(raw);
+        assertEquals(before, raw.keys());
+    }
+
+    @Test
+    void getInAccountReadsTheNamedAccountOutsideAnyRequest() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        raw.put("000000000000/resource", "default");
+        raw.put("111111111111/resource", "owned");
+
+        assertEquals(Optional.of("owned"), AccountAwareStorageBackend.getInAccount(storage, "111111111111", "resource"));
+        assertEquals(Optional.empty(), AccountAwareStorageBackend.getInAccount(storage, "222222222222", "resource"));
+    }
+
+    @Test
+    void putInAccountWritesTheNamedAccountOutsideAnyRequest() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        AccountAwareStorageBackend.putInAccount(storage, "111111111111", "resource", "owned");
+
+        assertEquals(Optional.of("owned"), raw.get("111111111111/resource"));
+        assertEquals(Optional.empty(), raw.get("000000000000/resource"));
+    }
+
+    @Test
+    void inAccountHelpersUseTheAmbientAccountWithoutAnAccountId() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        AccountAwareStorageBackend.putInAccount(storage, null, "resource", "ambient");
+
+        assertEquals(Optional.of("ambient"), raw.get("000000000000/resource"));
+        assertEquals(Optional.of("ambient"), AccountAwareStorageBackend.getInAccount(storage, null, "resource"));
+    }
+
+    @Test
+    void inAccountHelpersUseAPlainStoreAsIs() {
+        InMemoryStorage<String, String> plain = new InMemoryStorage<>();
+
+        AccountAwareStorageBackend.putInAccount(plain, "111111111111", "resource", "value");
+
+        assertEquals(Set.of("resource"), plain.keys());
+        assertEquals(Optional.of("value"), AccountAwareStorageBackend.getInAccount(plain, "111111111111", "resource"));
+    }
 
     @Test
     void accountIdReturnsDefaultOutsideRequestScope() {
@@ -361,6 +428,48 @@ class AccountAwareStorageBackendTest {
 
         assertEquals("current", raw.get("111111111111/us-east-1/current").orElseThrow());
         assertFalse(raw.get("111111111111/legacy").isPresent());
+    }
+
+    /**
+     * Every account's legacy entries move within that account, an unprefixed one counting as the default's,
+     * and the owner check is handed the account holding each legacy entry.
+     */
+    @Test
+    void migrateLegacyEntriesInAllAccountsMovesEachWithinItsOwnAccount() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("gen0", "default-owned");
+        raw.put("123456789012/gen1", "account-owned");
+        raw.put("123456789012/kept", "not-owned");
+        raw.put("123456789012/us-east-1::current", "current");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        List<String> ownerChecks = new ArrayList<>();
+
+        storage.migrateLegacyEntriesInAllAccounts(key -> !key.contains("::"), value -> "us-east-1::" + value,
+                (account, value) -> {
+                    ownerChecks.add(account + " " + value);
+                    return !value.equals("not-owned");
+                });
+
+        assertEquals(List.of("000000000000 default-owned", "123456789012 account-owned", "123456789012 not-owned"),
+                ownerChecks.stream().sorted().toList());
+        assertEquals(Set.of("000000000000/us-east-1::default-owned", "123456789012/us-east-1::account-owned",
+                "123456789012/kept", "123456789012/us-east-1::current"), Set.copyOf(raw.keys()));
+    }
+
+    /** Without an owner check, every account's legacy entries move. */
+    @Test
+    void migrateLegacyEntriesInAllAccountsWithoutAnOwnerCheckMovesEveryLegacyEntry() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("gen0", "default");
+        raw.put("123456789012/gen1", "account");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        storage.migrateLegacyEntriesInAllAccounts(key -> !key.contains("::"), value -> "us-east-1::" + value);
+
+        assertEquals(Set.of("000000000000/us-east-1::default", "123456789012/us-east-1::account"),
+                Set.copyOf(raw.keys()));
     }
 
     /**

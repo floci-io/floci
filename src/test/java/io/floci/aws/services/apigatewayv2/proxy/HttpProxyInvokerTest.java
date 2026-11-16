@@ -501,4 +501,66 @@ class HttpProxyInvokerTest {
         assertEquals(502, result.statusCode());
         assertNull(received.get());
     }
+
+    @Test
+    void rejectsAWholeBodyMappingCarryingALineBreakToANamedHost() {
+        HttpProxyInvoker invoker = new HttpProxyInvoker(
+                host -> new InetAddress[] {InetAddress.getByAddress(new byte[] {127, 0, 0, 1})});
+        Integration integration = httpProxyIntegration("http://named.example.test:" + backendPort + "/ok",
+                Map.of("overwrite:header.x-payload", "$request.body"));
+        RequestContext ctx = ctxFor("POST", "/wallet/x", "x", Map.of(), Map.of(),
+                "a\r\nX-Injected: 1".getBytes(StandardCharsets.UTF_8), Map.of());
+
+        ProxyResult result = invoker.invoke(integration, ctx);
+
+        assertEquals(502, result.statusCode());
+        assertEquals("{\"message\":\"Bad Gateway: invalid request header value for x-payload\"}",
+                new String(result.body(), StandardCharsets.UTF_8));
+        assertNull(received.get());
+    }
+
+    @Test
+    void rejectsAMappedHostHeaderCarryingALineBreak() {
+        Integration integration = httpProxyIntegration("http://127.0.0.1:" + backendPort + "/ok",
+                Map.of("overwrite:header.Host", "$request.querystring.host"));
+        RequestContext ctx = ctxFor("GET", "/wallet/x", "x", Map.of(),
+                Map.of("host", "lb.localhost.test\r\nX-Injected: 1"), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(502, result.statusCode());
+        assertEquals("{\"message\":\"Bad Gateway: invalid request header value for Host\"}",
+                new String(result.body(), StandardCharsets.UTF_8));
+        assertNull(received.get());
+    }
+
+    @Test
+    void rejectsAMappedBodyFieldCarryingAControlCharacterToAnAddressTarget() {
+        Integration integration = httpProxyIntegration("http://127.0.0.1:" + backendPort + "/ok",
+                Map.of("overwrite:header.x-note", "$request.body.note"));
+        for (String note : new String[] {"a\\r\\nX-Injected: 1", "a\\nb", "a\\u0000b", "a\\u007fb"}) {
+            RequestContext ctx = ctxFor("POST", "/wallet/x", "x", Map.of(), Map.of(),
+                    ("{\"note\":\"" + note + "\"}").getBytes(StandardCharsets.UTF_8), Map.of());
+
+            ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+            assertEquals(502, result.statusCode());
+            assertEquals("{\"message\":\"Bad Gateway: invalid request header value for x-note\"}",
+                    new String(result.body(), StandardCharsets.UTF_8));
+            assertNull(received.get());
+        }
+    }
+
+    @Test
+    void forwardsAMappedHeaderValueContainingATab() {
+        Integration integration = httpProxyIntegration("http://127.0.0.1:" + backendPort + "/ok",
+                Map.of("overwrite:header.x-note", "$request.body.note"));
+        RequestContext ctx = ctxFor("POST", "/wallet/x", "x", Map.of(), Map.of(),
+                "{\"note\":\"a\\tb\"}".getBytes(StandardCharsets.UTF_8), Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(200, result.statusCode());
+        assertTrue(received.get().headers().getFirst("x-note").matches("a[\\t ]b"));
+    }
 }

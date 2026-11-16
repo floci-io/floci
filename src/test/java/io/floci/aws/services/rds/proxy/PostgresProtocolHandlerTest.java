@@ -35,7 +35,6 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -255,9 +254,9 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
@@ -346,9 +345,9 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
@@ -404,9 +403,9 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
@@ -459,8 +458,8 @@ class PostgresProtocolHandlerTest {
     void hostnameVerificationRequiresRegisteredAdvertisedHost(String advertisedHost, boolean registered,
                                                               boolean legacyCa) throws Exception {
         try (ServerSocket clientServer = new ServerSocket(0);
-             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
-             Socket proxyClient = clientServer.accept()) {
+             Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = acceptTestSocket(clientServer)) {
 
             RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
             Path caCertFile = tempDir.resolve("tls/rds-ca.crt");
@@ -533,8 +532,8 @@ class PostgresProtocolHandlerTest {
     void cancelRequestInsideTlsIsForwardedToTheBackend() throws Exception {
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0);
-             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
-             Socket proxyClient = clientServer.accept()) {
+             Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = acceptTestSocket(clientServer)) {
 
             RdsProxyTlsCertificates tlsCertificates = testTlsCertificates();
             tlsCertificates.ensureHost("localhost");
@@ -542,7 +541,7 @@ class PostgresProtocolHandlerTest {
             Thread authThread = Thread.ofVirtual().start(() -> {
                 try {
                     PostgresProtocolHandler.authenticate(
-                            proxyClient, () -> new Socket("localhost", backendServer.getLocalPort()),
+                            proxyClient, () -> connectTestSocket("localhost", backendServer.getLocalPort()),
                             "dbadmin", "adminpass", "postgres",
                             false, testSigV4Validator(), testBinding(), tlsCertificates,
                             (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000);
@@ -563,7 +562,7 @@ class PostgresProtocolHandlerTest {
                 tlsOut.flush();
 
                 backendServer.setSoTimeout(5000);
-                try (Socket backend = backendServer.accept()) {
+                try (Socket backend = acceptTestSocket(backendServer)) {
                     backend.setSoTimeout(5000);
                     DataInputStream backendIn = new DataInputStream(backend.getInputStream());
                     assertEquals(16, backendIn.readInt());
@@ -592,10 +591,10 @@ class PostgresProtocolHandlerTest {
                 }
             });
 
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                Socket proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendServer.getLocalPort());
+                Socket proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendServer.getLocalPort());
 
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
@@ -651,10 +650,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -708,10 +707,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -773,10 +772,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -823,10 +822,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -878,10 +877,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -949,12 +948,12 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
+                proxyClient = acceptTestSocket(clientServer);
                 List<Socket> backends = new ArrayList<>(List.of(
-                        new Socket("localhost", lookupServer.getLocalPort()),
-                        new Socket("localhost", backendServer.getLocalPort())));
+                        connectTestSocket("localhost", lookupServer.getLocalPort()),
+                        connectTestSocket("localhost", backendServer.getLocalPort())));
 
                 Thread authThread = startIamAuth(proxyClient, () -> backends.remove(0));
 
@@ -1021,10 +1020,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", lookupServer.getLocalPort());
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", lookupServer.getLocalPort());
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -1236,10 +1235,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -1307,10 +1306,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -1362,10 +1361,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -1419,10 +1418,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -1490,10 +1489,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -1551,10 +1550,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend);
 
@@ -1592,11 +1591,11 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             PostgresProtocolHandler.BackendConnector connector =
-                    () -> new Socket("localhost", silentBackend.getLocalPort());
+                    () -> connectTestSocket("localhost", silentBackend.getLocalPort());
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                proxyClient = clientServer.accept();
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
+                proxyClient = acceptTestSocket(clientServer);
 
                 AtomicReference<IOException> authFailure = new AtomicReference<>();
                 Thread authThread = Thread.ofVirtual().start(() -> {
@@ -1700,7 +1699,7 @@ class PostgresProtocolHandlerTest {
                     writeReadyForQuery(out);
                     assertEquals(-1, in.read());
                 })));
-        List<String> logs = records.stream().map(record -> MessageFormat.format(record.getMessage(), record.getParameters())).toList();
+        List<String> logs = records.stream().map(LogCapture::formatted).toList();
         assertTrue(logs.stream().anyMatch(line -> line.contains("user approle: catalog query returned an error")));
         assertFalse(logs.stream().anyMatch(line -> line.contains("SECRET_") || line.contains("X-Amz-")
                 || line.contains("\n") || line.contains("\r")));
@@ -1734,9 +1733,9 @@ class PostgresProtocolHandlerTest {
                     backendFailure.set(failure);
                 }
             });
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
-                 Socket proxyClient = clientServer.accept();
-                 Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
+                 Socket proxyClient = acceptTestSocket(clientServer);
+                 Socket backend = connectTestSocket("localhost", backendServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
                 Thread authThread = Thread.ofVirtual().start(() -> {
                     try {
@@ -1835,10 +1834,10 @@ class PostgresProtocolHandlerTest {
             });
 
             Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
                 ourClient.setSoTimeout(5_000);
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendPort);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
 
                 Thread authThread = startIamAuth(proxyClient, backend, false, forwardStartupParameters);
 
@@ -1892,7 +1891,7 @@ class PostgresProtocolHandlerTest {
                                               AtomicReference<String> backendQuery,
                                               String role, boolean roleExists,
                                               BackendScript afterHandover, boolean initialAdmission) throws IOException {
-        try (Socket socket = server.accept()) {
+        try (Socket socket = acceptTestSocket(server)) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
@@ -1966,7 +1965,7 @@ class PostgresProtocolHandlerTest {
      */
     private static void mockBackendRoleDefaultsLookup(ServerSocket server, List<String[]> roleDefaults,
                                                       List<String> tried) throws IOException {
-        try (Socket socket = server.accept()) {
+        try (Socket socket = acceptTestSocket(server)) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
@@ -2063,7 +2062,7 @@ class PostgresProtocolHandlerTest {
     /** Backend that completes a plain master startup and then runs {@code script}. */
     private static void mockBackendMasterSession(ServerSocket server, BackendScript script)
             throws IOException {
-        try (Socket socket = server.accept()) {
+        try (Socket socket = acceptTestSocket(server)) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
@@ -2205,6 +2204,25 @@ class PostgresProtocolHandlerTest {
         return fields;
     }
 
+    private static Socket connectTestSocket(String host, int port) throws IOException {
+        return withTcpNoDelay(new Socket(host, port));
+    }
+
+    private static Socket acceptTestSocket(ServerSocket server) throws IOException {
+        return withTcpNoDelay(server.accept());
+    }
+
+    private static Socket withTcpNoDelay(Socket socket) throws IOException {
+        try {
+            socket.setTcpNoDelay(true);
+            return socket;
+        } catch (IOException failure) {
+            try (socket) {
+                throw failure;
+            }
+        }
+    }
+
     /** The endpoint the test proxy publishes; {@link #rdsToken} signs tokens for exactly this endpoint. */
     private static RdsProxyBinding testBinding() {
         return new RdsProxyBinding("localhost", 7001, "us-east-1", "123456789012", "db-ABCDEFGHIJKL01234", true);
@@ -2257,7 +2275,7 @@ class PostgresProtocolHandlerTest {
     private static void mockBackendStartup(ServerSocket server, AtomicReference<String> backendDatabase,
                                            AtomicReference<Map<String, String>> backendStartup,
                                            boolean failWithError) throws IOException {
-        try (Socket socket = server.accept()) {
+        try (Socket socket = acceptTestSocket(server)) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 
@@ -2294,7 +2312,7 @@ class PostgresProtocolHandlerTest {
     }
 
     private static void mockBackendClosesDuringBridge(ServerSocket server) throws IOException {
-        try (Socket socket = server.accept()) {
+        try (Socket socket = acceptTestSocket(server)) {
             DataInputStream in = new DataInputStream(socket.getInputStream());
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
 

@@ -49,6 +49,21 @@ class RedshiftDataResourceResolverTest {
     }
 
     @Test
+    void copyJobRunUsesTheProxyForSingleStatementsAndBatches() {
+        Cluster target = cluster();
+        target.setProxyPort(5439);
+        RedshiftService redshift = mock(RedshiftService.class);
+        when(redshift.describeClusters("wh")).thenReturn(List.of(target));
+        ObjectNode request = mapper.createObjectNode().put("ClusterIdentifier", "wh")
+                .put("DbUser", "admin").put("Database", "dev").put("Sql", "COPY JOB RUN ingest");
+        RedshiftDataResourceResolver resolver = resolver(redshift, mock(SecretsManagerService.class));
+        assertEquals(5439, resolver.resolve(request, REGION).port());
+        request.remove("Sql");
+        request.putArray("Sqls").add("SELECT 1").add("COPY JOB RUN ingest");
+        assertEquals(5439, resolver.resolve(request, REGION).port());
+    }
+
+    @Test
     void resolvesClusterIdentifierAndMasterDbUser() {
         RedshiftService redshift = mock(RedshiftService.class);
         when(redshift.describeClusters("wh")).thenReturn(List.of(cluster()));

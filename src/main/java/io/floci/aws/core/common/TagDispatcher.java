@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.services.iam.IamActionRegistry;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
@@ -209,16 +210,36 @@ public class TagDispatcher {
         try {
             serviceKey = AwsArnUtils.parse(arn).service();
         } catch (IllegalArgumentException e) {
-            throw new AwsException("BadRequestException",
-                    "Invalid resource ARN: " + arn, 400);
+            throw invalidArn(arn);
         }
         TagHandler handler = handlersByServiceKey.get(serviceKey);
         if (handler == null) {
             // Surface an unregistered service as an invalid-ARN error so floci's
             // internal routing isn't leaked to the client.
-            throw new AwsException("BadRequestException",
-                    "Invalid resource ARN: " + arn, 400);
+            throw invalidArn(arn);
         }
         return handler;
+    }
+
+    /**
+     * The handler of the service the ARN names, for a request on a path that service's AWS model gives. AWS serves
+     * a service's tagging on its own routes only, telling the services apart by hostname, so a service whose IAM
+     * resources the generated table reads from its modeled routes ({@link RequestResources#readsNamespace}) is
+     * served on those paths alone: the bare {@code /tags}, or a path whose ARN's {@code /} is not encoded, is
+     * refused as an ARN this path does not serve when its model has no such path
+     * ({@link IamActionRegistry#modelRoutes}). A method its model does not give on the path is the handler's to
+     * answer.
+     */
+    public TagHandler resolveHandler(String arn, UriInfo uriInfo) {
+        TagHandler handler = resolveHandler(arn);
+        String service = AwsArnUtils.parse(arn).service();
+        if (RequestResources.readsNamespace(service) && !IamActionRegistry.modelRoutes(service, uriInfo)) {
+            throw invalidArn(arn);
+        }
+        return handler;
+    }
+
+    private static AwsException invalidArn(String arn) {
+        return new AwsException("BadRequestException", "Invalid resource ARN: " + arn, 400);
     }
 }

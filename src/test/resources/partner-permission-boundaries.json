@@ -1,0 +1,14 @@
+{
+  "000000000001": {
+    "arn:aws:iam::partner:policy/permission_boundary/example.com/ReadOnlyAccess_20261101": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": ["s3:GetObject", "s3:ListBucket"],
+          "Resource": "*"
+        }
+      ]
+    }
+  }
+}

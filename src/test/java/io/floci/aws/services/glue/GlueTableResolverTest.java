@@ -13,6 +13,8 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class GlueTableResolverTest {
@@ -129,6 +131,172 @@ class GlueTableResolverTest {
         assertThat(GlueTableResolver.buildProjection(table), equalTo("\"tenantId\" AS \"tenantId\""));
     }
 
+    private static Table templatedTable(String template, Column... partitionKeys) {
+        Table table = table("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", "s3://bucket/events/",
+                List.of(column("id", "string")));
+        table.setPartitionKeys(List.of(partitionKeys));
+        table.setParameters(Map.of("projection.enabled", "true", "storage.location.template", template));
+        return table;
+    }
+
+    /** A string key is the matched text itself; any other type is cast, so a non-value yields NULL, not an error. */
+    @Test
+    void templatedKeysAreCastToTheirDeclaredTypes() {
+        Table table = templatedTable("s3://bucket/events/${region}/${year}/${dt}/",
+                column("region", "string"), column("year", "int"), column("dt", "date"));
+
+        String regex = "'^s3://bucket/events/([^/]+)/([^/]+)/([^/]+)/'";
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("\"id\" AS \"id\", "
+                + "regexp_extract(\"$path\", " + regex + ", 1) AS \"region\", "
+                + "TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS INTEGER) AS \"year\", "
+                + "TRY_CAST(regexp_extract(\"$path\", " + regex + ", 3) AS DATE) AS \"dt\""));
+        assertThat(GlueTableResolver.pathFilter(table), equalTo("regexp_matches(\"$path\", " + regex + ")"
+                + " AND TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS INTEGER) IS NOT NULL"
+                + " AND TRY_CAST(regexp_extract(\"$path\", " + regex + ", 3) AS DATE) IS NOT NULL"));
+    }
+
+    /**
+     * DuckDB's scalar {@code regexp_extract} stops at group 9, so a key at group 10 is read through
+     * the struct form, and the keys before it keep the scalar form.
+     */
+    @Test
+    void aKeyPastTheNinthGroupIsExtractedThroughTheStructForm() {
+        Table table = templatedTable("s3://bucket/events/${account}/${team}/${service}/${env}/${cluster}/"
+                        + "${zone}/${rack}/${host}/${region}/${dt}/",
+                column("account", "string"), column("team", "string"), column("service", "string"),
+                column("env", "string"), column("cluster", "string"), column("zone", "string"),
+                column("rack", "string"), column("host", "string"), column("region", "string"),
+                column("dt", "date"));
+
+        String regex = "'^s3://bucket/events/" + "([^/]+)/".repeat(10) + "'";
+        String projection = GlueTableResolver.buildProjection(table);
+        assertThat(projection, containsString("regexp_extract(\"$path\", " + regex + ", 9) AS \"region\""));
+        assertThat(projection, containsString("TRY_CAST(regexp_extract(\"$path\", " + regex + ", "
+                + "['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']).g10 AS DATE) AS \"dt\""));
+    }
+
+    @Test
+    void templatedReadAddsTheObjectPathAndTurnsOffHivePartitioning() {
+        Table table = templatedTable("s3://bucket/events/${region}/", column("region", "string"));
+
+        assertThat(GlueTableResolver.readExpression(table, "read_json_auto", "s3://bucket/events/*"),
+                equalTo("read_json_auto('s3://bucket/events/*/**', hive_partitioning = false, filename = '$path')"));
+    }
+
+    @Test
+    void singleQuotesInTheTemplateAreEscapedInTheRegexLiteral() {
+        Table table = templatedTable("s3://bucket/o'brien/${region}/", column("region", "string"));
+
+        assertThat(GlueTableResolver.pathFilter(table), equalTo("regexp_matches(\"$path\", '^s3://bucket/o''brien/([^/]+)/')"));
+    }
+
+    /** Tables without a template read and project exactly as they did, and an Iceberg table ignores one. */
+    @Test
+    void tablesWithoutATemplateAreReadAsBefore() {
+        Table plain = table("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", "s3://bucket/events/",
+                List.of(column("id", "string")));
+        Table iceberg = templatedTable("s3://bucket/events/${region}/", column("region", "string"));
+        iceberg.setParameters(Map.of("projection.enabled", "true", "table_type", "ICEBERG",
+                "storage.location.template", "s3://bucket/events/${region}/"));
+
+        for (Table table : List.of(plain, iceberg)) {
+            assertThat(GlueTableResolver.readExpression(table, "read_parquet", "s3://bucket/events"),
+                    equalTo("read_parquet('s3://bucket/events/**', union_by_name = true)"));
+            assertThat(GlueTableResolver.pathFilter(table), is(nullValue()));
+        }
+        assertThat(GlueTableResolver.buildProjection(iceberg), equalTo("\"id\" AS \"id\", \"region\" AS \"region\""));
+    }
+
+    private static final String PARQUET_FORMAT = "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat";
+
+    /**
+     * How the view reads Parquet column {@code name} declared {@code timestamp}, through {@code column}: by the file's
+     * physical type, as Athena does, a timestamp truncated to milliseconds, an INT64 as epoch milliseconds, and a
+     * string or a date failing with Athena's error.
+     */
+    private static String parquetTimestamp(String column, String name) {
+        String nanos = "epoch_ns(TRY_CAST(" + column + " AS TIMESTAMP_NS))";
+        return "date_trunc('millisecond', CASE WHEN typeof(" + column + ") = 'BIGINT' THEN epoch_ms(TRY_CAST(" + column
+                + " AS BIGINT)) WHEN typeof(" + column + ") = 'TIMESTAMP_NS' THEN epoch_ms(" + nanos + " // 1000000 -"
+                + " CASE WHEN " + nanos + " % 1000000 < 0 THEN 1 ELSE 0 END)"
+                + " WHEN typeof(" + column + ") IN ('VARCHAR', 'BLOB') THEN error('HIVE_BAD_DATA: Malformed"
+                + " Parquet file."
+                + " Field " + name + "''s type BINARY in parquet file is incompatible with type timestamp(3) defined in"
+                + " table schema') WHEN typeof(" + column + ") = 'DATE' THEN error('SERIALIZATION_ERROR: Could not"
+                + " serialize column ''" + name + "'' of type ''timestamp(3)''') ELSE CAST(" + column + " AS TIMESTAMP)"
+                + " END)";
+    }
+
+    /**
+     * Athena reads a column declared {@code timestamp} as {@code timestamp(3)}, the UTC wall-clock time truncated to
+     * milliseconds, where DuckDB types a Parquet column by what the file stores (a UTC-adjusted one as
+     * {@code TIMESTAMP WITH TIME ZONE}, a NANOS one as {@code TIMESTAMP_NS}).
+     */
+    @Test
+    void parquetColumnsDeclaredTimestampReadAsAthenasTimestamp() {
+        Table table = table(PARQUET_FORMAT, "s3://bucket/events/",
+                List.of(column("id", "string"), column("created_at", "TIMESTAMP"), column("day", "date")));
+
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("\"id\" AS \"id\", "
+                + parquetTimestamp("\"created_at\"", "created_at") + " AS \"created_at\", \"day\" AS \"day\""));
+        assertThat(GlueTableResolver.readsParquetTimestamps(table), is(true));
+    }
+
+    /** A name declared twice, in two cases, resolves to its first declaration, which is the column projected. */
+    @Test
+    void aNameDeclaredTwiceIsTypedByItsFirstDeclaration() {
+        Table table = table(PARQUET_FORMAT, "s3://bucket/events/",
+                List.of(column("ts", "string"), column("TS", "timestamp")));
+
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("\"ts\" AS \"ts\""));
+        assertThat(GlueTableResolver.readsParquetTimestamps(table), is(false));
+    }
+
+    /** A table read through its registered partitions types its data columns the same way; its keys come from Glue. */
+    @Test
+    void registeredPartitionReadsTypeParquetTimestampsTheSameWay() {
+        Table table = table(PARQUET_FORMAT, "s3://bucket/events/", List.of(column("created_at", "timestamp")));
+        table.setPartitionKeys(List.of(column("dt", "string")));
+
+        String select = GlueTableResolver.registeredPartitionsSelect(table,
+                List.of(new GlueTableResolver.RegisteredPartition("s3://bucket/events/dt=a", List.of("a"))));
+
+        assertThat(select, containsString(
+                "SELECT " + parquetTimestamp("r.\"created_at\"", "created_at") + " AS \"created_at\", "
+                        + "p.\"dt\" AS \"dt\" FROM read_parquet("));
+    }
+
+    /** Delimited text, which is read as text and cast to the declared types, has the same precision on Athena. */
+    @Test
+    void delimitedTextTimestampsReadAtMillisecondPrecision() {
+        Table table = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int"), column("created_at", "timestamp")));
+        table.getStorageDescriptor().setSerdeInfo(new StorageDescriptor.SerDeInfo());
+        table.getStorageDescriptor().getSerdeInfo().setParameters(Map.of("field.delim", "\t"));
+
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("TRY_CAST(\"id\" AS INTEGER) AS \"id\", "
+                + "date_trunc('millisecond', TRY_CAST(\"created_at\" AS TIMESTAMP)) AS \"created_at\""));
+        assertThat(GlueTableResolver.readsParquetTimestamps(table), is(false));
+    }
+
+    /** JSON, Iceberg tables and partition keys keep their projection. */
+    @Test
+    void timestampsOutsideParquetAndTextDataColumnsKeepTheirProjection() {
+        Table json = table("org.apache.hadoop.mapred.TextInputFormat", "s3://bucket/events/",
+                List.of(column("created_at", "timestamp")));
+        json.getStorageDescriptor().setSerdeInfo(new StorageDescriptor.SerDeInfo());
+        json.getStorageDescriptor().getSerdeInfo().setSerializationLibrary("org.openx.data.jsonserde.JsonSerDe");
+        Table iceberg = table(PARQUET_FORMAT, "s3://bucket/events/", List.of(column("created_at", "timestamp")));
+        iceberg.setParameters(Map.of("table_type", "ICEBERG"));
+        Table partitioned = table(PARQUET_FORMAT, "s3://bucket/events/", List.of(column("id", "string")));
+        partitioned.setPartitionKeys(List.of(column("hour", "timestamp")));
+
+        for (Table table : List.of(json, iceberg, partitioned)) {
+            assertThat(GlueTableResolver.buildProjection(table), not(containsString("date_trunc")));
+            assertThat(GlueTableResolver.readsParquetTimestamps(table), is(false));
+        }
+    }
+
     @Test
     void isIcebergTableFalseWhenParametersMissing() {
         assertThat(GlueTableResolver.isIcebergTable(new Table()), is(false));
@@ -146,7 +314,8 @@ class GlueTableResolverTest {
         String from = GlueTableResolver.readPlan(table).fromClause();
 
         assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = '|', quote = '''', "
-                + "escape = '\\', nullstr = 'NA', columns = {'id': 'VARCHAR', 'name': 'VARCHAR'})"));
+                + "escape = '\\', nullstr = 'NA', auto_detect = false, null_padding = true, strict_mode = false, "
+                + "columns = {'id': 'VARCHAR', 'name': 'VARCHAR'})"));
     }
 
     @Test
@@ -157,7 +326,9 @@ class GlueTableResolverTest {
 
         String from = GlueTableResolver.readPlan(table).fromClause();
 
-        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = ',', "
+        // A table naming no SerDe is read as LazySimpleSerDe reads it: a quote is text and \\N is NULL.
+        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = ',', quote = '', "
+                + "nullstr = '\\N', auto_detect = false, null_padding = true, strict_mode = false, "
                 + "columns = {'id': 'VARCHAR'})"));
     }
 
@@ -180,5 +351,18 @@ class GlueTableResolverTest {
                 List.of(column("id", "int")));
 
         assertThat(GlueTableResolver.readPlan(table).fromClause(), equalTo("read_csv_auto('s3://bucket/events/**')"));
+    }
+
+    @Test
+    void aJavaDatePatternTranslatesToAStrptimeFormat() {
+        assertThat(GlueTableResolver.strptimeFormat("yyyy/MM/dd/HH"), is("%Y/%m/%d/%H"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyyMMdd'T'HHmmss"), is("%Y%m%dT%H%M%S"));
+        assertThat(GlueTableResolver.strptimeFormat("yy-MM-dd 100%"), is("%y-%m-%d 100%%"));
+        // A doubled quote is one quote, inside a quoted section or outside one, as Java's formatter reads it.
+        assertThat(GlueTableResolver.strptimeFormat("yyyy'foo''bar'MMdd"), is("%Yfoo'bar%m%d"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyy''MM"), is("%Y'%m"));
+        assertThat(GlueTableResolver.strptimeFormat("yyyy'unclosed"), nullValue());
+        assertThat(GlueTableResolver.strptimeFormat("EEE, dd MMM yyyy"), nullValue());
+        assertThat(GlueTableResolver.strptimeFormat(" "), nullValue());
     }
 }

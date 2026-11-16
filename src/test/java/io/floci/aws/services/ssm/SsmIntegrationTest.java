@@ -1771,6 +1771,73 @@ class SsmIntegrationTest {
             .body("DeletedParameters", hasSize(2));
     }
 
+    @Test
+    void taggingRefusesAResourceTypeWhoseTagsAreNotKept() {
+        String name = "tag-type-" + System.nanoTime();
+        putFilterFixture(name, "String", "");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceType": "MaintenanceWindow", "ResourceId": "%s", "Tags": [{"Key": "env", "Value": "dev"}] }
+                """.formatted(name))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidResourceType"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListTagsForResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceType": "Bucket", "ResourceId": "%s" }
+                """.formatted(name))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("'resourceType'"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.RemoveTagsFromResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceId": "%s", "TagKeys": ["env"] }
+                """.formatted(name))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("'resourceType'"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DeleteParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void getParametersByPathRefusesARequestWithoutAPath() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Recursive\": true }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("'path'"));
+    }
+
     private String parameterArn(String name, String expectedArnSuffix) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.GetParameter")
@@ -1901,6 +1968,112 @@ class SsmIntegrationTest {
                 { "ParameterFilters": [{ "Key": "Name", "Values": ["/attr-bad-tier/p"] }] }
                 """)
             .body("Parameters", hasSize(0));
+    }
+
+    @Test
+    void putParameterRejectsANameOutsideTheParameterNameSyntaxAndStoresNothing() {
+        for (String name : List.of("/name-syntax/db:secret", "/name-syntax/db secret", "/name-syntax/db\\t",
+                "\\u00a0/name-syntax/db")) {
+            String exactNameFilter = """
+                    {
+                      "ParameterFilters": [
+                        {
+                          "Key": "Name",
+                          "Option": "Equals",
+                          "Values": ["%s"]
+                        }
+                      ]
+                    }
+                    """.formatted(name);
+            describeParameters(exactNameFilter)
+                .body("Parameters", hasSize(0))
+                .body("NextToken", nullValue());
+            given()
+                .header("X-Amz-Target", "AmazonSSM.PutParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + name + "\", \"Value\": \"v\", \"Type\": \"String\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Parameter name: can't be prefixed with \"aws\" or \"ssm\" "
+                        + "(case-insensitive). If formed as a path, it can consist of sub-paths divided by slash "
+                        + "symbol; each sub-path can be formed as a mix of letters, numbers and the following 3 "
+                        + "symbols .-_"));
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + name + "\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo(name.contains(" ") ? "ValidationException" : "ParameterNotFound"));
+            describeParameters(exactNameFilter)
+                .body("Parameters", hasSize(0))
+                .body("NextToken", nullValue());
+        }
+    }
+
+    @Test
+    void putParameterStoresANameWithoutItsSurroundingSpaces() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \" /name-spaces/db \", \"Value\": \"v\", \"Type\": \"String\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Version", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"/name-spaces/db\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo("/name-spaces/db"))
+            .body("Parameter.Value", equalTo("v"));
+    }
+
+    @Test
+    void aDoubleSlashArnDoesNotReadTheParameterUnderOneSlash() {
+        String name = "/double-slash-" + UUID.randomUUID();
+        String doubleSlashArn = "arn:aws:ssm:us-east-1:000000000000:parameter/" + name;
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"Value\": \"v\", \"Type\": \"String\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        for (String selected : List.of(doubleSlashArn, doubleSlashArn + ":1")) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + selected + "\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ParameterNotFound"));
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameters")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Names\": [\"" + selected + "\"] }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("Parameters", hasSize(0))
+                .body("InvalidParameters", contains(selected));
+        }
     }
 
     private void putIntelligentTiering(String name, String jsonEscapedValue) {

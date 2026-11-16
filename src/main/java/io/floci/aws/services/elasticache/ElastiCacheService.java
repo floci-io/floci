@@ -900,6 +900,16 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
+     * Whether a resource belongs to the request's Region. Replication groups, cache clusters (including
+     * Memcached ones, which DescribeCacheClusters lists too), users and user groups are stored per account;
+     * like AWS, the Describe* listings only show the requesting Region's.
+     * The getters stay unscoped: credential lookups, restore and validation run outside a request.
+     */
+    boolean inRequestRegion(String arn) {
+        return regionResolver.getRegion().equals(regionOf(arn));
+    }
+
+    /**
      * Restarts the container and auth proxy behind a standalone Redis or Valkey cache cluster,
      * the same pair {@link #provisionCacheCluster} creates. The cache comes back empty, as it
      * does for a replication group: only the record is persisted, never the keyspace.
@@ -1298,12 +1308,12 @@ public class ElastiCacheService implements ResourceProvider {
 
     public Collection<ReplicationGroup> listReplicationGroups(String filterGroupId) {
         if (filterGroupId != null && !filterGroupId.isBlank()) {
-            return groups.get(filterGroupId)
+            return groups.get(filterGroupId).filter(g -> inRequestRegion(g.getArn()))
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("ReplicationGroupNotFoundFault",
                             "Replication group " + filterGroupId + " not found.", 404));
         }
-        return groups.scan(k -> true);
+        return groups.scan(k -> true).stream().filter(g -> inRequestRegion(g.getArn())).toList();
     }
 
     public void deleteReplicationGroup(String groupId) {
@@ -2094,6 +2104,9 @@ public class ElastiCacheService implements ResourceProvider {
     public List<MemberCacheCluster> listMemberCacheClusters(String filterClusterId) {
         List<MemberCacheCluster> members = new ArrayList<>();
         for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (!inRequestRegion(group.getArn())) {
+                continue;
+            }
             for (MemberCacheCluster member : memberCacheClusters(group)) {
                 if (filterClusterId == null || filterClusterId.isBlank()
                         || filterClusterId.equals(member.cacheClusterId())) {
@@ -2113,12 +2126,135 @@ public class ElastiCacheService implements ResourceProvider {
             }
             return members;
         }
-        for (int i = 1; i <= group.getNumCacheClusters(); i++) {
+        List<Integer> numbers = memberNumbers(group);
+        int primary = primaryMember(group, numbers);
+        for (int number : numbers) {
             members.add(new MemberCacheCluster(group,
-                    group.getReplicationGroupId() + "-" + String.format("%03d", i),
-                    group.getProxyPort(), i == 1));
+                    group.getReplicationGroupId() + "-" + String.format("%03d", number),
+                    group.getProxyPort(), number == primary));
         }
         return members;
+    }
+
+    /** A cluster-mode-disabled group's member numbers, in order: 1 to NumCacheClusters until a count change. */
+    private static List<Integer> memberNumbers(ReplicationGroup group) {
+        if (!group.getMemberNumbers().isEmpty()) {
+            return group.getMemberNumbers();
+        }
+        List<Integer> numbers = new ArrayList<>();
+        for (int number = 1; number <= group.getNumCacheClusters(); number++) {
+            numbers.add(number);
+        }
+        return numbers;
+    }
+
+    /** The member a cluster-mode-disabled group reports as primary: the first, unless TestFailover moved it. */
+    private static int primaryMember(ReplicationGroup group, List<Integer> numbers) {
+        return numbers.contains(group.getPrimaryMemberNumber()) ? group.getPrimaryMemberNumber() : numbers.getFirst();
+    }
+
+    // ── Replicas and failover ─────────────────────────────────────────────────
+
+    /**
+     * IncreaseReplicaCount and DecreaseReplicaCount for a cluster-mode-disabled group. Its members
+     * share one backend, so a replica is a member cache cluster the group reports, added or removed at
+     * once, since {@code ApplyImmediately=False} is not supported. Up to five replicas, and at least one
+     * while Multi-AZ is enabled. New members take the next numbers; a decrease removes the
+     * highest-numbered replicas and never the primary, which AWS does not delete.
+     */
+    public ReplicationGroup changeReplicaCount(String groupId, Integer newReplicaCount, Boolean applyImmediately,
+                                               boolean increase) {
+        requireGroupId(groupId);
+        if (applyImmediately == null) {
+            throw new AwsException("InvalidParameterValue", "The parameter ApplyImmediately must be provided.", 400);
+        }
+        if (!applyImmediately) {
+            throw new AwsException("InvalidParameterValue", "ApplyImmediately=False is not currently supported.", 400);
+        }
+        if (newReplicaCount == null) {
+            throw new AwsException("InvalidParameterValue", "The parameter NewReplicaCount must be provided.", 400);
+        }
+        synchronized (lockFor("rg:" + groupId)) {
+            ReplicationGroup group = requireFailoverCapable(groupId,
+                    increase ? "IncreaseReplicaCount" : "DecreaseReplicaCount");
+            validateRange("NewReplicaCount", newReplicaCount, group.isMultiAzEnabled() ? 1 : 0, 5);
+            List<Integer> numbers = new ArrayList<>(memberNumbers(group));
+            int primary = primaryMember(group, numbers);
+            int current = numbers.size() - 1;
+            if (increase ? newReplicaCount <= current : newReplicaCount >= current) {
+                throw new AwsException("InvalidParameterValue", "NewReplicaCount " + newReplicaCount + " must be "
+                        + (increase ? "greater" : "less") + " than the " + current + " replica(s) replication group "
+                        + groupId + " has.", 400);
+            }
+            if (increase) {
+                int next = numbers.getLast();
+                while (numbers.size() < newReplicaCount + 1) {
+                    numbers.add(++next);
+                }
+            } else {
+                for (int i = numbers.size() - 1; i >= 0 && numbers.size() > newReplicaCount + 1; i--) {
+                    if (numbers.get(i) != primary) {
+                        numbers.remove(i);
+                    }
+                }
+            }
+            group.setMemberNumbers(numbers);
+            group.setNumCacheClusters(numbers.size());
+            group.setPrimaryMemberNumber(primary);
+            groups.put(groupId, group);
+            LOG.infov("Replication group {0} now has {1} replica(s)", groupId, String.valueOf(newReplicaCount));
+            return group;
+        }
+    }
+
+    /**
+     * TestFailover on a cluster-mode-disabled group, whose only node group is 0001: the next member
+     * becomes primary and the old primary a replica. The members share one backend, so the data and
+     * the endpoints stay as they are; the roles every API reports change.
+     */
+    public ReplicationGroup testFailover(String groupId, String nodeGroupId) {
+        requireGroupId(groupId);
+        if (nodeGroupId == null || nodeGroupId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The parameter NodeGroupId must be provided.", 400);
+        }
+        synchronized (lockFor("rg:" + groupId)) {
+            ReplicationGroup group = requireFailoverCapable(groupId, "TestFailover");
+            if (!"0001".equals(nodeGroupId)) {
+                throw new AwsException("NodeGroupNotFoundFault", "Node group " + nodeGroupId
+                        + " not found in replication group " + groupId + ".", 404);
+            }
+            List<Integer> numbers = memberNumbers(group);
+            if (!group.isAutomaticFailoverEnabled() || numbers.size() < 2) {
+                throw new AwsException("InvalidReplicationGroupState", "Replication group " + groupId
+                        + " needs automatic failover enabled and at least one replica to fail over.", 400);
+            }
+            int primary = primaryMember(group, numbers);
+            group.setPrimaryMemberNumber(numbers.get((numbers.indexOf(primary) + 1) % numbers.size()));
+            groups.put(groupId, group);
+            LOG.infov("Replication group {0} failed over to member {1}", groupId,
+                    String.valueOf(group.getPrimaryMemberNumber()));
+            return group;
+        }
+    }
+
+    private static void requireGroupId(String groupId) {
+        if (groupId == null || groupId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The parameter ReplicationGroupId must be provided.", 400);
+        }
+    }
+
+    /** The group, read under its monitor by the caller: available and cluster-mode disabled. */
+    private ReplicationGroup requireFailoverCapable(String groupId, String operation) {
+        ReplicationGroup group = getReplicationGroup(groupId);
+        if (group.isClusterEnabled()) {
+            throw new AwsException("InvalidParameterValue", "Floci supports " + operation
+                    + " on cluster-mode-disabled replication groups only; " + groupId + " is cluster-mode enabled.", 400);
+        }
+        if (group.getStatus() != ReplicationGroupStatus.AVAILABLE) {
+            throw new AwsException("InvalidReplicationGroupState",
+                    "Replication group " + groupId + " is not available.", 400);
+        }
+        return group;
     }
 
     public ReplicationGroup modifyReplicationGroup(String groupId, List<String> userGroupIdsToAdd,
@@ -2554,7 +2690,7 @@ public class ElastiCacheService implements ResourceProvider {
     public Collection<ElastiCacheUser> listUsers(String filterUserId, String filterEngine) {
         // UserId wins when both filters are sent; AWS documents no interaction between them.
         if (filterUserId != null && !filterUserId.isBlank()) {
-            return findUser(filterUserId)
+            return findUser(filterUserId).flatMap(this::inRequestRegion)
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("UserNotFound",
                             "User " + filterUserId + " not found.", 404));
@@ -2562,10 +2698,31 @@ public class ElastiCacheService implements ResourceProvider {
         ensureDefaultUser();
         if (filterEngine != null && !filterEngine.isBlank()) {
             return users.scan(k -> true).stream()
+                    .map(this::inRequestRegion).flatMap(Optional::stream)
                     .filter(u -> filterEngine.equalsIgnoreCase(u.getEngine()))
                     .toList();
         }
-        return users.scan(k -> true);
+        return users.scan(k -> true).stream().map(this::inRequestRegion).flatMap(Optional::stream).toList();
+    }
+
+    /**
+     * {@code user} as the request's Region lists it, or empty when it is another Region's. AWS has the built-in
+     * default user in every Region; Floci seeds one per account, so it is listed in every Region, with that
+     * Region's ARN.
+     */
+    private Optional<ElastiCacheUser> inRequestRegion(ElastiCacheUser user) {
+        if (!DEFAULT_USER_ID.equals(user.getUserId())) {
+            return inRequestRegion(user.getArn()) ? Optional.of(user) : Optional.empty();
+        }
+        String arn = regionResolver.buildArn("elasticache", regionResolver.getRegion(), "user:" + DEFAULT_USER_ID);
+        if (arn.equals(user.getArn())) {
+            return Optional.of(user);
+        }
+        ElastiCacheUser regional = new ElastiCacheUser(user.getUserId(), user.getUserName(), user.getAuthMode(),
+                user.getPasswords(), user.getAccessString(), user.getEngine(), user.getStatus(), user.getCreatedAt());
+        regional.setTags(user.getTags());
+        regional.setArn(arn);
+        return Optional.of(regional);
     }
 
     /**
@@ -2724,9 +2881,13 @@ public class ElastiCacheService implements ResourceProvider {
 
     public Collection<ElastiCacheUserGroup> listUserGroups(String filterUserGroupId) {
         if (filterUserGroupId != null && !filterUserGroupId.isBlank()) {
-            return List.of(getUserGroup(filterUserGroupId));
+            ElastiCacheUserGroup userGroup = getUserGroup(filterUserGroupId);
+            if (!inRequestRegion(userGroup.getArn())) {
+                throw userGroupNotFound(filterUserGroupId);
+            }
+            return List.of(userGroup);
         }
-        return userGroups.scan(k -> true);
+        return userGroups.scan(k -> true).stream().filter(g -> inRequestRegion(g.getArn())).toList();
     }
 
     public ElastiCacheUserGroup modifyUserGroup(String userGroupId, List<String> userIdsToAdd,
@@ -2833,8 +2994,10 @@ public class ElastiCacheService implements ResourceProvider {
                 .toList();
     }
 
+    /** The request Region's user groups the user is a member of, as DescribeUserGroups lists them there. */
     public List<String> userGroupIdsContaining(String userId) {
         return userGroups.scan(k -> true).stream()
+                .filter(g -> inRequestRegion(g.getArn()))
                 .filter(g -> g.getUserIds().contains(userId))
                 .map(ElastiCacheUserGroup::getUserGroupId)
                 .toList();

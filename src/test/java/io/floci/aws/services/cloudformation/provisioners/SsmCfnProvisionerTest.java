@@ -137,6 +137,44 @@ class SsmCfnProvisionerTest {
     }
 
     @Test
+    void aNameWithSurroundingSpacesIsRecordedAsTheNameSsmStores() {
+        StackResource r = parameter(null, null);
+
+        provisioner.provision(r, props().put("Name", " " + NAME + " "), ctx());
+
+        verify(ssm).putParameter(NAME, "v", "String", null, false, Map.of(), REGION);
+        assertEquals(NAME, r.getPhysicalId());
+        assertEquals(NAME, r.getAttributes().get("Name"));
+        assertEquals(ARN, r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void aPriorPhysicalIdWithSurroundingSpacesIsReplacedByTheStrippedName() {
+        String spaced = " " + NAME + " ";
+        StackResource r = parameter(spaced, null);
+        ProvisionContext create = ctx();
+        ProvisionContext update = new ProvisionContext(create.engine(), create.region(), create.accountId(),
+                create.stackName(), spaced);
+
+        provisioner.provision(r, props().put("Name", spaced), update);
+
+        verify(ssm, never()).getParameter(anyString(), anyString());
+        verify(ssm).putParameter(NAME, "v", "String", null, false, Map.of(), REGION);
+        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), eq(true), anyString());
+        assertEquals(NAME, r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(spaced, provisioner.updateCleanupPhysicalId(r));
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        provisioner.clearUpdate(r);
+
+        assertTrue(cleanup.complete());
+        verify(ssm).deleteParameter(spaced, REGION);
+        verify(ssm, never()).deleteParameter(NAME, REGION);
+    }
+
+    @Test
     void parameterWithoutTagsIsNotTagged() {
         StackResource r = parameter(null, null);
 
@@ -209,8 +247,8 @@ class SsmCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r));
 
-        verify(ssm).putParameter(NAME, "old", "String", "described outside the stack", true, null, null,
-                "^[a-z]+$", "Advanced", policies, REGION);
+        verify(ssm).restoreParameter(NAME, "old", "String", "described outside the stack", null, "^[a-z]+$",
+                "Advanced", policies, REGION);
         verify(ssm).removeTagsFromResource(NAME, List.of("added"), REGION);
         verify(ssm).addTagsToResource(NAME, Map.of("env", "dev", "team", "a"), REGION);
         verify(ssm, never()).addTagsToResource(eq(NAME), argThat(tags -> tags.containsKey("external")), eq(REGION));
@@ -225,8 +263,8 @@ class SsmCfnProvisionerTest {
         StackResource r = parameter(NAME, null);
         provisioner.provision(r, props(), updateCtx());
         afterTheUpdate(Map.of());
-        when(ssm.putParameter(eq(NAME), eq("old"), eq("String"), any(), eq(true), any(), any(), any(), any(),
-                any(), eq(REGION)))
+        when(ssm.restoreParameter(eq(NAME), eq("old"), eq("String"), any(), any(), any(), any(), any(),
+                eq(REGION)))
                 .thenThrow(new AwsException("InternalServerError", "simulated", 500))
                 .thenReturn(3L);
 
@@ -260,10 +298,10 @@ class SsmCfnProvisionerTest {
         provisioner.provision(skipped, props(), updateCtx(stored("current", Map.of())));
         afterTheUpdate(Map.of());
         assertTrue(provisioner.rollbackUpdate(skipped));
-        verify(ssm).putParameter(eq(NAME), eq("current"), eq("String"), any(), eq(true), any(), any(), any(),
-                any(), any(), eq(REGION));
-        verify(ssm, never()).putParameter(eq(NAME), eq("stale"), anyString(), any(), anyBoolean(), any(), any(),
-                any(), any(), any(), anyString());
+        verify(ssm).restoreParameter(eq(NAME), eq("current"), eq("String"), any(), any(), any(), any(), any(),
+                eq(REGION));
+        verify(ssm, never()).restoreParameter(eq(NAME), eq("stale"), anyString(), any(), any(), any(), any(),
+                any(), anyString());
     }
 
     /** AWS's handler checks the parameter exists before an update in place writes it. */
@@ -292,8 +330,8 @@ class SsmCfnProvisionerTest {
         assertEquals("ParameterNotFound",
                 assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r)).getErrorCode());
 
-        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), anyBoolean(), any(), any(),
-                any(), any(), any(), anyString());
+        verify(ssm, never()).restoreParameter(anyString(), anyString(), anyString(), any(), any(), any(), any(),
+                any(), anyString());
         assertTrue(provisioner.retainsFailedUpdateState(r));
     }
 
@@ -305,8 +343,8 @@ class SsmCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r));
 
-        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), anyBoolean(), any(), any(),
-                any(), any(), any(), anyString());
+        verify(ssm, never()).restoreParameter(anyString(), anyString(), anyString(), any(), any(), any(), any(),
+                any(), anyString());
         verify(ssm).addTagsToResource(NAME, Map.of("team", "a"), REGION);
     }
 

@@ -15,6 +15,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -32,7 +33,8 @@ import java.util.stream.Collectors;
  *
  * <p>Backward compatibility: on a {@link #get} miss for the prefixed key, the un-prefixed
  * key is tried and the entry is migrated on read. This covers existing persistent/WAL data
- * created before multi-account support was added.
+ * created before multi-account support was added. A key already carrying an account prefix
+ * is only read inside the caller's explicit namespace, never as a raw legacy key.
  */
 public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> {
 
@@ -70,6 +72,39 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccountId);
     }
 
+    /**
+     * Reads {@code key} in {@code accountId}, for a caller outside any request (an async worker)
+     * that knows the account owning the resource. A store that is not account-aware, or a null
+     * {@code accountId}, falls back to {@link StorageBackend#get}.
+     */
+    public static <V> Optional<V> getInAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            return aware.getForAccount(accountId, key);
+        }
+        return store.get(key);
+    }
+
+    /**
+     * As {@link #getInAccount}, also finding a pre-multi-account entry of the default account, read in place
+     * ({@link #getLegacyForAccount}), for a lookup that must leave the store as it is, as IAM's reads of a
+     * resource's tags must.
+     */
+    public static <V> Optional<V> readInAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            return aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key));
+        }
+        return store.get(key);
+    }
+
+    /** Writes {@code value} in {@code accountId}; the counterpart of {@link #getInAccount}. */
+    public static <V> void putInAccount(StorageBackend<String, V> store, String accountId, String key, V value) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            aware.putForAccount(accountId, key, value);
+        } else {
+            store.put(key, value);
+        }
+    }
+
     @Override
     public void put(String key, V value) {
         String account = prefix();
@@ -98,7 +133,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     public Optional<V> get(String key) {
         String prefixedKey = prefixed(key);
         Optional<V> result = delegate.get(prefixedKey);
-        if (result.isPresent()) {
+        if (result.isPresent() || hasAccountPrefix(key)) {
             return result;
         }
         // Backward-compat: try un-prefixed key (pre-multi-account data) and migrate on read. The
@@ -218,9 +253,8 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     public List<AccountEntry<V>> scanAllAccountEntries(Predicate<String> keyFilter) {
         List<AccountEntry<V>> result = new ArrayList<>();
         for (String rawKey : delegate.keys()) {
-            boolean hasAccountPrefix = hasAccountPrefix(rawKey);
-            String accountId = hasAccountPrefix ? rawKey.substring(0, 12) : defaultAccountId;
-            String logicalKey = hasAccountPrefix ? rawKey.substring(13) : rawKey;
+            String accountId = ownerOf(rawKey);
+            String logicalKey = hasAccountPrefix(rawKey) ? rawKey.substring(13) : rawKey;
             if (!keyFilter.test(logicalKey)) {
                 continue;
             }
@@ -243,6 +277,34 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                 (ignored, value) -> destinationKey.apply(value), legacyOwner);
     }
 
+    /**
+     * {@link #migrateLegacyEntries(String, Predicate, Function, Predicate)} in every account that
+     * holds an entry here, an unprefixed entry counting as the default account's, moving every legacy
+     * entry. For a store moving every record onto new keys at startup, when no request names an account.
+     */
+    public synchronized void migrateLegacyEntriesInAllAccounts(
+            Predicate<String> legacyKeyFilter,
+            Function<V, String> destinationKey) {
+        migrateLegacyEntriesInAllAccounts(legacyKeyFilter, destinationKey, (accountId, value) -> true);
+    }
+
+    /**
+     * As above; only the legacy entries {@code legacyOwner} accepts, given the account holding each.
+     */
+    public synchronized void migrateLegacyEntriesInAllAccounts(
+            Predicate<String> legacyKeyFilter,
+            Function<V, String> destinationKey,
+            BiPredicate<String, V> legacyOwner) {
+        Set<String> accounts = new LinkedHashSet<>();
+        for (String rawKey : delegate.keys()) {
+            accounts.add(ownerOf(rawKey));
+        }
+        for (String accountId : accounts) {
+            migrateLegacyEntries(accountId, legacyKeyFilter, destinationKey,
+                    value -> legacyOwner.test(accountId, value));
+        }
+    }
+
     private synchronized void migrateLegacyEntries(
             String accountId,
             Predicate<String> legacyKeyFilter,
@@ -250,8 +312,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
             Predicate<V> legacyOwner) {
         for (String rawKey : new ArrayList<>(delegate.keys())) {
             boolean prefixed = hasAccountPrefix(rawKey);
-            String owner = prefixed ? rawKey.substring(0, 12) : defaultAccountId;
-            if (!accountId.equals(owner)) {
+            if (!accountId.equals(ownerOf(rawKey))) {
                 continue;
             }
 
@@ -349,12 +410,13 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
      *
      * <p>The caller-supplied predicate must establish that the legacy value belongs to the
      * destination account. This opt-in path avoids {@link #get(String)}'s request-context fallback,
-     * which cannot validate ownership before migrating old data.
+     * which cannot validate ownership before migrating old data. Account-prefixed logical
+     * keys are only eligible for the explicit scoped lookup, not the raw legacy fallback.
      */
     public synchronized Optional<V> getForAccountMigratingLegacy(
             String accountId, String key, Predicate<V> legacyOwner) {
         Optional<V> scoped = getForAccount(accountId, key);
-        if (scoped.isPresent()) {
+        if (scoped.isPresent() || hasAccountPrefix(key)) {
             return scoped;
         }
         Optional<V> legacy = delegate.get(key).filter(legacyOwner);
@@ -459,6 +521,36 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         deleteAllAtomicallyForAccounts(Map.of(prefix(), keys));
     }
 
+    /**
+     * Deletes matching values in one commit, including unprefixed legacy
+     * keys only for the configured default account. Does not migrate or rewrite survivors.
+     */
+    public synchronized void deleteMatchingIncludingLegacyAtomically(Predicate<V> valueFilter) {
+        deleteMatchingIncludingLegacyAtomically(key -> true, valueFilter);
+    }
+
+    /**
+     * As above; with {@code keyFilter}, only among the keys it accepts: the account-relative key, or an
+     * unprefixed legacy key as it is stored.
+     */
+    public synchronized void deleteMatchingIncludingLegacyAtomically(Predicate<String> keyFilter,
+                                                                     Predicate<V> valueFilter) {
+        String account = prefix();
+        String accountPrefix = account + "/";
+        Set<String> rawKeys = new LinkedHashSet<>();
+        for (String rawKey : delegate.keys()) {
+            boolean prefixed = hasAccountPrefix(rawKey);
+            boolean owned = prefixed ? rawKey.startsWith(accountPrefix) : defaultAccountId.equals(account);
+            if (owned) {
+                String key = prefixed ? rawKey.substring(accountPrefix.length()) : rawKey;
+                if (keyFilter.test(key) && delegate.get(rawKey).filter(valueFilter).isPresent()) {
+                    rawKeys.add(rawKey);
+                }
+            }
+        }
+        delegate.deleteAllAtomically(rawKeys);
+    }
+
     public void deleteAllAtomicallyForAccounts(Map<String, Set<String>> keysByAccount) {
         Set<String> rawKeys = new LinkedHashSet<>();
         keysByAccount.forEach((account, keys) -> keys.forEach(key -> rawKeys.add(account + "/" + key)));
@@ -530,6 +622,24 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return delegate.scan(k -> !k.contains("/")).stream()
                 .filter(legacyOwner)
                 .toList();
+    }
+
+    /**
+     * Account-relative keys, including unmigrated keys only for the configured default account.
+     * Filters ownership before collecting keys and never fetches or migrates a stored value.
+     */
+    public Set<String> keysIncludingLegacyForAccount(String accountId, Predicate<String> keyFilter) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (String rawKey : delegate.keys()) {
+            if (!accountId.equals(ownerOf(rawKey))) {
+                continue;
+            }
+            String key = hasAccountPrefix(rawKey) ? rawKey.substring(13) : rawKey;
+            if (keyFilter.test(key)) {
+                keys.add(key);
+            }
+        }
+        return keys;
     }
 
     public Set<String> keysForAccount(String accountId) {
@@ -641,6 +751,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return prefix();
     }
 
+    /** The configured owner of data written before account namespaces were introduced. */
+    public String defaultAccountId() {
+        return defaultAccountId;
+    }
+
     private RequestContext requestContext() {
         return requestContextProxy.get();
     }
@@ -661,6 +776,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     private String prefixed(String key) {
         return prefix() + "/" + key;
+    }
+
+    /** The account owning {@code rawKey}: its account prefix, or the default account for an unprefixed key. */
+    private String ownerOf(String rawKey) {
+        return hasAccountPrefix(rawKey) ? rawKey.substring(0, 12) : defaultAccountId;
     }
 
     /** Whether {@code key} starts with a 12-digit account id and a slash, as account-scoped keys do. */

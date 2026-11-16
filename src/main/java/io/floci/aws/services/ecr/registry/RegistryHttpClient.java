@@ -36,21 +36,6 @@ public class RegistryHttpClient {
                 .build();
     }
 
-    /** Returns true if the registry responds to {@code GET /v2/}. */
-    public boolean ping() {
-        try {
-            HttpResponse<Void> resp = http.send(
-                    HttpRequest.newBuilder(URI.create(baseUrl + "/v2/"))
-                            .timeout(Duration.ofSeconds(5))
-                            .GET()
-                            .build(),
-                    HttpResponse.BodyHandlers.discarding());
-            return resp.statusCode() < 500;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     /**
      * Lists all repository names known to the backing registry, following the
      * {@code Link} header pagination that {@code GET /v2/_catalog} uses

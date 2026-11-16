@@ -2,6 +2,7 @@ package io.floci.aws.services.applicationautoscaling;
 
 import io.floci.aws.services.cloudwatch.metrics.AlarmEvaluator;
 import io.floci.aws.services.cloudwatch.metrics.AlarmEvaluatorTestAccess;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -9,6 +10,12 @@ import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScalableTarget;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAction;
+import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -18,6 +25,7 @@ import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * End-to-end coverage for the control loop that closes floci-io/floci#2565: a
@@ -54,6 +62,9 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
 
     @Inject
     AlarmEvaluator alarmEvaluator;
+
+    @Inject
+    ApplicationAutoScalingScheduledActionScheduler scheduledActionScheduler;
 
     @BeforeAll
     static void configure() {
@@ -154,4 +165,84 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                 .body("ScalingActivities[0].StatusCode", equalTo("Successful"))
                 .body("ScalingActivities[0].ResourceId", equalTo(RESOURCE_ID));
     }
+    @Test
+    void scheduledActionClampsEcsAndRetainsCompletion() {
+        String cluster = "aas-scheduled-cluster";
+        String serviceName = "aas-scheduled-service";
+        String resource = "service/" + cluster + "/" + serviceName;
+        try (ApplicationAutoScalingClient scaling = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.US_EAST_1);
+                EcsClient ecs = AwsTestClients.create(EcsClient.builder(), "000000000000", Region.US_EAST_1)) {
+            ecs.createCluster(b -> b.clusterName(cluster));
+            ecs.registerTaskDefinition(b -> b.family("aas-scheduled-task")
+                    .containerDefinitions(ContainerDefinition.builder().name("web").image("nginx").memory(128).build()));
+            ecs.createService(b -> b.cluster(cluster).serviceName(serviceName).taskDefinition("aas-scheduled-task").desiredCount(2));
+            ScheduledActionFixtures.register(scaling, resource, 1, 10);
+            try {
+                scaling.registerScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension(ScheduledActionFixtures.DIMENSION)
+                        .suspendedState(state -> state.scheduledScalingSuspended(true)));
+                Instant suspendedDeadline = Instant.now().plusSeconds(60);
+                scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
+                        .timezone("UTC").schedule(ScheduledActionFixtures.schedule(suspendedDeadline))
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(0, 1)).build());
+                ScheduledAction identity = ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst();
+                assertEquals("UTC", identity.timezone());
+                ScheduledActionFixtures.register(scaling, resource, 1, 10);
+                ScalableTarget suspended = scaling.describeScalableTargets(b -> b.serviceNamespace("ecs")
+                        .resourceIds(resource)).scalableTargets().getFirst();
+                assertEquals(true, suspended.suspendedState().scheduledScalingSuspended());
+                scheduledActionScheduler.tick(suspendedDeadline.plusSeconds(1));
+                assertScheduledCapacityUnchanged(scaling, ecs, resource, cluster, serviceName);
+                scaling.registerScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension(ScheduledActionFixtures.DIMENSION)
+                        .suspendedState(state -> state.scheduledScalingSuspended(false)));
+                scheduledActionScheduler.tick(suspendedDeadline.plusSeconds(2));
+                assertScheduledCapacityUnchanged(scaling, ecs, resource, cluster, serviceName);
+                Instant clampDeadline = Instant.now().plusSeconds(60);
+                scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
+                        .schedule(ScheduledActionFixtures.schedule(clampDeadline)).build());
+                scheduledActionScheduler.tick(clampDeadline);
+                assertEquals(1, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+                assertEquals("Successful", scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
+                        .scalingActivities().getFirst().statusCodeAsString());
+                assertEquals("UTC", ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst().timezone());
+                scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(0, 0)).build());
+                scheduledActionScheduler.tick(Instant.now().plusSeconds(60));
+                assertEquals(1, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+                Instant rescheduledDeadline = Instant.now().plusSeconds(60);
+                scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
+                        .schedule(ScheduledActionFixtures.schedule(rescheduledDeadline)).build());
+                scheduledActionScheduler.tick(rescheduledDeadline);
+                assertEquals(0, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+                ScheduledAction completed = ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst();
+                assertEquals(identity.scheduledActionARN(), completed.scheduledActionARN());
+                assertEquals(identity.creationTime(), completed.creationTime());
+                scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "cancel")
+                        .schedule(ScheduledActionFixtures.schedule(Instant.now().plusSeconds(60)))
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(4, 4)).build());
+                scaling.deleteScheduledAction(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension(ScheduledActionFixtures.DIMENSION).scheduledActionName("cancel"));
+                scheduledActionScheduler.tick(Instant.now().plusSeconds(120));
+                assertEquals(0, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+            } finally {
+                ScheduledActionFixtures.deregister(scaling, resource);
+                ecs.deleteService(b -> b.cluster(cluster).service(serviceName).force(true));
+                ecs.deleteCluster(b -> b.cluster(cluster));
+            }
+        }
+    }
+
+    private static void assertScheduledCapacityUnchanged(ApplicationAutoScalingClient scaling, EcsClient ecs,
+                                                         String resource, String cluster, String serviceName) {
+        ScalableTarget target = scaling.describeScalableTargets(b -> b.serviceNamespace("ecs").resourceIds(resource))
+                .scalableTargets().getFirst();
+        assertEquals(1, target.minCapacity());
+        assertEquals(10, target.maxCapacity());
+        assertEquals(2, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+        assertEquals(0, scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
+                .scalingActivities().size());
+    }
+
 }

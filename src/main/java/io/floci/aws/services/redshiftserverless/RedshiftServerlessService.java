@@ -8,8 +8,11 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.RedshiftAuditTarget;
 import io.floci.aws.services.redshift.SnapshotDumpCopier;
 import io.floci.aws.services.redshift.TempCredential;
 import io.floci.aws.services.redshift.model.Endpoint;
@@ -19,12 +22,14 @@ import io.floci.aws.services.redshiftserverless.model.Namespace;
 import io.floci.aws.services.redshiftserverless.model.PricePerformanceTarget;
 import io.floci.aws.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.floci.aws.services.redshiftserverless.model.Workgroup;
+import io.floci.aws.services.secretsmanager.ManagedSecretRotator;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
@@ -44,14 +49,17 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class RedshiftServerlessService implements Resettable {
+public class RedshiftServerlessService implements Resettable, StoredResourceArns, ManagedSecretRotator {
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessService.class);
 
     public static final String DEFAULT_DB_NAME = "dev";
@@ -119,6 +127,13 @@ public class RedshiftServerlessService implements Resettable {
     private final RedshiftServerlessRuntime runtime;
     private final EmulatorConfig config;
     private final RedshiftServerlessAdminSecrets adminSecrets;
+    private final Map<String, String> rotationReservations = new ConcurrentHashMap<>();
+    /** Looked up lazily: the endpoint service is built on this one. */
+    @Inject
+    Instance<RedshiftServerlessEndpointAccessService> endpointAccess;
+    /** Looked up lazily so a build without the publisher, and the unit tests that never wire one, still start. */
+    @Inject
+    Instance<RedshiftAuditLogPublisher> auditPublisher;
 
     public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
                                      RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
@@ -201,6 +216,63 @@ public class RedshiftServerlessService implements Resettable {
         workgroup.setMasterUsername(masterUsername);
         workgroup.setRuntimeHost(backend.host());
         workgroup.setRuntimePort(backend.port());
+        registerAudit(accountId, region, workgroup, namespace);
+    }
+
+    /** Stops the workgroup's runtime, and with it the audit export of its namespace. */
+    private void stopRuntime(String accountId, String region, String workgroupName) {
+        runtime.stop(accountId, region, workgroupName);
+        unregisterAudit(accountId, region, workgroupName);
+    }
+
+    private void unregisterAudit(String accountId, String region, String workgroupName) {
+        publisher().ifPresent(publisher -> publisher.unregister(accountId,
+                RedshiftServerlessRuntime.backendId(region, workgroupName)));
+    }
+
+    private Optional<RedshiftAuditLogPublisher> publisher() {
+        return auditPublisher == null || auditPublisher.isUnsatisfied()
+                ? Optional.empty() : Optional.of(auditPublisher.get());
+    }
+
+    /** Re-registers the audit export of the namespace's workgroup after the namespace's settings changed. */
+    private void syncAudit(String accountId, String region, Namespace namespace) {
+        workgroupOf(namespace.getNamespaceName(), region)
+                .ifPresent(workgroup -> registerAudit(accountId, region, workgroup, namespace));
+    }
+
+    /**
+     * Registers what the workgroup's backend exports to CloudWatch Logs: the log types its namespace selects in
+     * {@code logExports}, under {@code /aws/redshift/<namespace>/<log type>}. A workgroup without a running
+     * backend has nothing to export.
+     */
+    private void registerAudit(String accountId, String region, Workgroup workgroup, Namespace namespace) {
+        publisher().ifPresent(publisher -> {
+            String backendId = RedshiftServerlessRuntime.backendId(region, workgroup.getWorkgroupName());
+            if (hasLiveRuntime(workgroup)) {
+                try {
+                    publisher.register(accountId, region, auditTarget(backendId, workgroup, namespace));
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Failed to register Redshift audit target for workgroup {0}",
+                            workgroup.getWorkgroupName());
+                }
+            } else {
+                publisher.unregister(accountId, backendId);
+            }
+        });
+    }
+
+    static RedshiftAuditTarget auditTarget(String backendId, Workgroup workgroup, Namespace namespace) {
+        List<String> exports = namespace.getLogExports() == null ? List.of() : namespace.getLogExports().stream()
+                .filter(Objects::nonNull)
+                .toList();
+        boolean activityLogging = workgroup.getConfigParameters() != null
+                && workgroup.getConfigParameters().stream()
+                .anyMatch(parameter -> "enable_user_activity_logging".equals(parameter.getParameterKey())
+                        && "true".equalsIgnoreCase(parameter.getParameterValue()));
+        return new RedshiftAuditTarget(backendId, "serverless", "/aws/redshift/" + namespace.getNamespaceName(),
+                "namespace/" + namespace.getNamespaceName(), !exports.isEmpty(), "cloudwatch", null, null, exports,
+                activityLogging, 0L);
     }
 
     private Supplier<Optional<RedshiftServerlessRuntime.AdminCredentials>> adminSupplier(
@@ -419,12 +491,16 @@ public class RedshiftServerlessService implements Resettable {
             }
             storeAttempted = true;
             namespaces.put(key, updated);
+            syncAudit(workgroups.accountId(), region, updated);
             if (wasManaged && !managed) {
                 requireAdminSecrets().delete(current, region);
             }
         } catch (RuntimeException failure) {
             if (storeAttempted) {
-                compensate(() -> namespaces.put(key, current), failure, "restore namespace credentials");
+                compensate(() -> {
+                    namespaces.put(key, current);
+                    syncAudit(workgroups.accountId(), region, current);
+                }, failure, "restore namespace credentials");
             }
             if (backendChanged) {
                 compensate(() -> restoreAdminPassword(current, region), failure, "restore backend admin password");
@@ -473,6 +549,7 @@ public class RedshiftServerlessService implements Resettable {
             }
         }
         namespaces.put(storageKey(region, previous.getNamespaceName()), previous);
+        syncAudit(workgroups.accountId(), region, previous);
     }
 
     public synchronized Namespace deleteNamespace(String namespaceName, String region) {
@@ -593,12 +670,17 @@ public class RedshiftServerlessService implements Resettable {
 
     /** A stored dump path is trusted only while it still resolves inside this account's dump directory. */
     private Optional<Path> trustedDump(RedshiftServerlessSnapshot snapshot, String region) {
+        return trustedDump(snapshot, workgroups.accountId(), region);
+    }
+
+    /** A stored dump path is trusted only while it still resolves inside the owning account's dump directory. */
+    private Optional<Path> trustedDump(RedshiftServerlessSnapshot snapshot, String accountId, String region) {
         String stored = snapshot.getSqlDump();
         if (stored == null || stored.isBlank()) {
             return Optional.empty();
         }
         Path file = Paths.get(stored).toAbsolutePath().normalize();
-        return file.startsWith(dumpDir(region)) ? Optional.of(file) : Optional.empty();
+        return file.startsWith(dumpDir(accountId, region)) ? Optional.of(file) : Optional.empty();
     }
 
     private static void deleteDumpQuietly(Path dumpFile) {
@@ -624,7 +706,12 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     public String snapshotNameFromArn(String snapshotArn, String region, String memberName) {
-        String prefix = regionResolver.buildArn("redshift-serverless", region, "snapshot/");
+        return snapshotNameFromArn(snapshotArn, region, workgroups.accountId(), memberName);
+    }
+
+    /** Same as above for a snapshot {@code ownerAccount} owns, as a cross-account restore names it. */
+    public String snapshotNameFromArn(String snapshotArn, String region, String ownerAccount, String memberName) {
+        String prefix = regionResolver.buildArn("redshift-serverless", region, ownerAccount, "snapshot/");
         if (snapshotArn == null || !snapshotArn.startsWith(prefix) || snapshotArn.length() == prefix.length()) {
             throw ServerlessSupport.validation(memberName + " does not identify a snapshot in this account and Region.");
         }
@@ -871,7 +958,29 @@ public class RedshiftServerlessService implements Resettable {
                                                                      String ownerAccount, Instant startTime,
                                                                      Instant endTime, String region,
                                                                      Integer maxResults, String nextToken) {
-        List<RedshiftServerlessSnapshot> all = snapshots.scan(key -> key.startsWith(region + "::")).stream()
+        return pageOfSnapshots(snapshots.scan(key -> key.startsWith(region + "::")), namespaceName, namespaceArn,
+                ownerAccount, startTime, endTime, maxResults, nextToken);
+    }
+
+    /**
+     * Lists the snapshots {@code accountId} owns in {@code region}, narrowed as {@link #listSnapshots} does, to the
+     * ones {@code visible} keeps. Whether the caller may see a snapshot of another account is for the caller of
+     * this method to decide.
+     */
+    public PaginatedResult<RedshiftServerlessSnapshot> listSnapshotsOfAccount(
+            String accountId, UnaryOperator<List<RedshiftServerlessSnapshot>> visible, String namespaceName,
+            String namespaceArn, Instant startTime, Instant endTime, String region, Integer maxResults,
+            String nextToken) {
+        List<RedshiftServerlessSnapshot> owned = snapshots.scanForAccount(accountId,
+                key -> key.startsWith(region + "::"));
+        return pageOfSnapshots(visible.apply(owned), namespaceName, namespaceArn, accountId, startTime, endTime,
+                maxResults, nextToken);
+    }
+
+    private PaginatedResult<RedshiftServerlessSnapshot> pageOfSnapshots(
+            List<RedshiftServerlessSnapshot> candidates, String namespaceName, String namespaceArn,
+            String ownerAccount, Instant startTime, Instant endTime, Integer maxResults, String nextToken) {
+        List<RedshiftServerlessSnapshot> all = candidates.stream()
                 .filter(snapshot -> namespaceName == null || namespaceName.isBlank()
                         || namespaceName.equals(snapshot.getNamespaceName()))
                 .filter(snapshot -> namespaceArn == null || namespaceArn.isBlank()
@@ -908,6 +1017,136 @@ public class RedshiftServerlessService implements Resettable {
         if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
             throw snapshotNotFound(snapshotName);
         }
+        return restoreFrom(namespaceName, workgroupName, snapshot, workgroups.accountId(), manageAdminPassword,
+                adminPasswordSecretKmsKeyId, region);
+    }
+
+    /**
+     * Restores a snapshot another account owns. Whether the caller may is decided before this runs, by the
+     * snapshot's resource policy under IAM enforcement; the dump is read from the owner's directory.
+     */
+    public synchronized RestoreResult restoreFromSharedSnapshot(String namespaceName, String workgroupName,
+                                                                String snapshotName, String snapshotAccountId,
+                                                                Boolean manageAdminPassword,
+                                                                String adminPasswordSecretKmsKeyId, String region) {
+        validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
+        validateNamespaceName(namespaceName);
+        RedshiftServerlessSnapshot snapshot = findSnapshotOfAccount(snapshotAccountId, snapshotName, region)
+                .orElseThrow(() -> snapshotNotFound(snapshotName));
+        requireAvailableSnapshot(snapshot);
+        return restoreFrom(namespaceName, workgroupName, snapshot, snapshotAccountId, manageAdminPassword,
+                adminPasswordSecretKmsKeyId, region);
+    }
+
+    /** Whether {@code ownerAccount} names an account other than the caller's. */
+    public boolean isOtherAccount(String ownerAccount) {
+        return ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(workgroups.accountId());
+    }
+
+    @Override
+    public String namespace() {
+        return "redshift-serverless";
+    }
+
+    /**
+     * The ARN of the caller's resource the request names by its name. These ARNs end in an id Redshift Serverless
+     * gives them, which IAM policies are matched against.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (names.isEmpty()) {
+            return Optional.empty();
+        }
+        String name = names.getFirst();
+        return switch (type) {
+            case "namespace" -> findNamespace(name, region).map(Namespace::getNamespaceArn);
+            case "workgroup" -> findWorkgroup(name, region).map(Workgroup::getWorkgroupArn);
+            case "snapshot" -> findSnapshot(name, region).map(RedshiftServerlessSnapshot::getSnapshotArn);
+            case "endpointAccess" -> endpointAccess == null || endpointAccess.isUnsatisfied() ? Optional.empty()
+                    : endpointAccess.get().findEndpointArn(name, region);
+            default -> Optional.empty();
+        };
+    }
+
+    /** The ARN of the snapshot {@code account} owns under the name the request gives, which its policy may share. */
+    @Override
+    public Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+        if (names.isEmpty() || !"snapshot".equals(type)) {
+            return Optional.empty();
+        }
+        return findSnapshotOfAccount(account, names.getFirst(), region).map(RedshiftServerlessSnapshot::getSnapshotArn);
+    }
+
+    /**
+     * What the snapshot stored under {@code arn}, in any account, records as its {@code kmsKeyId}: its key, none for
+     * one under AWS's own key ({@value #AWS_OWNED_KMS_KEY}), which is no key of the account's.
+     */
+    @Override
+    public Optional<String> recorded(String arn, String member) {
+        if (!"kmsKeyId".equals(member) || !AwsArnUtils.isArnFor(arn, "redshift-serverless")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return snapshots.scanForAccount(parsed.accountId(), key -> key.startsWith(parsed.region() + "::")).stream()
+                .filter(snapshot -> arn.equals(snapshot.getSnapshotArn()))
+                .map(RedshiftServerlessSnapshot::getKmsKeyId)
+                .filter(key -> key != null && !key.isBlank() && !AWS_OWNED_KMS_KEY.equals(key))
+                .findFirst();
+    }
+
+    /**
+     * The tags of the namespace, the workgroup or the snapshot stored under {@code arn} in the account and Region it
+     * names, a pre-multi-account one of the default account included, read in place and matched on the whole ARN;
+     * empty for an ARN naming nothing stored. A tag change is stored on a copy, so the tags read are one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "redshift-serverless")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String region = parsed.region();
+        Map<String, String> tags = tagsIn(namespaces, account, region, arn, Namespace::getNamespaceArn,
+                        Namespace::getTags)
+                .or(() -> tagsIn(workgroups, account, region, arn, Workgroup::getWorkgroupArn, Workgroup::getTags))
+                .or(() -> tagsIn(snapshots, account, region, arn, RedshiftServerlessSnapshot::getSnapshotArn,
+                        RedshiftServerlessSnapshot::getTags))
+                .orElse(Map.of());
+        Map<String, String> copy = new LinkedHashMap<>();
+        tags.forEach((key, value) -> {
+            if (value != null) {
+                copy.put(key, value);
+            }
+        });
+        return copy;
+    }
+
+    private static <V> Optional<Map<String, String>> tagsIn(AccountAwareStorageBackend<V> store, String account,
+                                                            String region, String arn, Function<V, String> arnOf,
+                                                            Function<V, Map<String, String>> tagsOf) {
+        List<V> held = new ArrayList<>(store.scanForAccount(account, key -> key.startsWith(region + "::")));
+        if (account.equals(store.defaultAccountId())) {
+            held.addAll(store.scanUnscopedLegacy(stored -> arn.equals(arnOf.apply(stored))));
+        }
+        return held.stream()
+                .filter(stored -> arn.equals(arnOf.apply(stored)))
+                .map(tagsOf)
+                .filter(Objects::nonNull)
+                .findFirst();
+    }
+
+    /** The snapshot {@code snapshotName} of {@code accountId} in {@code region}, whoever is calling. */
+    public Optional<RedshiftServerlessSnapshot> findSnapshotOfAccount(String accountId, String snapshotName,
+                                                                      String region) {
+        return snapshotName == null ? Optional.empty()
+                : snapshots.getForAccount(accountId, storageKey(region, snapshotName));
+    }
+
+    private RestoreResult restoreFrom(String namespaceName, String workgroupName, RedshiftServerlessSnapshot snapshot,
+                                      String snapshotAccountId, Boolean manageAdminPassword,
+                                      String adminPasswordSecretKmsKeyId, String region) {
+        String snapshotName = snapshot.getSnapshotName();
         Workgroup workgroup = getWorkgroup(workgroupName, region);
         if (!namespaceName.equals(workgroup.getNamespaceName())) {
             throw ServerlessSupport.validation("The workgroup " + workgroupName + " does not belong to the namespace "
@@ -917,7 +1156,7 @@ public class RedshiftServerlessService implements Resettable {
         Runnable restoreCredentials = () -> restoreSnapshotCredentials(namespace, snapshot, manageAdminPassword,
                 adminPasswordSecretKmsKeyId, region);
         if (snapshot.getSqlDump() != null && hasLiveRuntime(workgroup)) {
-            Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> new AwsException(
+            Path dump = trustedDump(snapshot, snapshotAccountId, region).filter(Files::exists).orElseThrow(() -> new AwsException(
                     "InternalServerException", "The data of snapshot " + snapshotName + " is no longer available.",
                     500));
             runtime.restoreSnapshot(workgroups.accountId(), region, workgroupName, workgroup.getMasterUsername(),
@@ -945,6 +1184,34 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     public record RestoreResult(Namespace namespace, RedshiftServerlessSnapshot snapshot) {}
+
+    /** What a table restore reads from and writes into: the workgroup's backend, the snapshot's database and dump. */
+    public record TableRestoreSource(Workgroup workgroup, Namespace namespace, Path dump) {}
+
+    /**
+     * Resolves what restoring one table of {@code snapshotName} into {@code workgroupName} needs. The snapshot must be
+     * available and of {@code namespaceName}, the workgroup must be running, and the snapshot must hold data.
+     */
+    public synchronized TableRestoreSource tableRestoreSource(String namespaceName, String workgroupName,
+                                                              String snapshotName, String region) {
+        RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(snapshot);
+        if (!namespaceName.equals(snapshot.getNamespaceName())) {
+            throw snapshotNotFound(snapshotName);
+        }
+        Namespace namespace = getNamespace(namespaceName, region);
+        Workgroup workgroup = getWorkgroup(workgroupName, region);
+        if (!namespaceName.equals(workgroup.getNamespaceName())) {
+            throw ServerlessSupport.validation("The workgroup " + workgroupName + " does not belong to the namespace "
+                    + namespaceName + ".");
+        }
+        if (!hasLiveRuntime(workgroup)) {
+            throw ServerlessSupport.conflict("The workgroup " + workgroupName + " is not available.");
+        }
+        Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> ServerlessSupport.validation(
+                "The snapshot " + snapshotName + " holds no table data to restore."));
+        return new TableRestoreSource(workgroup, namespace, dump);
+    }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
         requireResourceArn(resourceArn);
@@ -1094,7 +1361,7 @@ public class RedshiftServerlessService implements Resettable {
             // The runtime may have started before the failure (a failed put), so tear it down; a
             // runtime that failed to start has already rolled itself back and this is then a no-op.
             try {
-                runtime.stop(workgroups.accountId(), region, workgroupName);
+                stopRuntime(workgroups.accountId(), region, workgroupName);
             } catch (RuntimeException stopFailure) {
                 LOG.warnv(stopFailure, "Could not stop the runtime of workgroup {0} after a failed create",
                         workgroupName);
@@ -1168,6 +1435,8 @@ public class RedshiftServerlessService implements Resettable {
             }
         }
         workgroups.put(storageKey(region, workgroupName), updated);
+        namespaces.get(storageKey(region, updated.getNamespaceName()))
+                .ifPresent(namespace -> registerAudit(workgroups.accountId(), region, updated, namespace));
         return updated;
     }
 
@@ -1176,7 +1445,7 @@ public class RedshiftServerlessService implements Resettable {
         // The proxy goes first and its failure aborts the delete: a listener that could not be closed
         // keeps its port, so the workgroup must stay on record and the call can be retried.
         try {
-            runtime.stop(workgroups.accountId(), region, workgroupName);
+            stopRuntime(workgroups.accountId(), region, workgroupName);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Failed to stop the runtime of workgroup {0}", workgroupName);
             throw new AwsException("InternalServerException",
@@ -1341,8 +1610,86 @@ public class RedshiftServerlessService implements Resettable {
                 || previous.getAdminUserPassword() == null) {
             return;
         }
-        runtime.restoreMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
-                attached.get().getMasterUsername(), previous.getDbName(), previous.getAdminUserPassword());
+        runtime.changeMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
+                attached.get().getMasterUsername(), previous.getDbName(), null, previous.getAdminUserPassword());
+    }
+
+    @Override
+    public boolean supports(String secretArn, String region) {
+        return managedNamespaceOf(secretArn, region).isPresent();
+    }
+
+    @Override
+    public synchronized void reserve(String secretArn, String region) {
+        AccountAwareStorageBackend.AccountEntry<Namespace> entry = requireManagedNamespace(secretArn, region);
+        requireLiveWorkgroup(entry, region);
+        if (rotationReservations.putIfAbsent(secretArn, entry.key()) != null) {
+            throw new AwsException("InvalidRequestException",
+                    "The namespace's managed admin password is already being rotated.", 400);
+        }
+    }
+
+    @Override
+    public void release(String secretArn, String region) {
+        rotationReservations.remove(secretArn);
+    }
+
+    /**
+     * The backend role and proxy, the stored namespace and the secret value change as one rotation:
+     * the secret is written last by the caller, and a failure anywhere puts the backend and the
+     * namespace back. A namespace with no running workgroup has nothing to change the password of,
+     * so it is refused rather than reported as rotated. This runs on a rotation thread with no request,
+     * so every lookup names the account of the namespace instead of the request's.
+     */
+    @Override
+    public synchronized void rotate(String secretArn, String region, ManagedSecretRotator.Rotation rotation) {
+        AccountAwareStorageBackend.AccountEntry<Namespace> entry = requireManagedNamespace(secretArn, region);
+        Workgroup workgroup = requireLiveWorkgroup(entry, region);
+        String accountId = entry.accountId();
+        Namespace current = entry.value();
+        Namespace rotated = new Namespace(current);
+        rotated.setAdminUserPassword(runtime.generatePassword());
+        rotation.commit(() -> {
+            runtime.changeMasterPassword(accountId, region, workgroup.getWorkgroupName(),
+                    workgroup.getMasterUsername(), current.getDbName(), current.getAdminUserPassword(),
+                    rotated.getAdminUserPassword());
+            namespaces.putForAccount(accountId, entry.key(), rotated);
+            return requireAdminSecrets().value(rotated);
+        }, () -> {
+            runtime.changeMasterPassword(accountId, region, workgroup.getWorkgroupName(),
+                    workgroup.getMasterUsername(), current.getDbName(), rotated.getAdminUserPassword(),
+                    current.getAdminUserPassword());
+            namespaces.putForAccount(accountId, entry.key(), current);
+        });
+    }
+
+    private Optional<AccountAwareStorageBackend.AccountEntry<Namespace>> managedNamespaceOf(String secretArn,
+                                                                                           String region) {
+        if (!AwsArnUtils.isArn(secretArn) || !region.equals(AwsArnUtils.parse(secretArn).region())) {
+            return Optional.empty();
+        }
+        return namespaces.scanAllAccountEntries(key -> key.startsWith(region + "::")).stream()
+                .filter(entry -> secretArn.equals(entry.value().getAdminPasswordSecretArn()))
+                .findFirst();
+    }
+
+    private AccountAwareStorageBackend.AccountEntry<Namespace> requireManagedNamespace(String secretArn,
+                                                                                      String region) {
+        return managedNamespaceOf(secretArn, region)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The Redshift Serverless namespace for this managed secret no longer exists.", 400));
+    }
+
+    private Workgroup requireLiveWorkgroup(AccountAwareStorageBackend.AccountEntry<Namespace> entry, String region) {
+        String namespaceName = entry.value().getNamespaceName();
+        return workgroups.scanAllAccountEntries(key -> key.startsWith(region + "::")).stream()
+                .filter(candidate -> entry.accountId().equals(candidate.accountId()))
+                .map(AccountAwareStorageBackend.AccountEntry::value)
+                .filter(workgroup -> namespaceName.equals(workgroup.getNamespaceName()))
+                .filter(workgroup -> "AVAILABLE".equals(workgroup.getStatus()) && hasLiveRuntime(workgroup))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "The namespace must have an available workgroup to rotate its admin password.", 400));
     }
 
     private static String blankToNull(String value) {
@@ -1388,14 +1735,18 @@ public class RedshiftServerlessService implements Resettable {
     @Override
     public void clear() {
         for (AccountAwareStorageBackend.AccountEntry<Workgroup> entry : workgroups.scanAllAccountEntries(key -> true)) {
+            String region = regionOf(entry.key());
+            String workgroupName = entry.value().getWorkgroupName();
             try {
-                runtime.stop(entry.accountId(), regionOf(entry.key()), entry.value().getWorkgroupName());
+                stopRuntime(entry.accountId(), region, workgroupName);
                 endpoints.release(entry.value().getEndpoint());
             } catch (RuntimeException e) {
+                // The workgroup record is about to be cleared, so drop its audit target even if shutdown failed.
+                unregisterAudit(entry.accountId(), region, workgroupName);
                 // The listener may still be bound, so the endpoint stays reserved rather than being
                 // handed to a later cluster or workgroup whose proxy could not bind it.
                 LOG.warnv(e, "Could not stop the runtime of workgroup {0} while clearing state; "
-                        + "its endpoint stays reserved", entry.value().getWorkgroupName());
+                        + "its endpoint stays reserved", workgroupName);
             }
         }
         namespaces.clear();

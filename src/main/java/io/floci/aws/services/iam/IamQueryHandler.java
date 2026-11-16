@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import io.floci.aws.core.common.*;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.iam.model.AccountPasswordPolicy;
@@ -102,6 +103,8 @@ public class IamQueryHandler {
     private final DelegationRequestService delegationRequestService;
     private final CentralRootAccess centralRootAccess;
     private final RegionResolver regionResolver;
+    /** The caller this request signed as, which says whether a delegation bounds what it creates. */
+    private final RequestContext requestContext;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
     /** Signs each page's Marker, so only a marker this handler issued names an item. */
     private final SignedMarkers markers = new SignedMarkers(MARKER_MAX_LENGTH);
@@ -114,6 +117,7 @@ public class IamQueryHandler {
                            DelegationRequestService delegationRequestService,
                            CentralRootAccess centralRootAccess,
                            RegionResolver regionResolver,
+                           RequestContext requestContext,
                            Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
@@ -122,6 +126,7 @@ public class IamQueryHandler {
         this.serviceLastAccessedService = serviceLastAccessedService;
         this.organizationsAccessReportService = organizationsAccessReportService;
         this.delegationRequestService = delegationRequestService;
+        this.requestContext = requestContext;
         this.centralRootAccess = centralRootAccess;
         this.regionResolver = regionResolver;
         this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
@@ -1353,8 +1358,15 @@ public class IamQueryHandler {
         String description = getParam(params, "Description");
         int maxSession = getIntParam(params, "MaxSessionDuration", 3600);
         Map<String, String> tags = extractTags(params, true);
+        // A role created with delegated credentials carries the boundary the delegation request
+        // names, the guide's long-term permissions "limit[ing] the permissions of any roles that
+        // are created or managed through temporary access". It is a cap the customer registered
+        // rather than a choice of the caller, so it is the role's boundary wherever the request
+        // restricts one, and what the call asked for applies only when it does not.
+        String boundary = iamService.delegatedRoleBoundaryArn(requestContext.getAccessKeyId())
+                .orElseGet(() -> getParam(params, "PermissionsBoundary"));
         IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags,
-                getParam(params, "PermissionsBoundary"));
+                boundary);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("CreateRole", AwsNamespaces.IAM, result)).build();
     }
@@ -1425,6 +1437,7 @@ public class IamQueryHandler {
                 requireParam(params, "PolicyDocument"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAssumeRolePolicy", AwsNamespaces.IAM)).build();
     }
+
 
     private Response handleTagRole(MultivaluedMap<String, String> params) {
         iamService.tagRole(getParam(params, "RoleName"), extractTags(params, true));
@@ -2132,21 +2145,65 @@ public class IamQueryHandler {
     private Response handlePutRolePermissionsBoundary(MultivaluedMap<String, String> params) {
         String roleName = requireParam(params, "RoleName");
         String boundaryArn = requireParam(params, "PermissionsBoundary");
+        refuseLiftingADelegatedCap(roleName);
         iamService.putRolePermissionsBoundary(roleName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteRolePermissionsBoundary(MultivaluedMap<String, String> params) {
         String roleName = requireParam(params, "RoleName");
+        refuseLiftingADelegatedCap(roleName);
         iamService.deleteRolePermissionsBoundary(roleName);
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
+    /**
+     * A delegation's cap stays on the role it capped. The guide says long-term permissions limit
+     * roles "that are created or managed through temporary access", and the boundary is registered
+     * out of band and immutable, so the credentials a delegation issued cannot replace or remove
+     * the boundary it gave a role: that would leave the role outside the cap by the same door it
+     * came through. No source gives a sentence for this refusal, so it is this emulator's own, and
+     * it reaches only a caller holding a delegated session whose registration the role carries.
+     */
+    private void refuseLiftingADelegatedCap(String roleName) {
+        String delegated = iamService.delegatedRoleBoundaryArn(requestContext.getAccessKeyId())
+                .orElse(null);
+        if (delegated == null) {
+            return;
+        }
+        String current = iamService.getValidatedRole(roleName).getPermissionsBoundaryArn();
+        if (delegated.equals(current)) {
+            throw new AwsException("AccessDenied", "The permissions boundary on role " + roleName
+                    + " was set by the delegation these credentials come from and cannot be changed"
+                    + " with them.", 403);
+        }
+    }
+
+    /**
+     * The principal's own policies, less whatever {@code PolicyExclusionList} asked to leave out
+     * and beside whatever documents the request handed in. The identifiers are request inputs, so
+     * they are read and refused ahead of the lookup, which is where this package answers an input;
+     * a simulation that excludes nothing and hands nothing in resolves the context it always did.
+     */
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = validatedPolicySourceArn(params);
-        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
-        List<String> actionNames = requireActionNames(params);
+        PolicyExclusions exclusions = PolicyExclusions.from(params);
+        List<String> inputDocuments = readablePolicyInputList(params);
+        String inputBoundary = inputBoundaryDocument(params);
+        // SCPs enter a simulation only when the call asks for them, the way the console includes
+        // them only when "AWS Organizations SCPs" is ticked, so the levels the call handed in are
+        // the whole of the organization the simulation runs against. They are read where the other
+        // handed-in documents are, ahead of the lookup, so a principal that does not exist cannot
+        // answer for an input this operation refuses: that is the rule above, and these two inputs
+        // live under it as well.
+        List<List<String>> scpLevels = organizationPolicyLevels(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        SimulationScenarios.requireScenarioResources(params.getFirst("ResourceHandlingOption"),
+                resourceArns);
+        CallerContext caller = withInputDocuments(
+                iamService.resolvePrincipalContext(policySourceArn, exclusions), inputDocuments, inputBoundary)
+                .withScpLevels(scpLevels);
+        List<String> actionNames = requireActionNames(params);
         // Keyed without regard to case, as the evaluator compares condition key names: a value
         // the call supplied has to shadow a populated one however the call spelled the key.
         Map<String, List<String>> context = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
@@ -2171,14 +2228,130 @@ public class IamQueryHandler {
     private Response handleSimulateCustomPolicy(MultivaluedMap<String, String> params) {
         List<String> policyInputList = requirePolicyInputList(params);
         List<String> actionNames = requireActionNames(params);
+        // Read before the scenario, as the principal simulation reads them, so a bad level and a
+        // bad scenario are answered in the same order whichever operation was called.
+        List<List<String>> scpLevels = organizationPolicyLevels(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        SimulationScenarios.requireScenarioResources(params.getFirst("ResourceHandlingOption"),
+                resourceArns);
         Map<String, List<String>> context = extractContextEntries(params);
-        // AWS accepts only one permissions boundary document per simulation; a request that
-        // provides more than one is not modeled and only the first is applied.
-        List<String> boundaryInputList = getMemberList(params, "PermissionsBoundaryPolicyInputList");
-        String boundaryDocument = boundaryInputList.isEmpty() ? null : boundaryInputList.get(0);
-        CallerContext caller = new CallerContext(policyInputList, null, boundaryDocument);
+        CallerContext caller = new CallerContext(policyInputList, null, inputBoundaryDocument(params),
+                scpLevels);
         return simulationResults("SimulateCustomPolicy", params, caller, actionNames, resourceArns, context);
+    }
+
+    /**
+     * The service control policies a simulation was handed, one list per level of an
+     * organization. The member's reference describes both the shape and the order: "An ordered
+     * list of service control policies (SCPs) to include in the simulation. Each element
+     * represents one level of an Organizations hierarchy, from the organization root to the
+     * account. The simulator evaluates SCPs in the order that you provide, consistent with how
+     * Organizations enforces SCPs." So the levels go to the evaluator as the caller's effective
+     * SCPs, which is the walk a live request already takes through them, in the order the request
+     * wrote. How many levels there may be is the model's to say, seven on this list, and the
+     * declared constraints are read ahead of this.
+     *
+     * <p>Each document is held to being a policy document, as the documents of the other input
+     * lists are, and a level naming none is no level: a request that carries the member and
+     * nothing in it simulates with no organization above it rather than with an empty root.
+     */
+    private List<List<String>> organizationPolicyLevels(MultivaluedMap<String, String> params) {
+        List<List<String>> levels = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember level
+                : AwsQueryLists.members(params, "OrderedOrganizationPolicyInputList", null)) {
+            List<String> documents = new ArrayList<>();
+            for (AwsQueryLists.IndexedMember document : AwsQueryLists.members(params,
+                    level.prefix() + ".ServiceControlPolicyInputList", null)) {
+                String policy = params.getFirst(document.prefix());
+                if (policy == null) {
+                    continue;
+                }
+                if (!policyEvaluator.readsAsPolicyDocument(policy)) {
+                    throw new AwsException("InvalidInput", "Ordered organization policy input list"
+                            + " item " + level.index() + " has invalid content", 400);
+                }
+                documents.add(policy);
+            }
+            if (!documents.isEmpty()) {
+                levels.add(List.copyOf(documents));
+            }
+        }
+        return levels.isEmpty() ? null : List.copyOf(levels);
+    }
+
+    /**
+     * The documents a principal simulation was handed beside the principal's own.
+     * {@code PolicyInputList} is "an optional list of additional policy documents to include in
+     * the simulation", so each is evaluated like a policy the principal holds: AWS's own example
+     * for this operation allows an action the attached policies do not, on the strength of an
+     * input document alone. A permissions boundary handed in "is used for the simulation" in place
+     * of the stored one, which is what the member says of an entity carrying one, and is the
+     * boundary when the entity carries none.
+     *
+     * <p>Neither document is attached to anything, so no {@code PolicyExclusionList} identifier
+     * reaches either: that member names the policies "actually attached to the principal", where
+     * these are the request's own. Both are read before the principal is resolved, which is where
+     * this package answers an input, so a document the operation cannot read is refused whether or
+     * not the ARN names anybody.
+     */
+    private CallerContext withInputDocuments(CallerContext caller, List<String> documents,
+                                             String boundaryDocument) {
+        CallerContext simulated = caller.withIdentityPolicies(documents);
+        return boundaryDocument == null ? simulated : simulated.withBoundaryPolicy(boundaryDocument);
+    }
+
+    /**
+     * The one permissions boundary document a simulation runs with, read the same way for both
+     * simulators. AWS accepts only one, "You can input only one permissions boundary when you pass
+     * a policy to this operation", so a request carrying more is not modelled and only the first
+     * is applied.
+     */
+    private String inputBoundaryDocument(MultivaluedMap<String, String> params) {
+        List<String> boundaryInputList = getMemberList(params, "PermissionsBoundaryPolicyInputList");
+        if (boundaryInputList.isEmpty()) {
+            return null;
+        }
+        String boundary = boundaryInputList.get(0);
+        if (!policyEvaluator.readsAsPolicyDocument(boundary)) {
+            // The member carries one document, so the refusal identifies none: this is the fixed
+            // sentence AWS's own emulator answers for every supplied document but an entry of
+            // PolicyInputList, which is named by its index instead.
+            throw new AwsException("InvalidInput", "Syntax errors in policy.", 400);
+        }
+        return boundary;
+    }
+
+    /**
+     * The {@code PolicyInputList} documents a request supplied, each held to being a policy
+     * document before anything is decided from it. The member takes "the complete, valid JSON text
+     * of an IAM policy", so a value that is no policy document is an invalid input value rather
+     * than a document the evaluation reads nothing out of, and the modelled {@code InvalidInput} is
+     * what this package answers a value it cannot read as the member's type at all, the declared
+     * format and length being answered by the constraints ahead of the operation.
+     *
+     * <p>The 500 {@code PolicyEvaluation} the two simulators model is not that answer: it carries
+     * no sender fault where {@code InvalidInput} does, and the two context-key readers take this
+     * same member and model no {@code PolicyEvaluation} at all, so one defect on one member would
+     * otherwise be answered two ways across the four operations that take it.
+     *
+     * <p>No wording for the refusal is published. This is the sentence AWS's own emulator answers,
+     * naming the offending entry by the index it arrived under, the member carrying several
+     * documents and the caller needing to know which of them was refused.
+     */
+    private List<String> readablePolicyInputList(MultivaluedMap<String, String> params) {
+        List<String> documents = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember member : AwsQueryLists.members(params, "PolicyInputList", null)) {
+            String document = params.getFirst(member.prefix());
+            if (document == null) {
+                continue;
+            }
+            if (!policyEvaluator.readsAsPolicyDocument(document)) {
+                throw new AwsException("InvalidInput",
+                        "Policy input list item " + member.index() + " has invalid content", 400);
+            }
+            documents.add(document);
+        }
+        return documents;
     }
 
     private List<String> requireActionNames(MultivaluedMap<String, String> params) {
@@ -2190,7 +2363,7 @@ public class IamQueryHandler {
     }
 
     private List<String> requirePolicyInputList(MultivaluedMap<String, String> params) {
-        List<String> policyInputList = getMemberList(params, "PolicyInputList");
+        List<String> policyInputList = readablePolicyInputList(params);
         if (policyInputList.isEmpty()) {
             throw new AwsException("ValidationError", "At least one PolicyInputList member is required.", 400);
         }
@@ -2242,9 +2415,10 @@ public class IamQueryHandler {
         // entity, and any additional policies that you provide, are included": a grant the account
         // applies without attaching it is therefore not read here, though a simulation evaluates
         // with it.
+        List<String> inputDocuments = readablePolicyInputList(params);
         CallerContext caller = iamService.resolveAttachedPrincipalContext(policySourceArn);
         List<String> allDocuments = new ArrayList<>(caller.identityPolicies());
-        allDocuments.addAll(getMemberList(params, "PolicyInputList"));
+        allDocuments.addAll(inputDocuments);
         List<String> keys = policyEvaluator.contextKeysReferencedIn(allDocuments);
         return Response.ok(AwsQueryResponse.envelope("GetContextKeysForPrincipalPolicy", AwsNamespaces.IAM,
                 contextKeyNamesXml(keys))).build();
@@ -2420,17 +2594,19 @@ public class IamQueryHandler {
      * {@code PolicySourceArn} held to the 20 to 2048 characters {@code arnType} declares, before
      * the entity it names is resolved. IAM answers that minimum on a sibling ARN member with a
      * {@code ValidationError} naming the length, so a value too short to be any ARN is refused on
-     * its shape rather than resolved to whatever follows its last slash.
+     * its shape rather than resolved to whatever follows its last slash. A blank is such a value:
+     * the request carried it, so it is held to the same minimum, which is the answer
+     * {@code GetContextKeysForPrincipalPolicy} gives for the same member through the walk.
      *
      * <p>A value that clears 20 characters and still parses as no ARN is left to the resolver
      * below, which refuses it as {@code InvalidInput} on a capture of its own: the member publishes
-     * a length and no pattern, so there is no shape to hold it to here. An absent or blank value
-     * is left there too, that resolver reporting it.
+     * a length and no pattern, so there is no shape to hold it to here. An absent member is left
+     * there too, that resolver answering it in the operation's own sentence.
      */
     private String validatedPolicySourceArn(MultivaluedMap<String, String> params) {
         String arn = getParam(params, "PolicySourceArn");
-        if (arn == null || arn.isBlank()) {
-            return arn;
+        if (arn == null) {
+            return null;
         }
         return arnOfDeclaredLength(arn, "policySourceArn");
     }
@@ -3058,13 +3234,14 @@ public class IamQueryHandler {
                 IamUser user = requireMatchingArn(iamService.getUser(parsed.name()).getArn(), arn,
                         iamService.getUser(parsed.name()));
                 // The report lists "every AWS service that the resource could access using
-                // permissions policies", so a permission the account applies to its users without
-                // attaching it counts: a user with no policies of their own still reaches IAM
-                // while the password policy allows self-service. It is added to the documents the
-                // service list is read from rather than to policiesForIdentity, since it is no
-                // policy of the user's and has no name or ARN to report as one.
+                // permissions policies", so a permission applied to a user without being attached
+                // counts: a user with no policies of their own still reaches IAM while the
+                // password policy allows self-service, and still reaches the delegation requests
+                // it owns. These are added to the documents the service list is read from rather
+                // than to policiesForIdentity, since they are no policies of the user's and have
+                // no name or ARN to report as one.
                 List<String> documents = new ArrayList<>(identityPolicyDocuments(accountId, arn));
-                documents.addAll(iamService.accountLevelUserGrants(accountId));
+                documents.addAll(iamService.implicitUserGrants(accountId, arn));
                 yield new AccessAdvisorTarget(documents, List.of(entityOf(user)));
             }
             case "role" -> {
@@ -3610,14 +3787,23 @@ public class IamQueryHandler {
      * malformed request read as a valid empty answer, so anything the model marks required is read
      * through here instead.
      *
-     * <p>A blank value is a value the request carries, and the constraints read ahead of this
-     * answer it against the minimum length its shape declares. What is left here is a member the
-     * model gives no minimum and an operation the vendored file does not carry, where a blank is
-     * still read as a member that never arrived rather than passed to the operation.
+     * <p>Only an absent member is reported as absent. A blank value is a value the request
+     * carries on this protocol, so what it breaks is the shape declared for it: the constraints
+     * read ahead of this answer every member declaring a minimum, a pattern or a value set.
+     *
+     * <p>Satisfying a shape is not the same as being usable, and this reader does not stand in for
+     * the rules above it. Fourteen required members declare a shape a blank satisfies: a minimum of
+     * 1 beside a pattern admitting the space, tab, line feed and carriage return characters, or
+     * none of the three at all. Seven of those are policy documents, and one that is no policy
+     * document reaches the operation and is stored, because nothing here holds a policy document to
+     * being one on a write; that gap takes a bare {@code +} the same way, so it is wider than a
+     * blank and is not this reader's to close. {@code serviceName} on
+     * {@code CreateServiceSpecificCredential} declares none of the three and answers a service name
+     * nothing supports.
      */
     private String requireParam(MultivaluedMap<String, String> params, String name) {
         String value = params.getFirst(name);
-        if (value == null || value.isBlank()) {
+        if (value == null) {
             throw IamValidationErrors.notNull(memberPath(name));
         }
         return value;

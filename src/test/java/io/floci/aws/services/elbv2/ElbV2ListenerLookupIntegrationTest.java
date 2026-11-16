@@ -1,5 +1,6 @@
 package io.floci.aws.services.elbv2;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -87,7 +88,7 @@ class ElbV2ListenerLookupIntegrationTest {
 
     private static String createBalancer(ElasticLoadBalancingV2Client client, String prefix) {
         return client.createLoadBalancer(r -> r.name(prefix + "-" + UUID.randomUUID().toString().substring(0, 8))
-                .type("application").subnets(List.of("subnet-default-us-east-1-a", "subnet-default-us-east-1-b")))
+                .type("application").subnets(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"))))
                 .loadBalancers().get(0).loadBalancerArn();
     }
 

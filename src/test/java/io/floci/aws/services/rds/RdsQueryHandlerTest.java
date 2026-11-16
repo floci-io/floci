@@ -1,8 +1,11 @@
 package io.floci.aws.services.rds;
 
+import com.github.dockerjava.api.exception.DockerException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
 import io.floci.aws.services.rds.model.DatabaseEngine;
@@ -25,6 +28,7 @@ import io.floci.aws.services.rds.model.ExportTask;
 import io.floci.aws.services.rds.model.OptionGroup;
 import io.floci.aws.services.rds.model.OptionGroupOption;
 import io.floci.aws.services.rds.model.PointInTimeRestoreRequest;
+import io.floci.aws.services.rds.model.RdsEvent;
 import io.floci.aws.services.rds.model.ReadReplicaRequest;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -74,6 +78,68 @@ class RdsQueryHandlerTest {
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
         handler = new RdsQueryHandler(service, exportTaskService, config, docDbHandler, neptuneHandler);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"DescribeEvents", "DescribeDBClusterParameterGroups", "DescribeExportTasks"})
+    void recordListingsValidatePageSizeBeforeReadingRecords(String action) {
+        for (String invalid : List.of("19", "101", "not-a-number")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("MaxRecords", invalid);
+            p.putSingle("Marker", "invalid-marker");
+            Response response = handler.handle(action, p, "us-east-1");
+            assertEquals(400, response.getStatus());
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
+            assertFalse(body.contains("Marker"), body);
+            verifyNoInteractions(service, exportTaskService);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"DescribeEvents", "DescribeDBClusterParameterGroups", "DescribeExportTasks"})
+    void recordListingsPageAndOmitTheTerminalMarker(String action) {
+        List<RdsEvent> events = new ArrayList<>();
+        List<DbClusterParameterGroup> groups = new ArrayList<>();
+        List<ExportTask> exports = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            String name = "record-" + i;
+            events.add(new RdsEvent(name, name, "db-cluster", "created", List.of("creation"),
+                    Instant.parse("2026-11-01T00:00:00Z"), "arn:aws:rds:us-east-1:000000000000:cluster:" + name));
+            DbClusterParameterGroup group = new DbClusterParameterGroup();
+            group.setDbClusterParameterGroupName(name);
+            groups.add(group);
+            exports.add(exportTask(name, ExportTask.STATUS_COMPLETE));
+        }
+        when(service.describeEvents("us-east-1", null, "db-cluster", null, null, null)).thenReturn(events);
+        when(service.listDbClusterParameterGroups(null, "us-east-1")).thenReturn(groups);
+        when(exportTaskService.describeExportTasks(eq(null), eq(null), eq(null), any(), eq("us-east-1")))
+                .thenReturn(exports);
+        String itemTag = switch (action) {
+            case "DescribeEvents" -> "Event";
+            case "DescribeDBClusterParameterGroups" -> "DBClusterParameterGroup";
+            default -> "ExportTask";
+        };
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("MaxRecords", "20");
+        if ("DescribeEvents".equals(action)) {
+            p.putSingle("SourceType", "db-cluster");
+        }
+        Response first = handler.handle(action, p, "us-east-1");
+        assertEquals(200, first.getStatus());
+        String firstBody = (String) first.getEntity();
+        assertEquals(20, firstBody.split("<" + itemTag + ">", -1).length - 1, firstBody);
+        assertTrue(firstBody.contains("<Marker>20</Marker>"), firstBody);
+        p.putSingle("Marker", "20");
+        Response last = handler.handle(action, p, "us-east-1");
+        assertEquals(200, last.getStatus());
+        String lastBody = (String) last.getEntity();
+        assertEquals(5, lastBody.split("<" + itemTag + ">", -1).length - 1, lastBody);
+        assertFalse(lastBody.contains("<Marker>"), lastBody);
+        p.putSingle("Marker", "999");
+        String emptyBody = (String) handler.handle(action, p, "us-east-1").getEntity();
+        assertEquals(0, emptyBody.split("<" + itemTag + ">", -1).length - 1, emptyBody);
+        assertFalse(emptyBody.contains("<Marker>"), emptyBody);
     }
 
     @ParameterizedTest
@@ -393,6 +459,23 @@ class RdsQueryHandlerTest {
         String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
 
         assertTrue(body.contains("<PubliclyAccessible>true</PubliclyAccessible>"), body);
+    }
+
+    @Test
+    void describeDbInstances_showsAnInstanceThatKeepsNoGroupsOnItsVpcsDefaultGroup() {
+        DbInstance own = makeInstance("own");
+        own.setVpcSecurityGroupIds(List.of("sg-own"));
+        DbInstance member = makeInstance("member");
+        DbInstance vpcGone = makeInstance("vpc-gone");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(own, member, vpcGone));
+        when(service.defaultVpcSecurityGroupIds(member)).thenReturn(List.of("sg-vpc-default"));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-own</VpcSecurityGroupId>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-vpc-default</VpcSecurityGroupId>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-00000000</VpcSecurityGroupId>"), body);
+        verify(service, never()).defaultVpcSecurityGroupIds(own);
     }
 
     @Test
@@ -850,6 +933,26 @@ class RdsQueryHandlerTest {
 
         String body = (String) response.getEntity();
         assertFalse(body.contains("<MasterUserSecret>"));
+    }
+
+    @Test
+    void createDbClusterAnswersADockerRejectionWithANonRetryableCapacityError() {
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), anyBoolean()))
+                .thenThrow(new ContainerRejectedException(
+                        new DockerException("authorization denied by plugin: --mounts is not allowed", 403)));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InsufficientDBInstanceCapacity</Code>"));
+        assertTrue(body.contains("--mounts is not allowed"));
     }
 
     @Test
@@ -3081,7 +3184,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<OptionGroupsList>"), body);
         assertTrue(body.contains("<OptionGroupsList><OptionGroup>"), body);
         assertTrue(body.contains("</OptionGroup></OptionGroupsList>"), body);
-        assertTrue(body.contains("<Marker></Marker>"), body);
+        assertFalse(body.contains("<Marker"), body);
         assertFalse(body.contains("<member>"), body);
     }
 
@@ -3446,8 +3549,8 @@ class RdsQueryHandlerTest {
         group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
         group.setVpcId("vpc-default");
         group.setSubnetGroupStatus("Complete");
-        group.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
-        group.setSubnetAvailabilityZones(Map.of("subnet-default-a", "us-east-1a", "subnet-default-b", "us-east-1b"));
+        group.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
+        group.setSubnetAvailabilityZones(Map.of(Ec2Service.defaultSubnetId("us-east-1", "a"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b"), "us-east-1b"));
         return group;
     }
 

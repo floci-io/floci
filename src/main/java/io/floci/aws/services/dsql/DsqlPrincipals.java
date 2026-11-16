@@ -2,12 +2,10 @@ package io.floci.aws.services.dsql;
 
 import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.IamService.CallerArns;
+import io.floci.aws.services.iam.RequestCallerResolver;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.context.ContextNotActiveException;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.HashMap;
@@ -23,26 +21,22 @@ public class DsqlPrincipals {
 
     private final IamService iamService;
     private final RegionResolver regionResolver;
-    private final Instance<RequestContext> requestContext;
+    private final RequestCallerResolver callers;
 
     @Inject
-    public DsqlPrincipals(IamService iamService, RegionResolver regionResolver,
-                          Instance<RequestContext> requestContext) {
+    public DsqlPrincipals(IamService iamService, RegionResolver regionResolver, RequestCallerResolver callers) {
         this.iamService = iamService;
         this.regionResolver = regionResolver;
-        this.requestContext = requestContext;
+        this.callers = callers;
     }
 
     public CallerArns caller() {
-        return callerOf(accessKeyId());
+        return callers.caller();
     }
 
     /** Who signs with {@code accessKeyId}, as {@link #caller()} names the caller of a request. */
     public CallerArns callerOf(String accessKeyId) {
-        String accountId = regionResolver.getAccountId();
-        return iamService.resolveCallerArns(accessKeyId)
-                .orElseGet(() -> CallerArns.accountRoot(regionResolver.buildGlobalArn("iam", accountId, "root"),
-                        accountId));
+        return callers.callerOf(accessKeyId);
     }
 
     /**
@@ -64,14 +58,5 @@ public class DsqlPrincipals {
      */
     public boolean exists(String arn) {
         return iamService.heldPrincipalArn(arn).isPresent();
-    }
-
-    private String accessKeyId() {
-        try {
-            return requestContext.isResolvable() ? requestContext.get().getAccessKeyId() : null;
-        } catch (ContextNotActiveException e) {
-            // A call outside a request, such as CloudFormation's, is the account's own.
-            return null;
-        }
     }
 }

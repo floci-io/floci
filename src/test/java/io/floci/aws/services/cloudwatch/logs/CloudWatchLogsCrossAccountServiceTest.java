@@ -1,10 +1,18 @@
 package io.floci.aws.services.cloudwatch.logs;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.PersistentStorage;
+import io.floci.aws.services.cloudwatch.logs.model.LogDestination;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -16,6 +24,33 @@ class CloudWatchLogsCrossAccountServiceTest {
     private final CloudWatchLogsCrossAccountService service = new CloudWatchLogsCrossAccountService(
             new InMemoryStorage<>(), new InMemoryStorage<>(),
             new RegionResolver(REGION, "000000000000"), new ObjectMapper());
+
+    @Test
+    void destinationTagsSurvivePersistentStorageReload(@TempDir Path tempDir) {
+        Path file = tempDir.resolve("destinations.json");
+        TypeReference<Map<String, LogDestination>> type = new TypeReference<>() {};
+        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+        PersistentStorage<String, LogDestination> firstStore = new PersistentStorage<>(file, type);
+        CloudWatchLogsCrossAccountService first = new CloudWatchLogsCrossAccountService(
+                firstStore, new InMemoryStorage<>(), regionResolver, new ObjectMapper());
+        LogDestination destination = first.putDestination("persisted-tags",
+                "arn:aws:kinesis:us-east-1:000000000000:stream/logs",
+                "arn:aws:iam::000000000000:role/logs", Map.of("team", "red"), REGION);
+        first.tagDestination(destination.getArn(), Map.of("env", "dev"), REGION);
+
+        PersistentStorage<String, LogDestination> secondStore = new PersistentStorage<>(file, type);
+        secondStore.load();
+        CloudWatchLogsCrossAccountService second = new CloudWatchLogsCrossAccountService(
+                secondStore, new InMemoryStorage<>(), regionResolver, new ObjectMapper());
+        assertEquals(Map.of("team", "red", "env", "dev"), second.listDestinationTags(destination.getArn(), REGION));
+        second.untagDestination(destination.getArn(), List.of("team"), REGION);
+
+        PersistentStorage<String, LogDestination> thirdStore = new PersistentStorage<>(file, type);
+        thirdStore.load();
+        CloudWatchLogsCrossAccountService third = new CloudWatchLogsCrossAccountService(
+                thirdStore, new InMemoryStorage<>(), regionResolver, new ObjectMapper());
+        assertEquals(Map.of("env", "dev"), third.listDestinationTags(destination.getArn(), REGION));
+    }
 
     @Test
     void transformerGlobalAndScopedPoliciesCannotCoexist() {

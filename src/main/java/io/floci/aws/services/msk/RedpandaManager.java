@@ -179,16 +179,18 @@ public class RedpandaManager {
 
         if (inContainer) {
             hostListenerPorts.put(clusterIdentityKey(cluster), kafkaHostPort);
-            // GetBootstrapBrokers reports the Docker-network address unless the host listener
-            // was asked for explicitly, which keeps sibling containers working by default. When
-            // it was, both listeners are listed: a client connects through whichever entry it can
-            // reach, and the broker then advertises that listener's address. The container name
-            // (not its IP) fails fast on the host, where it does not resolve, while an unroutable
-            // IP would wait for a connect timeout. It goes first for callers that read only the
-            // first entry.
+            // GetBootstrapBrokers reports the internal listener by the name the broker advertises
+            // for it, a hostname as on AWS: a client that bootstrapped from the container IP would
+            // be handed that name by the first Metadata response anyway. When the host listener
+            // was asked for explicitly, both listeners are listed: a client connects through
+            // whichever entry it can reach, and the broker then advertises that listener's
+            // address. The container name fails fast on the host, where it does not resolve,
+            // while an unroutable IP would wait for a connect timeout. It goes first for callers
+            // that read only the first entry.
+            String internalListenerAddr = containerName + ":" + KAFKA_PORT;
             cluster.setBootstrapBrokers(explicitBootstrapHostname().isPresent()
-                    ? containerName + ":" + KAFKA_PORT + "," + hostListenerAddr
-                    : kafkaEndpoint.host() + ":" + kafkaEndpoint.port());
+                    ? internalListenerAddr + "," + hostListenerAddr
+                    : internalListenerAddr);
             LOG.infov("Redpanda host listener for MSK cluster {0} published at {1}",
                     cluster.getClusterName(), hostListenerAddr);
         } else {
@@ -262,9 +264,7 @@ public class RedpandaManager {
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
             String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
-            if (!containerDetector.isRunningInContainer()) {
-                ContainerStorageHelper.ensureHostDir(hostDataPath);
-            }
+            ContainerStorageHelper.ensureHostDir(containerDetector, hostDataPath);
             specBuilder.withBind(hostDataPath, "/var/lib/redpanda/data");
         }
 

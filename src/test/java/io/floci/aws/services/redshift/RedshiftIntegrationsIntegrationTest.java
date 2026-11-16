@@ -16,6 +16,7 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -189,6 +190,66 @@ class RedshiftIntegrationsIntegrationTest {
                 .ignoreExceptions()
                 .untilAsserted(() -> assertTrue(
                         landingTableHasBackfilledRow(port, landingTable, "pre-existing-1")));
+    }
+
+    /**
+     * The current-state table is named after the DynamoDB table in {@code public}, holds the item under its key
+     * columns in a {@code value} column of DynamoDB JSON, and follows the source: a backfilled item is there, a
+     * put replaces it, and a delete removes it.
+     */
+    @Test
+    void theSourceTablesCurrentStateIsProjectedUnderItsOwnName() throws SQLException {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+        String tableName = "keystone-state-" + System.nanoTime();
+        String streamArn = createDynamoTable(tableName);
+        putItem(tableName, "order-1", "seeded");
+        query("Action", "CreateIntegration", "IntegrationName", "zetl-current-state",
+                "SourceArn", streamArn, "TargetArn", TARGET)
+                .then().statusCode(200);
+        int port = clusterPort("zero-etl-cluster");
+
+        Awaitility.await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).ignoreExceptions()
+                .untilAsserted(() -> assertEquals("seeded", currentNote(port, tableName, "order-1")));
+
+        putItem(tableName, "order-1", "replaced");
+        Awaitility.await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).ignoreExceptions()
+                .untilAsserted(() -> assertEquals("replaced", currentNote(port, tableName, "order-1")));
+
+        given()
+                .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+                .contentType("application/x-amz-json-1.0")
+                .body("{\"TableName\":\"%s\",\"Key\":{\"id\":{\"S\":\"order-1\"}}}".formatted(tableName))
+                .when().post("/")
+                .then().statusCode(200);
+        Awaitility.await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).ignoreExceptions()
+                .untilAsserted(() -> assertEquals(null, currentNote(port, tableName, "order-1")));
+    }
+
+    private static void putItem(String tableName, String id, String note) {
+        given()
+                .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+                .contentType("application/x-amz-json-1.0")
+                .body("""
+                        {
+                          "TableName": "%s",
+                          "Item": {"id": {"S": "%s"}, "note": {"S": "%s"}}
+                        }
+                        """.formatted(tableName, id, note))
+                .when().post("/")
+                .then().statusCode(200);
+    }
+
+    /** The item's {@code note} read the way a SUPER path is read on Redshift, or null when the row is gone. */
+    private static String currentNote(int port, String tableName, String id) throws SQLException {
+        String url = "jdbc:postgresql://127.0.0.1:" + port + "/dev";
+        try (Connection connection = DriverManager.getConnection(url, "admin", "password123");
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT value->'note'->>'S' FROM public.\"" + tableName + "\" WHERE id = ?")) {
+            statement.setString(1, id);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next() ? rows.getString(1) : null;
+            }
+        }
     }
 
     private static int clusterPort(String clusterIdentifier) {

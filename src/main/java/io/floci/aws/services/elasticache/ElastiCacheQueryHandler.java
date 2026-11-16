@@ -72,6 +72,9 @@ public class ElastiCacheQueryHandler {
             case "CreateReplicationGroup"     -> handleCreateReplicationGroup(params, region);
             case "DescribeReplicationGroups"  -> handleDescribeReplicationGroups(params);
             case "ModifyReplicationGroup"     -> handleModifyReplicationGroup(params);
+            case "IncreaseReplicaCount"       -> handleReplicaCount(params, true);
+            case "DecreaseReplicaCount"       -> handleReplicaCount(params, false);
+            case "TestFailover"               -> handleTestFailover(params);
             case "DeleteReplicationGroup"     -> handleDeleteReplicationGroup(params);
             case "CreateUser"                 -> handleCreateUser(params);
             case "DescribeUsers"              -> handleDescribeUsers(params);
@@ -262,6 +265,32 @@ public class ElastiCacheQueryHandler {
                     optionalSecurityGroupIds(params));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("ModifyReplicationGroup", AwsNamespaces.EC, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleReplicaCount(MultivaluedMap<String, String> params, boolean increase) {
+        String action = increase ? "IncreaseReplicaCount" : "DecreaseReplicaCount";
+        try {
+            if (!increase && !extractMemberList(params, "ReplicasToRemove.member.").isEmpty()) {
+                throw new AwsException("InvalidParameterValue",
+                        "Floci decreases the replica count by NewReplicaCount only, not by ReplicasToRemove.", 400);
+            }
+            ReplicationGroup group = service.changeReplicaCount(params.getFirst("ReplicationGroupId"),
+                    intParam(params, "NewReplicaCount"), boolParam(params, "ApplyImmediately"), increase);
+            return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.EC, replicationGroupXml(group))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleTestFailover(MultivaluedMap<String, String> params) {
+        try {
+            ReplicationGroup group = service.testFailover(params.getFirst("ReplicationGroupId"),
+                    params.getFirst("NodeGroupId"));
+            return Response.ok(AwsQueryResponse.envelope("TestFailover", AwsNamespaces.EC,
+                    replicationGroupXml(group))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }
@@ -490,12 +519,19 @@ public class ElastiCacheQueryHandler {
         boolean showNodeInfo = "true".equalsIgnoreCase(params.getFirst("ShowCacheNodeInfo"));
         boolean filtered = filterId != null && !filterId.isBlank();
         try {
+            // Cache clusters are stored per account; like AWS, only the request's Region's are listed.
             List<ElastiCacheService.MemberCacheCluster> members = service.listMemberCacheClusters(filterId);
-            List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId));
+            List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId).stream()
+                    .filter(c -> service.inRequestRegion(c.getArn())).toList());
             // The Memcached lookup is the one that raises CacheClusterNotFound for an unknown id,
             // which is the right answer only once no other source has answered.
             if (!filtered || (members.isEmpty() && clusterList.isEmpty())) {
-                clusterList.addAll(memcachedService.listCacheClusters(filterId));
+                memcachedService.listCacheClusters(filterId).stream()
+                        .filter(c -> service.inRequestRegion(c.getArn()))
+                        .forEach(clusterList::add);
+                if (filtered && clusterList.isEmpty()) {
+                    throw new AwsException("CacheClusterNotFound", "Cache cluster " + filterId + " not found.", 404);
+                }
             }
             XmlBuilder xml = new XmlBuilder().start("CacheClusters");
             for (CacheCluster c : clusterList) {

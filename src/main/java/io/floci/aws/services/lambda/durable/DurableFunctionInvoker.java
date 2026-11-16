@@ -10,7 +10,7 @@ public interface DurableFunctionInvoker {
     /** The function a durable execution runs on, or an AwsException when the name does not resolve. */
     ResolvedDurableTarget resolve(String accountId, String region, String functionName, String qualifier);
 
-    DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId);
+    DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId, String traceId);
 
     record ResolvedDurableTarget(String accountId,
                                  String region,
@@ -19,7 +19,8 @@ public interface DurableFunctionInvoker {
                                  String version,
                                  boolean durable,
                                  int executionTimeoutSeconds,
-                                 int retentionPeriodInDays) {
+                                 int retentionPeriodInDays,
+                                 boolean activeTracing) {
     }
 
     record DurableInvocationResult(String requestId, byte[] payload, String functionError) {

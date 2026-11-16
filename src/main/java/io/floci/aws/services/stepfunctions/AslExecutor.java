@@ -61,6 +61,7 @@ import io.floci.aws.services.scheduler.model.Schedule;
 import io.floci.aws.services.scheduler.model.ScheduleRequest;
 import io.floci.aws.services.sns.SnsJsonHandler;
 import io.floci.aws.services.sqs.SqsJsonHandler;
+import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.StepFunctionsService.TokenTimeout;
 import io.floci.aws.services.stepfunctions.StepFunctionsService.TokenWait;
 import io.floci.aws.services.stepfunctions.model.Execution;
@@ -1258,9 +1259,18 @@ public class AslExecutor {
     }
 
     /** Integrations {@link TaskPermissions} does not map stay unchecked, Lambda and API Gateway check their own. */
-    private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials) {
+    private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials,
+                               String taskToken) {
+        // NestedTaskCredentials has decided this one. Its callback form does not reach it, so it is decided here.
+        if (credentials != null && taskToken == null && NestedTaskCredentials.isNested(integration)) {
+            return;
+        }
         Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm,
-                redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns());
+                redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns(), ecsService,
+                taskToken != null, new TaskPermissions.ControlServices(
+                        cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
+                        sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
+                        sfnService == null || !sfnService.isResolvable() ? null : sfnService.get()));
         if (required.isEmpty()) {
             return;
         }
@@ -1268,7 +1278,18 @@ public class AslExecutor {
             NestedTaskCredentials.validateShape(credentials);
         }
         lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
-                required.get().deniedError(), required.get().permissions());
+                required.get().deniedError(), required.get().permissions(), required.get().checksExecutionRole());
+    }
+
+    /**
+     * A Distributed Map's reads and writes are evaluated as its execution role, before the S3 call that needs them.
+     * An execution with a mock test case is evaluated too: a test case cannot mock a Map state, so its S3 calls stay
+     * real, as an unmocked task's call in that execution does and is evaluated.
+     */
+    private void authorizeMapS3(StateMachine sm, String refusedError, List<Permission> permissions) {
+        if (iamEnforcementEnabled()) {
+            lambdaTaskAuthorizer.authorizeMapS3(sm, refusedError, permissions);
+        }
     }
 
     private boolean iamEnforcementEnabled() {
@@ -1455,7 +1476,7 @@ public class AslExecutor {
         }
 
         if (iamEnforcementEnabled()) {
-            authorizeTask(integration, input, sm, credentials);
+            authorizeTask(integration, input, sm, credentials, taskToken);
         }
 
         if (integration.is("apigateway", "invoke") && integration.suffix().isEmpty()) {
@@ -1552,6 +1573,12 @@ public class AslExecutor {
         // variant arrives here as the bare runTask resource and simply launches the task while the token
         // future blocks for SendTaskSuccess.
         if (integration.isAnySuffix("ecs", "runTask")) {
+            // AWS defines request-response, .sync and .waitForTaskToken for ecs:runTask, so any other
+            // pattern (.sync:2) is refused before a task is launched rather than after.
+            String suffix = integration.suffix();
+            if (!suffix.isEmpty() && !".sync".equals(suffix) && !".waitForTaskToken".equals(suffix)) {
+                throw OptimizedIntegrations.unsupported(integration);
+            }
             // A non-null taskToken means the original resource ended with .waitForTaskToken (stripped
             // upstream). Its failure semantics match .sync — a task placement failure fails the state —
             // whereas request-response returns the {Tasks,Failures} envelope without failing the state.
@@ -2318,12 +2345,6 @@ public class AslExecutor {
             return resp;
         }
 
-        if (!".sync".equals(mode)) {
-            // Only request-response (""), .sync and .waitForTaskToken are valid; reject typos rather
-            // than silently treating an unknown suffix as .sync.
-            throw new FailStateException("States.TaskFailed", "Unsupported ecs:runTask mode: " + mode);
-        }
-
         // .sync — wait until every launched task reaches STOPPED, then surface success or failure.
         // All tasks must be polled (not just the first): with Count > 1, a failure in any task must
         // fail the state, otherwise tasks beyond the first would run unmonitored. The wait is bounded
@@ -2456,23 +2477,43 @@ public class AslExecutor {
                 + "] which was managing this resource was aborted";
     }
 
-    /** Best effort, like AWS: a task that is already gone does not change how the state ends. */
+    /**
+     * Best effort, like AWS: a task that is already gone, which ECS answers with InvalidParameterException, does not
+     * change how the state ends, nor does one already stopped, which StopTask answers as it is. Any other refusal is a
+     * fault, raised as the integration's ECS error once every task has been asked to stop, as the emr-serverless undo
+     * raises its own; any other failure is raised at once.
+     */
     private void stopEcsTasks(String cluster, List<String> taskArns, String executionArn, String region) {
+        FailStateException fault = null;
         for (String taskArn : taskArns) {
             try {
                 ecsService.stopTask(cluster, taskArn, syncAbortCause(executionArn), region);
-            } catch (RuntimeException e) {
+            } catch (AwsException e) {
+                if (!"InvalidParameterException".equals(e.getErrorCode())) {
+                    fault = fault != null ? fault : new FailStateException("ECS." + e.getErrorCode(), e.getMessage());
+                    continue;
+                }
                 LOG.warnv("ecs:runTask.sync ended before its task {0} did, and the task could not be stopped: {1}",
                         taskArn, e.getMessage());
             }
         }
+        if (fault != null) {
+            throw fault;
+        }
     }
 
-    /** Best effort, like AWS: a child that already ended does not change how the state ends. */
+    /**
+     * Best effort, like AWS: a child that is gone, which Step Functions answers with ExecutionDoesNotExist, does not
+     * change how the state ends, nor does one that already ended, which StopExecution leaves as it is. Any other
+     * refusal is a fault, raised as the integration names a refused StartExecution, and any other failure is raised.
+     */
     private void abortChildExecution(String childExecutionArn, String executionArn) {
         try {
             sfnService.get().stopExecution(childExecutionArn, syncAbortCause(executionArn), null);
-        } catch (RuntimeException e) {
+        } catch (AwsException e) {
+            if (!"ExecutionDoesNotExist".equals(e.getErrorCode())) {
+                throw new FailStateException(optimizedSfnErrorName(e.getErrorCode()), e.getMessage());
+            }
             LOG.warnv("states:startExecution.sync ended before its child {0} did, and the child could not be stopped: {1}",
                     childExecutionArn, e.getMessage());
         }
@@ -3323,7 +3364,7 @@ public class AslExecutor {
         // Map input-processing fields, including ItemsPath and MaxConcurrencyPath, resolve against
         // the effective state input after InputPath has been applied.
         JsonNode mapInput = applyInputPath(stateDef, input, context);
-        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables);
+        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables, sm);
         JsonNode items = resolvedItems.items();
 
         if (!items.isArray()) {
@@ -3897,6 +3938,9 @@ public class AslExecutor {
                         "ResultWriter " + (jsonata ? "Arguments" : "Parameters")
                                 + " must resolve to an object", "ResultWriter/Arguments");
             }
+            // Every object is evaluated before the first is written, so a refusal leaves no partial export.
+            authorizeMapS3(sm, "States.ResultWriterFailed",
+                    TaskPermissions.resultWriterExport(loc, mapRun.id(), !failedChildren.isEmpty(), sm));
             JsonNode bucketNode = loc.get("Bucket");
             if (bucketNode == null) {
                 throw new FailStateException("States.ResultWriterFailed",
@@ -3932,12 +3976,10 @@ public class AslExecutor {
             // The run id alone keys the exported result set under the user-supplied S3 prefix.
             String mapRunId = mapRun.id();
             String mapRunArn = mapRun.arn();
-            String base = prefix.isEmpty()
-                    ? mapRunId + "/"
-                    : prefix + (prefix.endsWith("/") ? "" : "/") + mapRunId + "/";
+            String base = TaskPermissions.resultWriterBase(prefix, mapRunId);
 
-            String succeededKey = base + "SUCCEEDED_0.json";
-            String manifestKey = base + "manifest.json";
+            String succeededKey = base + TaskPermissions.RESULT_WRITER_SUCCEEDED;
+            String manifestKey = base + TaskPermissions.RESULT_WRITER_MANIFEST;
 
             byte[] succeededBytes = serializeResultFile(formatted, outputType);
             s3Service.putObject(bucket, succeededKey, succeededBytes, "application/json", new HashMap<>());
@@ -3948,7 +3990,7 @@ public class AslExecutor {
             ObjectNode resultFiles = manifest.putObject("ResultFiles");
             ArrayNode failedFiles = resultFiles.putArray("FAILED");
             if (!failedChildren.isEmpty()) {
-                String failedKey = base + "FAILED_0.json";
+                String failedKey = base + TaskPermissions.RESULT_WRITER_FAILED;
                 byte[] failedBytes = serializeResultFile(
                         formatFailedChildren(failedChildren, region, account, smName, mapRun.label()),
                         outputType);
@@ -4076,8 +4118,8 @@ public class AslExecutor {
         return objectMapper.writeValueAsBytes(formatted);
     }
 
-    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input,
-                                             boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
+    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+                                             ObjectNode variables, StateMachine sm) throws Exception {
         if (jsonata && stateDef.has("Items")) {
             JsonNode itemsNode = stateDef.get("Items");
             if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
@@ -4090,7 +4132,7 @@ public class AslExecutor {
         }
 
         if (stateDef.has("ItemReader")) {
-            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata, variables);
+            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata, variables, sm);
         }
 
         JsonNode itemsPath = stateDef.path("ItemsPath");
@@ -4101,7 +4143,7 @@ public class AslExecutor {
 
     private ResolvedMapItems resolveItemReaderItems(JsonNode itemReader, JsonNode input,
                                                     JsonNode context, boolean jsonata,
-                                                    ObjectNode variables) throws Exception {
+                                                    ObjectNode variables, StateMachine sm) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
         boolean listObjects = integration != null && integration.is("s3", "listObjectsV2");
@@ -4112,7 +4154,7 @@ public class AslExecutor {
 
         int maxItems = resolveItemReaderMaxItems(itemReader, input, jsonata, context, variables);
         if (listObjects) {
-            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems);
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems, sm);
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
@@ -4124,6 +4166,7 @@ public class AslExecutor {
         JsonNode resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
+        authorizeMapS3(sm, "States.ItemReaderFailed", TaskPermissions.itemReaderGetObject(bucket, key, sm));
         if (bucket == null || key == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket and Key");
         }
@@ -4283,13 +4326,14 @@ public class AslExecutor {
 
     private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
                                                      boolean jsonata, ObjectNode variables,
-                                                     int maxItems) throws Exception {
+                                                     int maxItems, StateMachine sm) throws Exception {
         JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = parameters.path("Bucket").asText(null);
+        String prefix = parameters.path("Prefix").asText(null);
+        authorizeMapS3(sm, "States.ItemReaderFailed", TaskPermissions.itemReaderListObjects(bucket, prefix, sm));
         if (bucket == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
         }
-        String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
         try {

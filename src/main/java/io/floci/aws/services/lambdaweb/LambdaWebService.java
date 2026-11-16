@@ -140,7 +140,7 @@ public class LambdaWebService implements Resettable {
 
     /** AWS assigns one shard label per cell. */
     private static final String DOMAIN_SHARD = "001";
-    private static final int DOMAIN_ID_LENGTH = 16;
+    static final int DOMAIN_ID_LENGTH = 16;
     private static final int DEFAULT_PAGE_SIZE = 50;
     static final int REVISION_CLEANUP_TARGET = 50;
     private static final String LOWERCASE_ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -1336,6 +1336,30 @@ public class LambdaWebService implements Resettable {
         String functionName = resolveFunctionName(region, resourceArn, "ListTags");
         synchronized (lockFor(region, functionName)) {
             return new LinkedHashMap<>(function(region, functionName).tags);
+        }
+    }
+
+    /**
+     * The tags of the web function stored under {@code arn} in the account and Region it names, or of the function
+     * whose revision or endpoint it names, which inherit their function's tags; matched on the whole ARN and left as
+     * they are, empty for an ARN naming nothing stored.
+     */
+    public Map<String, String> storedTags(String arn) {
+        Matcher named = WEB_FUNCTION_ARN.matcher(arn);
+        if (!named.matches()) {
+            return Map.of();
+        }
+        String region = named.group(1);
+        String functionName = named.group(3);
+        String child = named.group(4);
+        String functionArn = child == null ? arn : arn.substring(0, arn.lastIndexOf("/" + child + "/"));
+        synchronized (lockFor(region, functionName)) {
+            return AccountAwareStorageBackend.readInAccount(functions, named.group(2), key(region, functionName))
+                    .filter(fn -> functionArn.equals(fn.functionArn))
+                    .filter(fn -> child == null || ("revision".equals(child) ? fn.revisions : fn.endpoints)
+                            .containsKey(named.group(5)))
+                    .map(fn -> Map.copyOf(fn.tags))
+                    .orElse(Map.of());
         }
     }
 

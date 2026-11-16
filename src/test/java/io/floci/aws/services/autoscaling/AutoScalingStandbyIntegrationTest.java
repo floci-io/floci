@@ -1,5 +1,6 @@
 package io.floci.aws.services.autoscaling;
 
+import io.floci.aws.testing.AlbFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import jakarta.inject.Inject;
@@ -22,8 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class AutoScalingStandbyIntegrationTest {
 
+    private static final String ACCOUNT = "616161616161";
     private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=616161616161/20261028/us-east-1/autoscaling/aws4_request";
+            "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20261028/us-east-1/autoscaling/aws4_request";
     private static final String EC2_AUTH = AUTH.replace("/autoscaling/", "/ec2/");
     private static final String ELB_AUTH = AUTH.replace("/autoscaling/", "/elasticloadbalancing/");
     private static final String GROUP_PATH = "DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult"
@@ -73,7 +75,8 @@ class AutoScalingStandbyIntegrationTest {
             List<String> members = launched.getList(GROUP_PATH + ".Instances.member.InstanceId");
             String standby = members.get(0);
             String serving = members.get(1);
-            assertEquals(List.copyOf(members).stream().sorted().toList(), targets(targetGroup).stream().sorted().toList());
+            assertEquals(List.copyOf(members).stream().sorted().toList(),
+                    AlbFixtures.targetIds(ACCOUNT, targetGroup).stream().sorted().toList());
 
             // MinSize 2 leaves no room to decrement, so the client lowers it first.
             XmlPath refused = given().header("Authorization", AUTH).formParam("Action", "EnterStandby")
@@ -113,7 +116,7 @@ class AutoScalingStandbyIntegrationTest {
             assertEquals("1", inStandby.getString(GROUP_PATH + ".DesiredCapacity"));
             assertEquals("Standby", member(inStandby, standby, "LifecycleState"));
             assertEquals("InService", member(inStandby, serving, "LifecycleState"));
-            assertEquals(List.of(serving), targets(targetGroup));
+            assertEquals(List.of(serving), AlbFixtures.targetIds(ACCOUNT, targetGroup));
             assertEquals(List.of(serving), classicInstances(loadBalancer));
             assertEquals("Successful", activity(name, enterActivity, "StatusCode"));
             assertEquals("The instance " + serving + " is not in Standby.", given().header("Authorization", AUTH)
@@ -142,7 +145,8 @@ class AutoScalingStandbyIntegrationTest {
             XmlPath back = group(name);
             assertEquals("2", back.getString(GROUP_PATH + ".DesiredCapacity"));
             assertEquals(List.of("InService", "InService"), back.getList(GROUP_PATH + ".Instances.member.LifecycleState"));
-            assertEquals(List.of(serving, standby).stream().sorted().toList(), targets(targetGroup).stream().sorted().toList());
+            assertEquals(List.of(serving, standby).stream().sorted().toList(),
+                    AlbFixtures.targetIds(ACCOUNT, targetGroup).stream().sorted().toList());
             assertEquals(List.of(serving, standby).stream().sorted().toList(),
                     classicInstances(loadBalancer).stream().sorted().toList());
             assertEquals("Successful", activity(name, exitActivity, "StatusCode"));
@@ -184,14 +188,6 @@ class AutoScalingStandbyIntegrationTest {
     private static String member(XmlPath group, String instanceId, String field) {
         return group.getString(GROUP_PATH + ".Instances.member.find { it.InstanceId == '" + instanceId + "' }."
                 + field);
-    }
-
-    private static List<String> targets(String targetGroup) {
-        return given().header("Authorization", ELB_AUTH).formParam("Action", "DescribeTargetHealth")
-                .formParam("Version", "2015-12-01").formParam("TargetGroupArn", targetGroup)
-                .post("/").then().statusCode(200).extract().xmlPath()
-                .getList("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions"
-                        + ".member.Target.Id", String.class);
     }
 
     private static List<String> classicInstances(String loadBalancer) {

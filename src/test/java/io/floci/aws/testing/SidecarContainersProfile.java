@@ -1,6 +1,8 @@
 package io.floci.aws.testing;
 
+import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import io.floci.aws.testutil.FreePorts;
+import io.quarkus.arc.Arc;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.Assumptions;
@@ -184,6 +186,9 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
 
     private static boolean imageUsable(String image) {
         if ("true".equals(System.getenv("CI"))) {
+            // A cold pull can exceed the HTTP client's deadline. Finish the manager's bounded
+            // image preparation in class setup, before any request starts that manager.
+            Arc.container().instance(ImageCacheService.class).get().ensureImageExists(image);
             return true;
         }
         return run("docker", "image", "inspect", image);

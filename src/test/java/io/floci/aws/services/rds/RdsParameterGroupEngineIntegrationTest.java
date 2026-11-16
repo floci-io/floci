@@ -13,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Properties;
+import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
@@ -26,7 +27,9 @@ import static org.hamcrest.Matchers.equalTo;
  * its DB cluster parameter group with its writer's DB parameter group on top, a standalone MySQL
  * instance with its DB parameter group, and a value changed in the group, or a group switched by
  * ModifyDBCluster or ModifyDBInstance, takes effect when the writer or the instance is rebooted. A
- * value the server refuses leaves the instance incompatible-parameters. Skipped without Docker.
+ * value the server refuses leaves the instance incompatible-parameters. A PostgreSQL instance or an
+ * Aurora PostgreSQL writer whose groups set {@code rds.logical_replication} to 1 runs with
+ * {@code wal_level=logical}, from the same reboot. Skipped without Docker.
  */
 @QuarkusTest
 @Tag("docker")
@@ -46,11 +49,7 @@ class RdsParameterGroupEngineIntegrationTest {
         String group = "engine-cpg-" + suffix;
         String clusterId = "engine-cpg-cluster-" + suffix;
         String writerId = "engine-cpg-writer-" + suffix;
-        rds("CreateDBClusterParameterGroup")
-                .formParam("DBClusterParameterGroupName", group)
-                .formParam("DBParameterGroupFamily", "aurora-mysql8.0")
-                .formParam("Description", "engine parameters")
-        .when().post("/").then().statusCode(200);
+        createClusterParameterGroup(group, "aurora-mysql8.0");
         try {
             rds("ModifyDBClusterParameterGroup")
                     .formParam("DBClusterParameterGroupName", group)
@@ -96,13 +95,8 @@ class RdsParameterGroupEngineIntegrationTest {
                             + ".DBCluster.DBClusterParameterGroup");
             assertThat(reported, equalTo(group));
 
-            createWriter(writerId, clusterId, null);
-            rds("ModifyDBClusterParameterGroup")
-                    .formParam("DBClusterParameterGroupName", group)
-                    .formParam("Parameters.member.1.ParameterName", "max_connections")
-                    .formParam("Parameters.member.1.ParameterValue", "400")
-                    .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
-            .when().post("/").then().statusCode(200);
+            createWriter(writerId, clusterId, "aurora-mysql", null);
+            modifyClusterParameterGroup(group, "max_connections", "400", "pending-reboot");
             rebootInstance(writerId);
 
             assertThat(query(port, "SELECT @@GLOBAL.max_connections"), equalTo("400"));
@@ -141,7 +135,7 @@ class RdsParameterGroupEngineIntegrationTest {
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log"),
                     equalTo("500 1"));
 
-            createWriter(writerId, clusterId, writerGroup);
+            createWriter(writerId, clusterId, "aurora-mysql", writerGroup);
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log"),
                     equalTo("800 1"));
 
@@ -180,7 +174,7 @@ class RdsParameterGroupEngineIntegrationTest {
         createParameterGroup(group, "mysql8.0", "max_connections", "300");
         createParameterGroup(switchedGroup, "mysql8.0", "max_connections", "600");
         try {
-            int port = createMysqlInstance(instanceId, group);
+            int port = createInstance(instanceId, "mysql", "8.0", group);
 
             assertThat(query(port, "SELECT @@GLOBAL.max_connections"), equalTo("300"));
 
@@ -210,15 +204,10 @@ class RdsParameterGroupEngineIntegrationTest {
         String instanceId = "engine-bad-db-" + suffix;
         createParameterGroup(group, "mysql8.0", "sql_mode", "NOT_A_MODE");
         try {
-            int port = createMysqlInstance(instanceId, group);
+            int port = createInstance(instanceId, "mysql", "8.0", group);
             assertThat(instanceStatus(instanceId), equalTo("incompatible-parameters"));
 
-            rds("ModifyDBParameterGroup")
-                    .formParam("DBParameterGroupName", group)
-                    .formParam("Parameters.member.1.ParameterName", "sql_mode")
-                    .formParam("Parameters.member.1.ParameterValue", "STRICT_TRANS_TABLES")
-                    .formParam("Parameters.member.1.ApplyMethod", "immediate")
-            .when().post("/").then().statusCode(200);
+            modifyParameterGroup(group, "sql_mode", "STRICT_TRANS_TABLES", "immediate");
             rebootInstance(instanceId);
 
             assertThat(instanceStatus(instanceId), equalTo("available"));
@@ -231,11 +220,73 @@ class RdsParameterGroupEngineIntegrationTest {
         }
     }
 
-    private static int createMysqlInstance(String instanceId, String parameterGroup) {
+    @Test
+    void auroraPostgresqlWriterRunsWithLogicalReplicationFromItsClusterParameterGroup() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String group = "engine-pg-cpg-" + suffix;
+        String clusterId = "engine-pg-cluster-" + suffix;
+        String writerId = "engine-pg-writer-" + suffix;
+        createClusterParameterGroup(group, "aurora-postgresql16");
+        try {
+            modifyClusterParameterGroup(group, "rds.logical_replication", "1", "pending-reboot");
+
+            int port = rds("CreateDBCluster")
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("Engine", "aurora-postgresql")
+                    .formParam("DBClusterParameterGroupName", group)
+                    .formParam("MasterUsername", MASTER_USER)
+                    .formParam("MasterUserPassword", MASTER_PASSWORD)
+            .when().post("/").then().statusCode(200).extract().xmlPath()
+                    .getInt("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.Port");
+            createWriter(writerId, clusterId, "aurora-postgresql", null);
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
+
+            modifyClusterParameterGroup(group, "rds.logical_replication", "0", "pending-reboot");
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
+
+            rebootInstance(writerId);
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("replica"));
+        } finally {
+            deleteInstance(writerId);
+            rds("DeleteDBCluster")
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("SkipFinalSnapshot", "true")
+            .when().post("/");
+            rds("DeleteDBClusterParameterGroup")
+                    .formParam("DBClusterParameterGroupName", group)
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void postgresInstanceTurnsOnLogicalReplicationWhenRebooted() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String group = "engine-pg-pg-" + suffix;
+        String instanceId = "engine-pg-db-" + suffix;
+        createParameterGroup(group, "postgres16");
+        try {
+            int port = createInstance(instanceId, "postgres", "16", group);
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("replica"));
+
+            modifyParameterGroup(group, "rds.logical_replication", "1", "pending-reboot");
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("replica"));
+
+            rebootInstance(instanceId);
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
+        } finally {
+            deleteInstance(instanceId);
+            rds("DeleteDBParameterGroup")
+                    .formParam("DBParameterGroupName", group)
+            .when().post("/");
+        }
+    }
+
+    private static int createInstance(
+            String instanceId, String engine, String engineVersion, String parameterGroup) {
         return rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", instanceId)
-                .formParam("Engine", "mysql")
-                .formParam("EngineVersion", "8.0")
+                .formParam("Engine", engine)
+                .formParam("EngineVersion", engineVersion)
                 .formParam("DBInstanceClass", "db.t3.micro")
                 .formParam("AllocatedStorage", "20")
                 .formParam("DBParameterGroupName", parameterGroup)
@@ -245,11 +296,11 @@ class RdsParameterGroupEngineIntegrationTest {
                 .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
     }
 
-    private static void createWriter(String writerId, String clusterId, String parameterGroup) {
+    private static void createWriter(String writerId, String clusterId, String engine, String parameterGroup) {
         RequestSpecification request = rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", writerId)
                 .formParam("DBClusterIdentifier", clusterId)
-                .formParam("Engine", "aurora-mysql")
+                .formParam("Engine", engine)
                 .formParam("DBInstanceClass", "db.r6g.large");
         if (parameterGroup != null) {
             request = request.formParam("DBParameterGroupName", parameterGroup);
@@ -272,26 +323,30 @@ class RdsParameterGroupEngineIntegrationTest {
     }
 
     private static void createParameterGroup(String name, String family, String parameter, String value) {
+        createParameterGroup(name, family);
+        modifyParameterGroup(name, parameter, value, "immediate");
+    }
+
+    private static void createParameterGroup(String name, String family) {
         rds("CreateDBParameterGroup")
                 .formParam("DBParameterGroupName", name)
                 .formParam("DBParameterGroupFamily", family)
                 .formParam("Description", "engine parameters")
         .when().post("/").then().statusCode(200);
+    }
+
+    private static void modifyParameterGroup(String name, String parameter, String value, String applyMethod) {
         rds("ModifyDBParameterGroup")
                 .formParam("DBParameterGroupName", name)
                 .formParam("Parameters.member.1.ParameterName", parameter)
                 .formParam("Parameters.member.1.ParameterValue", value)
-                .formParam("Parameters.member.1.ApplyMethod", "immediate")
+                .formParam("Parameters.member.1.ApplyMethod", applyMethod)
         .when().post("/").then().statusCode(200);
     }
 
     private static void createClusterParameterGroup(
             String name, String parameter, String value, String secondParameter, String secondValue) {
-        rds("CreateDBClusterParameterGroup")
-                .formParam("DBClusterParameterGroupName", name)
-                .formParam("DBParameterGroupFamily", "aurora-mysql8.0")
-                .formParam("Description", "engine parameters")
-        .when().post("/").then().statusCode(200);
+        createClusterParameterGroup(name, "aurora-mysql8.0");
         rds("ModifyDBClusterParameterGroup")
                 .formParam("DBClusterParameterGroupName", name)
                 .formParam("Parameters.member.1.ParameterName", parameter)
@@ -303,15 +358,52 @@ class RdsParameterGroupEngineIntegrationTest {
         .when().post("/").then().statusCode(200);
     }
 
-    /**
-     * The first row of a query, its columns joined by single spaces. The MySQL image restarts its
-     * server once after initializing a new data directory, so a refused connection is retried.
-     */
+    private static void createClusterParameterGroup(String name, String family) {
+        rds("CreateDBClusterParameterGroup")
+                .formParam("DBClusterParameterGroupName", name)
+                .formParam("DBParameterGroupFamily", family)
+                .formParam("Description", "engine parameters")
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static void modifyClusterParameterGroup(
+            String name, String parameter, String value, String applyMethod) {
+        rds("ModifyDBClusterParameterGroup")
+                .formParam("DBClusterParameterGroupName", name)
+                .formParam("Parameters.member.1.ParameterName", parameter)
+                .formParam("Parameters.member.1.ParameterValue", value)
+                .formParam("Parameters.member.1.ApplyMethod", applyMethod)
+        .when().post("/").then().statusCode(200);
+    }
+
+    /** The first row of a MySQL query, its columns joined by single spaces. */
     private static String query(int port, String sql) throws Exception {
+        return retryUntilConnected(() -> queryOnce(port, sql));
+    }
+
+    private static String postgresQuery(int port, String sql) throws Exception {
+        return retryUntilConnected(() -> {
+            try (Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:" + port
+                         + "/postgres?sslmode=disable&connectTimeout=5&socketTimeout=10",
+                         MASTER_USER, MASTER_PASSWORD);
+                 Statement statement = connection.createStatement();
+                 ResultSet rows = statement.executeQuery(sql)) {
+                rows.next();
+                return rows.getString(1);
+            }
+        });
+    }
+
+    /**
+     * Runs a query until the server answers it, for up to 90 seconds. A server still starting
+     * refuses connections, and the MySQL image restarts its server once after initializing a new
+     * data directory, so a refused connection is retried.
+     */
+    private static String retryUntilConnected(Callable<String> attempt) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
         while (true) {
             try {
-                return queryOnce(port, sql);
+                return attempt.call();
             } catch (SQLException e) {
                 if (System.nanoTime() > deadline) {
                     throw e;

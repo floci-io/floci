@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsJson11Controller;
+import io.floci.aws.core.common.AwsJsonTimestamp;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
@@ -73,6 +74,7 @@ public class EventBridgeHandler {
                 case "PutTargets" -> handlePutTargets(request, region);
                 case "RemoveTargets" -> handleRemoveTargets(request, region);
                 case "ListTargetsByRule" -> handleListTargetsByRule(request, region);
+                case "ListRuleNamesByTarget" -> handleListRuleNamesByTarget(request, region);
                 case "PutEvents" -> handlePutEvents(request, region);
                 case "TestEventPattern" -> handleTestEventPattern(request);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
@@ -117,10 +119,11 @@ public class EventBridgeHandler {
 
     private Response handleCreateEventBus(JsonNode request, String region) {
         String name = request.path("Name").asText(null);
+        String eventSourceName = request.path("EventSourceName").asText(null);
         String description = request.path("Description").asText(null);
         String kmsKey = request.path("KmsKeyIdentifier").asText(null);
         Map<String, String> tags = parseTagsArray(request.path("Tags"));
-        EventBus bus = eventBridgeService.createEventBus(name, description, kmsKey,
+        EventBus bus = eventBridgeService.createEventBus(name, eventSourceName, description, kmsKey,
                 configJson(request.path("DeadLetterConfig")), configJson(request.path("LogConfig")), tags, region);
         // CreateEventBus answers with the bus's ARN and the configuration it was given.
         ObjectNode configuration = buildBusNode(bus);
@@ -267,6 +270,11 @@ public class EventBridgeHandler {
                 );
                 target.setRoleArn(t.path("RoleArn").asText(null));
                 target.setInputTransformer(InputTransformer.fromJson(t.path("InputTransformer")));
+                JsonNode kinesisParamsNode = t.path("KinesisParameters");
+                if (kinesisParamsNode.isObject()) {
+                    target.setKinesisParameters(
+                            objectMapper.convertValue(kinesisParamsNode, Target.KinesisParameters.class));
+                }
                 JsonNode sqsParamsNode = t.path("SqsParameters");
                 if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
                     String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
@@ -336,6 +344,32 @@ public class EventBridgeHandler {
         return Response.ok(response).build();
     }
 
+    private Response handleListRuleNamesByTarget(JsonNode request, String region) {
+        String targetArn = targetLookupString(request, "TargetArn");
+        String busName = targetLookupString(request, "EventBusName");
+        String nextToken = targetLookupString(request, "NextToken");
+        PaginatedResult<String> page = eventBridgeService.listRuleNamesByTarget(
+                targetArn, busName, readLimit(request.path("Limit")), nextToken, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode names = response.putArray("RuleNames");
+        page.items().forEach(names::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static String targetLookupString(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("SerializationException", field + " must be a string.", 400);
+        }
+        return value.textValue();
+    }
+
     private Response handleListTargetsByRule(JsonNode request, String region) {
         String ruleName = request.path("Rule").asText(null);
         String busName = request.path("EventBusName").asText(null);
@@ -359,6 +393,9 @@ public class EventBridgeHandler {
                 if (t.getInputTransformer().getInputTemplate() != null) {
                     transformerNode.put("InputTemplate", t.getInputTransformer().getInputTemplate());
                 }
+            }
+            if (t.getKinesisParameters() != null) {
+                node.set("KinesisParameters", objectMapper.valueToTree(t.getKinesisParameters()));
             }
             if (t.getSqsParameters() != null && t.getSqsParameters().getMessageGroupId() != null) {
                 node.putObject("SqsParameters").put("MessageGroupId", t.getSqsParameters().getMessageGroupId());
@@ -412,6 +449,10 @@ public class EventBridgeHandler {
                 }
                 if (!entryNode.path("Resources").isMissingNode()) {
                     entry.put("Resources", entryNode.path("Resources"));
+                }
+                Instant time = AwsJsonTimestamp.epochSeconds(entryNode, "Time", "SerializationException");
+                if (time != null) {
+                    entry.put("Time", time);
                 }
                 entries.add(entry);
             }

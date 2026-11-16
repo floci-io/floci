@@ -18,6 +18,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -131,15 +132,23 @@ public class RedshiftServerlessEndpointAccessService implements Resettable {
     }
 
     private EndpointAccess require(String endpointName, String region) {
-        EndpointAccess endpoint = endpoints.get(storageKey(region, endpointName)).orElse(null);
-        if (endpoint != null && !isOnSameWorkgroup(endpoint, region)) {
+        return findEndpoint(endpointName, region)
+                .orElseThrow(() -> ServerlessSupport.notFound("The endpoint " + endpointName + " was not found."));
+    }
+
+    /** The ARN of the caller's endpoint of that name in the Region; empty when there is none. */
+    public synchronized Optional<String> findEndpointArn(String endpointName, String region) {
+        return findEndpoint(endpointName, region).map(EndpointAccess::getEndpointArn);
+    }
+
+    private Optional<EndpointAccess> findEndpoint(String endpointName, String region) {
+        return endpoints.get(storageKey(region, endpointName)).filter(endpoint -> {
+            if (isOnSameWorkgroup(endpoint, region)) {
+                return true;
+            }
             endpoints.delete(storageKey(region, endpointName));
-            endpoint = null;
-        }
-        if (endpoint == null) {
-            throw ServerlessSupport.notFound("The endpoint " + endpointName + " was not found.");
-        }
-        return endpoint;
+            return false;
+        });
     }
 
     /** The region's endpoints whose workgroup is still there; any other is deleted as it is found. */

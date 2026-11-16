@@ -95,11 +95,8 @@ public class EmrServerlessController {
     @Path("/{applicationId}")
     public UpdateApplicationResponse updateApplication(@PathParam("applicationId") String applicationId,
                                                      UpdateApplicationRequest request) {
-        Application app = service.updateApplication(applicationId, request);
         UpdateApplicationResponse response = new UpdateApplicationResponse();
-        response.setApplicationId(app.getApplicationId());
-        response.setArn(app.getArn());
-        response.setName(app.getName());
+        response.setApplication(service.updateApplication(applicationId, request));
         return response;
     }
 
@@ -123,7 +120,7 @@ public class EmrServerlessController {
     @POST
     @Path("/{applicationId}/stop")
     public StopApplicationResponse stopApplication(@PathParam("applicationId") String applicationId) {
-        service.stopApplication(applicationId);
+        jobRuns.stopApplication(applicationId);
         StopApplicationResponse response = new StopApplicationResponse();
         return response;
     }

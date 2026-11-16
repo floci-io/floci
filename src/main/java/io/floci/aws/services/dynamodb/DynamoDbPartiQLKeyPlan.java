@@ -44,7 +44,11 @@ final class DynamoDbPartiQLKeyPlan {
         }
     }
 
-    private record Branch(Key partition, PVal partitionValue, Range sortRange, List<Cond> filters) {}
+    private record Branch(Key partition, PVal partitionValue, Range sortRange, List<Cond> filters) {
+
+        static final Comparator<Branch> IN_KEY_ORDER = Comparator.comparing(Branch::partition)
+                .thenComparing(Branch::sortRange, Range.BY_LOWER);
+    }
 
     DynamoDbPartiQLKeyPlan(List<Cond> where, DynamoDbAccessPath accessPath, TableDefinition table) {
         this.partitionKey = accessPath.partitionKeyName();
@@ -116,14 +120,38 @@ final class DynamoDbPartiQLKeyPlan {
         }
     }
 
+    /**
+     * Each key read leaves the rest of its branch to a filter, and DynamoDB refuses the statement
+     * once every such filter names a key of the access path. A statement that tests a key outside
+     * a range is read as a scan, whose filter may name the keys.
+     */
+    void requireFilterWithoutKeys() {
+        if (!keyed() || branches.stream().anyMatch(this::testsAKeyOutsideARange)) {
+            return;
+        }
+        // DynamoDB names a key the last read in key order filters on, the sort key first.
+        List<String> keys = sortKey == null ? List.of(partitionKey) : List.of(sortKey, partitionKey);
+        Optional<String> named = Optional.empty();
+        for (Branch branch : branches.stream().sorted(Branch.IN_KEY_ORDER).toList()) {
+            named = keys.stream().filter(key -> branch.filters().stream()
+                    .flatMap(DynamoDbPartiQLParser::leaves)
+                    .anyMatch(leaf -> leaf.path().root().equals(key))).findFirst();
+            if (named.isEmpty()) {
+                return;
+            }
+        }
+        throw DynamoDbAccessPathValidator.keyAttributeInFilter(named.get());
+    }
+
     // DynamoDB drops the overlap check once a branch tests a key in a way no key condition can
     // hold, such as sk <> 'a', attribute_exists(sk) or NOT sk = 'a'. A NOT counts only when it
-    // sits right on the test, and a NOT over size() never counts.
+    // sits right on the test, a NOT over size() never counts, and size() counts only on its own.
     private boolean testsAKeyOutsideARange(Branch branch) {
         return branch.filters().stream().anyMatch(filter -> switch (filter) {
             case Cond.Not not -> not.operand() instanceof Cond.Leaf leaf
                     && !(leaf instanceof Cond.SizeCmp) && namesAKey(leaf);
-            default -> anyLeaf(filter, this::namesAKey);
+            case Cond.Leaf leaf -> namesAKey(leaf);
+            default -> anyLeaf(filter, leaf -> !(leaf instanceof Cond.SizeCmp) && namesAKey(leaf));
         });
     }
 

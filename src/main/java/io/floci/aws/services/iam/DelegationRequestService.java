@@ -1,10 +1,12 @@
 package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.iam.model.DelegationPermission;
@@ -19,10 +21,14 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
@@ -56,7 +62,7 @@ import java.util.regex.Pattern;
  * announces the expiry, which is why they are published in a finally rather than on the way out.
  */
 @ApplicationScoped
-public class DelegationRequestService {
+public class DelegationRequestService implements DelegationRequestOwnership, Resettable {
 
     /** {@code delegationRequestIdType}, and the "dr-" prefix the reference's own examples carry. */
     private static final String ID_PREFIX = "dr-";
@@ -135,18 +141,39 @@ public class DelegationRequestService {
      */
     private final Object requestLock = new Object();
 
+    /** Bumped on every stored change, so a view of who owns what can tell that it is stale. */
+    private final AtomicLong ownershipVersion = new AtomicLong();
+
+    /** The last view built, with the version it was built from; null until one is built. */
+    private final AtomicReference<OwnedRequests> ownedRequests = new AtomicReference<>();
+
+    /**
+     * The permissions boundaries registered for each partner account, which a request this partner
+     * files carries. AWS registers them out of band and reports them on the request rather than
+     * taking them from one, so configuration is where they come from here.
+     */
+    private final PartnerPermissionBoundaries partnerPermissionBoundaries;
+
     @Inject
     public DelegationRequestService(StorageFactory storageFactory, Clock clock,
-                                    DelegationNotifier notifier) {
+                                    DelegationNotifier notifier, EmulatorConfig config) {
         this(storageFactory.create("iam", "iam-delegation-requests.json", new TypeReference<>() {}),
-                clock, notifier);
+                clock, notifier,
+                PartnerPermissionBoundaries.load(config.services().iam().partnerPermissionBoundariesPath()));
     }
 
     DelegationRequestService(AccountAwareStorageBackend<DelegationRequest> requests, Clock clock,
                              DelegationNotifier notifier) {
+        this(requests, clock, notifier, PartnerPermissionBoundaries.NONE);
+    }
+
+    DelegationRequestService(AccountAwareStorageBackend<DelegationRequest> requests, Clock clock,
+                             DelegationNotifier notifier,
+                             PartnerPermissionBoundaries partnerPermissionBoundaries) {
         this.requests = requests;
         this.clock = clock;
         this.notifier = notifier;
+        this.partnerPermissionBoundaries = partnerPermissionBoundaries;
     }
 
     /** The {@code CreateDelegationRequest} request, as the handler parsed it. */
@@ -240,6 +267,12 @@ public class DelegationRequestService {
         request.setRedirectUrl(command.redirectUrl());
         request.setRequestMessage(command.requestMessage());
         request.setOnlySendByOwner(command.onlySendByOwner());
+        // The long-term half of the feature: the guide says long-term permissions "limit the
+        // permissions of any roles that are created or managed through temporary access" and are
+        // "implemented as IAM permissions boundaries", registered for the partner out of band. The
+        // member is reported on the request rather than taken from one, so the request carries
+        // whatever is registered for the partner that filed it, which is nothing by default.
+        request.setRolePermissionRestrictionArns(partnerPermissionBoundaries.arnsFor(requestorAccountId));
         // The partner is identified by the account that called. AWS shows a registered partner
         // name here, which onboarding assigns and no API sets, so Floci leaves the name unset
         // rather than inventing one.
@@ -516,6 +549,66 @@ public class DelegationRequestService {
         }
     }
 
+    /** An owner, as ownership records one: the account a request was claimed in and the identity. */
+    private record Owner(String accountId, String arn) {}
+
+    /** Every owner's request ids as one scan found them, with the version that scan read. */
+    private record OwnedRequests(long version, Map<Owner, List<String>> ids) {}
+
+    /**
+     * The requests an identity owns, for the grant the policy set writes from them. It reads the
+     * same ownership the lifecycle records, an owner being whoever claimed the request, and asks
+     * nothing of state: a rejected or expired request is still theirs to read and list, and the
+     * operations that would move it refuse on its state rather than on permission.
+     *
+     * <p>This is called wherever a caller's policies are assembled, so on every authorized
+     * request and not only on a delegation one. It answers an empty store without reading it, and
+     * otherwise from a view of who owns what that one scan builds and any stored change
+     * invalidates whole, so the usual answer costs a lookup rather than a scan of every record in
+     * every account.
+     *
+     * <p>A scan is what gets cached rather than replaced because there is no account to read
+     * instead: a request is stored under the account that asked for it while ownership names the
+     * account that claimed it. And invalidating the whole view is what keeps it true, where an
+     * index maintained in place would be a second copy of the store to keep in step with every
+     * claim, expiry and reload.
+     */
+    @Override
+    public List<String> requestIdsOwnedBy(String accountId, String ownerArn) {
+        if (accountId == null || ownerArn == null || requests.isEmptyInAllAccounts()) {
+            return List.of();
+        }
+        return ownership().getOrDefault(new Owner(accountId, ownerArn), List.of());
+    }
+
+    /**
+     * Who owns what, from the last scan still current, or from a fresh one. A scan that a write
+     * overtook answers this caller and is not kept, so the next caller reads the store again
+     * rather than a view of the moment before that write.
+     */
+    private Map<Owner, List<String>> ownership() {
+        long version = ownershipVersion.get();
+        OwnedRequests cached = ownedRequests.get();
+        if (cached != null && cached.version() == version) {
+            return cached.ids();
+        }
+        Map<Owner, List<String>> owned = new HashMap<>();
+        for (DelegationRequest request : requests.scanAllAccounts()) {
+            if (request.getOwnerAccountId() == null || request.getOwnerId() == null
+                    || request.getDelegationRequestId() == null) {
+                continue;
+            }
+            owned.computeIfAbsent(new Owner(request.getOwnerAccountId(), request.getOwnerId()),
+                    owner -> new ArrayList<>()).add(request.getDelegationRequestId());
+        }
+        owned.replaceAll((owner, ids) -> List.copyOf(ids));
+        Map<Owner, List<String>> view = Map.copyOf(owned);
+        if (ownershipVersion.get() == version) {
+            ownedRequests.compareAndSet(cached, new OwnedRequests(version, view));
+        }
+        return view;
+    }
+
     private List<DelegationRequest> visibleToOwner(String callerAccountId, String ownerId,
                                                    Instant now,
                                                    List<DelegationNotifier.Notice> notices) {
@@ -686,8 +779,22 @@ public class DelegationRequestService {
                 + " hours or less. Approve it as an IAM user or role instead.", 403);
     }
 
+    /**
+     * A reset wipes the backend without a request passing through {@link #put}, so the view of who
+     * owns what is dropped here rather than left to outlive what it was built from. The store is
+     * already wiped by the time this runs, which is why nothing else is cleared.
+     */
+    @Override
+    public void clear() {
+        ownershipVersion.incrementAndGet();
+        ownedRequests.set(null);
+    }
+
     private void put(DelegationRequest request) {
         requests.putForAccount(request.getRequestorId(), request.getDelegationRequestId(), request);
+        // Every stored change makes a view of who owns what stale, and saying so here is the whole
+        // of keeping that view true: it is the one place a request reaches the store from.
+        ownershipVersion.incrementAndGet();
     }
 
     private void validatePermissions(DelegationPermission permissions) {

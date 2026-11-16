@@ -15,6 +15,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.Resettable;
@@ -110,13 +111,13 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    /** Documented default page size for GetUsage. */
-    private static final int DEFAULT_USAGE_LIMIT = 25;
+    /** Documented default page size for the paged list calls. */
+    private static final int DEFAULT_PAGE_SIZE = 25;
     /**
      * Documented maximum results per page. A larger {@code limit} is accepted, as real API Gateway
      * accepts one, but the page returned is still capped here.
      */
-    private static final int MAX_USAGE_PAGE_SIZE = 500;
+    private static final int MAX_PAGE_SIZE = 500;
 
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayService.class);
@@ -1160,16 +1161,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             String suffix = "/" + settingKey;
             if (!path.endsWith(suffix)) continue;
 
-            String prefix = path.substring(1, path.length() - suffix.length());
-            int lastSlash = prefix.lastIndexOf('/');
-            if (lastSlash < 0) return;
-            // AWS escapes the resource path's slashes as ~1 in the patch path ("/~1pets/GET/...")
-            // but reports the setting keyed by the plain path ("pets/GET"), so normalise both the
-            // escaped and unescaped spellings onto that one key.
-            String resourcePath = unescapeJsonPointer(prefix.substring(0, lastSlash));
-            if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
-            String httpMethod = prefix.substring(lastSlash + 1);
-            String methodKey = resourcePath + "/" + httpMethod;
+            String methodKey = path.substring(1, path.length() - suffix.length());
+            if (methodKey.lastIndexOf('/') < 0) {
+                return;
+            }
 
             MethodSetting setting = stage.getMethodSettings()
                     .computeIfAbsent(methodKey, k -> new MethodSetting());
@@ -1255,6 +1250,36 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         getRestApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return authorizerStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public PaginatedResult<Authorizer> getAuthorizerPage(String region, String apiId, Integer limit,
+                                                         String position) {
+        List<Authorizer> authorizers = getAuthorizers(region, apiId).stream()
+                .sorted(Comparator.comparing(Authorizer::getId))
+                .toList();
+        return pageById(authorizers, Authorizer::getId, limit, position);
+    }
+
+    /**
+     * One page of a list already sorted by id. The token is the id of the last item returned, and
+     * an unrecognised token is a {@code BadRequestException}, as on AWS.
+     */
+    private static <T> PaginatedResult<T> pageById(List<T> sorted, Function<T, String> idOf, Integer limit,
+                                                   String position) {
+        int pageSize = resolvePageSize(limit);
+        int start = 0;
+        if (position != null && !position.isBlank()) {
+            while (start < sorted.size() && !position.equals(idOf.apply(sorted.get(start)))) {
+                start++;
+            }
+            if (start == sorted.size()) {
+                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+            }
+            start++;
+        }
+        int end = Math.min(start + pageSize, sorted.size());
+        String nextPosition = end < sorted.size() ? idOf.apply(sorted.get(end - 1)) : null;
+        return new PaginatedResult<>(List.copyOf(sorted.subList(start, end)), nextPosition);
     }
 
     public void deleteAuthorizer(String region, String apiId, String authorizerId) {
@@ -1796,7 +1821,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         if (end.isBefore(start)) {
             throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
         }
-        int pageSize = resolveUsageLimit(limit);
+        int pageSize = resolvePageSize(limit);
 
         List<UsagePlanKey> keys = getUsagePlanKeys(region, usagePlanId).stream()
                 .filter(key -> keyId == null || keyId.isBlank() || keyId.equals(key.getId()))
@@ -1854,9 +1879,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     }
 
     /**
-     * Resolves the effective page size, which is not the same thing as accepting the request.
+     * Resolves the effective page size of a paged list call ({@code GetUsage}, {@code GetAuthorizers},
+     * {@code GetDocumentationParts}), which is not the same thing as accepting the request.
      *
-     * <p>Request acceptance and response page size are separate. Probed against real API Gateway,
+     * <p>Request acceptance and response page size are separate. The probe below was made against
+     * {@code GetUsage} on real API Gateway:
      * every {@code limit} from 500 up to {@link Integer#MAX_VALUE} is accepted without error, so
      * none is rejected here either. What that probe does <em>not</em> establish is that the service
      * ever returns more than 500 entries in one page, and the documented contract says 500 is the
@@ -1867,14 +1894,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
      * {@code limit=-1} with an {@code InternalFailure}, which is a fault rather than a contract, so
      * a page size below one is rejected as a bad request instead of reproducing a 500.
      */
-    static int resolveUsageLimit(Integer limit) {
+    static int resolvePageSize(Integer limit) {
         if (limit == null) {
-            return DEFAULT_USAGE_LIMIT;
+            return DEFAULT_PAGE_SIZE;
         }
         if (limit < 1) {
             throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
         }
-        return Math.min(limit, MAX_USAGE_PAGE_SIZE);
+        return Math.min(limit, MAX_PAGE_SIZE);
     }
 
     /**
@@ -2449,9 +2476,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid documentation part id specified", 404));
     }
 
-    public record DocumentationPartPage(List<DocumentationPart> items, String position) {}
-
-    public DocumentationPartPage getDocumentationParts(String region, String apiId, String type, String name,
+    public PaginatedResult<DocumentationPart> getDocumentationParts(String region, String apiId, String type, String name,
                                                         String path, String locationStatus, Integer limit,
                                                         String position) {
         getRestApi(region, apiId);
@@ -2475,10 +2500,6 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             modeledRequest.put("position", position);
         }
         ApiGatewayDocumentationRequestShapes.check("GetDocumentationParts", modeledRequest);
-        if (limit != null && limit < 1) {
-            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
-        }
-        int pageSize = limit == null ? 25 : Math.min(limit, 500);
         String prefix = region + "::" + apiId + "::";
         List<DocumentationPart> parts = documentationPartStore.scan(key -> key.startsWith(prefix)).stream()
                 .filter(part -> type == null || type.equals(part.getLocation().get("type")))
@@ -2488,19 +2509,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .sorted(Comparator.comparing(DocumentationPart::getId))
                 .toList();
 
-        int start = 0;
-        if (position != null && !position.isBlank()) {
-            while (start < parts.size() && !position.equals(parts.get(start).getId())) {
-                start++;
-            }
-            if (start == parts.size()) {
-                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
-            }
-            start++;
-        }
-        int end = Math.min(start + pageSize, parts.size());
-        String nextPosition = end < parts.size() ? parts.get(end - 1).getId() : null;
-        return new DocumentationPartPage(List.copyOf(parts.subList(start, end)), nextPosition);
+        return pageById(parts, DocumentationPart::getId, limit, position);
     }
 
     public synchronized DocumentationPart updateDocumentationPart(String region, String apiId, String partId,
@@ -2537,11 +2546,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                     || !Set.of("type", "path", "method", "statusCode", "name").contains(key)) {
                 throw new AwsException("BadRequestException", "Invalid documentation part location", 400);
             }
-            location.put(key, fieldValue);
+            // Terraform sends unset location members as empty strings.
+            if (!fieldValue.isBlank()) {
+                location.put(key, fieldValue);
+            }
         }
         // AWS REST examples allow REQUEST_BODY without a name despite the model's required marker.
         if (DOCUMENTATION_PART_NAMED_TYPES.contains(type) && !"REQUEST_BODY".equals(type)
-                && (location.get("name") == null || location.get("name").isBlank())) {
+                && !location.containsKey("name")) {
             throw new AwsException("BadRequestException", "Documentation part location name is required", 400);
         }
         if (location.containsKey("name") && !DOCUMENTATION_PART_NAMED_TYPES.contains(type)

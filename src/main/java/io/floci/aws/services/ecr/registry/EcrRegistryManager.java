@@ -23,6 +23,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.core.common.docker.SidecarHealthHelper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -85,6 +86,11 @@ public class EcrRegistryManager {
     private static final Pattern ECR_IMAGE_REGION = Pattern.compile("^(?:[0-9]{12}\\.dkr\\.ecr\\.([a-z0-9-]+)\\.(?:"
             + AwsPartitions.dnsSuffixRegex() + "|" + FLOCI_REGISTRY_HOST + ")"
             + "|" + FLOCI_REGISTRY_HOST + "/[0-9]{12}/([a-z0-9-]+))/.+$");
+
+    /** The account, Region and path of an image in an ECR repository, in {@link #ECR_IMAGE_REGION}'s forms. */
+    private static final Pattern ECR_IMAGE_PARTS = Pattern.compile("^(?:([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.(?:"
+            + AwsPartitions.dnsSuffixRegex() + "|" + FLOCI_REGISTRY_HOST + ")"
+            + "|" + FLOCI_REGISTRY_HOST + "/([0-9]{12})/([a-z0-9-]+))/(.+)$");
 
     /**
      * The container name actually in use. Differs from {@link #registryContainerName()} only when
@@ -220,6 +226,36 @@ public class EcrRegistryManager {
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }
+
+    /**
+     * The ECR repository an image URI names, in any of the forms {@link #imageRegion} reads, and the tag or digest it
+     * asks for, its tag {@code latest} where it names neither; empty for an image outside ECR.
+     */
+    public static Optional<EcrImage> ecrImage(String image) {
+        Matcher m = image != null ? ECR_IMAGE_PARTS.matcher(image) : null;
+        if (m == null || !m.matches()) {
+            return Optional.empty();
+        }
+        String path = m.group(5);
+        String digest = null;
+        int at = path.indexOf('@');
+        if (at >= 0) {
+            digest = path.substring(at + 1);
+            path = path.substring(0, at);
+        }
+        String tag = null;
+        int colon = path.lastIndexOf(':');
+        if (colon > path.lastIndexOf('/')) {
+            tag = path.substring(colon + 1);
+            path = path.substring(0, colon);
+        }
+        return Optional.of(new EcrImage(m.group(1) != null ? m.group(1) : m.group(3),
+                m.group(2) != null ? m.group(2) : m.group(4), path, digest == null && tag == null ? "latest" : tag,
+                digest));
+    }
+
+    /** An image in an ECR repository: its registry, Region and repository, and the tag or the digest asked for. */
+    public record EcrImage(String registryId, String region, String repository, String tag, String digest) {}
 
     /**
      * The Region of the ECR repository an image URI names, AWS-shaped or one Floci's ECR hands out; empty for an
@@ -421,6 +457,9 @@ public class EcrRegistryManager {
         if (started) {
             ContainerPresence presence = lifecycleManager.presenceOf(containerId);
             if (presence == ContainerPresence.RUNNING || presence == ContainerPresence.UNKNOWN) {
+                if (!ready) {
+                    completeStartup();
+                }
                 return;
             }
             String previousContainerId = containerId;
@@ -453,8 +492,7 @@ public class EcrRegistryManager {
             } else if (!onAnotherNetwork(existing.get())) {
                 this.activeContainerName = adoptedName;
                 adoptExisting(existing.get());
-                runReconcileOnce();
-                this.ready = true;
+                completeStartup();
                 return;
             }
             // Recreated under the current name; the data volume is resolved by its own probe.
@@ -480,6 +518,11 @@ public class EcrRegistryManager {
         } catch (Exception e) {
             throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
         }
+        completeStartup();
+    }
+
+    private void completeStartup() {
+        SidecarHealthHelper.waitForHealth(httpClient().baseUrl(), "/v2/");
         runReconcileOnce();
         this.ready = true;
     }
@@ -587,18 +630,6 @@ public class EcrRegistryManager {
             return;
         }
         try {
-            // Give the registry a moment to be ready on first start
-            for (int i = 0; i < 10; i++) {
-                if (httpClient().ping()) {
-                    break;
-                }
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
             List<String> repos = httpClient().catalog();
             reconcileHook.accept(repos);
             reconciled = true;

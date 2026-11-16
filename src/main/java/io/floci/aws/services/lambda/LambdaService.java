@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -22,6 +23,7 @@ import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.StorageBackedMap;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.VpcDependencyProvider;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
@@ -38,6 +40,7 @@ import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.LambdaUrlConfig;
+import io.floci.aws.services.lambda.model.ResponseStreamListener;
 import io.floci.aws.services.lambda.model.ScalingConfig;
 import io.floci.aws.services.lambda.zip.CodeStore;
 import io.floci.aws.services.lambda.zip.DeploymentPackage;
@@ -52,8 +55,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.math.BigDecimal;
 import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -77,6 +85,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -85,7 +94,7 @@ import java.util.stream.Collectors;
  * Business logic for Lambda function management and invocation.
  */
 @ApplicationScoped
-public class LambdaService implements ResourceProvider {
+public class LambdaService implements ResourceProvider, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(LambdaService.class);
 
@@ -108,7 +117,10 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
+    private static final int FUNCTION_URL_CONFIGS_PAGE_SIZE = 50;
     private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
+    private static final int MAX_ENVIRONMENT_BYTES = 4096;
+    private static final int MAX_ENVIRONMENT_DIAGNOSTIC_BYTES = 5120;
     // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
@@ -211,6 +223,7 @@ public class LambdaService implements ResourceProvider {
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
     private final SignedMarkers listFunctionMarkers = new SignedMarkers();
     private final SignedMarkers codeSigningFunctionMarkers = new SignedMarkers();
+    private final SignedMarkers functionUrlMarkers = new SignedMarkers();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -683,7 +696,7 @@ public class LambdaService implements ResourceProvider {
             }
         }
 
-        functionStore.save(region, fn);
+        saveHoldingSubnets(region, fn, vpcConfig != null);
         LOG.infov("Created Lambda function: {0} in region {1}", functionName, region);
         if (Boolean.TRUE.equals(request.get("Publish"))) {
             return publishVersion(region, functionName, null);
@@ -1208,7 +1221,7 @@ public class LambdaService implements ResourceProvider {
         // Drain warm containers so the next invocation picks up the new configuration
         warmPool.drainEnvironment(fn);
 
-        functionStore.save(region, fn);
+        saveHoldingSubnets(region, fn, requestedVpcConfigUpdate != null);
         // LastUpdateStatus reports the last update of either kind, so this one replaces a failed sync's.
         failedReactiveSyncs.remove(fn.getFunctionArn());
         LOG.infov("Updated configuration for function: {0}", functionName);
@@ -1241,13 +1254,15 @@ public class LambdaService implements ResourceProvider {
     /**
      * DeleteFunction. A Qualifier names a single published version to remove, leaving the
      * function and its other versions in place; without one the whole function goes.
+     * AWS answers 202 for a durable function and keeps it Deleting for about a minute.
+     *
+     * @return true when a durable function or an existing version of it was deleted
      */
-    public void deleteFunction(String region, String functionName, String qualifier) {
+    public boolean deleteFunction(String region, String functionName, String qualifier) {
         if (qualifier != null && !qualifier.isEmpty()) {
-            deleteFunctionVersion(region, functionName, qualifier);
-            return;
+            return deleteFunctionVersion(region, functionName, qualifier);
         }
-        deleteWholeFunction(region, functionName);
+        return deleteWholeFunction(region, functionName);
     }
 
     /**
@@ -1255,7 +1270,7 @@ public class LambdaService implements ResourceProvider {
      * {@code $LATEST} or naming an alias is rejected, a version an alias points at is a
      * conflict, and a version that does not exist is a silent success rather than a 404.
      */
-    private void deleteFunctionVersion(String region, String functionName, String qualifier) {
+    private boolean deleteFunctionVersion(String region, String functionName, String qualifier) {
         if (!QUALIFIER.matcher(qualifier).matches()) {
             throw SmithyValidationErrors.validationException(
                     "Value '" + qualifier + "' at 'qualifier' failed"
@@ -1286,7 +1301,7 @@ public class LambdaService implements ResourceProvider {
         }
         Optional<LambdaFunction> version = functionStore.get(region, name, qualifier);
         if (version.isEmpty()) {
-            return;
+            return false;
         }
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.deleteProvisionedQualifier(fn, qualifier);
@@ -1298,9 +1313,10 @@ public class LambdaService implements ResourceProvider {
             reclaimLegacyCodeDirectoryIfUnused(name);
         }
         LOG.infov("Deleted version {0} of Lambda function: {1}", qualifier, name);
+        return fn.isDurable();
     }
 
-    private void deleteWholeFunction(String region, String functionName) {
+    private boolean deleteWholeFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
@@ -1348,6 +1364,7 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+        return fn.isDurable();
     }
 
     /**
@@ -1434,6 +1451,12 @@ public class LambdaService implements ResourceProvider {
      */
     public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type, String clientContext, String durableExecutionName) {
+        return invoke(region, functionName, queryQualifier, payload, type, clientContext, durableExecutionName, null);
+    }
+
+    public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
+                               InvocationType type, String clientContext, String durableExecutionName,
+                               String traceHeader) {
         validateInvokeQualifier(queryQualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
@@ -1447,7 +1470,8 @@ public class LambdaService implements ResourceProvider {
             fn = targetResolver.resolveInvokeTarget(region, name, qualifier);
         }
         reportCustomResourceLiveness(payload);
-        InvokeResult durable = invokeIfDurable(fn, region, qualifier, durableExecutionName, payload, type);
+        InvokeResult durable = invokeIfDurable(fn, region, qualifier, durableExecutionName, payload, type,
+                traceHeader);
         if (durable != null) {
             return durable;
         }
@@ -1459,7 +1483,8 @@ public class LambdaService implements ResourceProvider {
 
     /** Null for a plain function, and for a DryRun, which only checks the qualifier. */
     private InvokeResult invokeIfDurable(LambdaFunction fn, String region, String qualifier,
-                                         String durableExecutionName, byte[] payload, InvocationType type) {
+                                         String durableExecutionName, byte[] payload, InvocationType type,
+                                         String traceHeader) {
         if (!fn.isDurable()) {
             return null;
         }
@@ -1470,7 +1495,7 @@ public class LambdaService implements ResourceProvider {
         if (type == InvocationType.DryRun) {
             return null;
         }
-        InvokeResult result = invokeDurable(fn, region, durableExecutionName, payload, type);
+        InvokeResult result = invokeDurable(fn, region, durableExecutionName, payload, type, traceHeader);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -1480,7 +1505,7 @@ public class LambdaService implements ResourceProvider {
      * limit. Event answers 202 as soon as the execution exists.
      */
     private InvokeResult invokeDurable(LambdaFunction fn, String region, String executionName, byte[] payload,
-                                       InvocationType type) {
+                                       InvocationType type, String traceHeader) {
         boolean synchronous = type == InvocationType.RequestResponse;
         if (synchronous && fn.getDurableExecutionTimeout() > MAX_FUNCTION_TIMEOUT_SECONDS) {
             throw new AwsException("InvalidParameterValueException",
@@ -1494,7 +1519,8 @@ public class LambdaService implements ResourceProvider {
         }
         String input = payload == null || payload.length == 0 ? "{}" : new String(payload, StandardCharsets.UTF_8);
         DurableExecution execution = durableExecutionService.start(new DurableExecutionService.StartRequest(
-                fn.getAccountId(), region, fn.getFunctionName(), fn.getVersion(), executionName, input, synchronous));
+                fn.getAccountId(), region, fn.getFunctionName(), fn.getVersion(), executionName, input, synchronous,
+                traceHeader));
         String requestId = UUID.randomUUID().toString();
         InvokeResult result;
         if (!synchronous) {
@@ -1560,16 +1586,32 @@ public class LambdaService implements ResourceProvider {
         return invokeArn(functionArn, payload, InvocationType.Event, chainDepth);
     }
 
+    /**
+     * Invokes a Lambda target ARN synchronously, handing a response the runtime streams to
+     * {@code listener} as it arrives.
+     */
+    public InvokeResult invokeArnStreaming(String functionArn, byte[] payload, ResponseStreamListener listener) {
+        return invokeArn(functionArn, payload, InvocationType.RequestResponse,
+                LambdaInvocationChain.currentDepth(), listener);
+    }
+
     private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth) {
+        return invokeArn(functionArn, payload, type, chainDepth, null);
+    }
+
+    private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth,
+                                   ResponseStreamListener listener) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(
                 arn.accountId(), arn.region(), ref.name(), ref.qualifier());
-        InvokeResult durable = invokeIfDurable(fn, arn.region(), ref.qualifier(), null, payload, type);
+        InvokeResult durable = invokeIfDurable(fn, arn.region(), ref.qualifier(), null, payload, type, null);
         if (durable != null) {
             return durable;
         }
-        InvokeResult result = executorService.invoke(fn, payload, type, chainDepth, ref.qualifier());
+        InvokeResult result = listener == null
+                ? executorService.invoke(fn, payload, type, chainDepth, ref.qualifier())
+                : executorService.invokeStreaming(fn, payload, chainDepth, ref.qualifier(), listener);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -2770,6 +2812,53 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
+    // ─── VPC dependencies ────────────────────────────────────────────────────────
+
+    /**
+     * Whether a function of the caller's account, or a published version of one, names the subnet in its VpcConfig:
+     * Lambda creates a Hyperplane network interface in each subnet a function's VpcConfig names, and EC2 refuses
+     * DeleteSubnet while one is there.
+     */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        return functionStore.listWithVersionsForAccount(regionResolver.getAccountId(), region).stream()
+                .anyMatch(fn -> namesSubnet(fn, subnetId));
+    }
+
+    /** Whether a function of the caller's account, or a version of one, is configured in the VPC. */
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return functionStore.listWithVersionsForAccount(regionResolver.getAccountId(), region).stream()
+                .anyMatch(fn -> vpcId.equals(fn.getVpcId()));
+    }
+
+    private static boolean namesSubnet(LambdaFunction fn, String subnetId) {
+        Object subnets = fn.getVpcConfig() == null ? null : fn.getVpcConfig().get("SubnetIds");
+        return subnets instanceof List<?> list && list.contains(subnetId);
+    }
+
+    /**
+     * Saves a function, under EC2's subnet lock when its VpcConfig names subnets, so a DeleteSubnet or DeleteVpc
+     * either sees it or runs before it is stored, never between. A VpcConfig this request set is resolved again under
+     * the lock: a subnet deleted since the request was validated is then unknown, as one never created is, and the
+     * function infers no VPC from it.
+     *
+     * @param vpcConfigSet whether this request set the function's VpcConfig
+     */
+    private void saveHoldingSubnets(String region, LambdaFunction fn, boolean vpcConfigSet) {
+        Object subnets = fn.getVpcConfig() == null ? null : fn.getVpcConfig().get("SubnetIds");
+        if (ec2Service != null && subnets instanceof List<?> list && !list.isEmpty()) {
+            ec2Service.runWithSubnetReferencesHeld(region, () -> {
+                if (vpcConfigSet) {
+                    fn.setVpcId(resolveVpcId(region, fn.getVpcConfig()));
+                }
+                functionStore.save(region, fn);
+            });
+        } else {
+            functionStore.save(region, fn);
+        }
+    }
+
     /** Resolve the common VPC only after every requested subnet and security group is validated. */
     private String resolveVpcId(String region, Map<String, Object> vpcConfig) {
         List<String> subnetIds = vpcResourceIds(vpcConfig, "SubnetIds");
@@ -2825,12 +2914,67 @@ public class LambdaService implements ResourceProvider {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, String> environmentVariables(Map<String, Object> environment) {
+    private Map<String, String> environmentVariables(Map<String, Object> environment) {
         if (environment == null) {
             return null;
         }
-        return (Map<String, String>) (Map<?, ?>) structureValue(
+        Map<String, String> variables = (Map<String, String>) (Map<?, ?>) structureValue(
                 environment.get("Variables"), "Environment.Variables");
+        if (variables != null) {
+            EnvironmentSizeOutputStream output = new EnvironmentSizeOutputStream();
+            // A Writer preserves Unicode characters; Jackson's byte generator escapes surrogate pairs.
+            try (OutputStreamWriter writer = new OutputStreamWriter(output, StandardCharsets.UTF_8)) {
+                objectMapper.writer().without(SerializationFeature.INDENT_OUTPUT).writeValue(writer, variables);
+            } catch (IOException e) {
+                if (!output.truncated) {
+                    throw new AwsException("SerializationException", "Environment.Variables could not be serialized", 400);
+                }
+            }
+            if (output.size > MAX_ENVIRONMENT_BYTES) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Lambda was unable to configure your environment variables because the environment variables "
+                                + "you have provided exceeded the 4KB limit. String measured: " + output.measuredString(),
+                        400);
+            }
+        }
+        return variables;
+    }
+
+    private static final class EnvironmentSizeOutputStream extends OutputStream {
+        private final byte[] measured = new byte[MAX_ENVIRONMENT_DIAGNOSTIC_BYTES];
+        private int size;
+        private boolean truncated;
+
+        @Override
+        public void write(int value) throws IOException {
+            if (size == measured.length) {
+                overflow();
+            }
+            measured[size++] = (byte) value;
+        }
+
+        @Override
+        public void write(byte[] source, int offset, int length) throws IOException {
+            Objects.checkFromIndexSize(offset, length, source.length);
+            int copied = Math.min(length, measured.length - size);
+            System.arraycopy(source, offset, measured, size, copied);
+            size += copied;
+            if (copied < length) {
+                overflow();
+            }
+        }
+
+        private void overflow() throws IOException {
+            truncated = true;
+            throw new IOException("Environment exceeds the diagnostic capture limit");
+        }
+
+        private String measuredString() {
+            CharBuffer decoded = CharBuffer.allocate(size);
+            StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.IGNORE)
+                    .decode(ByteBuffer.wrap(measured, 0, size), decoded, true);
+            return decoded.flip().toString() + (truncated ? "..." : "");
+        }
     }
 
     /**
@@ -3289,15 +3433,34 @@ public class LambdaService implements ResourceProvider {
     public LambdaAlias updateAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
                                    Map<String, Double> routingConfig) {
+        return rewriteAlias(region, functionName, aliasName, functionVersion, description, (fn, alias) -> {
+            warmPool.validateProvisionedAliasUpdate(fn, aliasName, functionVersion);
+            if (functionVersion != null) alias.setFunctionVersion(functionVersion);
+            if (description != null) alias.setDescription(description);
+            if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
+        });
+    }
+
+    /**
+     * Writes the alias description exactly as given, null included, which {@link #updateAlias} reads
+     * as "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public LambdaAlias replaceAliasDescription(String region, String functionName, String aliasName,
+                                               String description) {
+        return rewriteAlias(region, functionName, aliasName, null, description,
+                (fn, alias) -> alias.setDescription(description));
+    }
+
+    /** Validates the alias members, then under the function's lock applies {@code change} to the stored alias and saves it. */
+    private LambdaAlias rewriteAlias(String region, String functionName, String aliasName,
+                                     String functionVersion, String description,
+                                     BiConsumer<LambdaFunction, LambdaAlias> change) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             LambdaAlias alias = getAlias(region, functionName, aliasName);
-            warmPool.validateProvisionedAliasUpdate(fn, aliasName, functionVersion);
-            if (functionVersion != null) alias.setFunctionVersion(functionVersion);
-            if (description != null) alias.setDescription(description);
-            if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
+            change.accept(fn, alias);
             alias.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             alias.setRevisionId(UUID.randomUUID().toString());
             if (aliasStore != null) aliasStore.save(region, alias);
@@ -3422,6 +3585,45 @@ public class LambdaService implements ResourceProvider {
 
         LOG.infov("Created Function URL for {0} (qualifier: {1}): {2}", functionName, qualifier, url);
         return urlConfig;
+    }
+
+    public PaginatedResult<LambdaUrlConfig> listFunctionUrlConfigs(
+            String region, String functionName, String maxItems, String marker) {
+        requireFunctionUrlsAvailable(region);
+        List<String> errors = new ArrayList<>();
+        Integer requested = LambdaPagination.parseMaxItems(maxItems, FUNCTION_URL_CONFIGS_PAGE_SIZE, errors);
+        if (!errors.isEmpty()) {
+            throw SmithyValidationErrors.validationException(errors);
+        }
+
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, null);
+        validateFunctionUrlQualifier(ref.qualifier());
+        if (AwsArnUtils.looksLikeArn(functionName)
+                && AwsArnUtils.isForeignPartition(AwsArnUtils.parse(functionName),
+                        regionResolver.partitionForRegion(region))) {
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
+        }
+        String accountId = regionResolver.getAccountId();
+        if (ref.account() != null && !accountId.equals(ref.account())) {
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
+        }
+        LambdaFunction function = functionStore.get(region, ref.name())
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Function not found: " + functionName, 404));
+        List<LambdaUrlConfig> urls = new ArrayList<>();
+        if (function.getUrlConfig() != null) {
+            urls.add(function.getUrlConfig());
+        }
+        if (aliasStore != null) {
+            for (LambdaAlias alias : aliasStore.list(region, function.getFunctionName())) {
+                if (alias.getUrlConfig() != null) {
+                    urls.add(alias.getUrlConfig());
+                }
+            }
+        }
+        String scope = accountId + "\n" + region + "\n" + function.getFunctionName() + "\n";
+        return LambdaPagination.paginate(urls, LambdaUrlConfig::getFunctionArn, requested,
+                FUNCTION_URL_CONFIGS_PAGE_SIZE, marker, functionUrlMarkers, scope);
     }
 
     public LambdaUrlConfig getFunctionUrlConfig(String region, String functionName, String qualifier) {
@@ -4143,14 +4345,17 @@ public class LambdaService implements ResourceProvider {
         validateTagKeys(tags);
         EventSourceMapping esm = taggedEventSourceMapping(functionArn);
         if (esm != null) {
-            esm.getTags().putAll(tags);
+            synchronized (esm) {
+                esm.setTags(withTags(esm.getTags(), tags));
+            }
             esmStore.save(esm);
             return;
         }
         TagTarget target = resolveTagTarget(functionArn);
         LambdaFunction fn = getFunction(target.region, target.name);
-        if (fn.getTags() == null) fn.setTags(new HashMap<>());
-        fn.getTags().putAll(tags);
+        synchronized (fn) {
+            fn.setTags(withTags(fn.getTags(), tags));
+        }
         functionStore.save(target.region, fn);
     }
 
@@ -4177,16 +4382,76 @@ public class LambdaService implements ResourceProvider {
     public void untagResource(String functionArn, List<String> tagKeys) {
         EventSourceMapping esm = taggedEventSourceMapping(functionArn);
         if (esm != null) {
-            tagKeys.forEach(esm.getTags()::remove);
+            synchronized (esm) {
+                esm.setTags(withoutTags(esm.getTags(), tagKeys));
+            }
             esmStore.save(esm);
             return;
         }
         TagTarget target = resolveTagTarget(functionArn);
         LambdaFunction fn = getFunction(target.region, target.name);
-        if (fn.getTags() != null) {
-            tagKeys.forEach(fn.getTags()::remove);
+        synchronized (fn) {
+            fn.setTags(withoutTags(fn.getTags(), tagKeys));
         }
         functionStore.save(target.region, fn);
+    }
+
+    /**
+     * A new tag map of {@code current} with {@code added} put in it. A resource's tags are replaced, never changed in
+     * place, so a reader copying them, as {@link #storedTags} does on every request IAM checks, sees one whole set.
+     */
+    private static Map<String, String> withTags(Map<String, String> current, Map<String, String> added) {
+        Map<String, String> next = current == null ? new HashMap<>() : new HashMap<>(current);
+        next.putAll(added);
+        return next;
+    }
+
+    /** A new tag map of {@code current} without {@code keys}, as {@link #withTags} gives one. */
+    private static Map<String, String> withoutTags(Map<String, String> current, List<String> keys) {
+        Map<String, String> next = current == null ? new HashMap<>() : new HashMap<>(current);
+        keys.forEach(next::remove);
+        return next;
+    }
+
+    /**
+     * The tags of the function, or the event source mapping, stored under {@code arn} in the account and Region it
+     * names, matched on the whole ARN and left as they are; a version or alias ARN has its function's, as Lambda keeps
+     * tags on the function alone. Empty for an ARN naming nothing stored, or any other Lambda resource.
+     */
+    public Map<String, String> storedTags(String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String uuid = LambdaArnUtils.eventSourceMappingUuid(parsed);
+        if (uuid != null) {
+            return esmStore == null ? Map.of() : esmStore.readForAccount(parsed.accountId(), uuid)
+                    .filter(esm -> arn.equals(LambdaArnUtils.eventSourceMappingArn(
+                            esm.getRegion(), esm.getAccountId(), esm.getUuid())))
+                    .map(esm -> Map.copyOf(esm.getTags()))
+                    .orElse(Map.of());
+        }
+        String[] function = parsed.resource().split(":", -1);
+        if (function.length < 2 || function.length > 3 || !"function".equals(function[0])
+                || parsed.resource().contains("/")) {
+            return Map.of();
+        }
+        String qualifier = function.length == 3 ? function[2] : null;
+        return functionStore.readForAccount(parsed.accountId(), parsed.region(), function[1], "$LATEST")
+                .filter(fn -> arn.equals(qualifier == null ? fn.getFunctionArn()
+                        : fn.getFunctionArn() + ":" + qualifier))
+                .filter(fn -> qualifier == null || holdsQualifier(parsed, function[1], qualifier))
+                .map(fn -> fn.getTags() == null ? Map.<String, String>of() : Map.copyOf(fn.getTags()))
+                .orElse(Map.of());
+    }
+
+    /** Whether the function holds the version or the alias {@code qualifier} names; {@code $LATEST} it always has. */
+    private boolean holdsQualifier(AwsArnUtils.Arn function, String name, String qualifier) {
+        if ("$LATEST".equals(qualifier)) {
+            return true;
+        }
+        if (functionStore.readForAccount(function.accountId(), function.region(), name, qualifier).isPresent()) {
+            return true;
+        }
+        return aliasStore != null
+                && aliasStore.readForAccount(function.accountId(), function.region(), name, qualifier).isPresent();
     }
 
     private record TagTarget(String region, String name) {}

@@ -34,7 +34,8 @@ import static org.mockito.Mockito.when;
  * authorizes on no resource type, the vendored route it matches is its own. This builds a request on each
  * operation's route, as botocore's model gives it ({@code rest-routes.json}, from
  * {@code tools/aws/regen_rest_routes.py}), and compares the action the registry resolves with the one
- * {@code iam-authorized-actions.json} names for the operation, or else the operation's own name.
+ * {@code iam-authorized-actions.json} names for the operation, or its route's method names for an operation it
+ * authorizes by method, or else the operation's own name.
  */
 class IamRestRouteCoverageTest {
 
@@ -43,16 +44,6 @@ class IamRestRouteCoverageTest {
 
     /** The REST namespaces whose entries in {@code iam-authorized-actions.json} only the route table can apply. */
     private static final Set<String> ROUTED_NAMESPACES = Set.of("s3", "apigateway", "lambda");
-
-    /**
-     * Operations Floci does not serve, whose request runs as another operation instead and so is checked
-     * as that one: S3 has no bucket metadata configuration, and {@code ?metadataConfiguration} on a
-     * bucket falls through to ListObjects and DeleteBucket. Checking it as the metadata table action
-     * would let that action list or delete the bucket.
-     */
-    private static final Map<String, String> RUN_AS_ANOTHER_OPERATION = Map.of(
-            "GetBucketMetadataConfiguration", "s3:ListBucket",
-            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket");
 
     /**
      * The S3 Control operations Floci serves, the rest-routes entry of which is a route the
@@ -110,7 +101,7 @@ class IamRestRouteCoverageTest {
             while (entries.hasNext()) {
                 Map.Entry<String, JsonNode> entry = entries.next();
                 List<Route> routes = routesOf(models, namespace, entry.getKey());
-                String expected = RUN_AS_ANOTHER_OPERATION.getOrDefault(entry.getKey(), entry.getValue().asText());
+                String expected = entry.getValue().asText();
                 tests.add(DynamicTest.dynamicTest(namespace + " " + entry.getKey(), () -> {
                     assertFalse(routes.isEmpty(), "no model route for " + entry.getKey());
                     for (Route route : routes) {
@@ -126,31 +117,45 @@ class IamRestRouteCoverageTest {
      * Every operation of a scope the vendored routes do not leave to the rules alone resolves to its action when
      * Floci can check it as AWS does: its resources built by hand for its namespace or read by the vendored request
      * resources, or none, AWS authorizing its action on no resource type. Any other operation stays unmapped,
-     * unchecked rather than checked on {@code *}, until the resources in its path are read.
+     * unchecked rather than checked on {@code *}, until the resources in its path are read. An operation the
+     * authorized actions list as authorized by method is the action its route's method names, and an alternative
+     * route a shared controller also serves it on is checked as the operation, by that route's own method.
      */
     @TestFactory
     Stream<DynamicTest> everyOperationOfARoutedScopeResolvesToItsActionWhenFlociCanCheckIt() throws IOException {
         JsonNode document = load("/aws/rest-routes.json");
         JsonNode models = document.path("models");
-        JsonNode authorized = load("/aws/iam-authorized-actions.json").path("authorizedActions");
+        JsonNode authorizedActions = load("/aws/iam-authorized-actions.json");
+        JsonNode authorized = authorizedActions.path("authorizedActions");
         JsonNode requestResources = load("/aws/iam-request-resources.json");
         Set<String> handBuilt = new HashSet<>();
         requestResources.path("handBuilt").forEach(namespace -> handBuilt.add(namespace.asText()));
+        Set<String> byMethod = new HashSet<>();
+        authorizedActions.path("authorizedByMethod").properties().forEach(scope ->
+                scope.getValue().forEach(operation -> byMethod.add(scope.getKey() + ":" + operation.asText())));
         List<DynamicTest> tests = new ArrayList<>();
         for (String model : routedModels(document)) {
             String scope = models.path(model).path("credentialScope").asText();
             Iterator<Map.Entry<String, JsonNode>> operations = models.path(model).path("operations").fields();
             while (operations.hasNext()) {
                 Map.Entry<String, JsonNode> operation = operations.next();
-                Route route = new Route(scope, model, operation.getKey(), operation.getValue().path("method").asText(),
-                        operation.getValue().path("requestUri").asText());
-                String action = RUN_AS_ANOTHER_OPERATION.getOrDefault(operation.getKey(),
-                        authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey()));
+                String method = operation.getValue().path("method").asText();
+                List<Route> routes = new ArrayList<>(List.of(new Route(scope, model, operation.getKey(), method,
+                        operation.getValue().path("requestUri").asText())));
+                operation.getValue().path("alternatives").forEach(alternative -> routes.add(new Route(scope, model,
+                        operation.getKey(), alternative.path("method").asText(method),
+                        alternative.path("requestUri").asText())));
                 boolean read = requestResources.path("operations").has(scope + ":" + operation.getKey());
-                String expected = handBuilt.contains(scope) || read || IamAuthorizedActions.actsOnNoResourceType(action)
-                        ? action : null;
-                tests.add(DynamicTest.dynamicTest(model + " " + operation.getKey(),
-                        () -> assertEquals(expected, resolve(route), route.toString())));
+                for (Route route : routes) {
+                    String action = byMethod.contains(scope + ":" + operation.getKey())
+                            ? scope + ":" + route.method()
+                            : authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey());
+                    String expected = handBuilt.contains(scope) || read
+                            || IamAuthorizedActions.actsOnNoResourceType(action)
+                            ? action : null;
+                    tests.add(DynamicTest.dynamicTest(route.toString(),
+                            () -> assertEquals(expected, resolve(route), route.toString())));
+                }
             }
         }
         return tests.stream();
@@ -177,8 +182,9 @@ class IamRestRouteCoverageTest {
                     ContainerRequestContext request = route.request();
                     String matched = IamRestRoutes.vendored().operation(scope, route.method(),
                             request.getUriInfo().getPath(), request.getUriInfo().getQueryParameters()).orElse(null);
-                    assertEquals(IamAuthorizedActions.actionFor(scope, operation.getKey()),
-                            matched == null ? null : IamAuthorizedActions.actionFor(scope, matched), route.toString());
+                    assertEquals(IamAuthorizedActions.actionFor(scope, operation.getKey(), route.method()),
+                            matched == null ? null : IamAuthorizedActions.actionFor(scope, matched, route.method()),
+                            route.toString());
                 }));
             }
         }

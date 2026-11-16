@@ -2,6 +2,8 @@ package io.floci.aws.core.common.docker;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -18,6 +20,7 @@ import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
@@ -37,8 +40,10 @@ import org.jboss.logging.Logger;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -50,7 +55,6 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -86,8 +90,6 @@ public class ContainerLifecycleManager {
 
     /** Host interface a port marked loopback-only publishes on. */
     private static final String LOOPBACK_HOST_IP = "127.0.0.1";
-
-    private final Semaphore teardownSlots = new Semaphore(8, true);
 
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
@@ -135,6 +137,15 @@ public class ContainerLifecycleManager {
      */
     public ContainerInfo createAndStart(ContainerSpec spec) {
         return createAndStart(spec, false);
+    }
+
+    /**
+     * Creates and starts a container for a specific Docker platform.
+     *
+     * @param platform Docker platform, such as {@code linux/arm64}, or null for the daemon's own
+     */
+    public ContainerInfo createAndStart(ContainerSpec spec, String platform) {
+        return createAndStart(spec, platform, false);
     }
 
     /** Starts a disposable container, reclaiming its anonymous volumes if startup fails. */
@@ -237,6 +248,15 @@ public class ContainerLifecycleManager {
                         "Failed to attach pre-start network configuration for container " + containerId, e);
             }
         }
+        for (String network : spec.joinedNetworks()) {
+            try {
+                dockerClient.connectToNetworkCmd().withContainerId(containerId).withNetworkId(network).exec();
+            } catch (RuntimeException e) {
+                removeFailedContainer(containerId, e, removeAnonymousVolumes);
+                throw new IllegalStateException("Could not connect container " + containerId + " to Docker network "
+                        + network + ": " + e.getMessage(), e);
+            }
+        }
         return containerId;
     }
 
@@ -290,6 +310,9 @@ public class ContainerLifecycleManager {
         if (spec.user() != null && !spec.user().isBlank()) {
             createCmd.withUser(spec.user());
         }
+        if (spec.dnsName() != null) {
+            createCmd.withHostName(spec.dnsName()).withAliases(spec.dnsName());
+        }
         if (env != null && !env.isEmpty()) {
             createCmd.withEnv(env);
         }
@@ -317,7 +340,15 @@ public class ContainerLifecycleManager {
         labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
         createCmd.withLabels(labels);
 
-        String containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+        String containerId;
+        try {
+            containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+        } catch (DockerException e) {
+            if (ContainerRejectedException.isRejection(e)) {
+                throw new ContainerRejectedException(e);
+            }
+            throw e;
+        }
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
     }
@@ -584,11 +615,7 @@ public class ContainerLifecycleManager {
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
      */
     public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        withTeardownSlot(() -> stopAndRemoveAdmitted(containerId, logStream, stopTimeoutSeconds));
-    }
-
-    private void stopAndRemoveAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        boolean stoppedOrMissing = stopAdmitted(containerId, stopTimeoutSeconds);
+        boolean stoppedOrMissing = stop(containerId, stopTimeoutSeconds);
 
         // Force removal is the recovery path when Docker could not stop the container cleanly. It also
         // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
@@ -615,12 +642,9 @@ public class ContainerLifecycleManager {
      *
      * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
+     * @return whether the container is stopped or already missing
      */
-    public void stop(String containerId, int stopTimeoutSeconds) {
-        withTeardownSlot(() -> stopAdmitted(containerId, stopTimeoutSeconds));
-    }
-
-    private boolean stopAdmitted(String containerId, int stopTimeoutSeconds) {
+    public boolean stop(String containerId, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
@@ -671,12 +695,6 @@ public class ContainerLifecycleManager {
     /** Strict teardown that can also reclaim the container's anonymous volumes. */
     public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
                                      boolean removeAnonymousVolumes) {
-        withTeardownSlot(() -> stopAndRemoveStrictAdmitted(
-                containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes));
-    }
-
-    private void stopAndRemoveStrictAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds,
-                                             boolean removeAnonymousVolumes) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
@@ -738,15 +756,6 @@ public class ContainerLifecycleManager {
             LOG.debugv("Could not await container {0} removal: {1}", containerId, e.getMessage());
         }
         return presenceOf(containerId) == ContainerPresence.ABSENT;
-    }
-
-    private void withTeardownSlot(Runnable stopAndRemove) {
-        teardownSlots.acquireUninterruptibly();
-        try {
-            stopAndRemove.run();
-        } finally {
-            teardownSlots.release();
-        }
     }
 
     private void closeLogStreamIfPresent(Closeable logStream) {
@@ -1028,10 +1037,12 @@ public class ContainerLifecycleManager {
 
     /** Connects the created container {@code containerId} to {@code networkName} too, before it starts. */
     public void connectToNetwork(String containerId, String networkName) {
-        dockerClient.connectToNetworkCmd()
-                .withContainerId(containerId)
-                .withNetworkId(networkName)
-                .exec();
+        connectToNetwork(containerId, networkName, null);
+    }
+
+    /** Connects {@code containerId} to {@code networkName}, with {@code linkLocalIp} there too unless it is null. */
+    public void connectToNetwork(String containerId, String networkName, String linkLocalIp) {
+        connect(containerId, networkName, null, linkLocalIp);
     }
 
     /**
@@ -1039,15 +1050,54 @@ public class ContainerLifecycleManager {
      * as {@code alias}, unless it is on it already.
      */
     public void ensureConnected(String containerId, String networkName, String alias) {
+        ensureConnected(containerId, networkName, alias, null);
+    }
+
+    /** As {@link #ensureConnected(String, String, String)}, with {@code linkLocalIp} there too unless it is null. */
+    public void ensureConnected(String containerId, String networkName, String alias, String linkLocalIp) {
         if (networksOf(containerId).containsKey(networkName)) {
             return;
         }
-        dockerClient.connectToNetworkCmd()
-                .withContainerId(containerId)
-                .withNetworkId(networkName)
-                .withContainerNetwork(new ContainerNetwork().withAliases(alias))
-                .exec();
+        connect(containerId, networkName, new ContainerNetwork().withAliases(alias), linkLocalIp);
         LOG.debugv("Connected {0} to network {1} as {2}", containerId, networkName, alias);
+    }
+
+    // Connects containerId to networkName, at endpoint unless it is null, with linkLocalIp there too unless it is null.
+    private void connect(String containerId, String networkName, ContainerNetwork endpoint, String linkLocalIp) {
+        ContainerNetwork at = linkLocalIp == null ? endpoint
+                : (endpoint != null ? endpoint : new ContainerNetwork())
+                        .withIpamConfig(new LinkLocalIpam(List.of(linkLocalIp)));
+        ConnectToNetworkCmd connect = dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(networkName);
+        if (at != null) {
+            connect.withContainerNetwork(at);
+        }
+        connect.exec();
+    }
+
+    /**
+     * The last {@code lines} lines the container {@code containerId} wrote, standard output and error together, or as
+     * much of them as Docker gave within {@code timeout}; empty when it gave none. For the message of a container that
+     * failed, which a failure to read them should not replace, so that is only logged.
+     */
+    public String lastLogLines(String containerId, int lines, Duration timeout) {
+        StringBuffer output = new StringBuffer();
+        ResultCallback.Adapter<Frame> reader = new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+            }
+        };
+        try (reader) {
+            dockerClient.logContainerCmd(containerId).withStdOut(true).withStdErr(true).withTail(lines).exec(reader)
+                    .awaitCompletion(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException | RuntimeException e) {
+            LOG.debugv(e, "Could not read the log of container {0}: {1}", containerId, e.getMessage());
+        }
+        return output.toString().strip();
     }
 
     /**
@@ -1433,8 +1483,9 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Returns the underlying DockerClient for operations not covered by this manager.
-     * Prefer using manager methods when available.
+     * Returns the underlying control-plane DockerClient for operations not covered by this
+     * manager. Prefer using manager methods when available. A stream that stays open for a
+     * container's lifetime belongs on the {@link StreamingDocker} client instead.
      */
     public DockerClient getDockerClient() {
         return dockerClient;

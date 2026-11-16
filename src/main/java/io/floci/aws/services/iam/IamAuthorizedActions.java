@@ -38,7 +38,10 @@ import java.util.Set;
  *
  * <p>The file also lists, for each credential scope whose REST routes {@code aws/rest-routes.json} reads, the
  * actions the Service Reference gives no resource type ({@link #actsOnNoResourceType}): AWS authorizes them on
- * {@code *}, which is what Floci checks a REST request on until it reads the resources in its path.
+ * {@code *}, which is what Floci checks a REST request on until it reads the resources in its path. And it lists
+ * the operations of those scopes a request on whose route is checked as the action its HTTP method names
+ * ({@link #actionFor(String, String, String)}): API Gateway's management API is authorized as
+ * {@code apigateway:GET}, {@code apigateway:POST} and so on, and {@code TagResource} is a PUT in v1 and a POST in v2.
  *
  * <p>A missing or malformed resource is a build defect, not a runtime condition, so loading fails
  * with {@link IllegalStateException} rather than degrading to an empty map, which would silently put
@@ -63,10 +66,11 @@ public final class IamAuthorizedActions {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
-     * The file: the action of each operation it names, keyed by {@code <namespace>:<Operation>}, and the actions of
-     * no resource type, as {@code <namespace>:<Action>} in lower case.
+     * The file: the action of each operation it names, keyed by {@code <namespace>:<Operation>}, the actions of
+     * no resource type, as {@code <namespace>:<Action>} in lower case, and the operations authorized by method, as
+     * {@code <namespace>:<Operation>}.
      */
-    record Table(Map<String, String> actions, Set<String> withoutResourceTypes) {
+    record Table(Map<String, String> actions, Set<String> withoutResourceTypes, Set<String> byMethod) {
     }
 
     private static final class Holder {
@@ -87,6 +91,17 @@ public final class IamAuthorizedActions {
             return own;
         }
         return Holder.TABLE.actions().getOrDefault(own, own);
+    }
+
+    /**
+     * The action AWS checks for a request of {@code method} on a route of {@code operation} under {@code namespace}:
+     * the one that method names, {@code <namespace>:<METHOD>}, for an operation the file lists as authorized by
+     * method, or else {@link #actionFor(String, String)}'s.
+     */
+    public static String actionFor(String namespace, String operation, String method) {
+        return Holder.TABLE.byMethod().contains(namespace + ":" + operation)
+                ? namespace + ":" + method.toUpperCase(Locale.ROOT)
+                : actionFor(namespace, operation);
     }
 
     /**
@@ -122,7 +137,30 @@ public final class IamAuthorizedActions {
                 actions.put(namespace.getKey() + ":" + operation.getKey(), action);
             });
         });
-        return new Table(Map.copyOf(actions), withoutResourceTypes(document.path("actionsWithoutResourceTypes")));
+        return new Table(Map.copyOf(actions), withoutResourceTypes(document.path("actionsWithoutResourceTypes")),
+                byMethod(document.path("authorizedByMethod")));
+    }
+
+    /** The operations authorized by method, each scope's a list of operation names. */
+    private static Set<String> byMethod(JsonNode scopes) {
+        if (!scopes.isObject()) {
+            throw new IllegalStateException(RESOURCE_NAME + " carries no authorizedByMethod");
+        }
+        Set<String> operations = new HashSet<>();
+        scopes.properties().forEach(scope -> {
+            if (!scope.getValue().isArray()) {
+                throw new IllegalStateException(RESOURCE_NAME + " has authorizedByMethod."
+                        + scope.getKey() + " as something other than a list");
+            }
+            scope.getValue().forEach(operation -> {
+                if (!operation.isTextual() || operation.textValue().isBlank()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " lists " + operation + " among "
+                            + scope.getKey() + "'s operations authorized by method");
+                }
+                operations.add(scope.getKey() + ":" + operation.textValue());
+            });
+        });
+        return Set.copyOf(operations);
     }
 
     /** The actions of no resource type, each scope's a list of action names. */

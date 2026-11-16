@@ -160,6 +160,8 @@ class EcsImagePullDockerIntegrationTest {
         app.setName("app");
         app.setImage(image);
         app.setCommand(List.of("sleep", "120"));
+        // Forward SIGTERM to the sleeping fixture so task cleanup can finish promptly.
+        app.setUnparsed(Map.of("linuxParameters", Map.of("initProcessEnabled", true)));
         return ecsService.registerTaskDefinition("pull-" + UUID.randomUUID().toString().substring(0, 8),
                 List.of(app), NetworkMode.bridge, null, null, null, null, null, REGION);
     }

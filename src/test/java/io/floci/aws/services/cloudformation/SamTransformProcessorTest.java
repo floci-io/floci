@@ -3,18 +3,16 @@ package io.floci.aws.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.text.MessageFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1115,6 +1113,57 @@ class SamTransformProcessorTest {
                 lambdaProps.path("FileSystemConfigs").get(0).path("Arn").asText());
         assertEquals("/mnt/shared",
                 lambdaProps.path("FileSystemConfigs").get(0).path("LocalMountPath").asText());
+    }
+
+    @Test
+    void expandSamTemplate_durableFunctionKeepsDurableAndLoggingConfig() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "LoggingConfig": {"LogFormat": "JSON", "ApplicationLogLevel": "DEBUG"}
+                }
+              },
+              "Resources": {
+                "DurableFn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "python3.13",
+                    "InlineCode": "def handler(e, c): return e",
+                    "DurableConfig": {"ExecutionTimeout": 60, "RetentionPeriodInDays": 3}
+                  }
+                },
+                "PlainFn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "python3.13",
+                    "InlineCode": "def handler(e, c): return e"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        JsonNode durableProps = resources.path("DurableFn").path("Properties");
+        assertEquals(objectMapper.readTree("{\"ExecutionTimeout\": 60, \"RetentionPeriodInDays\": 3}"),
+                durableProps.path("DurableConfig"));
+        assertEquals(objectMapper.readTree("{\"LogFormat\": \"JSON\", \"ApplicationLogLevel\": \"DEBUG\"}"),
+                durableProps.path("LoggingConfig"));
+        assertEquals(objectMapper.readTree("""
+                [{"Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicDurableExecutionRolePolicy"}]
+                """), resources.path("DurableFnRole").path("Properties").path("ManagedPolicyArns"));
+
+        JsonNode plainProps = resources.path("PlainFn").path("Properties");
+        assertTrue(plainProps.path("DurableConfig").isMissingNode());
+        assertEquals("JSON", plainProps.path("LoggingConfig").path("LogFormat").asText());
+        assertEquals(objectMapper.readTree("""
+                [{"Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"}]
+                """), resources.path("PlainFnRole").path("Properties").path("ManagedPolicyArns"));
     }
 
     @Test
@@ -3196,50 +3245,15 @@ class SamTransformProcessorTest {
             }
             """);
 
-        List<LogRecord> logged = new CopyOnWriteArrayList<>();
-        Logger logger =
-                Logger.getLogger(SamTransformProcessor.class.getName());
-        Level original = logger.getLevel();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                logged.add(logRecord);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        logger.setLevel(Level.ALL);
-        try {
-            processor.expandSamTemplate(template);
-        } finally {
-            logger.setLevel(original);
-            logger.removeHandler(handler);
-        }
+        List<LogRecord> logged = LogCapture.capture(SamTransformProcessor.class,
+                () -> processor.expandSamTemplate(template));
 
         String expected = "Unsupported SAM resource type AWS::Serverless::Application (MyApp): "
                 + "left in the template for the CloudFormation provisioner.";
         assertTrue(logged.stream().anyMatch(r ->
                         r.getLevel().intValue() >= Level.WARNING.intValue()
-                                && expected.equals(text(r))),
+                                && expected.equals(LogCapture.formatted(r))),
                 "expected the unexpanded SAM type to be reported at warn, got: "
-                        + logged.stream().map(r -> r.getLevel() + " " + text(r)).toList());
-    }
-
-    /**
-     * The record's text. Which logging backend is in play decides whether the parameters are
-     * already substituted or still carried alongside the pattern.
-     */
-    private static String text(LogRecord record) {
-        Object[] parameters = record.getParameters();
-        return parameters == null || parameters.length == 0
-                ? record.getMessage()
-                : MessageFormat.format(record.getMessage(), parameters);
+                        + logged.stream().map(r -> r.getLevel() + " " + LogCapture.formatted(r)).toList());
     }
 }

@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.floci.aws.core.common.QueryFormDecoder;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import org.jboss.logging.Logger;
@@ -10,7 +11,6 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
@@ -69,10 +69,10 @@ public final class RequestBodyReader {
         for (String pair : form.split("&")) {
             int eq = pair.indexOf('=');
             String pairKey = eq < 0 ? pair : pair.substring(0, eq);
-            if (!key.equals(URLDecoder.decode(pairKey, charset))) {
+            if (!key.equals(QueryFormDecoder.decode(pairKey, charset, ctx))) {
                 continue;
             }
-            return eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), charset);
+            return eq < 0 ? "" : QueryFormDecoder.decode(pair.substring(eq + 1), charset, ctx);
         }
         return null;
     }

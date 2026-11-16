@@ -23,8 +23,15 @@ import java.util.function.Predicate;
  * straight to it that is not signed for the service is refused the way S3 refuses that bucket
  * name, since an S3 bucket name may not begin with an underscore, rather than reaching the
  * service.
+ *
+ * <p>A request routed under the prefix, rewritten onto it or sent to it, records the prefix
+ * ({@link #internalPrefix}), so IAM matches it on the path the service's model gives the
+ * operation: the path it was routed under, without the prefix.
  */
 public final class SignedServiceRoute {
+
+    /** The request property that holds the internal prefix a request was routed under. */
+    public static final String INTERNAL_PREFIX_PROPERTY = SignedServiceRoute.class.getName() + ".internalPrefix";
 
     private final ResolvedServiceCatalog catalog;
     private final Set<String> externalKeys;
@@ -77,7 +84,16 @@ public final class SignedServiceRoute {
     public static Optional<String> signingService(ContainerRequestContext ctx) {
         return SigV4CredentialScope.serviceName(ctx.getHeaderString("Authorization"))
                 .or(() -> SigV4CredentialScope.serviceNameFromCredential(
-                        ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential")));
+                        ResteasyRequests.queryParameters(ctx).getFirst("X-Amz-Credential")));
+    }
+
+    /**
+     * The internal prefix a request was routed under, as {@link #apply} recorded it: empty for a
+     * request no route moved onto one or sent to one.
+     */
+    public static Optional<String> internalPrefix(ContainerRequestContext ctx) {
+        return ctx.getProperty(INTERNAL_PREFIX_PROPERTY) instanceof String prefix ? Optional.of(prefix)
+                : Optional.empty();
     }
 
     public void apply(ContainerRequestContext ctx) {
@@ -87,7 +103,9 @@ public final class SignedServiceRoute {
         if (internalPaths.test(normalizedPath)) {
             if (!signedForService(ctx)) {
                 ctx.abortWith(invalidBucketName());
+                return;
             }
+            ctx.setProperty(INTERNAL_PREFIX_PROPERTY, internalPrefix);
             return;
         }
         if (!publicPaths.test(normalizedPath) || !signedForService(ctx)) {
@@ -96,6 +114,7 @@ public final class SignedServiceRoute {
         ctx.setRequestUri(ctx.getUriInfo().getRequestUriBuilder()
                 .replacePath(internalPrefix + normalizedPath)
                 .build());
+        ctx.setProperty(INTERNAL_PREFIX_PROPERTY, internalPrefix);
     }
 
     private boolean signedForService(ContainerRequestContext ctx) {

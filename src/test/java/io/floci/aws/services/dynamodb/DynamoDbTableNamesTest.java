@@ -6,6 +6,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -152,6 +155,68 @@ class DynamoDbTableNamesTest {
                 () -> DynamoDbTableNames.requireShortName(input)).getMessage());
         assertEquals(expected, assertThrows(AwsException.class,
                 () -> DynamoDbTableNames.resolve(input)).getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            😀😀 | pattern        | short
+            😀a  | pattern        | short
+            a!   | short, pattern | short
+            éé   | short, pattern | short
+            ab   | short          | short
+            """)
+    void tableCallsCountUtf16UnitsAndListEveryProblem(String name, String tableCall, String itemCall) {
+        assertEquals(nameErrors(name, tableCall), assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolve(name)).getMessage());
+        assertEquals(nameErrors(name, tableCall), assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.requireShortName(name)).getMessage());
+        assertEquals(nameErrors(name, itemCall), assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolveForItemCall(name)).getMessage());
+    }
+
+    @Test
+    void anEmojiCountsTwiceTowardTheLongestTableName() {
+        String name = "😀".repeat(128);
+        assertEquals(nameErrors(name, "long, pattern"), assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolve(name)).getMessage());
+        assertEquals(nameErrors(name, "pattern"), assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolveForItemCall(name)).getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            a!   | have length greater than or equal to 3
+            😀😀 | satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            """)
+    void everyCallReportsTheFirstProblemOfTheNameInAnArn(String name, String rule) {
+        String arn = "arn:aws:dynamodb:eu-west-2:123456789012:table/" + name;
+        String expected = "1 validation error detected: Value '" + arn
+                + "' at 'tableName' failed to satisfy constraint: Table name of ARN must " + rule;
+        assertEquals(expected, assertThrows(AwsException.class, () -> DynamoDbTableNames.resolve(arn)).getMessage());
+        assertEquals(expected, assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolveForItemCall(arn)).getMessage());
+    }
+
+    @Test
+    void anEmojiCountsTwiceInTheNameOfAnArn() {
+        String arn = "arn:aws:dynamodb:eu-west-2:123456789012:table/" + "😀".repeat(128);
+        assertEquals("1 validation error detected: Value '" + arn + "' at 'tableName' failed to satisfy constraint: "
+                + "Table name of ARN must have length less than or equal to 255", assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolveForItemCall(arn)).getMessage());
+    }
+
+    static String nameErrors(String name, String problems) {
+        List<String> errors = new ArrayList<>();
+        for (String problem : problems.split(", ")) {
+            String rule = switch (problem) {
+                case "short" -> "Member must have length greater than or equal to 3";
+                case "long" -> "Member must have length less than or equal to 255";
+                default -> "Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+";
+            };
+            errors.add("Value '" + name + "' at 'tableName' failed to satisfy constraint: " + rule);
+        }
+        return errors.size() + (errors.size() == 1 ? " validation error detected: " : " validation errors detected: ")
+                + String.join("; ", errors);
     }
 
     private static String emptyToNull(String s) {

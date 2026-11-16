@@ -14,6 +14,9 @@ import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.OidcIssuerKeyLookup;
 import io.floci.aws.core.common.QueryConstraintCheck;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestMfaClaim;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.common.WebIdentityToken;
 import io.floci.aws.core.common.WebIdentityTokenVerifier;
@@ -34,6 +37,7 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -77,6 +81,7 @@ public class StsQueryHandler {
     private final DelegationRequestService delegationRequestService;
     private final CentralRootAccess centralRootAccess;
     private final WebIdentityTokenIssuer tokenIssuer;
+    private final RequestContext requestContext;
     private final Clock clock;
 
     /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
@@ -98,10 +103,11 @@ public class StsQueryHandler {
                            SAMLTrustPolicyEvaluator samlTrustEvaluator,
                            DelegationRequestService delegationRequestService,
                            CentralRootAccess centralRootAccess,
-                           WebIdentityTokenIssuer tokenIssuer) {
+                           WebIdentityTokenIssuer tokenIssuer,
+                           RequestContext requestContext) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
                 tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
-                centralRootAccess, tokenIssuer, Clock.systemUTC());
+                centralRootAccess, tokenIssuer, requestContext, Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -114,6 +120,7 @@ public class StsQueryHandler {
                     DelegationRequestService delegationRequestService,
                     CentralRootAccess centralRootAccess,
                     WebIdentityTokenIssuer tokenIssuer,
+                    RequestContext requestContext,
                     Clock clock) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
@@ -128,6 +135,7 @@ public class StsQueryHandler {
         this.delegationRequestService = delegationRequestService;
         this.centralRootAccess = centralRootAccess;
         this.tokenIssuer = tokenIssuer;
+        this.requestContext = requestContext;
         this.clock = clock;
     }
 
@@ -160,6 +168,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        MfaOutcome mfa = authenticateMfa(params);
+        if (mfa.denial() != null) {
+            return mfa.denial();
+        }
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
         int durationSeconds = getIntParam(params, "DurationSeconds", 3600);
@@ -176,7 +188,7 @@ public class StsQueryHandler {
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
         IamRole role = iamService.findRole(accountId, roleName).orElse(null);
-        Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params);
+        Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params, mfa);
         if (trustDenied != null) {
             return trustDenied;
         }
@@ -194,8 +206,7 @@ public class StsQueryHandler {
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
-        String roleId = (role != null && role.getRoleId() != null) ? role.getRoleId() : ("AROA" + randomId(16));
-        String assumedRoleId = roleId + ":" + sessionName;
+        String assumedRoleId = assumedRoleId(role, sessionName);
 
         // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
         // IAM token validation can find the temporary secret key, and account routing can map
@@ -219,6 +230,62 @@ public class StsQueryHandler {
     }
 
     /**
+     * What a call's MFA parameters authenticated: the instant the device was used, or the denial
+     * that answers a device the caller cannot present. Both {@code GetSessionToken} and
+     * {@code AssumeRole} take the same pair, {@code SerialNumber} naming "the identification
+     * number of the MFA device that is associated with the IAM user who is making the
+     * GetSessionToken call" and {@code TokenCode} carrying "the value provided by the MFA device".
+     *
+     * <p>A call that names neither claims nothing, and takes whatever its own credentials already
+     * carry, which is how a session minted behind a device assumes a role that tests for MFA
+     * without presenting the device again: "because temporary credentials returned by
+     * GetSessionToken include MFA information, you can check for MFA in individual API operations
+     * made by the credentials". A call that names either member is a claim of MFA and has to make
+     * it good; what answers a claim that fails is the access denied AWS documents for the case,
+     * "an incorrect MFA code causes the API to return an access denied error", carrying the
+     * sentence the IAM actions already write for a code that does not match.
+     *
+     * <p>The claim is read through the request's own holder rather than taken here, because the
+     * policy for this call was evaluated before the operation ran and had to see the same device,
+     * and because a code is spent when it authenticates: one request is one claim.
+     */
+    private MfaOutcome authenticateMfa(MultivaluedMap<String, String> params) {
+        String serialNumber = getParam(params, "SerialNumber");
+        String tokenCode = getParam(params, "TokenCode");
+        if (serialNumber == null && tokenCode == null) {
+            return new MfaOutcome(iamService.callerMfaAuthenticatedAt(callerAccessKeyId()).orElse(null), null);
+        }
+        RequestMfaClaim claim =
+                iamService.requestMfaClaim(requestContext, callerAccessKeyId(), serialNumber, tokenCode);
+        if (claim.failed()) {
+            return new MfaOutcome(null, AwsQueryResponse.error("AccessDenied",
+                    "Invalid MFA one time pass code.", AwsNamespaces.STS, 403));
+        }
+        return new MfaOutcome(claim.authenticatedAt(), null);
+    }
+
+    /** The MFA a call authenticated, or the refusal it earned. */
+    private record MfaOutcome(Instant authenticatedAt, Response denial) {
+    }
+
+    /**
+     * Hands a {@code GetSessionToken} session the device behind it, so its own requests publish the
+     * two keys: "because temporary credentials returned by GetSessionToken include MFA
+     * information, you can check for MFA in individual API operations made by the credentials".
+     *
+     * <p>An assumed-role session is not given one, and this is not called there. AWS draws the line
+     * itself: "the temporary credentials returned by AssumeRole do not include MFA information in
+     * the context, so you cannot check individual API operations for MFA", and "once the user has
+     * assumed the role, no further MFA checks are made". The device decides the assume and stops
+     * there.
+     */
+    private void recordIssuedSessionMfa(String sessionAccessKeyId, MfaOutcome mfa) {
+        if (mfa.authenticatedAt() != null) {
+            iamService.recordSessionMfa(sessionAccessKeyId, mfa.authenticatedAt());
+        }
+    }
+
+    /**
      * When IAM enforcement is enabled, denies AssumeRole if the target role's trust policy does not
      * permit the caller. Returns {@code null} to allow when enforcement is disabled or the caller is
      * permitted. Roles absent from Floci are always denied.
@@ -235,11 +302,21 @@ public class StsQueryHandler {
      * principal does wherever else Floci builds it.
      */
     private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
-                                        MultivaluedMap<String, String> params) {
+                                        MultivaluedMap<String, String> params, MfaOutcome mfa) {
         String callerAccount = regionResolver.getAccountId();
         IamService.CallerArns caller = iamService.resolveCallerArns(callerAccessKeyId())
                 .orElseGet(() -> IamService.CallerArns.accountRoot(
                         regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount));
+        if (mfa.authenticatedAt() != null) {
+            // A device this call presented is this request's own authentication, which is how a
+            // long-term key reaches a role whose trust policy "includes a condition that tests for
+            // MFA authentication". It rides on the caller rather than onto the context, because the
+            // caller is what writes those keys wherever a policy is evaluated: written onto the
+            // context, a session that presented a fresh device would still be described by what it
+            // was minted with.
+            caller = caller.withSessionMfa(new IamService.CallerArns.SessionMfa(true,
+                    Math.max(0, Duration.between(mfa.authenticatedAt(), clock.instant()).toSeconds())));
+        }
         String callerArn = caller.callerArn();
 
         if (role == null || !IamService.roleArnMatches(roleArn, role)) {
@@ -251,15 +328,15 @@ public class StsQueryHandler {
             return null;
         }
 
-        Map<String, List<String>> requestContext = IamConditionContextResolver.withGlobalContext(
+        Map<String, List<String>> trustContext = IamConditionContextResolver.withGlobalContext(
                 null, roleArn, regionResolver.getRegion(), callerAccount, roleAccountId);
-        requestContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));
+        trustContext.put("sts:RoleSessionName", List.of(getParam(params, "RoleSessionName")));
         String externalId = getParam(params, "ExternalId");
         if (externalId != null) {
-            requestContext.put("sts:ExternalId", List.of(externalId));
+            trustContext.put("sts:ExternalId", List.of(externalId));
         }
         if (trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
-                requestContext)) {
+                trustContext)) {
             return null;
         }
         return AwsQueryResponse.error("AccessDenied",
@@ -281,7 +358,7 @@ public class StsQueryHandler {
             token = getParam(params, "X-Amz-Security-Token");
         }
         if (token == null && uriInfo != null) {
-            token = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
+            token = ResteasyRequests.queryParameters(uriInfo).getFirst("X-Amz-Security-Token");
         }
         return token;
     }
@@ -347,6 +424,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
+        MfaOutcome mfa = authenticateMfa(params);
+        if (mfa.denial() != null) {
+            return mfa.denial();
+        }
         int durationSeconds = longTermTokenDuration(params);
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
@@ -357,6 +438,7 @@ public class StsQueryHandler {
         // No role ARN: the credentials route back to the caller's account and act as the caller.
         iamService.registerIssuedSession(accessKeyId, secretKey, sessionToken, null, expiration, null,
                 regionResolver.getAccountId(), callerAccessKeyId());
+        recordIssuedSessionMfa(accessKeyId, mfa);
         return Response.ok(AwsQueryResponse.envelope("GetSessionToken", AwsNamespaces.STS, result)).build();
     }
 
@@ -408,7 +490,7 @@ public class StsQueryHandler {
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
-        String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
+        String assumedRoleId = assumedRoleId(role, sessionName);
 
         String provider = verified != null ? verified.issuer()
                 : (providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com");
@@ -529,6 +611,11 @@ public class StsQueryHandler {
                 new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE), role.get());
     }
 
+    private static String assumedRoleId(IamRole role, String sessionName) {
+        String roleId = (role != null && role.getRoleId() != null) ? role.getRoleId() : ("AROA" + randomId(16));
+        return roleId + ":" + sessionName;
+    }
+
     /**
      * A session on a role lives in the role's partition, whatever region AssumeRole is signed
      * for. Callers pass the stored role's ARN when the role exists, not the RoleArn the request
@@ -612,7 +699,7 @@ public class StsQueryHandler {
         String sessionToken = sessionToken(params);
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
-        String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
+        String assumedRoleId = assumedRoleId(role, sessionName);
 
         iamService.registerSession(accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, null,
                 callerAccountId, sessionName, assumedRoleId);
@@ -629,7 +716,7 @@ public class StsQueryHandler {
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String auth = IamEnforcementFilter.requestAuthorization(
                 authorization == null || authorization.isBlank() ? null : authorization,
-                uriInfo == null ? null : uriInfo.getQueryParameters());
+                uriInfo == null ? null : ResteasyRequests.queryParameters(uriInfo));
         return auth == null ? null : accountResolver.extractAccessKeyId(auth);
     }
 
@@ -721,7 +808,7 @@ public class StsQueryHandler {
         // redeemed the token.
         iamService.registerDelegatedSession(accessKeyId, secretKey, sessionToken, request.getApproverId(),
                 redeemed.credentialExpiry(), request.getPermissionPolicy(),
-                request.getOwnerAccountId());
+                request.getOwnerAccountId(), request.getRolePermissionRestrictionArns());
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, redeemed.credentialExpiry()))

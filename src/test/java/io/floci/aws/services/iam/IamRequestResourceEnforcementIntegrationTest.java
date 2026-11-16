@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessRuntime;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
@@ -19,6 +20,11 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
+import software.amazon.awssdk.services.applicationautoscaling.model.ApplicationAutoScalingException;
+import software.amazon.awssdk.services.applicationautoscaling.model.PutScheduledActionRequest;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScalableTargetAction;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -36,6 +42,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -225,19 +232,22 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * {@code StartExecution} runs the machine before a Step Functions Local test case's {@code #}, so a grant on
-     * that machine allows a start that names a test case, and a deny on it holds.
+     * A Step Functions Local {@code <stateMachineArn>#<test case>} is checked as given: it is no ARN AWS has, and
+     * nothing botocore or the Service Reference says reads it otherwise. So a grant on the machine alone does not
+     * reach a start naming a test case, a grant covering it does, and a deny on the machine alone does not apply.
      */
     @Test
-    void aStateMachinesTestCaseIsCheckedOnTheMachineItRuns() {
+    void aStateMachinesTestCaseIsCheckedAsGiven() {
         String arn = createStateMachine("res-tc-" + suffix());
         User user = user("res-tc");
         user.policy(allowOn("states:StartExecution", arn));
+        refusedJson(startExecution(user, arn + "#"), "states:StartExecution");
+        user.policy(allowOn("states:StartExecution", arn + "*"));
         startExecution(user, arn + "#").statusCode(200);
 
         user.policy(allowOn("states:StartExecution", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"states:StartExecution\","
                 + "\"Resource\":\"" + arn + "\"}");
-        refusedJson(startExecution(user, arn + "#"), "states:StartExecution");
+        startExecution(user, arn + "#").statusCode(200);
     }
 
     /**
@@ -860,11 +870,12 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * A build is checked on its project, which its id names before its {@code :}, as CodeBuild authorizes builds,
-     * and a project on the ARN its name gives, a list naming it by name and by ARN alike.
+     * A build is checked on the project CodeBuild holds it under, and one it holds none of on {@code *}: nothing
+     * botocore or the Service Reference says gives a build id's project. A project is checked on the ARN its name
+     * gives, a list naming it by name and by ARN alike.
      */
     @Test
-    void aBuildIsCheckedOnTheProjectItsIdNames() {
+    void aBuildIsCheckedOnTheProjectItIsHeldUnder() {
         String project = "res-project-" + suffix();
         String arn = adminJson("codebuild", "CodeBuild_20161006.CreateProject").body("{\"name\":\"" + project
                 + "\",\"source\":{\"type\":\"NO_SOURCE\",\"buildspec\":\"version: 0.2\"},\"artifacts\":{\"type\":"
@@ -880,12 +891,59 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + allowOn("codebuild:StopBuild", arn));
         codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + project + "\"]}").statusCode(200);
         codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + project + "\",\"" + arn + "\"]}").statusCode(200);
-        codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\"]}").statusCode(200);
-        refusedJson(codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\",\"" + project + "-other:1\"]}"),
-                "codebuild:BatchGetBuilds");
-        codeBuild(user, "StopBuild", "{\"id\":\"" + project + ":1\"}").statusCode(400)
+        // CodeBuild holds no build of these ids, so none names a project and each request is checked on *.
+        refusedJson(codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\"]}"), "codebuild:BatchGetBuilds");
+        refusedJson(codeBuild(user, "StopBuild", "{\"id\":\"" + project + ":1\"}"), "codebuild:StopBuild");
+        User any = user("res-build-any");
+        any.policy(allowOn("codebuild:BatchGetBuilds", "*") + "," + allowOn("codebuild:StopBuild", "*"));
+        codeBuild(any, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\"]}").statusCode(200);
+        codeBuild(any, "StopBuild", "{\"id\":\"" + project + ":1\"}").statusCode(400)
                 .body(containsString("ResourceNotFoundException"));
-        refusedJson(codeBuild(user, "StopBuild", "{\"id\":\"" + project + "-other:1\"}"), "codebuild:StopBuild");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CodeBuild holds on a project and a report group, so an allow
+     * on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void aCodeBuildResourceTagConditionReadsTheTagsOfTheProjectAndTheReportGroup() {
+        String tagged = codeBuildProject("res-tag-project-" + suffix(), "data");
+        String other = codeBuildProject("res-tag-project-" + suffix(), "web");
+        String taggedGroup = codeBuildReportGroup("res-tag-group-" + suffix(), "data");
+        String otherGroup = codeBuildReportGroup("res-tag-group-" + suffix(), "web");
+
+        User user = user("res-codebuild-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"codebuild:BatchGetProjects\","
+                + "\"codebuild:BatchGetReportGroups\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + tagged + "\"]}").statusCode(200);
+        refusedJson(codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + other + "\"]}"),
+                "codebuild:BatchGetProjects");
+        codeBuild(user, "BatchGetReportGroups", "{\"reportGroupArns\":[\"" + taggedGroup + "\"]}").statusCode(200);
+        refusedJson(codeBuild(user, "BatchGetReportGroups", "{\"reportGroupArns\":[\"" + otherGroup + "\"]}"),
+                "codebuild:BatchGetReportGroups");
+    }
+
+    private String codeBuildProject(String name, String team) {
+        adminJson("codebuild", "CodeBuild_20161006.CreateProject").body("{\"name\":\"" + name
+                + "\",\"source\":{\"type\":\"NO_SOURCE\",\"buildspec\":\"version: 0.2\"},"
+                + "\"artifacts\":{\"type\":\"NO_ARTIFACTS\"},\"environment\":{\"type\":\"LINUX_CONTAINER\","
+                + "\"image\":\"aws/codebuild/standard:7.0\",\"computeType\":\"BUILD_GENERAL1_SMALL\"},"
+                + "\"serviceRole\":\"arn:aws:iam::" + ACCOUNT + ":role/codebuild-role\","
+                + "\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("codebuild", "CodeBuild_20161006.DeleteProject")
+                .body("{\"name\":\"" + name + "\"}").post("/"));
+        return name;
+    }
+
+    private String codeBuildReportGroup(String name, String team) {
+        String arn = adminJson("codebuild", "CodeBuild_20161006.CreateReportGroup").body("{\"name\":\"" + name
+                + "\",\"type\":\"TEST\",\"exportConfig\":{\"exportConfigType\":\"NO_EXPORT\"},"
+                + "\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]}").post("/").then().statusCode(200)
+                .extract().path("reportGroup.arn");
+        cleanup.register(() -> adminJson("codebuild", "CodeBuild_20161006.DeleteReportGroup")
+                .body("{\"arn\":\"" + arn + "\"}").post("/"));
+        return arn;
     }
 
     /** A Managed Service for Apache Flink application is checked on the ARN its name gives. */
@@ -922,8 +980,11 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + allowOn("athena:StartQueryExecution", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
                 + "\"athena:StartQueryExecution\",\"Resource\":\"" + primary + "\"}");
         send(user, "athena", "AmazonAthena.ListQueryExecutions", "1.1", "{}").statusCode(200);
-        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{}").statusCode(200);
-        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":null}").statusCode(200)
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{}").statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":null}").statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"primary\"}").statusCode(200)
                 .body("WorkGroup.Name", equalTo("primary"));
         refusedJson(send(user, "athena", "AmazonAthena.ListQueryExecutions", "1.1", "{\"WorkGroup\":\"res-other\"}"),
                 "athena:ListQueryExecutions");
@@ -932,38 +993,94 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * An Athena catalog read is checked on the catalog its {@code CatalogName} names and on {@code AwsDataCatalog},
-     * the Glue Data Catalog Floci reads whichever it names, so a grant on another catalog alone does not reach it.
+     * An {@code aws:ResourceTag} condition reads the tags Athena holds on a workgroup and a data catalog, so an allow
+     * on one team's tag lets the caller read that team's and not another's.
      */
     @Test
-    void aCatalogReadIsCheckedOnTheGlueCatalogFlociReads() {
+    void anAthenaResourceTagConditionReadsTheTagsOfTheWorkgroupAndTheDataCatalog() {
+        String workGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "data");
+        String otherWorkGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "web");
+        String catalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "data");
+        String otherCatalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "web");
+
+        User user = user("res-athena-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"athena:GetWorkGroup\",\"athena:GetDataCatalog\"],"
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + workGroup + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + otherWorkGroup
+                + "\"}"), "athena:GetWorkGroup");
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + catalog + "\"}").statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + otherCatalog
+                + "\"}"), "athena:GetDataCatalog");
+    }
+
+    /** An Athena workgroup or {@code LAMBDA} data catalog of the name, tagged with the team, deleted afterwards. */
+    private String athenaTagged(String operation, String name, String team) {
+        String body = "CreateWorkGroup".equals(operation) ? "{\"Name\":\"" + name + "\""
+                : "{\"Name\":\"" + name + "\",\"Type\":\"LAMBDA\"";
+        adminJson("athena", "AmazonAthena." + operation).body(body + ",\"Tags\":[{\"Key\":\"team\",\"Value\":\""
+                + team + "\"}]}").post("/").then().statusCode(200);
+        if ("CreateWorkGroup".equals(operation)) {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteWorkGroup")
+                    .body("{\"WorkGroup\":\"" + name + "\"}").post("/"));
+        } else {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteDataCatalog")
+                    .body("{\"Name\":\"" + name + "\"}").post("/"));
+        }
+        return name;
+    }
+
+    /**
+     * An Athena catalog read is checked on the catalog its {@code CatalogName} names, and Floci reads the metadata of
+     * none but the account's Glue Data Catalog: a catalog of another type is refused, so a grant on it does not reach
+     * the Glue data, nor does one on a Glue catalog reach {@code AwsDataCatalog}'s grant.
+     */
+    @Test
+    void aCatalogReadIsCheckedOnTheCatalogItNamesAndReadsNoOther() {
         String catalogs = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":datacatalog/";
-        User both = user("res-catalogs");
-        both.policy(allowOn("athena:ListDatabases", catalogs + "AwsDataCatalog") + ","
-                + allowOn("athena:ListDatabases", catalogs + "res-allowed"));
-        send(both, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-allowed\"}").statusCode(200);
-        refusedJson(send(both, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-other\"}"),
+        String glue = "res-glue-" + suffix();
+        String lambda = "res-lambda-" + suffix();
+        for (String catalog : List.of("{\"Name\":\"" + glue + "\",\"Type\":\"GLUE\",\"Parameters\":{\"catalog-id\":\""
+                        + ACCOUNT + "\"}}",
+                "{\"Name\":\"" + lambda + "\",\"Type\":\"LAMBDA\",\"Parameters\":{\"function\":\"arn:aws:lambda:"
+                        + REGION + ":" + ACCOUNT + ":function:meta\"}}")) {
+            adminJson("athena", "AmazonAthena.CreateDataCatalog").body(catalog).post("/").then().statusCode(200);
+        }
+        for (String name : List.of(glue, lambda)) {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteDataCatalog")
+                    .body("{\"Name\":\"" + name + "\"}").post("/"));
+        }
+        User user = user("res-catalogs");
+        user.policy(allowOn("athena:ListDatabases", catalogs + glue) + ","
+                + allowOn("athena:ListDatabases", catalogs + lambda));
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"" + glue + "\"}")
+                .statusCode(200);
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"" + lambda + "\"}")
+                .statusCode(400).body("__type", equalTo("MetadataException"));
+        refusedJson(send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"AwsDataCatalog\"}"),
                 "athena:ListDatabases");
-        User named = user("res-catalog");
-        named.policy(allowOn("athena:ListDatabases", catalogs + "res-allowed"));
-        refusedJson(send(named, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-allowed\"}"),
+        refusedJson(send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-other\"}"),
                 "athena:ListDatabases");
     }
 
     /**
-     * An Athena catalog request naming no catalog, or a JSON null, is checked on {@code AwsDataCatalog}, the one
-     * {@code GetDataCatalog} answers and the catalog reads read, so a grant on it reaches them and a deny on it applies.
+     * Athena authorization checks the default Glue catalog before model validation rejects a missing required
+     * catalog name. A grant reaches validation; a deny still refuses the request before it.
      */
     @Test
     void aCatalogRequestNamingNoCatalogIsCheckedOnTheGlueOne() {
         String glue = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":datacatalog/AwsDataCatalog";
         User user = user("res-glue-catalog");
         user.policy(allowOn("athena:GetDataCatalog", glue) + "," + allowOn("athena:ListDatabases", glue));
-        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}").statusCode(200)
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}").statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":null}").statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":null}").statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"AwsDataCatalog\"}").statusCode(200)
                 .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
-        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":null}").statusCode(200)
-                .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
-        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":null}").statusCode(200);
         refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"res-other\"}"),
                 "athena:GetDataCatalog");
         User denied = user("res-glue-denied");
@@ -1056,17 +1173,34 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * A Cost Explorer cost read is checked on {@code *}, not on the billing view its {@code BillingViewArn} gives:
-     * Floci serves no billing views and answers the account's costs whichever it names.
+     * A Cost Explorer cost read is checked on the billing view its {@code BillingViewArn} gives, and Floci answers the
+     * costs of none but the caller's primary view: another is refused, so a grant on it does not reach the account's
+     * costs, nor does one on the primary view reach another's.
      */
     @Test
-    void aBillingViewGrantDoesNotReachTheAccountsCosts() {
-        String view = "arn:aws:billing::" + ACCOUNT + ":billingview/res-view";
+    void aCostReadIsCheckedOnTheBillingViewItNamesAndAnswersNoOther() {
+        String views = "arn:aws:billing::" + ACCOUNT + ":billingview/";
         User user = user("res-view");
-        user.policy(allowOn("ce:GetCostAndUsage", view));
-        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", "{\"TimePeriod\":{\"Start\":"
-                + "\"2026-01-01\",\"End\":\"2026-02-01\"},\"Granularity\":\"MONTHLY\",\"Metrics\":[\"UnblendedCost\"],"
-                + "\"BillingViewArn\":\"" + view + "\"}"), "ce:GetCostAndUsage");
+        user.policy(allowOn("ce:GetCostAndUsage", views + "primary") + ","
+                + allowOn("ce:GetCostAndUsage", views + "res-view"));
+        send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "primary")).statusCode(200);
+        send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "res-view")).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "res-other")),
+                "ce:GetCostAndUsage");
+        User primary = user("res-view-primary");
+        primary.policy(allowOn("ce:GetCostAndUsage", views + "primary"));
+        refusedJson(send(primary, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "res-view")),
+                "ce:GetCostAndUsage");
+        // A deny on the primary view is not sidestepped by naming it under another service, which IAM checks as *.
+        User denied = user("res-view-denied");
+        denied.policy(allowOn("ce:GetCostAndUsage", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"ce:GetCostAndUsage\","
+                + "\"Resource\":\"" + views + "primary\"}");
+        refusedJson(send(denied, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "primary")),
+                "ce:GetCostAndUsage");
+        send(denied, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1",
+                costs("arn:aws:ce::" + ACCOUNT + ":billingview/primary")).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     /**
@@ -1220,7 +1354,7 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "}"), "cur:PutReportDefinition");
         cur(user, "PutReportDefinition", "{\"ReportDefinition\":" + reportDefinition(name, null) + "}").statusCode(200);
         cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "\",\"ReportDefinition\":"
-                + reportDefinition(name, arn + "-other") + "}").statusCode(200);
+                + reportDefinition(name, "arn:aws:billing::" + ACCOUNT + ":billingview/primary") + "}").statusCode(200);
         refusedJson(cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "-other\",\"ReportDefinition\":"
                 + reportDefinition(name + "-other", arn) + "}"), "cur:ModifyReportDefinition");
         cur(user, "DeleteReportDefinition", "{\"ReportName\":\"" + name + "\"}").statusCode(200);
@@ -1305,6 +1439,40 @@ class IamRequestResourceEnforcementIntegrationTest {
         scaling(user, "DeregisterScalableTarget", other + "}").statusCode(200);
     }
 
+    @Test
+    void scheduledActionWritesUseTargetArnAndDescribeRequiresWildcard() {
+        User user = user("res-scheduled-actions");
+        String resource = "service/res-" + suffix() + "/scheduled";
+        try (ApplicationAutoScalingClient adminClient = AwsTestClients.create(ApplicationAutoScalingClient.builder(), ADMIN, Region.US_EAST_1);
+                ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(), user.accessKeyId(), Region.US_EAST_1)) {
+            String arn = adminClient.registerScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource)
+                    .scalableDimension("ecs:service:DesiredCount").minCapacity(0).maxCapacity(2)).scalableTargetARN();
+            try {
+                PutScheduledActionRequest put = PutScheduledActionRequest.builder().serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension("ecs:service:DesiredCount").scheduledActionName("scheduled")
+                        .schedule("at(2099-01-01T00:00:00)")
+                        .scalableTargetAction(ScalableTargetAction.builder().minCapacity(0).build()).build();
+                user.policy(allowOn("application-autoscaling:PutScheduledAction", TARGETS + "other"));
+                assertEquals("AccessDeniedException", assertThrows(ApplicationAutoScalingException.class,
+                        () -> client.putScheduledAction(put)).awsErrorDetails().errorCode());
+                user.policy(allowOn("application-autoscaling:PutScheduledAction", arn));
+                client.putScheduledAction(put);
+                user.policy(allowOn("application-autoscaling:DescribeScheduledActions", arn));
+                assertThrows(ApplicationAutoScalingException.class, () -> client.describeScheduledActions(b -> b.serviceNamespace("ecs").resourceId(resource)));
+                user.policy(allowOn("application-autoscaling:DescribeScheduledActions", "*"));
+                assertEquals(1, client.describeScheduledActions(b -> b.serviceNamespace("ecs").resourceId(resource)).scheduledActions().size());
+                user.policy(allowOn("application-autoscaling:DeleteScheduledAction", TARGETS + "other"));
+                assertThrows(ApplicationAutoScalingException.class, () -> client.deleteScheduledAction(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).scalableDimension("ecs:service:DesiredCount").scheduledActionName("scheduled")));
+                user.policy(allowOn("application-autoscaling:DeleteScheduledAction", arn));
+                client.deleteScheduledAction(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension("ecs:service:DesiredCount").scheduledActionName("scheduled"));
+            } finally {
+                adminClient.deregisterScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource).scalableDimension("ecs:service:DesiredCount"));
+            }
+        }
+    }
+
     /** The members naming an ECS service's desired count as a scalable target, an open JSON object. */
     private static String scalableTarget(String resourceId) {
         return "{\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"" + resourceId + "\","
@@ -1360,6 +1528,51 @@ class IamRequestResourceEnforcementIntegrationTest {
         for (String named : List.of(name, arn)) {
             refusedJson(listDatabases(user, "\"WorkgroupName\":\"" + named + "\""), "redshift-data:ListDatabases");
         }
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Redshift Serverless holds on a namespace and a workgroup, so
+     * an allow on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void aRedshiftServerlessResourceTagConditionReadsTheTagsOfTheNamespaceAndTheWorkgroup() {
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
+        String tagged = "res-tag-rss-" + suffix();
+        String other = "res-tag-rss-" + suffix();
+        taggedWorkgroup(tagged, "data");
+        taggedWorkgroup(other, "web");
+
+        User user = user("res-rss-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"redshift-serverless:GetNamespace\","
+                + "\"redshift-serverless:GetWorkgroup\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        redshiftServerless(user, "GetNamespace", "{\"namespaceName\":\"" + tagged + "-ns\"}").statusCode(200);
+        refusedJson(redshiftServerless(user, "GetNamespace", "{\"namespaceName\":\"" + other + "-ns\"}"),
+                "redshift-serverless:GetNamespace");
+        redshiftServerless(user, "GetWorkgroup", "{\"workgroupName\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(redshiftServerless(user, "GetWorkgroup", "{\"workgroupName\":\"" + other + "\"}"),
+                "redshift-serverless:GetWorkgroup");
+    }
+
+    /** Creates a serverless workgroup and its namespace as the admin, both tagged with the team. */
+    private void taggedWorkgroup(String name, String team) {
+        String tags = ",\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]";
+        adminJson("redshift-serverless", "RedshiftServerless.CreateNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\",\"adminUsername\":\"admin\","
+                        + "\"adminUserPassword\":\"Secret123!\"" + tags + "}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\"}").post("/"));
+        adminJson("redshift-serverless", "RedshiftServerless.CreateWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\",\"namespaceName\":\"" + name + "-ns\"" + tags + "}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\"}").post("/"));
+    }
+
+    private static ValidatableResponse redshiftServerless(User user, String operation, String body) {
+        return user.json("redshift-serverless", "RedshiftServerless." + operation, "1.1").body(body).post("/").then();
     }
 
     /** Creates a serverless workgroup and its namespace as the admin and gives the workgroup's ARN. */
@@ -1509,12 +1722,12 @@ class IamRequestResourceEnforcementIntegrationTest {
     /** An assignment of the permission set to a group, in the account. */
     /**
      * An IAM Identity Center permission set provisioned to all the accounts it is provisioned to, with no
-     * {@code TargetId}, or a null one, is checked on each of those accounts, so a grant on one does not reach the
-     * others, a deny on one holds, and a grant on all of them lets it through. Each request finds the accounts
-     * afresh, so one provisioned to since is checked too.
+     * {@code TargetId} or a null one, is checked on its instance and itself: nothing botocore or the Service Reference
+     * says names those accounts, so a grant on the instance and the permission set lets it through and a deny on one of
+     * its accounts does not apply. One provisioned to an account is checked on that account too.
      */
     @Test
-    void aPermissionSetProvisionedToAllItsAccountsIsCheckedOnEachOfThem() {
+    void aPermissionSetProvisionedToAllItsAccountsIsCheckedOnItsInstanceAndItself() {
         String instance = ssoInstance();
         String permissionSet = permissionSet(instance);
         for (String account : List.of("111111111111", "222222222222")) {
@@ -1530,25 +1743,18 @@ class IamRequestResourceEnforcementIntegrationTest {
 
         User user = user("res-sso-provision");
         user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
+                + allowOn("sso:ProvisionPermissionSet", permissionSet));
+        ssoAdmin(user, "ProvisionPermissionSet", all).statusCode(200);
+        ssoAdmin(user, "ProvisionPermissionSet", provision + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\","
+                + "\"TargetId\":null}").statusCode(200);
+        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", one), "sso:ProvisionPermissionSet");
+        user.policy(allowOn("sso:ProvisionPermissionSet", "*") + ",{\"Effect\":\"Deny\","
+                + "\"Action\":\"sso:ProvisionPermissionSet\",\"Resource\":\"arn:aws:sso:::account/222222222222\"}");
+        ssoAdmin(user, "ProvisionPermissionSet", all).statusCode(200);
+        user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
                 + allowOn("sso:ProvisionPermissionSet", permissionSet) + ","
                 + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/111111111111"));
         ssoAdmin(user, "ProvisionPermissionSet", one).statusCode(200);
-        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
-        user.policy(allowOn("sso:ProvisionPermissionSet", "*") + ",{\"Effect\":\"Deny\","
-                + "\"Action\":\"sso:ProvisionPermissionSet\",\"Resource\":\"arn:aws:sso:::account/222222222222\"}");
-        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
-        ssoAdmin(user, "ProvisionPermissionSet", one).statusCode(200);
-        // A grant on both accounts covers it, a null TargetId naming no account of its own.
-        user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
-                + allowOn("sso:ProvisionPermissionSet", permissionSet) + ","
-                + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/111111111111") + ","
-                + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/222222222222"));
-        ssoAdmin(user, "ProvisionPermissionSet", provision + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\","
-                + "\"TargetId\":null}").statusCode(200);
-        String third = assignment(instance, permissionSet, "333333333333");
-        adminJson("sso", "SWBExternalService.CreateAccountAssignment").body(third).post("/").then().statusCode(200);
-        cleanup.register(() -> adminJson("sso", "SWBExternalService.DeleteAccountAssignment").body(third).post("/"));
-        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
     }
 
     /**
@@ -1687,6 +1893,38 @@ class IamRequestResourceEnforcementIntegrationTest {
         refused(restore(user, restored, source), "redshift:RestoreFromClusterSnapshot");
     }
 
+    @Test
+    void aRedshiftRestoreWithOwnerAccountIsCheckedOnTheOwnerSnapshot() {
+        String source = "res-source-" + suffix();
+        String restored = "res-restored-" + suffix();
+        String ownerAccount = "111122223333";
+        String ownerSnapshotArn = "arn:aws:redshift:us-east-1:" + ownerAccount + ":snapshot:" + source + "/snap";
+        User user = user("res-redshift-restore-owner");
+
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", ownerSnapshotArn));
+        restoreWithOwner(user, restored, source, ownerAccount)
+                .statusCode(404).body(containsString("ClusterSnapshotNotFound"));
+
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", "*") + ","
+                + "{\"Effect\":\"Deny\",\"Action\":\"redshift:RestoreFromClusterSnapshot\",\"Resource\":\""
+                + ownerSnapshotArn + "\"}");
+        refused(restoreWithOwner(user, restored, source, ownerAccount), "redshift:RestoreFromClusterSnapshot");
+
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "snapshot:" + source + "/snap"));
+        refused(restoreWithOwner(user, restored, source, ownerAccount), "redshift:RestoreFromClusterSnapshot");
+    }
+
+    private static ValidatableResponse restoreWithOwner(User user, String cluster, String snapshotCluster,
+                                                        String ownerAccount) {
+        return user.query("redshift", "RestoreFromClusterSnapshot").formParam("Version", "2012-12-01")
+                .formParam("ClusterIdentifier", cluster).formParam("SnapshotIdentifier", "snap")
+                .formParam("SnapshotClusterIdentifier", snapshotCluster)
+                .formParam("OwnerAccount", ownerAccount).post("/").then();
+    }
+
     private static ValidatableResponse redshiftTag(User user, String arn) {
         return user.query("redshift", "CreateTags").formParam("Version", "2012-12-01").formParam("ResourceName", arn)
                 .formParam("Tags.Tag.1.Key", "team").formParam("Tags.Tag.1.Value", "data").post("/").then();
@@ -1701,6 +1939,12 @@ class IamRequestResourceEnforcementIntegrationTest {
         return user.query("redshift", "RestoreFromClusterSnapshot").formParam("Version", "2012-12-01")
                 .formParam("ClusterIdentifier", cluster).formParam("SnapshotIdentifier", "snap")
                 .formParam("SnapshotClusterIdentifier", snapshotCluster).post("/").then();
+    }
+
+    /** A month's unblended cost of the billing view. */
+    private static String costs(String billingViewArn) {
+        return "{\"TimePeriod\":{\"Start\":\"2026-01-01\",\"End\":\"2026-02-01\"},\"Granularity\":\"MONTHLY\","
+                + "\"Metrics\":[\"UnblendedCost\"],\"BillingViewArn\":\"" + billingViewArn + "\"}";
     }
 
     private static String budget(String name, String billingViewArn) {
@@ -1745,6 +1989,265 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /** The user's JSON-protocol request to the target, {@code <prefix>.<operation>}, with the body. */
+    /**
+     * An {@code aws:ResourceTag} condition reads a Step Functions state machine's tags for the state machine, its
+     * version and its execution, and an activity's own, so an allow on one team's tag lets the caller read that
+     * team's and not another's.
+     */
+    @Test
+    void aStepFunctionsResourceTagConditionReadsTheStateMachineTagsAndTheActivityTags() {
+        String definition = "{\\\"StartAt\\\":\\\"Done\\\",\\\"States\\\":{\\\"Done\\\":{\\\"Type\\\":\\\"Pass\\\","
+                + "\\\"End\\\":true}}}";
+        String tagged = stateMachine("res-tag-sm-" + suffix(), definition, "data");
+        String other = stateMachine("res-tag-sm-" + suffix(), definition, "web");
+        String version = sfn("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + tagged + "\"}")
+                .statusCode(200).extract().path("stateMachineVersionArn");
+        String execution = sfn("StartExecution", "{\"stateMachineArn\":\"" + tagged + "\"}")
+                .statusCode(200).extract().path("executionArn");
+        String otherExecution = sfn("StartExecution", "{\"stateMachineArn\":\"" + other + "\"}")
+                .statusCode(200).extract().path("executionArn");
+        String activity = activity("res-tag-act-" + suffix(), "data");
+        String otherActivity = activity("res-tag-act-" + suffix(), "web");
+
+        User user = user("res-sfn-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"states:DescribeStateMachine\",\"states:DescribeExecution\","
+                + "\"states:DescribeActivity\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describe(user, "DescribeStateMachine", "stateMachineArn", tagged).statusCode(200);
+        describe(user, "DescribeStateMachine", "stateMachineArn", version).statusCode(200);
+        refusedJson(describe(user, "DescribeStateMachine", "stateMachineArn", other), "states:DescribeStateMachine");
+        describe(user, "DescribeExecution", "executionArn", execution).statusCode(200);
+        refusedJson(describe(user, "DescribeExecution", "executionArn", otherExecution), "states:DescribeExecution");
+        describe(user, "DescribeActivity", "activityArn", activity).statusCode(200);
+        refusedJson(describe(user, "DescribeActivity", "activityArn", otherActivity), "states:DescribeActivity");
+    }
+
+    private String stateMachine(String name, String definition, String team) {
+        String arn = sfn("CreateStateMachine", "{\"name\":\"" + name + "\",\"definition\":\"" + definition
+                + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/sfn\",\"tags\":[{\"key\":\"team\",\"value\":\""
+                + team + "\"}]}").statusCode(200).extract().path("stateMachineArn");
+        cleanup.register(() -> sfn("DeleteStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}"));
+        return arn;
+    }
+
+    private String activity(String name, String team) {
+        String arn = sfn("CreateActivity", "{\"name\":\"" + name + "\",\"tags\":[{\"key\":\"team\",\"value\":\""
+                + team + "\"}]}").statusCode(200).extract().path("activityArn");
+        cleanup.register(() -> sfn("DeleteActivity", "{\"activityArn\":\"" + arn + "\"}"));
+        return arn;
+    }
+
+    private static ValidatableResponse sfn(String operation, String body) {
+        return adminJson("states", "AWSStepFunctions." + operation, "1.0").body(body).post("/").then();
+    }
+
+    private static ValidatableResponse describe(User user, String operation, String member, String arn) {
+        return send(user, "states", "AWSStepFunctions." + operation, "1.0", "{\"" + member + "\":\"" + arn + "\"}");
+    }
+
+    /**
+     * A Glue table is checked on the account's catalog, its database and itself, the types AWS gives
+     * {@code glue:GetTable}, so a grant on all three allows it, the same grant refuses another table of the database,
+     * a grant leaving out the catalog refuses it, and a deny scoped to the table holds under an allow on everything.
+     */
+    @Test
+    void aGlueTableIsCheckedOnTheCatalogItsDatabaseAndItself() {
+        String database = "res_db_" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        glue("CreateTable", "{\"DatabaseName\":\"" + database + "\",\"TableInput\":{\"Name\":\"orders\"}}")
+                .statusCode(200);
+        cleanup.register(() -> glue("DeleteTable", "{\"DatabaseName\":\"" + database + "\",\"Name\":\"orders\"}"));
+        String catalog = allowOn("glue:GetTable", glueArn + "catalog");
+        String scoped = allowOn("glue:GetTable", glueArn + "database/" + database) + ","
+                + allowOn("glue:GetTable", glueArn + "table/" + database + "/orders");
+
+        User user = user("res-glue-table");
+        user.policy(catalog + "," + scoped);
+        getTable(user, database, "orders").statusCode(200);
+        refusedJson(getTable(user, database, "other"), "glue:GetTable");
+        user.policy(scoped);
+        refusedJson(getTable(user, database, "orders"), "glue:GetTable");
+        user.policy(allowOn("glue:GetTable", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"glue:GetTable\",\"Resource\":\""
+                + glueArn + "table/" + database + "/orders\"}");
+        refusedJson(getTable(user, database, "orders"), "glue:GetTable");
+    }
+
+    /** A Glue database is checked on the catalog and {@code database/<name>}, and a job on {@code job/<name>}. */
+    @Test
+    void aGlueDatabaseAndAJobAreCheckedOnTheArnsGlueGivesThem() {
+        String database = "res_db_" + suffix();
+        String job = "res-job-" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        glue("CreateJob", "{\"Name\":\"" + job + "\",\"Role\":\"arn:aws:iam::" + ACCOUNT + ":role/glue\","
+                + "\"Command\":{\"Name\":\"glueetl\",\"ScriptLocation\":\"s3://scripts/job.py\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + job + "\"}"));
+
+        User user = user("res-glue-db");
+        user.policy(allowOn("glue:GetDatabase", glueArn + "catalog") + ","
+                + allowOn("glue:GetDatabase", glueArn + "database/" + database) + ","
+                + allowOn("glue:GetJob", glueArn + "job/" + job));
+        send(user, "glue", "AWSGlue.GetDatabase", "1.1", "{\"Name\":\"" + database + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetDatabase", "1.1", "{\"Name\":\"" + database + "_other\"}"),
+                "glue:GetDatabase");
+        send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + job + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + job + "-other\"}"), "glue:GetJob");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Glue holds on the resource a request names, a job's and a
+     * schema registry's, so an allow on one team's tag lets the caller read that team's job and registry and not
+     * another's.
+     */
+    @Test
+    void aGlueResourceTagConditionReadsTheTagsOfTheJobAndTheRegistry() {
+        String tagged = "res-tag-job-" + suffix();
+        String other = "res-tag-job-" + suffix();
+        String jobRest = "\",\"Role\":\"arn:aws:iam::" + ACCOUNT + ":role/glue\","
+                + "\"Command\":{\"Name\":\"glueetl\",\"ScriptLocation\":\"s3://scripts/job.py\"}";
+        glue("CreateJob", "{\"Name\":\"" + tagged + jobRest + ",\"Tags\":{\"team\":\"data\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + tagged + "\"}"));
+        glue("CreateJob", "{\"Name\":\"" + other + jobRest + ",\"Tags\":{\"team\":\"web\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + other + "\"}"));
+        String taggedRegistry = "res-tag-reg-" + suffix();
+        String otherRegistry = "res-tag-reg-" + suffix();
+        glue("CreateRegistry", "{\"RegistryName\":\"" + taggedRegistry + "\",\"Tags\":{\"team\":\"data\"}}")
+                .statusCode(200);
+        cleanup.register(() -> glue("DeleteRegistry", "{\"RegistryId\":{\"RegistryName\":\"" + taggedRegistry
+                + "\"}}"));
+        glue("CreateRegistry", "{\"RegistryName\":\"" + otherRegistry + "\"}").statusCode(200);
+        cleanup.register(() -> glue("DeleteRegistry", "{\"RegistryId\":{\"RegistryName\":\"" + otherRegistry
+                + "\"}}"));
+
+        User user = user("res-glue-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"glue:GetJob\",\"glue:GetRegistry\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + other + "\"}"), "glue:GetJob");
+        send(user, "glue", "AWSGlue.GetRegistry", "1.1", "{\"RegistryId\":{\"RegistryName\":\"" + taggedRegistry
+                + "\"}}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetRegistry", "1.1", "{\"RegistryId\":{\"RegistryName\":\""
+                + otherRegistry + "\"}}"), "glue:GetRegistry");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags DynamoDB holds on the table a request names, as created and
+     * as tagged later, so an allow on one team's tag lets the caller describe that team's tables and not another's.
+     */
+    @Test
+    void aDynamoDbResourceTagConditionReadsTheTagsOfTheTable() {
+        String tagged = dynamoDbTable("res-tag-ddb-" + suffix(), "data");
+        String other = dynamoDbTable("res-tag-ddb-" + suffix(), "web");
+
+        User user = user("res-ddb-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"dynamodb:DescribeTable\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "dynamodb", "DynamoDB_20120810.DescribeTable", "1.0", "{\"TableName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "dynamodb", "DynamoDB_20120810.DescribeTable", "1.0", "{\"TableName\":\"" + other
+                + "\"}"), "dynamodb:DescribeTable");
+
+        adminJson("dynamodb", "DynamoDB_20120810.TagResource", "1.0").body("{\"ResourceArn\":\"arn:aws:dynamodb:"
+                + REGION + ":" + ACCOUNT + ":table/" + other + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+        send(user, "dynamodb", "DynamoDB_20120810.DescribeTable", "1.0", "{\"TableName\":\"" + other + "\"}")
+                .statusCode(200);
+    }
+
+    /** A DynamoDB table of the name, keyed on {@code id} and tagged with the team, deleted afterwards. */
+    private String dynamoDbTable(String name, String team) {
+        adminJson("dynamodb", "DynamoDB_20120810.CreateTable", "1.0").body("{\"TableName\":\"" + name + "\","
+                + "\"KeySchema\":[{\"AttributeName\":\"id\",\"KeyType\":\"HASH\"}],"
+                + "\"AttributeDefinitions\":[{\"AttributeName\":\"id\",\"AttributeType\":\"S\"}],"
+                + "\"BillingMode\":\"PAY_PER_REQUEST\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("dynamodb", "DynamoDB_20120810.DeleteTable", "1.0")
+                .body("{\"TableName\":\"" + name + "\"}").post("/"));
+        return name;
+    }
+
+    /**
+     * What Glue's batch deletes name, the tables of {@code TablesToDelete} and the connections of
+     * {@code ConnectionNameList}, is checked one by one, so a deny scoped to one of them holds under an allow on
+     * everything.
+     */
+    @Test
+    void aGlueBatchDeleteIsCheckedOnEachTableAndConnectionItNames() {
+        String database = "res_db_" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        glue("CreateDatabase", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+
+        User user = user("res-glue-batch");
+        user.policy(allowOn("glue:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":[\"glue:BatchDeleteTable\","
+                + "\"glue:BatchDeleteConnection\"],\"Resource\":[\"" + glueArn + "table/" + database + "/kept\",\""
+                + glueArn + "connection/kept-" + database + "\"]}");
+        refusedJson(send(user, "glue", "AWSGlue.BatchDeleteTable", "1.1", "{\"DatabaseName\":\"" + database
+                + "\",\"TablesToDelete\":[\"gone\",\"kept\"]}"), "glue:BatchDeleteTable");
+        send(user, "glue", "AWSGlue.BatchDeleteTable", "1.1", "{\"DatabaseName\":\"" + database
+                + "\",\"TablesToDelete\":[\"gone\"]}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.BatchDeleteConnection", "1.1", "{\"ConnectionNameList\":[\"gone-"
+                + database + "\",\"kept-" + database + "\"]}"), "glue:BatchDeleteConnection");
+        send(user, "glue", "AWSGlue.BatchDeleteConnection", "1.1", "{\"ConnectionNameList\":[\"gone-" + database
+                + "\"]}").statusCode(200);
+    }
+
+    /**
+     * A Glue database's creation is checked on the catalog and the database its {@code DatabaseInput.Name} names, and
+     * a connection's tags on the connection its {@code ConnectionInput.Name} names, the resource they go on.
+     */
+    @Test
+    void aGlueCreateIsCheckedOnWhatItsInputNames() {
+        String database = "res_db_" + suffix();
+        String connection = "res-conn-" + suffix();
+        String glueArn = "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":";
+        cleanup.register(() -> glue("DeleteDatabase", "{\"Name\":\"" + database + "\"}"));
+        cleanup.register(() -> glue("DeleteConnection", "{\"ConnectionName\":\"" + connection + "\"}"));
+
+        User user = user("res-glue-create");
+        user.policy(allowOn("glue:CreateDatabase", glueArn + "catalog") + ","
+                + allowOn("glue:CreateDatabase", glueArn + "database/" + database));
+        refusedJson(send(user, "glue", "AWSGlue.CreateDatabase", "1.1",
+                "{\"DatabaseInput\":{\"Name\":\"" + database + "_other\"}}"), "glue:CreateDatabase");
+        send(user, "glue", "AWSGlue.CreateDatabase", "1.1", "{\"DatabaseInput\":{\"Name\":\"" + database + "\"}}")
+                .statusCode(200);
+
+        String create = "{\"ConnectionInput\":{\"Name\":\"" + connection + "\",\"ConnectionType\":\"JDBC\","
+                + "\"ConnectionProperties\":{\"JDBC_CONNECTION_URL\":\"jdbc:postgresql://db:5432/app\"}},"
+                + "\"Tags\":{\"team\":\"data\"}}";
+        user.policy(allowOn("glue:CreateConnection", "*") + "," + allowOn("glue:TagResource", "*")
+                + ",{\"Effect\":\"Deny\",\"Action\":\"glue:TagResource\",\"Resource\":\"" + glueArn + "connection/"
+                + connection + "\"}");
+        refusedJson(send(user, "glue", "AWSGlue.CreateConnection", "1.1", create), "glue:TagResource");
+        user.policy(allowOn("glue:CreateConnection", "*") + ","
+                + allowOn("glue:TagResource", glueArn + "connection/" + connection));
+        send(user, "glue", "AWSGlue.CreateConnection", "1.1", create).statusCode(200);
+    }
+
+    /** A Glue workflow run is checked on the workflow its {@code Name} names. */
+    @Test
+    void aGlueWorkflowRunIsCheckedOnItsWorkflow() {
+        String workflow = "res-wf-" + suffix();
+        User user = user("res-glue-run");
+        user.policy(allowOn("glue:GetWorkflowRun", "arn:aws:glue:" + REGION + ":" + ACCOUNT + ":workflow/" + workflow));
+        refusedJson(send(user, "glue", "AWSGlue.GetWorkflowRun", "1.1",
+                "{\"Name\":\"" + workflow + "-other\",\"RunId\":\"wr_0\"}"), "glue:GetWorkflowRun");
+        send(user, "glue", "AWSGlue.GetWorkflowRun", "1.1", "{\"Name\":\"" + workflow + "\",\"RunId\":\"wr_0\"}")
+                .body(not(containsString("AccessDeniedException")));
+    }
+
+    private static ValidatableResponse glue(String operation, String body) {
+        return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
+    }
+
+    private static ValidatableResponse getTable(User user, String database, String table) {
+        return send(user, "glue", "AWSGlue.GetTable", "1.1",
+                "{\"DatabaseName\":\"" + database + "\",\"Name\":\"" + table + "\"}");
+    }
+
     private static ValidatableResponse send(User user, String service, String target, String version, String body) {
         return user.json(service, target, version).body(body).post("/").then();
     }

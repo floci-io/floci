@@ -179,7 +179,16 @@ final class DynamoDbAttributeValueValidator {
 
     // Batch and transact writes report the limit without the validation envelope.
     static void requireNestingWithinLimit(JsonNode attributes, boolean inValidationEnvelope) {
-        if (!nestingWithinLimit(attributes)) {
+        requireNestingWithin(attributes, MAX_NESTING_LEVELS, inValidationEnvelope);
+    }
+
+    // DynamoDB lets an expression or condition value nest one level deeper than an item attribute.
+    static void requireValueNestingWithinLimit(JsonNode values, boolean inValidationEnvelope) {
+        requireNestingWithin(values, MAX_NESTING_LEVELS + 1, inValidationEnvelope);
+    }
+
+    private static void requireNestingWithin(JsonNode attributes, int maxLevels, boolean inValidationEnvelope) {
+        if (!nestingWithin(attributes, maxLevels)) {
             throw validationEx((inValidationEnvelope ? "1 validation error detected: " : "")
                     + "Nesting Levels have exceeded supported limits: "
                     + "Attributes in the item have nested levels beyond supported limit");
@@ -194,16 +203,16 @@ final class DynamoDbAttributeValueValidator {
         }
     }
 
-    static boolean valueNestingWithinLimit(JsonNode value) {
-        return depthOf(value) <= MAX_NESTING_LEVELS;
+    static boolean nestingWithinLimit(JsonNode attributes) {
+        return nestingWithin(attributes, MAX_NESTING_LEVELS);
     }
 
-    static boolean nestingWithinLimit(JsonNode attributes) {
+    private static boolean nestingWithin(JsonNode attributes, int maxLevels) {
         if (attributes == null || !attributes.isObject()) {
             return true;
         }
         for (JsonNode value : attributes) {
-            if (!valueNestingWithinLimit(value)) {
+            if (maxLevels < depthOf(value)) {
                 return false;
             }
         }

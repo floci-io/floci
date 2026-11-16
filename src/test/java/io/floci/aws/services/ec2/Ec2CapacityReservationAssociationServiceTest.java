@@ -654,6 +654,35 @@ class Ec2CapacityReservationAssociationServiceTest {
         }
     }
 
+    /**
+     * A dry-run start admits its stopped instances into their reservation as the real start does,
+     * the whole batch counted, and records nothing: one of two fits the free slot, both do not.
+     */
+    @Test
+    void aDryRunRestartIsAdmittedAsTheRealOneAndRecordsNothing() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            CapacityReservation capacity = fixture.create(1);
+            Instance first = fixture.launch(capacity.getCapacityReservationId());
+            fixture.service.stopInstances(REGION, List.of(first.getInstanceId()));
+            Instance second = fixture.launch(capacity.getCapacityReservationId());
+            fixture.service.stopInstances(REGION, List.of(second.getInstanceId()));
+
+            assertEquals("DryRunOperation", assertThrows(AwsException.class, () -> fixture.service
+                    .startInstances(REGION, List.of(first.getInstanceId()), true)).getErrorCode());
+            AwsException failure = assertThrows(AwsException.class, () -> fixture.service
+                    .startInstances(REGION, List.of(first.getInstanceId(), second.getInstanceId()), true));
+            assertEquals("ReservationCapacityExceeded", failure.getErrorCode());
+            assertEquals("The targeted Capacity Reservation has insufficient available capacity.", failure.getMessage());
+
+            assertEquals(List.of(), fixture.describe(capacity).getInstanceIds());
+            assertEquals(1, fixture.describe(capacity).getAvailableInstanceCount());
+            assertEquals(List.of("stopped", "stopped"), fixture.service.describeInstances(REGION,
+                    List.of(first.getInstanceId(), second.getInstanceId()), Map.of()).stream()
+                    .flatMap(reservation -> reservation.getInstances().stream())
+                    .map(instance -> instance.getState().getName()).toList());
+        }
+    }
+
     @Test
     void reservationOnlyLaunchDoesNotFallBackToOnDemand() {
         try (Fixture fixture = new Fixture("memory", directory)) {

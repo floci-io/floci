@@ -240,9 +240,7 @@ public class ApiGatewayV2JsonHandler {
 
     private Response handleCreateIntegration(JsonNode request, String region) {
         String apiId = request.path("ApiId").asText();
-        @SuppressWarnings("unchecked")
-        Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
-        Integration integration = service.createIntegration(region, apiId, map);
+        Integration integration = service.createIntegration(region, apiId, integrationRequest(request));
         return Response.status(201).entity(toIntegrationNode(integration).toString()).build();
     }
 
@@ -264,10 +262,23 @@ public class ApiGatewayV2JsonHandler {
     private Response handleUpdateIntegration(JsonNode request, String region) {
         String apiId = request.path("ApiId").asText();
         String integrationId = request.path("IntegrationId").asText();
+        Integration integration = service.updateIntegration(region, apiId, integrationId, integrationRequest(request));
+        return Response.ok(toIntegrationNode(integration).toString()).build();
+    }
+
+    /**
+     * The integration request with lower-camel-case member names. RequestParameters keys keep
+     * their case, since an integration subtype's parameters are named by its action's members.
+     */
+    private Map<String, Object> integrationRequest(JsonNode request) {
         @SuppressWarnings("unchecked")
         Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
-        Integration integration = service.updateIntegration(region, apiId, integrationId, map);
-        return Response.ok(toIntegrationNode(integration).toString()).build();
+        JsonNode requestParameters = request.get("RequestParameters");
+        if (requestParameters != null && requestParameters.isObject()) {
+            map.put("requestParameters",
+                    objectMapper.convertValue(requestParameters, new TypeReference<Map<String, Object>>() {}));
+        }
+        return map;
     }
 
     // ──────────────────────────── Stage ────────────────────────────
@@ -639,7 +650,13 @@ public class ApiGatewayV2JsonHandler {
     private ObjectNode toIntegrationNode(Integration i) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("IntegrationId", i.getIntegrationId());
+        if (i.getDescription() != null) {
+            node.put("Description", i.getDescription());
+        }
         node.put("IntegrationType", i.getIntegrationType());
+        if (i.getIntegrationSubtype() != null) {
+            node.put("IntegrationSubtype", i.getIntegrationSubtype());
+        }
         if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("ConnectionId", i.getConnectionId());
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());

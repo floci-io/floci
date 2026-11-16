@@ -73,8 +73,8 @@ class EcsReconciliationConcurrencyServiceTest {
             assertTrue(entered.await(5, TimeUnit.SECONDS), "first pass must reach service storage");
             secondThread.start();
             await().atMost(Duration.ofSeconds(5)).until(() ->
-                    secondThread.getState() == Thread.State.BLOCKED || second.isDone());
-            assertEquals(Thread.State.BLOCKED, secondThread.getState(),
+                    secondThread.getState() == Thread.State.WAITING || second.isDone());
+            assertEquals(Thread.State.WAITING, secondThread.getState(),
                     "a direct pass must wait for the running pass instead of reconciling the same deficit");
         } finally {
             release.countDown();

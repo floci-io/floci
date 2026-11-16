@@ -44,7 +44,7 @@ final class SesV2Json {
     static AwsException remapV1Exception(AwsException e) {
         return switch (e.getErrorCode()) {
             case "InvalidParameterValue", "InvalidTemplate", "ValidationError",
-                 "InvalidRenderingParameter", "MissingRenderingAttribute" ->
+                 "InvalidRenderingParameter", "MissingRenderingAttribute", "InvalidSNSDestination" ->
                     new AwsException("BadRequestException", e.getMessage(), 400);
             case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist",
                  "CustomVerificationEmailTemplateDoesNotExist", "FromEmailAddressNotVerified" ->

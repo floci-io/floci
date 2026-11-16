@@ -12,6 +12,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
@@ -176,6 +177,87 @@ class CloudFormationTemplateEngineTest {
         CloudFormationTemplateEngine e = engineWithAttributes(Map.of("Thing", Map.of("Arn", "arn:aws:stub:::Thing")));
 
         assertEquals("Thing.Missing", e.resolve(json("{\"Fn::GetAtt\": [\"Thing\", \"Missing\"]}")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "Value: !GetAtt [Vpc, !Ref AttributeName]\n",
+        "Value: !GetAtt\n  - Vpc\n  - !Ref AttributeName\n",
+        "Value:\n  Fn::GetAtt: [Vpc, {Ref: AttributeName}]\n"
+    })
+    void getAttSequenceResolvesAttributeNameRef(String yaml) {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of("AttributeName", "CidrBlock"), Map.of(),
+                Map.of("Vpc", Map.of("CidrBlock", "10.0.0.0/16")), Map.of(), Map.of(), mapper, name -> null);
+        JsonNode value = new CloudFormationYamlParser(mapper).parse(yaml).get("Value");
+
+        assertEquals("10.0.0.0/16", e.resolve(value));
+        assertEquals("10.0.0.0/16", e.resolveNode(value).asText());
+    }
+
+    @Test
+    void getAttAttributeNameRefRetainsTypedList() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of("AttributeName", "SourceIdsList"), Map.of(),
+                Map.of("Watcher", Map.of("SourceIdsList", "stored")), Map.of(), Map.of(), mapper,
+                null, UnaryOperator.identity(), null, Map.of(),
+                (logicalId, attribute, value) -> mapper.createArrayNode().add("first,with-comma").add("second"));
+        JsonNode value = new CloudFormationYamlParser(mapper).parse(
+                "Value: !GetAtt [Watcher, !Ref AttributeName]").get("Value");
+
+        assertEquals(json("[\"first,with-comma\", \"second\"]"), e.resolveNode(value));
+        assertEquals("first,with-comma|second", e.resolve(json("""
+                {
+                  "Fn::Join": [
+                    "|",
+                    {
+                      "Fn::GetAtt": ["Watcher", {"Ref": "AttributeName"}]
+                    }
+                  ]
+                }
+                """)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "[]", "[Vpc]", "[Vpc, CidrBlock, Extra]",
+        "['', CidrBlock]", "[Vpc, '']", "['', '']",
+        "[Vpc, !Ref EmptyAttribute]"
+    })
+    void getAttRejectsMissingOrEmptyOperands(String operands) {
+        assertInvalidGetAtt(operands, "Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                + "the resource name and the resource attribute");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"'Vpc.'", "'.CidrBlock'", "'Vpc'", "''"})
+    void getAttRejectsMalformedStringOperands(String operand) {
+        assertInvalidGetAtt(operand, "Template error: if specifying one argument to Fn::GetAtt, "
+                + "that argument must be a non-empty string in format <LogicalId>.<Attribute>");
+    }
+
+    private void assertInvalidGetAtt(String operands, String expectedMessage) {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of("EmptyAttribute", ""), Map.of(),
+                Map.of("Vpc", Map.of("CidrBlock", "10.0.0.0/16")), Map.of(), Map.of(), mapper, name -> null);
+        CloudFormationYamlParser parser = new CloudFormationYamlParser(mapper);
+        for (JsonNode value : List.of(parser.parse("!GetAtt " + operands),
+                parser.parse("Fn::GetAtt: " + operands))) {
+            AwsException scalarFailure = assertThrows(AwsException.class, () -> e.resolve(value));
+            AwsException nodeFailure = assertThrows(AwsException.class, () -> e.resolveNode(value));
+            AwsException dependencyFailure = assertThrows(AwsException.class,
+                    () -> e.referencesGetAttAttribute(value.get("Fn::GetAtt"), "Vpc", Set.of("CidrBlock")));
+
+            assertEquals("ValidationError", scalarFailure.getErrorCode());
+            assertEquals("ValidationError", nodeFailure.getErrorCode());
+            assertEquals("ValidationError", dependencyFailure.getErrorCode());
+            assertEquals(400, scalarFailure.getHttpStatus());
+            assertEquals(400, nodeFailure.getHttpStatus());
+            assertEquals(400, dependencyFailure.getHttpStatus());
+            assertEquals(expectedMessage, scalarFailure.getMessage());
+            assertEquals(scalarFailure.getMessage(), nodeFailure.getMessage());
+            assertEquals(scalarFailure.getMessage(), dependencyFailure.getMessage());
+        }
     }
 
     @ParameterizedTest

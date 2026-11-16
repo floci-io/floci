@@ -2,6 +2,7 @@ package io.floci.aws.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -74,6 +76,21 @@ class EventBridgeSchedulerIntegrationTest {
                     RuleState.ENABLED, null, null, null, REGION);
 
             assertTrue(scheduler.isRunning(rule.getArn()));
+        }
+
+        @Test
+        void rejectedRateUpdateLeavesTheOriginalTimerRunning() {
+            Rule rule = eventBridgeService.putRule(
+                    "preserved-timer", "default", null, "rate(5 minutes)",
+                    RuleState.ENABLED, null, null, null, REGION);
+
+            assertThrows(AwsException.class, () -> eventBridgeService.putRule(
+                    "preserved-timer", "default", null, "rate(1 minutes)",
+                    RuleState.DISABLED, null, null, null, REGION));
+
+            assertTrue(scheduler.isRunning(rule.getArn()));
+            assertEquals("rate(5 minutes)", rule.getScheduleExpression());
+            assertEquals(RuleState.ENABLED, rule.getState());
         }
 
         @Test
@@ -326,6 +343,10 @@ class EventBridgeSchedulerIntegrationTest {
                     public List<String> containerFallbackServers() { return List.of("8.8.8.8", "8.8.4.4"); }
                     @Override
                     public boolean spoofAwsEndpoints() { return false; }
+                    @Override
+                    public OptionalInt hostPort() { return OptionalInt.empty(); }
+                    @Override
+                    public boolean bridgeListenerEnabled() { return true; }
                 };
             }
             @Override
@@ -352,6 +373,7 @@ class EventBridgeSchedulerIntegrationTest {
                     @Override public boolean enabled() { return false; }
                     @Override public Optional<String> certPath() { return Optional.empty(); }
                     @Override public Optional<String> keyPath() { return Optional.empty(); }
+                    @Override public Optional<String> extraCaPath() { return Optional.empty(); }
                     @Override public boolean selfSigned() { return true; }
                     @Override public int awsHttpsPort() { return 443; }
                 };

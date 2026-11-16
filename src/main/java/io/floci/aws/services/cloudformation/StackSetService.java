@@ -7,6 +7,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudformation.model.ChangeSet;
@@ -41,6 +42,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -65,6 +67,7 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
     private static final String INSTANCE_CHANGE_SET = "stackset-instance";
     private static final String UPDATE_CHANGE_SET = "stackset-update";
     private static final String ORGANIZATIONS_ACCESS_KEY = "organizations-access";
+    private static final String STACK_SET_RESOURCE = "stackset/";
     private static final int STACK_SET_LIMIT = 1000;
     private static final Pattern STACK_SET_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9-]{0,127}");
     private static final Pattern OPERATION_ID = Pattern.compile("[A-Za-z0-9][-A-Za-z0-9]{0,127}");
@@ -207,6 +210,45 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         return getStackSetOrThrow(name);
     }
 
+    /** The stack set's ARN, {@code stackset/<name>:<id>} in the request's Region, as AWS gives its StackSetARN. */
+    /** The stack set's ARN in the Region given, the one the request naming it is in, whatever context runs it. */
+    public String stackSetArn(StackSet stackSet, String region) {
+        return regionResolver.buildArn("cloudformation", region, STACK_SET_RESOURCE + stackSet.getStackSetId());
+    }
+
+    /**
+     * The ARN of the caller's stack set of that name in the Region given, which IAM checks a request naming it on;
+     * empty for none.
+     */
+    public Optional<String> stackSetArn(String name, String region) {
+        return name == null ? Optional.empty() : stackSets.get(name).map(stackSet -> stackSetArn(stackSet, region));
+    }
+
+    /**
+     * The tags of the stack set stored under {@code arn} in the account the ARN names, a pre-multi-account one of the
+     * default account read in place, by key, which IAM gives a resource-tag condition; empty when there is none. Reads
+     * only, matching the stack set's id, {@code <name>:<id>}, on the ARN.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cloudformation")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String id = parsed.resource().startsWith(STACK_SET_RESOURCE)
+                ? parsed.resource().substring(STACK_SET_RESOURCE.length()) : "";
+        if (id.indexOf(':') < 1) {
+            return Map.of();
+        }
+        String name = id.substring(0, id.indexOf(':'));
+        String account = parsed.accountId();
+        Optional<StackSet> stored = stackSets instanceof AccountAwareStorageBackend<StackSet> aware
+                ? aware.getForAccount(account, name).or(() -> aware.getLegacyForAccount(account, name))
+                : stackSets.get(name);
+        return stored.filter(stackSet -> id.equals(stackSet.getStackSetId()))
+                .<Map<String, String>>map(stackSet -> Map.copyOf(stackSet.getTags()))
+                .orElse(Map.of());
+    }
+
     /** The StackSet's permission model, which says whether an update naming no administration role passes the default one. */
     @Override
     public Optional<String> stackSetPermissionModel(String stackSetName) {
@@ -231,36 +273,63 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
                                                          Boolean autoDeploymentEnabled,
                                                          Boolean retainStacksOnAccountRemoval,
                                                          Boolean managedExecutionActive) {
+        return updateStackSet(name, templateBody, parameters, capabilities, tags, description, requestedOperationId,
+                autoDeploymentEnabled, retainStacksOnAccountRemoval, managedExecutionActive, false);
+    }
+
+    public synchronized StackSetOperation updateStackSetResource(String name, String templateBody,
+                                                                 Map<String, String> parameters,
+                                                                 List<String> capabilities, Map<String, String> tags,
+                                                                 String description, Boolean autoDeploymentEnabled,
+                                                                 Boolean retainStacksOnAccountRemoval,
+                                                                 Boolean managedExecutionActive) {
+        return updateStackSet(name, templateBody, parameters, capabilities, tags, description, null,
+                autoDeploymentEnabled, retainStacksOnAccountRemoval, managedExecutionActive, true);
+    }
+
+    private StackSetOperation updateStackSet(String name, String templateBody, Map<String, String> parameters,
+                                             List<String> capabilities, Map<String, String> tags, String description,
+                                             String requestedOperationId, Boolean autoDeploymentEnabled,
+                                             Boolean retainStacksOnAccountRemoval, Boolean managedExecutionActive,
+                                             boolean replaceSettings) {
         StackSet ss = getStackSetOrThrow(name);
+        if (replaceSettings) {
+            if ("SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+                autoDeploymentEnabled = Boolean.TRUE.equals(autoDeploymentEnabled);
+            }
+            retainStacksOnAccountRemoval = Boolean.TRUE.equals(retainStacksOnAccountRemoval);
+            managedExecutionActive = Boolean.TRUE.equals(managedExecutionActive);
+        }
+        if (autoDeploymentEnabled != null && !"SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "AutoDeployment is valid only for SERVICE_MANAGED StackSets.", 400);
+        }
         // Checked against the template and parameters the update leaves the stack set with, before
         // either is changed or an operation is recorded.
         String keptTemplate = templateBody != null && !templateBody.isBlank() ? templateBody : ss.getTemplateBody();
         requireValidTemplate(keptTemplate);
-        cfnService.requireParameterValues(keptTemplate,
-                parameters != null && !parameters.isEmpty() ? parameters : ss.getParameters());
+        Map<String, String> updatedParameters = replaceSettings
+                ? (parameters == null ? Map.of() : parameters)
+                : (parameters != null && !parameters.isEmpty() ? parameters : ss.getParameters());
+        cfnService.requireParameterValues(keptTemplate, updatedParameters);
         String operationId = reserveOperation(name, "UPDATE", requestedOperationId).getOperationId();
         if (templateBody != null && !templateBody.isBlank()) {
             ss.setTemplateBody(templateBody);
         }
-        if (parameters != null && !parameters.isEmpty()) {
-            ss.setParameters(new LinkedHashMap<>(parameters));
-        }
-        if (capabilities != null && !capabilities.isEmpty()) {
+        ss.setParameters(new LinkedHashMap<>(updatedParameters));
+        if (replaceSettings || (capabilities != null && !capabilities.isEmpty())) {
             ss.getCapabilities().clear();
-            ss.getCapabilities().addAll(capabilities);
+            if (capabilities != null) {
+                ss.getCapabilities().addAll(capabilities);
+            }
         }
-        if (tags != null && !tags.isEmpty()) {
-            ss.setTags(new LinkedHashMap<>(tags));
+        if (replaceSettings || (tags != null && !tags.isEmpty())) {
+            ss.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
         }
-        if (description != null) {
+        if (replaceSettings || description != null) {
             ss.setDescription(description);
         }
         if (autoDeploymentEnabled != null) {
-            if (!"SERVICE_MANAGED".equals(ss.getPermissionModel())) {
-                completeOperation(name, operationId, "FAILED");
-                throw new AwsException("InvalidOperationException",
-                        "AutoDeployment is valid only for SERVICE_MANAGED StackSets.", 400);
-            }
             ss.setAutoDeploymentEnabled(autoDeploymentEnabled);
         }
         if (retainStacksOnAccountRemoval != null) ss.setRetainStacksOnAccountRemoval(retainStacksOnAccountRemoval);
@@ -301,7 +370,7 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         }
     }
 
-    public void deleteStackSet(String name) {
+    public synchronized void deleteStackSet(String name) {
         getStackSetOrThrow(name);
         if (!listStackInstances(name, null, null).isEmpty()) {
             throw new AwsException("StackSetNotEmptyException",
@@ -309,6 +378,43 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         }
         stackSets.delete(name);
         LOG.infov("Deleted StackSet: {0}", name);
+    }
+
+    public synchronized boolean mutateStackSetResource(String stackSetId, Consumer<StackSet> mutation) {
+        if (stackSetId == null || stackSetId.indexOf(':') < 1) {
+            return false;
+        }
+        String name = stackSetId.substring(0, stackSetId.indexOf(':'));
+        StackSet stackSet = stackSets.get(name).orElse(null);
+        if (stackSet == null || !stackSetId.equals(stackSet.getStackSetId())) {
+            return false;
+        }
+        mutation.accept(stackSet);
+        return true;
+    }
+
+    /**
+     * Deletes every stack instance with its stack, then the stack set, as deleting an
+     * {@code AWS::CloudFormation::StackSet} resource does. A stack set already gone is left alone.
+     */
+    public synchronized void deleteStackSetWithInstances(String name) {
+        StackSet stackSet = stackSets.get(name).orElse(null);
+        if (stackSet == null) {
+            return;
+        }
+        for (StackInstance instance : listStackInstances(name, null, null)) {
+            removeInstance(stackSet, instance, false);
+        }
+        if (listStackInstances(name, null, null).isEmpty()) {
+            deleteAutoDeploymentTargets(name);
+        }
+        deleteStackSet(name);
+    }
+
+    private void deleteAutoDeploymentTargets(String name) {
+        for (StackSetAutoDeploymentTarget target : listStackSetAutoDeploymentTargets(name)) {
+            autoDeploymentTargets.delete(name + "::" + target.getOrganizationalUnitId());
+        }
     }
 
     // ── Instances ──────────────────────────────────────────────────────────────

@@ -1,9 +1,11 @@
 package io.floci.aws.services.emrserverless;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -11,6 +13,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
@@ -40,15 +43,18 @@ import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
@@ -59,7 +65,10 @@ import static io.floci.aws.services.emrserverless.SparkJobRunner.Engine.SPARK;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -67,6 +76,7 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
@@ -85,8 +95,15 @@ class EmrServerlessSparkRunnerTest {
             "floci-aws-emr-j-2AXXXXXXGAPLF-home", "floci-aws-emr-j-2AXXXXXXGAPLF-mnt")
             .withHdfs("ip-10-0-0-1.ec2.internal", "172.18.0.5", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs");
 
+    // The same, on its cluster's YARN, with a step's AWS environment for its containers.
+    private static final SparkJobRunner.Storage ON_YARN = STORAGE.withYarn("ip-10-0-0-1.ec2.internal",
+            "http://floci:4566");
+    private static final List<String> AWS_ENVIRONMENT = List.of("AWS_ACCESS_KEY_ID=ASIASTEP",
+            "AWS_ENDPOINT_URL=http://floci:4566");
+
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+    private final LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
     private final DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
     private final SparkJobRunner.Progress progress = mock(SparkJobRunner.Progress.class);
     private final S3Service s3 = mock(S3Service.class);
@@ -180,7 +197,7 @@ class EmrServerlessSparkRunnerTest {
                 "-i", "s3://bucket/queries/init.sql", "-f", "s3://bucket/queries/report.sql",
                 "--hivevar", "day=2026-11-03");
 
-        List<String> arguments = EmrServerlessSparkRunner.hiveArguments(hiveJob(application), ENDPOINT);
+        List<String> arguments = EmrServerlessSparkRunner.hiveArguments(hiveJob(application), ENDPOINT, List.of());
 
         assertEquals(List.of(
                 "--hiveconf", "fs.s3a.endpoint=http://floci:4566",
@@ -214,6 +231,8 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.size() == 5
                 && List.of("/bin/bash", "-c").equals(entrypoint.subList(0, 2))
                 && entrypoint.get(2).contains("setpriv --reuid=hadoop --regid=hadoop --clear-groups \"$@\"")
+                // While it is still root, which owns Hive's lib folder.
+                && entrypoint.get(2).contains(EmrServerlessSparkRunner.HIVE_ONE_SDK + "\nexport HOME=~hadoop\n")
                 && List.of("floci", "/usr/bin/hive").equals(entrypoint.subList(3, 5))));
         verify(spec).withCmd(argThat((List<String> cmd) -> "--hiveconf".equals(cmd.getFirst())
                 && List.of("-f", "s3://bucket/queries/report.sql").equals(cmd.subList(cmd.size() - 2, cmd.size()))));
@@ -238,9 +257,13 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.size() == 7
                 && List.of("floci", "hive-script", "--run-hive-script", "--args")
                 .equals(entrypoint.subList(3, 7))));
-        verify(spec).withCmd(EmrServerlessSparkRunner.hiveArguments(step, ENDPOINT));
+        verify(spec).withCmd(EmrServerlessSparkRunner.hiveArguments(step, ENDPOINT, List.of()));
         verify(spec).withNamedVolume("j-1-home", "/home/hadoop");
         verify(spec).withNamedVolume("j-1-mnt", "/mnt");
+        // It runs on its cluster's primary node, which its node's files name.
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "MASTER");
+        verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.get(2).contains(
+                EmrServerlessSparkRunner.NODE_INFO)));
         // In its cluster's image, which holds Spark too, Hive reads its own Hadoop configuration.
         verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.get(2).contains(
                 "if [ -d /etc/hadoop/conf.hive ]; then export HADOOP_CONF_DIR=/etc/hadoop/conf.hive; fi")));
@@ -252,7 +275,7 @@ class EmrServerlessSparkRunnerTest {
     void anEmrHiveStepsHiveReachesItsClustersHdfsAndMetastoreServiceOnItsPrimaryNode() {
         List<String> arguments = EmrServerlessSparkRunner.hiveArguments(
                 hiveStep(List.of("--hiveconf", "hive.exec.reducers.max=8", "-f", "s3://bucket/queries/report.q")),
-                ENDPOINT);
+                ENDPOINT, List.of());
 
         int tez = arguments.indexOf("tez.am.client.am.port-range=40000-40100");
         assertEquals(List.of(
@@ -270,7 +293,7 @@ class EmrServerlessSparkRunnerTest {
         SparkJobRunner.Job step = hiveStep(List.of("-f", "s3://bucket/queries/report.q"));
         List<String> arguments = EmrServerlessSparkRunner.hiveArguments(step.onStorage(
                 new SparkJobRunner.Storage("j-1-home", "j-1-mnt").withHdfs("ip-10-0-0-1.ec2.internal", "127.0.0.1",
-                        null)), ENDPOINT);
+                        null)), ENDPOINT, List.of());
 
         int tez = arguments.indexOf("tez.am.client.am.port-range=40000-40100");
         assertEquals(List.of(
@@ -351,9 +374,311 @@ class EmrServerlessSparkRunnerTest {
         verify(lifecycle, never()).copyJavaTrustStore(anyString());
         // The release's image is not in an ECR repository, so it is pulled once, as the container is created.
         verify(lifecycle, never()).resolveImageForLaunch(anyString(), any(), any());
-        // An EMR Serverless run has no cluster, nor its storage or network.
+        // An EMR Serverless run has no cluster, nor its storage or network, nor a node's files.
         verify(spec, never()).withNamedVolume(anyString(), anyString());
-        verify(lifecycle, never()).connectToNetwork(anyString(), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_INSTANCE_ROLE"), anyString());
+        verify(lifecycle, never()).connectToNetwork(anyString(), anyString(), any());
+    }
+
+    @Test
+    void aSparkRunsExecutorsRunApartOnlyOnANetworkOfContainers() {
+        SparkJobRunner.Job apart = executorsJob(Map.of());
+
+        assertTrue(EmrServerlessSparkRunner.executorsApart(apart, "floci-network"));
+        assertTrue(EmrServerlessSparkRunner.executorsApart(apart, null));
+        // On the host's network, or in another container's namespace, its ports would meet another run's.
+        assertFalse(EmrServerlessSparkRunner.executorsApart(apart, "host"));
+        assertFalse(EmrServerlessSparkRunner.executorsApart(apart, "container:floci"));
+        // A job without them, a Hive run and a step keep their executors where they were.
+        assertFalse(EmrServerlessSparkRunner.executorsApart(job(Duration.ZERO), "floci-network"));
+        assertFalse(EmrServerlessSparkRunner.executorsApart(hiveJob(List.of()).withExecutors(EXECUTORS),
+                "floci-network"));
+        assertFalse(EmrServerlessSparkRunner.executorsApart(stepJob(Map.of()).withExecutors(EXECUTORS),
+                "floci-network"));
+    }
+
+    @Test
+    void aRunWhoseExecutorsRunApartTakesItsMasterFromItsContainerAndHasItsUiOn() {
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(
+                executorsJob(Map.of("spark.ui.enabled", "false")), ENDPOINT);
+
+        assertFalse(arguments.contains("--master"));
+        // Floci's comes before the job's own, which wins.
+        int on = arguments.indexOf("spark.ui.enabled=true");
+        assertTrue(on > 0 && arguments.indexOf("spark.ui.enabled=false") > on);
+        // Its kill links, which any container on the network reaches, the driver's container turns off.
+        assertFalse(arguments.contains("spark.ui.killEnabled=false"));
+    }
+
+    @Test
+    void whatTheDriversContainerForcesComesAfterTheRunsOwnOptionsAndBeforeItsPrimaryResource() {
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job(null,
+                List.of("--conf", "spark.ui.killEnabled=true", "--conf=spark.authenticate.secret=mine", "--master",
+                        "local[2]", "s3://bucket/jobs/app.jar", "--conf", "for-the-app"),
+                Map.of("spark.ui.killEnabled", "true"), Duration.ZERO).withExecutors(EXECUTORS), ENDPOINT);
+
+        // The driver's container gives its master, secret and kill links after the options its count covers,
+        // the run's own settings and options among them, and before the run's primary resource.
+        int options = SparkExecutors.optionCount(arguments);
+        assertEquals("s3://bucket/jobs/app.jar", arguments.get(options));
+        assertTrue(arguments.subList(0, options).containsAll(List.of("spark.ui.killEnabled=true",
+                "--conf=spark.authenticate.secret=mine", "--master", "local[2]")));
+    }
+
+    @Test
+    void theDriverOfARunWhoseExecutorsRunApartStartsTheMasterWithTheRunsSecretThenFlociAsksItsUi() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        EmrServerlessSparkRunner runner = runner(builder);
+        List<List<String>> asked = ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
+
+        runner.run(executorsJob(Map.of()), progress);
+
+        // spark-submit, then how many of its arguments are options, which the wrapper puts its own after.
+        ArgumentCaptor<List<String>> cmd = ArgumentCaptor.captor();
+        verify(spec).withCmd(cmd.capture());
+        verify(spec).withEntrypoint(List.of("/bin/bash", "-c", SparkExecutors.DRIVER_WRAPPER, "floci",
+                "/usr/lib/spark/bin/spark-submit", String.valueOf(SparkExecutors.optionCount(cmd.getValue()))));
+        assertEquals("s3://bucket/jobs/app.jar", cmd.getValue().get(SparkExecutors.optionCount(cmd.getValue())));
+        verify(spec).withEnv(eq(SparkExecutors.SECRET_VARIABLE),
+                argThat((String secret) -> secret.matches("[0-9a-f]{64}")));
+        assertFalse(cmd.getValue().contains("--master"));
+        assertEquals(List.of("curl", "-sf", "-m", "2", "http://127.0.0.1:4040/api/v1/applications"),
+                asked.getFirst());
+        verify(lifecycle, never()).createAndStart(any());
+    }
+
+    @Test
+    void aRunsExecutorsContainersGoWithItsDriver() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("executor",
+                Map.of()));
+        EmrServerlessSparkRunner runner = runner(builder);
+        // A driver whose settings leave dynamic allocation off, so its two executor instances start at once.
+        ContainerExecStubs.completeEveryExec(docker, "driver", 0L, "[{\"id\": \"app-1\"}]", "");
+
+        assertEquals(0, runner.run(executorsJob(Map.of()), progress).exitCode());
+
+        verify(lifecycle, times(2)).createAndStart(any());
+        verify(lifecycle, times(2)).stopAndRemove("executor", null, 0);
+    }
+
+    @Test
+    void onTheHostsNetworkARunsExecutorsRunInItsDriversContainer() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveDockerNetwork(Optional.of("floci-network"))).thenReturn(Optional.of("host"));
+
+        runner(builder).run(executorsJob(Map.of()), progress);
+
+        verify(spec).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
+        verify(spec).withCmd(argThat((List<String> cmd) -> List.of("--master", "local[*]").equals(cmd.subList(0, 2))));
+        verify(spec, never()).withEnv(eq(SparkExecutors.SECRET_VARIABLE), anyString());
+    }
+
+    @Test
+    void anExecutorsContainerIsAWorkerOnTheDriversNetworkLabelledAsTheRunsAndGoesWhenRemoved() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("executor",
+                Map.of()));
+        when(lifecycle.resolveContainerNetworkIp("executor", "floci-network")).thenReturn("172.18.0.9");
+        SparkExecutors.Containers containers = runner(builder).executorContainers(executorsJob(Map.of()),
+                "sha256:image", "floci-network", "172.18.0.4", "secret", AWS_ENVIRONMENT,
+                Map.of(ContainerStorageHelper.SERVICE_LABEL, "emr-serverless"));
+
+        SparkExecutors.Worker worker = containers.start(2, FOUR_CORE_EXECUTOR);
+        containers.remove(worker.containerId());
+
+        assertEquals(new SparkExecutors.Worker("executor", "172.18.0.9"), worker);
+        verify(builder).newContainer("sha256:image");
+        verify(spec).withName(ContainerStorageHelper.dockerName(config, "emr-serverless-00f0000000000001-executor-2"));
+        verify(spec).withEntrypoint(List.of("/bin/bash", "-c", SparkExecutors.WORKER_SCRIPT));
+        // The driver's AWS environment, its master and secret, and the executor's cores and memory.
+        verify(spec).withEnv(AWS_ENVIRONMENT);
+        verify(spec).withEnv(SparkExecutors.SECRET_VARIABLE, "secret");
+        verify(spec).withEnv(SparkExecutors.MASTER_VARIABLE, "172.18.0.4");
+        verify(spec).withEnv(SparkExecutors.CORES_VARIABLE, "4");
+        verify(spec).withEnv(SparkExecutors.MEMORY_VARIABLE, "14336");
+        verify(spec).withDockerNetwork(Optional.of("floci-network"));
+        verify(spec).withJavaTrustStore();
+        // Found by a reset and the leftover sweep as the run's driver is.
+        verify(spec).withLabels(argThat(labels -> "emr-serverless".equals(labels.get(ContainerStorageHelper.SERVICE_LABEL))
+                && SparkExecutors.COMPONENT.equals(labels.get(ContainerStorageHelper.COMPONENT_LABEL))));
+        verify(lifecycle).stopAndRemove("executor", null, 0);
+    }
+
+    @Test
+    void anExecutorsContainerWhoseAddressCannotBeFoundGoesBeforeItIsTheRunsToRemove() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("executor",
+                Map.of()));
+        when(lifecycle.resolveContainerNetworkIp("executor", "floci-network"))
+                .thenThrow(new IllegalStateException("no address"));
+        SparkExecutors.Containers containers = runner(builder).executorContainers(executorsJob(Map.of()),
+                "sha256:image", "floci-network", "172.18.0.4", "secret", AWS_ENVIRONMENT, Map.of());
+
+        assertThrows(IllegalStateException.class, () -> containers.start(1, FOUR_CORE_EXECUTOR));
+
+        verify(lifecycle).stopAndRemove("executor", null, 0);
+    }
+
+    @Test
+    void aDriverThatCannotBeAskedAnswersNothing() {
+        EmrServerlessSparkRunner runner = runner(mock(ContainerBuilder.class));
+        when(docker.execCreateCmd("driver")).thenThrow(new NotFoundException("gone"));
+
+        assertNull(runner.driver("driver").get(SparkExecutors.DRIVER_UI_PORT, "/api/v1/applications"));
+    }
+
+    @Test
+    void theRunsOfAnApplicationShareOneCapacityWhichGoesWithTheLast() {
+        EmrServerlessSparkRunner runner = runner();
+        SparkExecutors.Capacity first = runner.joinCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a");
+        SparkExecutors.Capacity second = runner.joinCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a");
+
+        assertSame(first, second);
+        assertNotSame(first, runner.joinCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/b"));
+        // A run of no application shares it with none.
+        assertNotSame(runner.joinCapacity(null), runner.joinCapacity(null));
+        runner.leaveCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a", first);
+        assertSame(first, runner.joinCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a"));
+        runner.leaveCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a", first);
+        runner.leaveCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a", first);
+        assertNotSame(first, runner.joinCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a"));
+    }
+
+    @Test
+    void aDriverWhoseAddressLookupFailsLeavesItsApplicationsCapacity() {
+        String application = "arn:aws:emr-serverless:eu-west-1:123456789012:/app/failed-driver";
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveDockerNetwork(Optional.of("floci-network"))).thenReturn(Optional.of("floci-network"));
+        EmrServerlessSparkRunner runner = runner(builder);
+        NotFoundException addressFailure = new NotFoundException("driver disappeared during address lookup");
+        when(lifecycle.resolveContainerNetworkIp("driver", "floci-network")).thenThrow(addressFailure);
+        SparkJobRunner.Job job = executorsJob(Map.of()).withExecutors(
+                new SparkJobRunner.Executors(2, null, 0, 0, 0, application));
+        SparkJobRunner.Outcome outcome = runner.run(job, progress);
+
+        assertEquals(SparkJobRunner.Outcome.couldNotStart(addressFailure.getMessage()), outcome);
+        verify(progress).started();
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+        verify(lifecycle, never()).createAndStart(any());
+        SparkExecutors.Capacity firstAfterFailure = runner.joinCapacity(application);
+        runner.leaveCapacity(application, firstAfterFailure);
+        SparkExecutors.Capacity secondAfterFailure = runner.joinCapacity(application);
+        assertNotSame(firstAfterFailure, secondAfterFailure,
+                "a balanced subsequent membership must retire its capacity object");
+    }
+
+    @Test
+    void theReleasesImageForARunsExecutorsIsPulledWhenMissingBeforeTheDriverStarts() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        EmrServerlessSparkRunner runner = runner(builder);
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
+
+        runner.run(executorsJob(Map.of()), progress);
+
+        // Not while the run waits for its executors, where a pull would hold up a cancel and the run's timeout.
+        InOrder order = inOrder(lifecycle);
+        order.verify(lifecycle).resolveImageForLaunch("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                ImagePullBehavior.PREFER_CACHED, null);
+        order.verify(lifecycle).create(any());
+    }
+
+    @Test
+    void anArm64RunsDriverAndExecutorsImageAreThoseForArm64() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        EmrServerlessSparkRunner runner = runner(builder);
+        when(lifecycle.create(any(), eq("linux/arm64"))).thenReturn("driver");
+        when(lifecycle.resolveImageForLaunch(anyString(), eq(ImagePullBehavior.PREFER_CACHED), eq("linux/arm64")))
+                .thenAnswer(pull -> new LaunchImage(pull.getArgument(0), null));
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
+
+        runner.run(executorsJob(Map.of()).withPlatform("linux/arm64"), progress);
+
+        // The release's image is published for both architectures, so the driver's is created for arm64, and the
+        // executors' pulled for it.
+        verify(lifecycle).create(any(), eq("linux/arm64"));
+        verify(lifecycle, never()).create(any());
+        verify(lifecycle).resolveImageForLaunch("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                ImagePullBehavior.PREFER_CACHED, "linux/arm64");
+    }
+
+    @Test
+    void anArm64RunsCustomImageIsPulledForArm64() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        String custom = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0";
+        String inFlocisRegistry = "localhost:5100/123456789012/eu-west-1/spark/custom:7.5.0";
+        String pulled = "sha256:" + "6".repeat(64);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveImage(inFlocisRegistry)).thenReturn(inFlocisRegistry);
+        when(ecr.rewriteImageUri(custom)).thenReturn(inFlocisRegistry);
+        when(lifecycle.resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, "linux/arm64"))
+                .thenReturn(new LaunchImage(pulled, null));
+        EmrServerlessSparkRunner runner = runner(builder);
+        when(lifecycle.create(any(), eq("linux/arm64"))).thenReturn("driver");
+
+        // The executors' worker type naming the same custom image.
+        runner.run(customImageJob(custom).withExecutors(new SparkJobRunner.Executors(2, custom, 0, 0, 0, null))
+                .withPlatform("linux/arm64"), progress);
+
+        verify(lifecycle, times(2)).resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, "linux/arm64");
+        verify(builder).newContainer(pulled);
+    }
+
+    @Test
+    void anArm64RunsExecutorsContainerStartsForArm64() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(lifecycle.createAndStart(any(), eq("linux/arm64")))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("executor", Map.of()));
+        when(lifecycle.resolveContainerNetworkIp("executor", "floci-network")).thenReturn("172.18.0.9");
+        SparkExecutors.Containers containers = runner(builder).executorContainers(
+                executorsJob(Map.of()).withPlatform("linux/arm64"), "sha256:image", "floci-network", "172.18.0.4",
+                "secret", AWS_ENVIRONMENT, Map.of());
+
+        containers.start(1, FOUR_CORE_EXECUTOR);
+
+        verify(lifecycle).createAndStart(any(), eq("linux/arm64"));
+        verify(lifecycle, never()).createAndStart(any());
+    }
+
+    @Test
+    void anApplicationsImageForItsExecutorsIsPulledBeforeTheDriverStarts() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        String custom = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/executor:7.5.0";
+        String inFlocisRegistry = "localhost:5100/123456789012/eu-west-1/spark/executor:7.5.0";
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveImage(inFlocisRegistry)).thenReturn(inFlocisRegistry);
+        when(ecr.rewriteImageUri(custom)).thenReturn(inFlocisRegistry);
+        when(lifecycle.resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage("sha256:" + "5".repeat(64), null));
+        EmrServerlessSparkRunner runner = runner(builder);
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
+
+        runner.run(executorsJob(Map.of()).withExecutors(new SparkJobRunner.Executors(2, custom, 0, 0, 0, null)),
+                progress);
+
+        InOrder order = inOrder(lifecycle);
+        order.verify(lifecycle).resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, null);
+        order.verify(lifecycle).create(any());
     }
 
     @Test
@@ -377,6 +702,35 @@ class EmrServerlessSparkRunnerTest {
         verify(lifecycle, times(2)).resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, null);
         verify(builder, times(2)).newContainer(pulled);
         verify(builder, never()).newContainer(custom);
+    }
+
+    @Test
+    void aRunIsToldTheManifestDigestEachWorkerTypesCustomImageResolvedToAndNoneForAnImageWithout() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        String driverImage = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/driver:7.5.0";
+        String executorImage = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/executor:7.5.0";
+        String builtLocally = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/local:7.5.0";
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveImage(anyString())).thenAnswer(resolve -> resolve.getArgument(0));
+        when(ecr.rewriteImageUri(anyString())).thenAnswer(rewrite -> "localhost:5100/" + rewrite.getArgument(0));
+        when(lifecycle.resolveImageForLaunch("localhost:5100/" + driverImage, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage("sha256:" + "1".repeat(64), "sha256:" + "a".repeat(64)));
+        when(lifecycle.resolveImageForLaunch("localhost:5100/" + executorImage, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage("sha256:" + "2".repeat(64), "sha256:" + "b".repeat(64)));
+        when(lifecycle.resolveImageForLaunch("localhost:5100/" + builtLocally, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage("sha256:" + "3".repeat(64), null));
+        EmrServerlessSparkRunner runner = runner(builder);
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
+
+        runner.run(customImageJob(driverImage)
+                .withExecutors(new SparkJobRunner.Executors(2, executorImage, 0, 0, 0, null)), progress);
+        runner.run(customImageJob(builtLocally), progress);
+
+        // Each for the worker type that runs it.
+        verify(progress).imageResolved(SparkJobRunner.WorkerType.DRIVER, "sha256:" + "a".repeat(64));
+        verify(progress).imageResolved(SparkJobRunner.WorkerType.EXECUTOR, "sha256:" + "b".repeat(64));
+        verify(progress, times(2)).imageResolved(any(), any());
     }
 
     @Test
@@ -599,7 +953,7 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withExtraHost("ip-10-0-0-1.ec2.internal", "172.18.0.5");
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).create(any());
-        order.verify(lifecycle).connectToNetwork("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs");
+        order.verify(lifecycle).connectToNetwork("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs", null);
         order.verify(lifecycle).startCreated(eq("driver"), any());
         // After Floci's S3 settings, before the cluster's spark-defaults, which win.
         assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(19));
@@ -611,6 +965,104 @@ class EmrServerlessSparkRunnerTest {
                         + "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager",
                 "--conf", "spark.hadoop.fs.defaultFS=file:///",
                 "s3://bucket/jobs/report.py"), arguments.subList(20, arguments.size()));
+    }
+
+    @Test
+    void aStepWritesTheCopiesOfABlockItsCoreNodesKeep() {
+        SparkJobRunner.Job job = stepJob(Map.of()).onStorage(STORAGE.withReplication(2));
+
+        assertTrue(EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566", List.of())
+                .contains("spark.hadoop.dfs.replication=2"));
+        assertTrue(EmrServerlessSparkRunner.hiveArguments(job, "http://floci:4566", List.of())
+                .contains("dfs.replication=2"));
+    }
+
+    @Test
+    void aStepOnAClusterWhoseHdfsIsOnItsPrimaryNodeLeavesTheCopiesOfABlockAlone() {
+        SparkJobRunner.Job job = stepJob(Map.of()).onStorage(STORAGE);
+
+        assertFalse(EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566", List.of()).toString()
+                .contains("dfs.replication"));
+    }
+
+    @Test
+    void aStepOnItsClustersYarnSubmitsToItsResourceManagerWithExecutorsSizedForItsNode() {
+        SparkJobRunner.Job job = stepJob(Map.of("spark.executor.memory", "2g"))
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci:4566"));
+
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566",
+                List.of("AWS_ACCESS_KEY_ID=ASIASTEP", "AWS_ENDPOINT_URL=http://floci:4566"));
+
+        assertEquals(List.of("--master", "yarn"), arguments.subList(0, 2));
+        // The ResourceManager on the primary node; Spark's jars from the node's image, which is the step's.
+        assertTrue(arguments.contains("spark.hadoop.yarn.resourcemanager.hostname=ip-10-0-0-1.ec2.internal"));
+        assertTrue(arguments.contains("spark.yarn.jars=local:/usr/lib/spark/jars/*"));
+        // Floci's sizes for the NodeManager, which the cluster's spark-defaults replace.
+        int floci = arguments.indexOf("spark.executor.memory=1g");
+        assertTrue(floci > 0 && arguments.indexOf("spark.executor.memory=2g") > floci, arguments.toString());
+        assertTrue(arguments.contains("spark.executor.cores=1"));
+        assertTrue(arguments.contains("spark.driver.memory=2g"));
+        assertTrue(arguments.contains("spark.driver.cores=1"));
+        // A client-mode driver is reached at its container's name on the cluster's network.
+        assertTrue(arguments.contains("spark.driver.host=s-1a2b3c4d5e6f7"));
+        assertTrue(arguments.contains("spark.driver.bindAddress=0.0.0.0"));
+        // Each executor, and a cluster-mode driver, has the step's AWS environment.
+        assertTrue(arguments.contains("spark.executorEnv.AWS_ACCESS_KEY_ID=ASIASTEP"));
+        assertTrue(arguments.contains("spark.yarn.appMasterEnv.AWS_ACCESS_KEY_ID=ASIASTEP"));
+        assertTrue(arguments.contains("spark.executorEnv.AWS_ENDPOINT_URL=http://floci:4566"));
+        assertTrue(arguments.contains("spark.hadoop.fs.s3a.endpoint=http://floci:4566"));
+        assertTrue(EmrServerlessSparkRunner.sparkDefaultsFile(job, "http://floci:4566", List.of())
+                .startsWith("spark.master yarn\n"));
+    }
+
+    @Test
+    void aStepNotOnYarnRunsInLocalModeWithNoneOfYarnsSettings() {
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT);
+
+        assertEquals(List.of("--master", "local[*]"), arguments.subList(0, 2));
+        assertFalse(arguments.stream().anyMatch(argument -> argument.startsWith("spark.yarn.")
+                || argument.startsWith("spark.executorEnv.") || argument.startsWith("spark.driver.host=")),
+                arguments.toString());
+    }
+
+    @Test
+    void aStepOnItsClustersYarnJoinsItsNetworkByTheNameItsDriverIsReachedAtAndReachesFlociThere() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        SparkJobRunner.Job job = stepJob(Map.of())
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci-on-cluster:4566"));
+        when(awsEnv.sdkBaselineEnv("eu-west-1", Optional.empty(), "http://floci-on-cluster:4566", Optional.empty(),
+                "123456789012")).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIASTEP"));
+
+        runner(builder).run(job, progress);
+
+        InOrder order = inOrder(lifecycle);
+        order.verify(lifecycle).create(any());
+        order.verify(lifecycle).ensureConnected("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs", "s-1a2b3c4d5e6f7", null);
+        order.verify(lifecycle).startCreated(eq("driver"), any());
+        verify(lifecycle, never()).connectToNetwork(anyString(), anyString(), any());
+        // Floci's address on the cluster's network, where its executors reach it too, not on Floci's own.
+        verify(spec).withCmd(argThat((List<String> arguments) ->
+                arguments.contains("spark.hadoop.fs.s3a.endpoint=http://floci-on-cluster:4566")
+                        && arguments.contains("spark.executorEnv.AWS_ACCESS_KEY_ID=ASIASTEP")));
+    }
+
+    @Test
+    void aCommandsOwnSparkSubmitOnItsClustersYarnGetsItsSettingsInItsSparkDefaults() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        SparkJobRunner.Job job = commandJob(List.of("bash", "-c", "spark-submit s3://bucket/app.py"), Map.of())
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci-on-cluster:4566"));
+        when(awsEnv.sdkBaselineEnv(eq("eu-west-1"), eq(Optional.empty()), eq("http://floci-on-cluster:4566"), any(),
+                anyString())).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIASTEP"));
+
+        runner(builder).run(job, progress);
+
+        verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"), argThat(file -> file.startsWith("spark.master yarn\n")
+                && file.contains("spark.hadoop.yarn.resourcemanager.hostname ip-10-0-0-1.ec2.internal")
+                && file.contains("spark.executorEnv.AWS_ACCESS_KEY_ID ASIASTEP")));
     }
 
     @Test
@@ -628,6 +1080,274 @@ class EmrServerlessSparkRunnerTest {
         assertEquals("--conf", arguments.get(metastore - 1));
         // Floci's, before the cluster's spark-defaults and spark-hive-site, which win.
         assertTrue(arguments.indexOf(glue) > metastore, arguments.toString());
+    }
+
+    @Test
+    void aMapReduceJobOnItsClustersYarnRunsThereFromItsNodesLayout() {
+        String site = EmrServerlessSparkRunner.mapredSite(stepJob(Map.of()).onStorage(ON_YARN), AWS_ENVIRONMENT);
+
+        assertTrue(site.contains("<name>mapreduce.framework.name</name><value>yarn</value>"), site);
+        assertFalse(site.contains("<value>local</value>"), site);
+        assertFalse(site.contains("mapreduce.jobtracker.staging.root.dir"), site);
+        // The image's real layout, which yarn.application.classpath's default does not name, and S3A's AWS SDK.
+        assertTrue(site.contains("<name>mapreduce.application.classpath</name><value>"
+                + "/usr/lib/hadoop-mapreduce/*,/usr/lib/hadoop-mapreduce/lib/*,/usr/lib/hadoop/*,/usr/lib/hadoop/lib/*,"
+                + "/usr/lib/hadoop-hdfs/*,/usr/lib/hadoop-hdfs/lib/*,/usr/lib/hadoop-yarn/*,/usr/lib/hadoop-yarn/lib/*,"
+                + "/usr/lib/hadoop-lzo/lib/*,/usr/share/aws/aws-java-sdk-v2/*,"
+                + "/usr/share/aws/emr/serverless-goodies/lib/emr-serverless-spark-goodies.jar</value>"), site);
+        // Java 17's options, the MapReduce home and the step's AWS environment, for all three kinds of container.
+        for (String name : List.of("yarn.app.mapreduce.am.env", "mapreduce.map.env", "mapreduce.reduce.env")) {
+            assertTrue(site.contains("<name>" + name + "</name><value>JDK_JAVA_OPTIONS="
+                    + EmrServerlessSparkRunner.yarnJavaOptions() + ",HADOOP_MAPRED_HOME=/usr/lib/hadoop-mapreduce,"
+                    + "AWS_ACCESS_KEY_ID=ASIASTEP,AWS_ENDPOINT_URL=http://floci:4566</value>"), site);
+        }
+        assertTrue(site.contains("<name>yarn.app.mapreduce.am.resource.mb</name><value>1024</value>"), site);
+        assertTrue(site.contains("<name>mapreduce.map.memory.mb</name><value>768</value>"), site);
+        assertTrue(site.contains("<name>mapreduce.reduce.memory.mb</name><value>768</value>"), site);
+    }
+
+    @Test
+    void anEmrSparkReleasesMapReduceRunsFromTheHadoopItsImageKeepsApart() {
+        String site = EmrServerlessSparkRunner.mapredSite(
+                onRelease("emr-spark-8.1.0", stepJob(Map.of()).onStorage(ON_YARN)), List.of());
+
+        assertTrue(site.contains("<value>/opt/hadoop-mapreduce/*,/opt/hadoop-mapreduce/lib/*,/opt/hadoop/*"), site);
+        assertTrue(site.contains(",HADOOP_MAPRED_HOME=/opt/hadoop-mapreduce</value>"), site);
+    }
+
+    @Test
+    void aCommandsTezOnItsClustersYarnRunsStockTezThereAsHivesDoes() {
+        String site = EmrServerlessSparkRunner.tezSite(stepJob(Map.of()).onStorage(ON_YARN), AWS_ENVIRONMENT);
+
+        for (String setting : List.of("tez.local.mode</name><value>false",
+                "yarn.resourcemanager.hostname</name><value>ip-10-0-0-1.ec2.internal",
+                "tez.framework.client</name><value>org.apache.tez.client.TezYarnClient",
+                "tez.am.yarn.scheduler.class</name><value>org.apache.tez.dag.app.rm.YarnTaskSchedulerService",
+                "tez.am.shuffle.auxiliary-service.id</name><value>mapreduce_shuffle",
+                "tez.lib.uris</name><value>file:///usr/lib/tez/,file:///usr/lib/tez/lib/",
+                "tez.use.cluster.hadoop-libs</name><value>false",
+                "tez.am.resource.memory.mb</name><value>1024",
+                "tez.task.resource.memory.mb</name><value>768",
+                "tez.runtime.intermediate-output.should-compress</name><value>false")) {
+            assertTrue(site.contains("<name>" + setting + "</value>"), setting + " in " + site);
+        }
+        // Without Hive's jar or home, which a command's Tez does not run.
+        assertTrue(site.contains("<name>tez.cluster.additional.classpath.prefix</name><value>$PWD/*:/usr/lib/tez/*:"
+                + "/usr/lib/tez/lib/*:/usr/lib/hadoop-mapreduce/*:/usr/lib/hadoop-mapreduce/lib/*:/usr/lib/hadoop/*:"
+                + "/usr/lib/hadoop/lib/*:/usr/lib/hadoop-hdfs/*:/usr/lib/hadoop-hdfs/lib/*:/usr/lib/hadoop-yarn/*:"
+                + "/usr/lib/hadoop-yarn/lib/*:/usr/lib/hadoop-lzo/lib/*</value>"), site);
+        String environment = "</name><value>JDK_JAVA_OPTIONS=" + EmrServerlessSparkRunner.yarnJavaOptions()
+                + ",TEZ_HOME=/usr/lib/tez,AWS_ACCESS_KEY_ID=ASIASTEP,AWS_ENDPOINT_URL=http://floci:4566</value>";
+        assertTrue(site.contains("<name>tez.am.launch.env" + environment), site);
+        assertTrue(site.contains("<name>tez.task.launch.env" + environment), site);
+        assertFalse(site.contains("hive"), site);
+    }
+
+    @Test
+    void aCommandsTezWhereThereIsNoYarnRunsInLocalModeWithoutTheJarsAContainerIsGiven() {
+        String site = EmrServerlessSparkRunner.tezSite(stepJob(Map.of()).onStorage(STORAGE), List.of());
+
+        assertEquals("<property><name>tez.local.mode</name><value>true</value></property>\n"
+                + "<property><name>tez.ignore.lib.uris</name><value>true</value></property>\n"
+                + "<property><name>tez.runtime.optimize.local.fetch</name><value>true</value></property>", site);
+    }
+
+    @Test
+    void aCommandOnItsClusterGetsItsTezSite() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("pig", "-e", "fs -ls /"), Map.of(), STORAGE), progress);
+
+        verify(spec).withEnv(eq("FLOCI_TEZ_SITE"), argThat(site -> site.contains(
+                "<name>tez.local.mode</name><value>true</value>")));
+    }
+
+    @Test
+    void aClustersMapredSiteReplacesFlocisSettingsOnYarn() {
+        String site = EmrServerlessSparkRunner.mapredSite(hadoopJob(null,
+                Map.of("mapreduce.map.memory.mb", "2048"), Map.of(), Map.of()).onStorage(ON_YARN), List.of());
+
+        assertTrue(site.indexOf("<value>2048</value>") > site.indexOf("<value>768</value>"), site);
+    }
+
+    @Test
+    void aJobOnYarnKeepsItsStagingFolderInHdfsWithHdfssOwnClient() {
+        String site = EmrServerlessSparkRunner.hadoopSite(stepJob(Map.of()).onStorage(ON_YARN), ENDPOINT);
+
+        assertTrue(site.contains("<name>fs.hdfs.impl</name>"
+                + "<value>org.apache.hadoop.hdfs.DistributedFileSystem</value>"), site);
+        assertFalse(site.contains("viewfs"), site);
+        // Where there is no YARN, the local job runner's staging folder needs the view.
+        assertTrue(EmrServerlessSparkRunner.hadoopSite(stepJob(Map.of()), ENDPOINT).contains("viewfs"));
+    }
+
+    @Test
+    void aStepOnYarnRunsItsHadoopCommandFromTheNodesHadoopAndKnowsItsResourceManager() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("bash", "-c", "hadoop version"), Map.of(), ON_YARN), progress);
+
+        verify(spec).withEnv("FLOCI_HADOOP_ROOT", "/usr/lib");
+        verify(spec).withEnv("FLOCI_YARN_SITE",
+                "<property><name>yarn.resourcemanager.hostname</name><value>ip-10-0-0-1.ec2.internal</value></property>");
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
+                "  if [ -n \"${FLOCI_YARN_SITE:-}\" ]; then",
+                "    site yarn-site.xml \"$FLOCI_YARN_SITE\"",
+                "  fi"))
+                && entrypoint.get(2).contains(
+                        "\"export HADOOP_HOME=$r/hadoop HADOOP_COMMON_HOME=$r/hadoop HADOOP_LIBEXEC_DIR=$r/hadoop/libexec"
+                                + " HADOOP_HDFS_HOME=$r/hadoop-hdfs HADOOP_MAPRED_HOME=$r/hadoop-mapreduce"
+                                + " HADOOP_YARN_HOME=$r/hadoop-yarn\"")
+                && entrypoint.get(2).contains("'export HADOOP_CLASSPATH=\"${HADOOP_CLASSPATH:-}:"
+                        + "/usr/share/aws/aws-java-sdk-v2/*:"
+                        + "/usr/share/aws/emr/serverless-goodies/lib/emr-serverless-spark-goodies.jar\"'")
+                && entrypoint.get(2).contains("\"exec $r/hadoop/bin/hadoop \\\"\\$@\\\"\" > /tmp/floci-bin/hadoop")
+                && entrypoint.get(2).contains("\"exec /tmp/floci-bin/hadoop jar $r/hadoop-mapreduce/hadoop-streaming.jar"
+                        + " \\\"\\$@\\\"\" > /tmp/floci-bin/hadoop-streaming")));
+    }
+
+    @Test
+    void aStepOnAnEmrSparkReleasesYarnRunsItsHadoopCommandFromTheHadoopItsImageKeepsApart() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(onRelease("emr-spark-8.1.0",
+                commandJob(List.of("bash", "-c", "hadoop version"), Map.of(), ON_YARN)), progress);
+
+        verify(spec).withEnv("FLOCI_HADOOP_ROOT", "/opt");
+    }
+
+    @Test
+    void aStepWhereThereIsNoYarnKeepsTheLocalJobRunnersHadoop() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("bash", "-c", "hadoop version"), Map.of(), STORAGE), progress);
+
+        verify(spec, never()).withEnv(eq("FLOCI_HADOOP_ROOT"), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_YARN_SITE"), anyString());
+    }
+
+    @Test
+    void aHiveStepOnItsClustersYarnRunsStockTezThereInPlaceOfEmrServerlesssPlugins() {
+        List<String> arguments = EmrServerlessSparkRunner.hiveArguments(
+                hiveJob(List.of("-e", "select 1")).onStorage(ON_YARN), ENDPOINT, AWS_ENVIRONMENT);
+
+        assertFalse(arguments.contains("tez.local.mode=true"), arguments.toString());
+        for (String setting : List.of(
+                "tez.local.mode=false",
+                "yarn.resourcemanager.hostname=ip-10-0-0-1.ec2.internal",
+                "tez.framework.client=org.apache.tez.client.TezYarnClient",
+                "tez.am.class=org.apache.tez.dag.app.DAGAppMaster",
+                "tez.task.class=org.apache.tez.runtime.task.TezChild",
+                "tez.am.yarn.scheduler.class=org.apache.tez.dag.app.rm.YarnTaskSchedulerService",
+                "tez.am.yarn.communicator.class=org.apache.tez.dag.app.TezTaskCommunicatorImpl",
+                "tez.am.yarn.container-launcher.class=org.apache.tez.dag.app.launcher.TezContainerLauncherImpl",
+                "tez.am.shuffle.auxiliary-service.id=mapreduce_shuffle",
+                "tez.am.client.am.port-range=40000-40100",
+                "tez.am.task.am.port-range=40101-40200",
+                // Left for the application master's own node to fill in.
+                "tez.am.client.am.hostname=${env.NM_HOST}",
+                "tez.am.task.am.hostname=${env.NM_HOST}",
+                "tez.am.client.am.bind-host=0.0.0.0",
+                "tez.am.task.am.bind-host=0.0.0.0",
+                "tez.shuffle.bind-host=0.0.0.0",
+                "tez.lib.uris=file:///usr/lib/tez/,file:///usr/lib/tez/lib/",
+                "tez.use.cluster.hadoop-libs=false",
+                "tez.am.resource.memory.mb=1024",
+                "hive.tez.container.size=768",
+                // A task's two would never match the one YARN's default scheduler grants.
+                "hive.tez.cpu.vcores=1",
+                "tez.runtime.intermediate-output.should-compress=false",
+                "tez.runtime.intermediate-input.is-compressed=false")) {
+            assertTrue(arguments.contains(setting), setting + " in " + arguments);
+        }
+        assertTrue(arguments.contains("tez.cluster.additional.classpath.prefix=$PWD/*:/usr/lib/hive/lib/hive-exec.jar:"
+                + "/usr/lib/tez/*:/usr/lib/tez/lib/*:/usr/lib/hadoop-mapreduce/*:/usr/lib/hadoop-mapreduce/lib/*:"
+                + "/usr/lib/hadoop/*:/usr/lib/hadoop/lib/*:/usr/lib/hadoop-hdfs/*:/usr/lib/hadoop-hdfs/lib/*:"
+                + "/usr/lib/hadoop-yarn/*:/usr/lib/hadoop-yarn/lib/*:/usr/lib/hadoop-lzo/lib/*"), arguments.toString());
+        String environment = "=JDK_JAVA_OPTIONS=" + EmrServerlessSparkRunner.yarnJavaOptions()
+                + ",HIVE_HOME=/usr/lib/hive,TEZ_HOME=/usr/lib/tez,AWS_ACCESS_KEY_ID=ASIASTEP,"
+                + "AWS_ENDPOINT_URL=http://floci:4566";
+        assertTrue(arguments.contains("tez.am.launch.env" + environment), arguments.toString());
+        assertTrue(arguments.contains("tez.task.launch.env" + environment), arguments.toString());
+    }
+
+    @Test
+    void aStepsMapReduceContainersGetItsAwsEnvironmentThroughARealRun() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(awsEnv.sdkBaselineEnv("eu-west-1", Optional.empty(), "http://floci:4566", Optional.empty(),
+                "123456789012")).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIASTEP"));
+
+        runner(builder).run(commandJob(List.of("bash", "-c", "hadoop version"), Map.of(), ON_YARN), progress);
+
+        verify(spec).withEnv(eq("FLOCI_MAPRED_SITE"), argThat(site -> site.contains(
+                "AWS_ACCESS_KEY_ID=ASIASTEP</value></property>")));
+    }
+
+    @Test
+    void aHiveStepsTezContainersGetItsAwsEnvironmentThroughARealRun() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(awsEnv.sdkBaselineEnv("eu-west-1", Optional.empty(), "http://floci:4566", Optional.empty(),
+                "123456789012")).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIASTEP"));
+
+        runner(builder).run(hiveStep(List.of("-e", "select 1")).onStorage(ON_YARN), progress);
+
+        verify(spec).withCmd(argThat((List<String> arguments) -> arguments.stream().anyMatch(argument ->
+                argument.startsWith("tez.task.launch.env=") && argument.endsWith(",AWS_ACCESS_KEY_ID=ASIASTEP"))));
+    }
+
+    @Test
+    void aHiveStepWhereThereIsNoYarnKeepsTezInLocalMode() {
+        List<String> arguments = EmrServerlessSparkRunner.hiveArguments(hiveJob(List.of("-e", "select 1")), ENDPOINT,
+                List.of());
+
+        assertTrue(arguments.contains("tez.local.mode=true"), arguments.toString());
+        assertFalse(arguments.toString().contains("tez.framework.client"), arguments.toString());
+    }
+
+    @Test
+    void yarnsJavaOptionsOpenWhatHadoopReachesInto() {
+        assertTrue(EmrServerlessSparkRunner.yarnJavaOptions().startsWith("--add-opens=java.base/java.lang=ALL-UNNAMED "));
+        assertTrue(EmrServerlessSparkRunner.yarnJavaOptions().endsWith("--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"));
+    }
+
+    @Test
+    void aHadoopCommandOnAClusterWhoseCoreNodesHoldItsHdfsWritesTheirCopies() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        List<String> command = List.of("bash", "-c", "hadoop fs -put data.csv /input/");
+
+        runner(builder).run(commandJob(command, Map.of(), STORAGE.withReplication(2)), progress);
+
+        // In hdfs-site.xml, as a client reads it after core-site.xml and the image's says two.
+        verify(spec).withEnv("FLOCI_HDFS_SITE", "<property><name>dfs.replication</name><value>2</value></property>");
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
+                "  if [ -n \"${FLOCI_HDFS_SITE:-}\" ]; then",
+                "    site hdfs-site.xml \"$FLOCI_HDFS_SITE\"",
+                "  fi"))));
+    }
+
+    @Test
+    void aHadoopCommandOnAClusterWhosePrimaryNodeHoldsItsHdfsLeavesTheImagesCopies() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("bash", "-c", "true"), Map.of(), STORAGE), progress);
+
+        verify(spec, never()).withEnv(eq("FLOCI_HDFS_SITE"), anyString());
     }
 
     @Test
@@ -656,7 +1376,7 @@ class EmrServerlessSparkRunnerTest {
                 && entrypoint.get(2).contains(String.join("\n",
                         "    if [ -f \"$hadoop_conf/$1\" ]; then",
                         "      mv \"$hadoop_conf/$1\" \"$hadoop_conf/floci-original-$1\"",
-                        "      include=\"<xi:include href=\\\"$hadoop_conf/floci-original-$1\\\"/>\"",
+                        "      include=\"<xi:include href=\\\"floci-original-$1\\\"/>\"",
                         "    fi",
                         "    printf '%s\\n' '<configuration xmlns:xi=\"http://www.w3.org/2001/XInclude\">' \"$include\""
                                 + " \"$2\" '</configuration>' > \"$hadoop_conf/$1\""))
@@ -737,6 +1457,113 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aClustersContainerWritesWhatAwsDocumentsOfItsNodesFilesAndNothingElse(@TempDir Path folder) throws Exception {
+        // As the test's user, root or not, in place of the image's hadoop user, whom the host need not have.
+        String script = EmrServerlessSparkRunner.NODE_INFO.replace("/mnt/", folder + "/")
+                .replace("setpriv --reuid=hadoop --regid=hadoop --clear-groups", "");
+        Path instance = folder.resolve("var/lib/info/instance.json");
+        Path extra = folder.resolve("var/lib/instance-controller/extraInstanceData.json");
+        // The Management Guide's bootstrap action, which tells the primary node from the others.
+        String guide = "if grep isMaster " + instance + " | grep false > /dev/null; then echo other;"
+                + " else echo primary; fi";
+        ObjectMapper json = new ObjectMapper();
+        for (String role : List.of("MASTER", "CORE", "TASK")) {
+            ProcessBuilder shell = new ProcessBuilder("bash", "-c", script + "\n" + guide);
+            shell.environment().put("FLOCI_INSTANCE_ROLE", role);
+
+            BootstrapProcess.Result ended = BootstrapProcess.run(shell);
+
+            assertEquals(new BootstrapProcess.Result(0, "MASTER".equals(role) ? "primary\n" : "other\n"), ended);
+            assertEquals("{\"isMaster\": " + "MASTER".equals(role) + "}\n", Files.readString(instance));
+            assertEquals("{\"instanceRole\": \"" + role + "\"}\n", Files.readString(extra));
+            // AWS's Knowledge Center reads it with jq and compares it, lowercased, with master, core and task.
+            assertEquals(role.toLowerCase(Locale.ROOT), json.readTree(extra.toFile()).path("instanceRole").asText()
+                    .toLowerCase(Locale.ROOT));
+            assertEquals(PosixFilePermissions.fromString("rw-r--r--"), Files.getPosixFilePermissions(instance));
+        }
+        // Nothing where no role is named, as in an EMR Serverless run.
+        Path unnamed = Files.createDirectory(folder.resolve("unnamed"));
+        BootstrapProcess.Result skipped = BootstrapProcess.run(new ProcessBuilder("bash", "-c",
+                script.replace(folder + "/", unnamed + "/")));
+        assertEquals(new BootstrapProcess.Result(0, ""), skipped);
+        try (Stream<Path> made = Files.list(unnamed)) {
+            assertEquals(0, made.count());
+        }
+    }
+
+    @Test
+    void aStepsCommandFindsASudoThatRunsItsCommandAsItIs(@TempDir Path folder) throws Exception {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("bash", "-c", "sudo -u hadoop spark-submit app.py"), Map.of(), STORAGE),
+                progress);
+
+        ArgumentCaptor<List<String>> entrypoint = ArgumentCaptor.captor();
+        verify(spec).withEntrypoint(entrypoint.capture());
+        String script = entrypoint.getValue().get(2);
+        // In the folder the wrapper puts first on the step's PATH.
+        assertTrue(script.contains("\n  export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"\n"),
+                script);
+        // The wrapper's lines that write it and make it runnable, in the block they run in, in a folder of the test's.
+        int start = script.indexOf("  cat > /tmp/floci-bin/sudo");
+        assertTrue(start >= 0, script);
+        int end = script.indexOf("\n", script.indexOf("  chmod +x ", start));
+        Path bin = Files.createDirectory(folder.resolve("bin"));
+        Files.writeString(bin.resolve("hdfs"), "");
+        Files.writeString(bin.resolve("hadoop-streaming"), "");
+        String lines = script.substring(start, end).replace("/tmp/floci-bin/", bin + "/");
+        BootstrapProcess.Result written = BootstrapProcess.run(new ProcessBuilder("bash", "-c",
+                "if true; then\n" + lines + "\nfi").directory(folder.toFile()));
+        assertEquals(0, written.exit(), written.output());
+
+        BootstrapProcess.Result ended = BootstrapProcess.run(new ProcessBuilder(bin.resolve("sudo").toString(),
+                "-u", "hadoop", "-H", "GREETING=hello", "sh", "-c", "printf '%s %s|' \"$GREETING\" \"$1\"", "sh",
+                "two words"));
+
+        assertEquals(new BootstrapProcess.Result(0, "hello two words|"), ended);
+        // A long option takes its value apart or after an =, as sudo's own do.
+        BootstrapProcess.Result longOptions = BootstrapProcess.run(new ProcessBuilder(bin.resolve("sudo").toString(),
+                "--user", "hadoop", "--group=hadoop", "--chdir", "/tmp", "sh", "-c", "printf '%s|' \"$0\"", "ran"));
+        assertEquals(new BootstrapProcess.Result(0, "ran|"), longOptions);
+    }
+
+    @Test
+    void aHiveStepOnAClusterFindsTheSudoAStepHasButAnEmrServerlessHiveRunDoesNot(@TempDir Path folder)
+            throws Exception {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(hiveStep(List.of("-e", "!sudo id;")), progress);
+
+        verify(spec).withEnv("FLOCI_CLUSTER_STEP", "1");
+        ArgumentCaptor<List<String>> entrypoint = ArgumentCaptor.captor();
+        verify(spec).withEntrypoint(entrypoint.capture());
+        String script = entrypoint.getValue().get(2);
+        int start = script.indexOf("if [ -n \"${FLOCI_CLUSTER_STEP:-}\" ]; then");
+        assertTrue(start >= 0, script);
+        // Written as root, before hive runs as the image's user, whose shell commands then find it.
+        assertTrue(start < script.indexOf("exec setpriv"), script);
+        Path bin = folder.resolve("bin");
+        String block = script.substring(start, script.indexOf("\nfi\n", start) + 3)
+                .replace("/tmp/floci-bin", bin.toString());
+        ProcessBuilder shell = new ProcessBuilder("bash", "-c",
+                block + "\nsudo -u hadoop sh -c 'printf \"%s|\" \"$0\"' ran").directory(folder.toFile());
+        shell.environment().put("FLOCI_CLUSTER_STEP", "1");
+        assertEquals(new BootstrapProcess.Result(0, "ran|"), BootstrapProcess.run(shell));
+
+        ContainerBuilder serverlessBuilder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder serverless = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(serverlessBuilder.newContainer(anyString())).thenReturn(serverless);
+
+        runner(serverlessBuilder).run(hiveJob(List.of("-e", "select 1;")), progress);
+
+        verify(serverless, never()).withEnv(eq("FLOCI_CLUSTER_STEP"), anyString());
+    }
+
+    @Test
     void aStepsHadoopCommandLogsToStandardErrorWhenItsLog4jPropertiesIsEmpty() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
@@ -805,6 +1632,7 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.size() == 5
                 && entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
                 && entrypoint.get(2).startsWith(String.join("\n",
+                        EmrServerlessSparkRunner.NODE_INFO,
                         "conf=/tmp/floci-spark-conf",
                         "mkdir -p \"$conf\"",
                         "cp -rL \"${SPARK_CONF_DIR:-/usr/lib/spark/conf}/.\" \"$conf\" 2>/dev/null",
@@ -879,7 +1707,7 @@ class EmrServerlessSparkRunnerTest {
         // A MapReduce job its main class starts reads mapred-site.xml from HADOOP_CONF_DIR, which spark-submit puts
         // on its class path: the image's names YARN, which the job would wait for without end.
         verify(spec).withEnv("FLOCI_HADOOP_SITE", EmrServerlessSparkRunner.hadoopSite(job, ENDPOINT));
-        verify(spec).withEnv("FLOCI_MAPRED_SITE", EmrServerlessSparkRunner.mapredSite(job));
+        verify(spec).withEnv("FLOCI_MAPRED_SITE", EmrServerlessSparkRunner.mapredSite(job, List.of()));
         verify(spec, never()).withEnv(eq("FLOCI_SPARK_LOG4J2"), anyString());
         verify(spec, never()).withEnv(eq("FLOCI_HADOOP_LOG4J"), anyString());
         verify(spec, never()).withEnv(eq("FLOCI_HADOOP_ENV"), anyString());
@@ -910,7 +1738,7 @@ class EmrServerlessSparkRunnerTest {
                 "<property><name>mapreduce.framework.name</name><value>local</value></property>"
                         + "<property><name>mapreduce.jobtracker.staging.root.dir</name>"
                         + "<value>/tmp/hadoop/mapred/staging</value></property>"),
-                EmrServerlessSparkRunner.mapredSite(hadoopJob(null, mapredSite, Map.of(), Map.of())));
+                EmrServerlessSparkRunner.mapredSite(hadoopJob(null, mapredSite, Map.of(), Map.of()), List.of()));
     }
 
     @Test
@@ -979,6 +1807,56 @@ class EmrServerlessSparkRunnerTest {
         assertEquals(List.of("true", "/path/to/my.jar:/usr/lib/hadoop-lzo/lib/*", "-Dnote='it''s' $HOME `id`"),
                 Files.readAllLines(printed));
         assertFalse(Files.exists(folder.resolve("ran")));
+    }
+
+    @Test
+    void anEmr6HiveImageKeepsOneSdkWithCloudWatchsModulesAndWhatIsNotTheSdk(@TempDir Path folder) throws Exception {
+        List<String> kept = List.of("auth-2.19.0.jar", "cloudwatch-2.20.160.jar",
+                "cloudwatch-metric-publisher-2.20.160.jar", "guava-31.1-jre.jar", "hive-exec-3.1.3-amzn-8.jar",
+                "my-library-2.20.160.jar");
+        List<String> jars = new ArrayList<>(kept);
+        for (String module : List.of("annotations", "apache-client", "auth", "aws-core", "aws-json-protocol",
+                "aws-query-protocol", "endpoints-spi", "http-client-spi", "json-utils", "metrics-spi",
+                "netty-nio-client", "profiles", "protocol-core", "regions", "sdk-core", "third-party-jackson-core",
+                "utils")) {
+            jars.add(module + "-2.20.160.jar");
+        }
+
+        assertEquals(kept, hiveLibAfterOneSdk(folder, true, jars.toArray(String[]::new)));
+    }
+
+    @Test
+    void anImageWithoutStockSdkModulesKeepsEveryJar(@TempDir Path folder) throws Exception {
+        List<String> jars = List.of("commons-math-2.2.jar", "guava-31.1-jre.jar", "hive-exec-3.1.3-amzn-14.jar");
+
+        assertEquals(jars, hiveLibAfterOneSdk(folder, true, jars.toArray(String[]::new)));
+    }
+
+    @Test
+    void anImageWithoutTezsPluginKeepsItsOnlySdk(@TempDir Path folder) throws Exception {
+        List<String> jars = List.of("aws-core-2.20.160.jar", "sdk-core-2.20.160.jar");
+
+        assertEquals(jars, hiveLibAfterOneSdk(folder, false, jars.toArray(String[]::new)));
+    }
+
+    /** What is left of a Hive lib folder holding {@code jars} once the shell has run, by name. */
+    private static List<String> hiveLibAfterOneSdk(Path folder, boolean plugin, String... jars) throws Exception {
+        Path lib = Files.createDirectories(folder.resolve("hive/lib"));
+        Path tez = Files.createDirectories(folder.resolve("tez"));
+        for (String jar : jars) {
+            Files.createFile(lib.resolve(jar));
+        }
+        if (plugin) {
+            Files.createFile(tez.resolve("tez-emr-serverless.jar"));
+        }
+        String script = EmrServerlessSparkRunner.HIVE_ONE_SDK.replace("/usr/lib/hive/lib", lib.toString())
+                .replace("/usr/lib/tez", tez.toString());
+
+        BootstrapProcess.run(new ProcessBuilder("bash", "-c", script).directory(folder.toFile()));
+
+        try (Stream<Path> left = Files.list(lib)) {
+            return left.map(path -> path.getFileName().toString()).sorted().toList();
+        }
     }
 
     @Test
@@ -1332,6 +2210,21 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aNodeOfALiveClusterIsNoDriverTheSweepRemoves() {
+        EmrServerlessSparkRunner runner = runner();
+        when(config.port()).thenReturn(4566);
+        Container node = mock(Container.class);
+        when(node.getId()).thenReturn("node");
+        when(node.getLabels()).thenReturn(Map.of(ContainerStorageHelper.SERVICE_LABEL, "emr",
+                ContainerStorageHelper.OWNER_LABEL, "4566", ContainerStorageHelper.COMPONENT_LABEL, "emr-node"));
+        when(docker.listContainersCmd().withShowAll(true).withLabelFilter(anyMap()).exec()).thenReturn(List.of(node));
+
+        runner.removeLeftoverDrivers("emr");
+
+        verify(lifecycle, never()).removeIfExists("node");
+    }
+
+    @Test
     void theHdfsOfALiveClusterIsNoDriverTheSweepRemoves() {
         EmrServerlessSparkRunner runner = runner();
         when(config.port()).thenReturn(4566);
@@ -1362,8 +2255,10 @@ class EmrServerlessSparkRunnerTest {
         when(lifecycle.create(any())).thenReturn("driver");
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenReturn(false);
         when(docker.inspectContainerCmd("driver").exec().getState().getExitCodeLong()).thenReturn(0L);
-        LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.flociEndpoint()).thenReturn(ENDPOINT);
+        // An image pulled only when missing is there, by its own name.
+        when(lifecycle.resolveImageForLaunch(anyString(), eq(ImagePullBehavior.PREFER_CACHED), isNull()))
+                .thenAnswer(pull -> new LaunchImage(pull.getArgument(0), null));
         return new EmrServerlessSparkRunner(builder, lifecycle, logStreamer, awsEnv,
                 mock(LambdaExecutionRoleCredentials.class), s3, ecr, config, new MutableClock(), Duration.ZERO);
     }
@@ -1462,13 +2357,24 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 SPARK, imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
                 application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of(), null, Map.of(), Map.of(),
-                Map.of(), Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), null);
+    }
+
+    private static final SparkJobRunner.Executors EXECUTORS = new SparkJobRunner.Executors(2, null, 0, 0, 0, null);
+    // A 4-core 14G executor's size, whose worker and the driver's hold 4 vCPUs, 16 GB and 20 GB of disk.
+    private static final SparkExecutors.Size FOUR_CORE_EXECUTOR = new SparkExecutors.Size(4, 14336,
+            new SparkExecutors.Amount(4, 16, 20), new SparkExecutors.Amount(4, 16, 20));
+
+    // An EMR Serverless Spark run whose executors run in containers of their own.
+    private static SparkJobRunner.Job executorsJob(Map<String, String> sparkDefaults) {
+        return job(null, List.of("s3://bucket/jobs/app.jar"), sparkDefaults, Duration.ZERO).withExecutors(EXECUTORS);
     }
 
     private static SparkJobRunner.Job hiveJob(List<String> application) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000002", "123456789012", "eu-west-1", "emr-7.5.0",
                 HIVE, null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(), application, null,
-                Duration.ZERO, null, null, Map.of(), List.of(), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                Duration.ZERO, null, null, Map.of(), List.of(), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                null);
     }
 
     // An EMR Hive step: hive-script's --args, then application, on cluster j-1's storage.
@@ -1478,21 +2384,21 @@ class EmrServerlessSparkRunnerTest {
                 List.of("hive-script", "--run-hive-script", "--args"), Duration.ZERO, null, null, Map.of(), List.of(),
                 new SparkJobRunner.Storage("j-1-home", "j-1-mnt").withHdfs("ip-10-0-0-1.ec2.internal", "172.18.0.5",
                         "j-1-hdfs").withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"),
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 SPARK, null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of(), null,
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
     }
 
     private static SparkJobRunner.Job archiveJob(List<String> archives) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 SPARK, null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives, null,
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
     }
 
     private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
@@ -1504,7 +2410,7 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
                 Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), List.of(),
-                storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
     }
 
     // A step on a cluster with core-site and spark-log4j2 properties: a command, or a Spark step for a null one.
@@ -1513,7 +2419,7 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 command == null ? List.of("s3://bucket/jobs/report.py") : List.of(), command, Duration.ZERO, null,
-                null, Map.of(), List.of(), STORAGE, coreSite, sparkLog4j2, Map.of(), Map.of(), Map.of());
+                null, Map.of(), List.of(), STORAGE, coreSite, sparkLog4j2, Map.of(), Map.of(), Map.of(), null);
     }
 
     // A step on a cluster with mapred-site, hadoop-log4j and hadoop-env: a command, or a custom JAR for a null one.
@@ -1523,14 +2429,23 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 command == null ? List.of("s3://bucket/jobs/report.jar") : List.of(), command, Duration.ZERO, null,
-                null, Map.of(), List.of(), STORAGE, Map.of(), Map.of(), mapredSite, hadoopLog4j, hadoopEnvironment);
+                null, Map.of(), List.of(), STORAGE, Map.of(), Map.of(), mapredSite, hadoopLog4j, hadoopEnvironment,
+                null);
     }
 
     // A Spark step on a cluster, which has storage.
+    private static SparkJobRunner.Job onRelease(String release, SparkJobRunner.Job job) {
+        return new SparkJobRunner.Job(job.service(), job.runId(), job.accountId(), job.region(), release, job.engine(),
+                job.imageTemplate(), job.customImage(), job.dockerNetwork(), job.executionRole(), job.sparkDefaults(),
+                job.application(), job.command(), job.timeout(), job.logFolder(), job.cloudWatchLogs(),
+                job.environment(), job.archives(), job.storage(), job.coreSite(), job.sparkLog4j2(), job.mapredSite(),
+                job.hadoopLog4j(), job.hadoopEnvironment(), job.executors());
+    }
+
     private static SparkJobRunner.Job stepJob(Map<String, String> sparkDefaults) {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
                 List.of("s3://bucket/jobs/report.py"), null, Duration.ZERO, null, null, Map.of(), List.of(), STORAGE,
-                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
     }
 }

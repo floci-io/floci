@@ -9,6 +9,8 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.configservice.AwsConfigService;
 import io.floci.aws.services.configservice.model.ConfigRule;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -121,6 +123,36 @@ class ConfigCfnProvisionerTest {
 
         assertEquals("ValidationError", failure.getErrorCode());
         assertEquals("AWS::Config::ConfigRule requires Source", failure.getMessage());
+        verifyNoInteractions(config);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{\"Source\":{}}",
+        "{\"Source\":{\"Owner\":\"SOMEONE\"}}",
+        "{\"Source\":{\"Owner\":\"CUSTOM_LAMBDA\",\"SourceDetails\":[{\"MessageType\":\"Daily\"}]}}",
+        "{\"Source\":{\"Owner\":\"AWS\"},\"MaximumExecutionFrequency\":\"Hourly\"}",
+        "{\"Source\":{\"Owner\":\"AWS\"},\"EvaluationModes\":[{\"Mode\":\"BOTH\"}]}"})
+    void configRuleOutsideTheModeledConstraintsFailsBeforeCallingConfig(String props) throws Exception {
+        JsonNode template = mapper.readTree(props);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), template, context()));
+
+        assertEquals("ValidationException", failure.getErrorCode());
+        verifyNoInteractions(config);
+    }
+
+    @Test
+    void configRuleViolationUsesTheConfigValidationMessage() {
+        ObjectNode props = mapper.createObjectNode().put("Description", "d".repeat(257));
+        props.set("Source", mapper.createObjectNode().put("Owner", "AWS"));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), props, context()));
+
+        assertEquals("Invalid parameter at 'ConfigRule.Description' failed to satisfy constraint: "
+                + "'Member must have length less than or equal to 256'", failure.getMessage());
         verifyNoInteractions(config);
     }
 

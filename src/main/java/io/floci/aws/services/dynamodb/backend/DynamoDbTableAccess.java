@@ -24,6 +24,11 @@ public interface DynamoDbTableAccess {
                                 Long writeCapacity, List<GlobalSecondaryIndex> globalSecondaryIndexes,
                                 List<LocalSecondaryIndex> localSecondaryIndexes);
 
+    TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                        List<AttributeDefinition> attributeDefinitions,
+                                        List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                        List<LocalSecondaryIndex> localSecondaryIndexes);
+
     TableDefinition describeTable(Scope scope, String tableName);
 
     Optional<TableDefinition> findTable(Scope scope, String tableName);
@@ -55,6 +60,13 @@ public interface DynamoDbTableAccess {
     void tagResource(Scope scope, String resourceArn, Map<String, String> tags);
 
     void untagResource(Scope scope, String resourceArn, List<String> tagKeys);
+
+    /**
+     * The tags held for the table {@code arn} names, or for the table whose index it names, as an index inherits its
+     * table's tags, in the account and Region the ARN names, read without changing anything; empty for an ARN naming
+     * no table or index held, or any other resource.
+     */
+    Map<String, String> storedTags(String arn);
 
     TableDefinition applyReplicaUpdates(Scope scope, String tableName, List<String> addRegions,
                                         List<String> removeRegions);

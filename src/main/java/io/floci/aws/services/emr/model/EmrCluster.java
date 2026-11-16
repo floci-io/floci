@@ -51,9 +51,18 @@ public class EmrCluster {
     // its steps run in; Floci's own, as the API has neither.
     private boolean bootstrapInContainer;
     private String bootstrapImage;
+    // Whether that image holds what a node needs to run YARN, which an image from an earlier Floci may not; Floci's own.
+    private boolean bootstrapImageRunsYarn;
+    // The image each core or task node's own bootstrap left, which it runs from, by node id, and those of the nodes the
+    // cluster no longer has, which one being decommissioned may still run from, until the cluster ends; Floci's own.
+    private Map<String, String> nodeBootstrapImages = new LinkedHashMap<>();
+    private List<String> retiredBootstrapImages = new ArrayList<>();
     // Whether the docker runner mode has made the cluster's storage, which goes once the cluster has ended; Floci's
     // own, as the API has none.
     private boolean storageCreated;
+    // The core nodes the cluster was created with, which its HDFS's copies of a block follow; Floci's own, as the API
+    // has none.
+    private int provisionedCoreNodes;
     // The cluster's ManagedScalingPolicy and AutoTerminationPolicy as given, raw JSON; null when none.
     private String managedScalingPolicy;
     private String autoTerminationPolicy;
@@ -63,6 +72,8 @@ public class EmrCluster {
     private Instant endDateTime;
     // When the cluster began TERMINATING; Floci's own, as the API's Timeline has no such time.
     private Instant terminatingDateTime;
+    // Status.ErrorDetails: the errors that ended the cluster, empty unless one of those with an ErrorDetail code did.
+    private List<EmrErrorDetail> errorDetails = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
     private List<EmrStep> steps = new ArrayList<>();
     private List<EmrInstanceGroup> instanceGroups = new ArrayList<>();
@@ -180,8 +191,26 @@ public class EmrCluster {
     public String getBootstrapImage() { return bootstrapImage; }
     public void setBootstrapImage(String bootstrapImage) { this.bootstrapImage = bootstrapImage; }
 
+    public Map<String, String> getNodeBootstrapImages() { return nodeBootstrapImages; }
+    public void setNodeBootstrapImages(Map<String, String> nodeBootstrapImages) {
+        this.nodeBootstrapImages = nodeBootstrapImages != null ? nodeBootstrapImages : new LinkedHashMap<>();
+    }
+
+    public List<String> getRetiredBootstrapImages() { return retiredBootstrapImages; }
+    public void setRetiredBootstrapImages(List<String> retiredBootstrapImages) {
+        this.retiredBootstrapImages = retiredBootstrapImages != null ? retiredBootstrapImages : new ArrayList<>();
+    }
+
+    public boolean isBootstrapImageRunsYarn() { return bootstrapImageRunsYarn; }
+    public void setBootstrapImageRunsYarn(boolean bootstrapImageRunsYarn) {
+        this.bootstrapImageRunsYarn = bootstrapImageRunsYarn;
+    }
+
     public boolean isStorageCreated() { return storageCreated; }
     public void setStorageCreated(boolean storageCreated) { this.storageCreated = storageCreated; }
+
+    public int getProvisionedCoreNodes() { return provisionedCoreNodes; }
+    public void setProvisionedCoreNodes(int provisionedCoreNodes) { this.provisionedCoreNodes = provisionedCoreNodes; }
 
     public String getManagedScalingPolicy() { return managedScalingPolicy; }
     public void setManagedScalingPolicy(String managedScalingPolicy) { this.managedScalingPolicy = managedScalingPolicy; }
@@ -203,6 +232,9 @@ public class EmrCluster {
 
     public Instant getTerminatingDateTime() { return terminatingDateTime; }
     public void setTerminatingDateTime(Instant terminatingDateTime) { this.terminatingDateTime = terminatingDateTime; }
+
+    public List<EmrErrorDetail> getErrorDetails() { return errorDetails; }
+    public void setErrorDetails(List<EmrErrorDetail> errorDetails) { this.errorDetails = errorDetails; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

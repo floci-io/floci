@@ -267,8 +267,10 @@ Continue with `nextToken` in the same account and region, keeping `includeDelete
 unchanged. Region and deletion-date filters apply before paging. Final pages omit
 `NextToken`, and deleting or renaming the cursor plan does not skip the next plan.
 `includeDeleted` defaults to false. When true, retained records include their
-`DeletionDate`; normal plan deletion still removes the record, so deleted history
-is not retained.
+`DeletionDate`. Deleting a plan retains its listing metadata in the configured
+storage backend. Deleted plans remain unavailable to Get, Update, tags and new
+selections, and are omitted from default listings. Plans with active selections
+cannot be deleted.
 
 ## Examples
 

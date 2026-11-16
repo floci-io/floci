@@ -268,6 +268,8 @@ public class EcsContainerManager {
             throw new AwsException("ClientException",
                     "awsfirelens log driver requires a firelensConfiguration container", 400);
         }
+        List<String> firelensSecretEnv = addFirelensSecretOptions(
+                firelensLogOptions, taskDef.getContainerDefinitions(), isFluentdRouter(firelensRouter), region);
 
         List<ContainerDefinition> launchOrder = orderForDependencies(
                 launchOrder(taskDef.getContainerDefinitions(), firelensRouter), firelensRouter);
@@ -322,6 +324,9 @@ public class EcsContainerManager {
                         metadataId, taskRoleEndpoint.vending()));
                 imagesByContainer.put(def,
                         containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(def.getImage())));
+            }
+            if (firelensRouter != null) {
+                envVarsByContainer.get(firelensRouter).addAll(firelensSecretEnv);
             }
             // Pulled for every container before any is created, as the ECS agent does, so a tag
             // moved in its registry since the last launch is what this task runs. Each container is
@@ -1169,8 +1174,8 @@ public class EcsContainerManager {
                 .filter(def -> def.getPortMappings() != null && !def.getPortMappings().isEmpty())
                 .findFirst()
                 .orElse(definitions.getFirst());
-        ec2Service.attachContainerToVpc(region, vpcId,
-                task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
+        ec2Service.attachContainerToVpc(AwsArnUtils.accountOrDefault(task.getTaskArn(), regionResolver.getAccountId()),
+                region, vpcId, task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
                 containerIds.get(holder.getName()), task.getPrivateIpAddress());
     }
 
@@ -1365,8 +1370,9 @@ public class EcsContainerManager {
                                 .stream().map(PrefixListEntry::getCidr).toList()));
             }
             firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
-                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(),
-                    namespace.transportAddress(), Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
+                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(), eni.getIpv6Addresses(),
+                    namespace.transportAddress(), namespace.transportIpv6Address(), Set.copyOf(groupIds), groups),
+                    namespace.helperId(), prefixLists);
             task.setNetworkInterfaceId(eniId);
             task.setPrivateIpAddress(eni.getPrivateIpAddress());
             return new PreparedNetwork(eni, namespace);
@@ -1639,6 +1645,39 @@ public class EcsContainerManager {
             options.put(def.getName(), log.options() != null ? log.options() : Map.of());
         }
         return options;
+    }
+
+    /**
+     * Hands each awsfirelens container's {@code secretOptions} to the router the way the ECS agent does: the
+     * value, resolved from Secrets Manager or SSM, is an environment variable of the router named
+     * {@code <option>_<container index>}, and the output option beside the container's {@code options}
+     * only references it. The value never becomes config text, so it cannot add directives to the config.
+     *
+     * @return the router's environment entries, one per secret option
+     */
+    private List<String> addFirelensSecretOptions(
+            Map<String, Map<String, String>> logOptions, List<ContainerDefinition> defs, boolean fluentd,
+            String region) {
+        List<String> routerEnv = new ArrayList<>();
+        for (int index = 0; index < defs.size(); index++) {
+            ContainerDefinition def = defs.get(index);
+            if (!isAwsFirelens(def)) {
+                continue;
+            }
+            List<Secret> secretOptions = def.getLogConfiguration().secretOptions();
+            if (secretOptions == null || secretOptions.isEmpty()) {
+                continue;
+            }
+            Map<String, String> options = new LinkedHashMap<>(logOptions.get(def.getName()));
+            for (Secret secretOption : secretOptions) {
+                String variable = secretOption.name() + "_" + index;
+                routerEnv.add(variable + "=" + resolveSecretValue(secretOption.valueFrom(), region));
+                options.put(secretOption.name(),
+                        fluentd ? "\"#{ENV['" + variable + "']}\"" : "${" + variable + "}");
+            }
+            logOptions.put(def.getName(), options);
+        }
+        return routerEnv;
     }
 
     private static boolean isAwsFirelens(ContainerDefinition def) {

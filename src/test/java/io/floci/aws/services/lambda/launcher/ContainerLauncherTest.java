@@ -7,16 +7,19 @@ import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
+import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.AccessMode;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.VersionComponent;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerEngineDetector;
@@ -52,8 +55,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockMakers;
-import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.ByteArrayInputStream;
@@ -75,7 +76,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import static io.floci.aws.testing.DockerDaemonVersionFixtures.stubDaemonVersion;
@@ -106,6 +106,7 @@ class ContainerLauncherTest {
     @Mock EmbeddedDnsServer embeddedDnsServer;
     @Mock RuntimeApiServer runtimeApiServer;
     @Mock DockerClient dockerClient;
+    @Mock DockerClient streamingDockerClient;
     @Mock LambdaExecutionRoleCredentials executionRoleCredentials;
     @Mock LambdaLayerService layerService;
     @Mock Ec2Service ec2Service;
@@ -177,6 +178,7 @@ class ContainerLauncherTest {
                 new ContainerLifecycleManager.ContainerInfo("container-123", Map.of());
         lenient().when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
         lenient().when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        workingDirectory("");
         ListContainersCmd inventory = mock(ListContainersCmd.class, RETURNS_SELF);
         lenient().when(dockerClient.listContainersCmd()).thenReturn(inventory);
         lenient().when(inventory.exec()).thenReturn(List.of());
@@ -252,7 +254,7 @@ class ContainerLauncherTest {
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
         ContainerLauncher backgroundLauncher = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
-                lifecycleManager, logStreamer, imageResolver, runtimeApiServerFactory,
+                lifecycleManager, streamingDockerClient, logStreamer, imageResolver, runtimeApiServerFactory,
                 dockerHostResolver, config, ecrRegistryManager, layers,
                 new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials, ec2Service);
         LambdaFunction fn = new LambdaFunction();
@@ -505,7 +507,7 @@ class ContainerLauncherTest {
                 networkResolver, new ContainerEngineDetector(dockerClient));
         ContainerReachableEndpoint endpoint =
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
-        return new ContainerLauncher(builder, lifecycleManager, logStreamer, selectedResolver,
+        return new ContainerLauncher(builder, lifecycleManager, streamingDockerClient, logStreamer, selectedResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
                 layerService, new LaunchedContainerAwsEnv(endpoint),
                 executionRoleCredentials, ec2Service);
@@ -939,6 +941,67 @@ class ContainerLauncherTest {
 
         // createAndStart must NOT be called — Lambda uses the split path
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void launchFunction_imageWorkingDirectoryLambdasUserCannotEnter_failsInitWithoutStarting() throws Exception {
+        workingDirectory("/home/nonroot");
+        directoryMode("/home", 0755);
+        directoryMode("/home/nonroot", 0700);
+
+        LambdaInitException error = assertThrows(LambdaInitException.class, () -> launcher.launch(imageFunction()));
+
+        assertEquals("Runtime.InvalidEntrypoint", error.errorType());
+        verify(lifecycleManager, never()).startCreated(any(), any());
+    }
+
+    @Test
+    void launchFunction_imageWorkingDirectoryEveryoneCanEnter_starts() throws Exception {
+        workingDirectory("/srv/app");
+        directoryMode("/srv", 0755);
+        directoryMode("/srv/app", 0755);
+
+        launcher.launch(imageFunction());
+
+        verify(lifecycleManager).startCreated(eq("container-123"), any());
+    }
+
+    @Test
+    void launchFunction_imageWorkingDirectoryOnAMountedFileSystem_starts() throws Exception {
+        workingDirectory("/mnt/efs/app");
+        directoryMode("/mnt", 0755);
+        directoryMode("/mnt/efs", 0700);
+        LambdaFunction fn = imageFunction();
+        fn.setFileSystemConfigs(List.of(new LambdaFileSystemConfig(
+                "arn:aws:elasticfilesystem:us-east-1:222233334444:access-point/fsap-0123456789abcdef0",
+                "/mnt/efs")));
+
+        launcher.launch(fn);
+
+        verify(lifecycleManager).startCreated(eq("container-123"), any());
+    }
+
+    private void workingDirectory(String workingDir) {
+        ContainerConfig containerConfig = mock(ContainerConfig.class);
+        lenient().when(containerConfig.getWorkingDir()).thenReturn(workingDir);
+        InspectContainerResponse inspected = mock(InspectContainerResponse.class);
+        lenient().when(inspected.getConfig()).thenReturn(containerConfig);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        lenient().when(inspect.exec()).thenReturn(inspected);
+        lenient().when(dockerClient.inspectContainerCmd("container-123")).thenReturn(inspect);
+    }
+
+    private void directoryMode(String path, int mode) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+            TarArchiveEntry dir = new TarArchiveEntry(path.substring(path.lastIndexOf('/') + 1) + "/");
+            dir.setMode(040000 | mode);
+            tar.putArchiveEntry(dir);
+            tar.closeArchiveEntry();
+        }
+        CopyArchiveFromContainerCmd copy = mock(CopyArchiveFromContainerCmd.class);
+        lenient().when(copy.exec()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
+        lenient().when(dockerClient.copyArchiveFromContainerCmd("container-123", path)).thenReturn(copy);
     }
 
     private static LambdaFunction imageFunction() {
@@ -1491,45 +1554,45 @@ class ContainerLauncherTest {
     @Test
     void vpcFunctionJoinsItsVpcNetworkBeforeStartAndReturnsTheAddressAfterRemoval() throws Exception {
         LambdaFunction fn = vpcFunction("vpc-join-fn");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.20"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.20"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.20"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.20"))
                 .thenReturn(Optional.of("floci-vpc-1"));
 
         ContainerHandle handle = launcher.launch(fn);
-        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any(), any());
         launcher.stop(handle);
 
         InOrder order = inOrder(ec2Service, lifecycleManager);
-        order.verify(ec2Service).allocateVpcPrivateIp("us-east-1", "subnet-a");
-        order.verify(ec2Service).attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123",
+        order.verify(ec2Service).allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a");
+        order.verify(ec2Service).attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-123",
                 "172.31.0.20");
         order.verify(lifecycleManager).startCreated(eq("container-123"), any());
         order.verify(lifecycleManager).stopAndRemoveStrict("container-123", null, 1);
-        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.20");
+        order.verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.20");
     }
 
     @Test
     void vpcFunctionKeepsItsAddressUntilARetriedRemovalSucceeds() throws Exception {
         LambdaFunction fn = vpcFunction("vpc-retry-fn");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.23"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.23"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.23"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.23"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         ContainerHandle handle = launcher.launch(fn);
         doThrow(new RuntimeException("removal failed")).doNothing()
                 .when(lifecycleManager).stopAndRemoveStrict("container-123", null, 1);
 
         assertThrows(RuntimeException.class, () -> launcher.stop(handle));
-        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any(), any());
 
         launcher.stop(handle);
-        verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.23");
+        verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.23");
     }
 
     @Test
     void vpcFunctionReturnsTheAddressOnceAFailedLaunchRemovesItsContainer() throws Exception {
         LambdaFunction fn = vpcFunction("vpc-launch-failure-fn");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.21"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.21"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.21"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.21"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         doThrow(new RuntimeException("start failed")).when(lifecycleManager).startCreated(eq("container-123"), any());
 
@@ -1537,14 +1600,14 @@ class ContainerLauncherTest {
 
         InOrder order = inOrder(lifecycleManager, ec2Service);
         order.verify(lifecycleManager).stopAndRemoveStrict("container-123", null);
-        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.21");
+        order.verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.21");
     }
 
     @Test
     void vpcFunctionKeepsTheAddressWhenAFailedLaunchCannotRemoveItsContainer() throws Exception {
         LambdaFunction fn = vpcFunction("vpc-launch-removal-failure-fn");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.24"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.24"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.24"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.24"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         doThrow(new RuntimeException("start failed")).when(lifecycleManager).startCreated(eq("container-123"), any());
         doThrow(new IllegalStateException("removal failed"))
@@ -1552,52 +1615,41 @@ class ContainerLauncherTest {
 
         assertThrows(RuntimeException.class, () -> launcher.launch(fn));
 
-        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any(), any());
     }
 
     @Test
     void vpcFunctionReturnsTheAddressAtOnceWhenItCannotJoinTheNetwork() throws Exception {
         LambdaFunction fn = vpcFunction("vpc-attach-failure-fn");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.22"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.22"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.22"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.22"))
                 .thenReturn(Optional.empty());
 
         ContainerHandle handle = launcher.launch(fn);
         launcher.stop(handle);
 
         InOrder order = inOrder(ec2Service, lifecycleManager);
-        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.22");
+        order.verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.22");
         order.verify(lifecycleManager).startCreated(eq("container-123"), any());
-        verify(ec2Service, times(1)).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, times(1)).releaseVpcPrivateIp(any(), any(), any(), any());
     }
 
     @Test
     void vpcFunctionLeasesItsAddressInTheFunctionsAccountOutsideARequest() throws Exception {
-        // A provisioned or cross-account launch has no caller scope of the function's owner, and
-        // the allocator reads the owner's endpoint interfaces from the ambient account.
+        // A provisioned or cross-account launch has no caller scope of the function's owner, so the
+        // owner's account is named on every call: its VPC network is the account's own.
         LambdaFunction fn = vpcFunction("vpc-account-fn");
         fn.setFunctionArn("arn:aws:lambda:eu-west-1:222233334444:function:vpc-account-fn");
-        AtomicBoolean inOwnerScope = new AtomicBoolean();
-        when(ec2Service.allocateVpcPrivateIp("eu-west-1", "subnet-a"))
-                .thenAnswer(invocation -> inOwnerScope.get() ? Optional.of("172.31.0.25") : Optional.empty());
-        when(ec2Service.attachContainerToVpc("eu-west-1", "vpc-1", "subnet-a", "container-123", "172.31.0.25"))
-                .thenReturn(Optional.of("floci-vpc-1"));
-        try (MockedStatic<RequestScopes> scopes =
-                     mockStatic(RequestScopes.class, withSettings().mockMaker(MockMakers.INLINE))) {
-            scopes.when(() -> RequestScopes.callAs(eq("222233334444"), eq("eu-west-1"), any(Supplier.class)))
-                    .thenAnswer(invocation -> {
-                        inOwnerScope.set(true);
-                        try {
-                            return invocation.<Supplier<?>>getArgument(2).get();
-                        } finally {
-                            inOwnerScope.set(false);
-                        }
-                    });
+        when(ec2Service.allocateVpcPrivateIp("222233334444", "eu-west-1", "subnet-a"))
+                .thenReturn(Optional.of("172.31.0.25"));
+        when(ec2Service.attachContainerToVpc("222233334444", "eu-west-1", "vpc-1", "subnet-a", "container-123",
+                "172.31.0.25")).thenReturn(Optional.of("floci-vpc-1"));
 
-            launcher.launch(fn);
-        }
+        launcher.stop(launcher.launch(fn));
 
-        verify(ec2Service).attachContainerToVpc("eu-west-1", "vpc-1", "subnet-a", "container-123", "172.31.0.25");
+        verify(ec2Service).attachContainerToVpc("222233334444", "eu-west-1", "vpc-1", "subnet-a", "container-123",
+                "172.31.0.25");
+        verify(ec2Service).releaseVpcPrivateIp("222233334444", "eu-west-1", "subnet-a", "172.31.0.25");
     }
 
     @Test
@@ -2383,7 +2435,7 @@ class ContainerLauncherTest {
                     launchCmds.add(launchCmd);
                     return launchCmd;
                 });
-        lenient().when(dockerClient.execStartCmd(argThat(id -> id != null && id.startsWith("exec-launch-"))))
+        lenient().when(streamingDockerClient.execStartCmd(launchedExecId()))
                 .thenAnswer(invocation -> {
                     ExecStartCmd start = mock(ExecStartCmd.class);
                     when(start.exec(any())).thenAnswer(startInvocation -> {
@@ -2398,11 +2450,16 @@ class ContainerLauncherTest {
         return launchCmds;
     }
 
+    /** Matches the id of an exec {@link #stubExtensionDiscoveryFromTar} created for an extension launch. */
+    private static String launchedExecId() {
+        return argThat(id -> id != null && id.startsWith("exec-launch-"));
+    }
+
     /** Overrides the default exec-start stub so the callback the launcher supplies is driven with a
      *  real STDOUT {@link Frame} carrying {@code output}, exercising the frame-to-CloudWatch path
      *  rather than only completing the callback. */
     private void stubExecStartEmittingFrame(String output) {
-        lenient().when(dockerClient.execStartCmd(argThat(id -> id != null && id.startsWith("exec-launch-"))))
+        lenient().when(streamingDockerClient.execStartCmd(launchedExecId()))
                 .thenAnswer(invocation -> {
                     ExecStartCmd start = mock(ExecStartCmd.class);
                     when(start.exec(any())).thenAnswer(startInvocation -> {
@@ -2452,6 +2509,28 @@ class ContainerLauncherTest {
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
     }
 
+    // Catches: the extension exec or the exit watch running on the control-plane client, where
+    // each warm container would hold a lease for its whole lifetime and starve short Docker calls.
+    @Test
+    void launchFunction_holdsExtensionAndExitStreamsOnTheStreamingClient() throws Exception {
+        stubExtensionDiscovery("lambda-adapter");
+        WaitContainerCmd wait = mock(WaitContainerCmd.class);
+        when(streamingDockerClient.waitContainerCmd("container-123")).thenReturn(wait);
+        when(wait.exec(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("streaming-pool-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        verify(streamingDockerClient).execStartCmd(launchedExecId());
+        verify(streamingDockerClient).waitContainerCmd("container-123");
+        verify(dockerClient, never()).execStartCmd(anyString());
+        verify(dockerClient, never()).waitContainerCmd(anyString());
+    }
+
     /**
      * Extension stdout/stderr must reach the function's CloudWatch log group. `docker logs` — and
      * therefore ContainerLogStreamer.attach(), which uses logContainerCmd — only covers the
@@ -2469,7 +2548,8 @@ class ContainerLauncherTest {
         ContainerLauncher launcherWithRealStreamer = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager,
-                new ContainerLogStreamer(dockerClient, cloudWatchLogs),
+                streamingDockerClient,
+                new ContainerLogStreamer(streamingDockerClient, cloudWatchLogs),
                 imageResolver, runtimeApiServerFactory, dockerHostResolver, config,
                 ecrRegistryManager,
                 mock(LambdaLayerService.class),

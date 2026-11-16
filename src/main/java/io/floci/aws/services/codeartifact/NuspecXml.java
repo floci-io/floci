@@ -3,13 +3,18 @@ package io.floci.aws.services.codeartifact;
 import io.floci.aws.core.common.XmlParser;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.zip.ZipEntry;
@@ -37,6 +42,70 @@ final class NuspecXml {
     record Metadata(String id, String version, Optional<String> description) {
     }
 
+    /** One {@code <dependency id="" version=""/>} entry, verbatim, before any format mapping. */
+    record RawDependency(String id, String version) {
+    }
+
+    /**
+     * Every direct dependency declared under {@code <metadata>/<dependencies>}, flattened across
+     * however many {@code <group targetFramework="...">} blocks the nuspec has (AWS's own
+     * {@code PackageDependency} shape carries no target-framework field, so the same package id
+     * can legitimately appear more than once with a different {@code version} across frameworks;
+     * that is correct, AWS-matching behavior, not something to deduplicate). Also handles the
+     * older nuspec schema's bare {@code <dependency>} directly under {@code <dependencies>} with
+     * no {@code <group>} wrapper at all. Empty when the nuspec declares no dependencies.
+     */
+    static List<RawDependency> dependencies(byte[] content) {
+        Document document;
+        try {
+            document = XmlParser.parseDocument(content);
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not parse the package version's .nuspec file.", e);
+        }
+        NodeList metadataNodes = document.getDocumentElement().getElementsByTagName("metadata");
+        if (metadataNodes.getLength() == 0) {
+            return List.of();
+        }
+        NodeList dependenciesNodes = ((Element) metadataNodes.item(0)).getElementsByTagName("dependencies");
+        if (dependenciesNodes.getLength() == 0) {
+            return List.of();
+        }
+        List<RawDependency> dependencies = new ArrayList<>();
+        NodeList children = dependenciesNodes.item(0).getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            Element element = (Element) child;
+            if ("group".equals(element.getLocalName())) {
+                addDependencyChildren(element, dependencies);
+            } else if ("dependency".equals(element.getLocalName())) {
+                addDependency(element, dependencies);
+            }
+        }
+        return dependencies;
+    }
+
+    private static void addDependencyChildren(Element group, List<RawDependency> dependencies) {
+        NodeList children = group.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE && "dependency".equals(((Element) child).getLocalName())) {
+                addDependency((Element) child, dependencies);
+            }
+        }
+    }
+
+    private static void addDependency(Element dependency, List<RawDependency> dependencies) {
+        String id = dependency.getAttribute("id");
+        if (id.isBlank()) {
+            return;
+        }
+        String version = dependency.getAttribute("version");
+        dependencies.add(new RawDependency(id, version.isBlank() ? null : version));
+    }
+
     /**
      * {@code content} is the raw bytes of a {@code .nuspec} file taken from inside a caller-supplied
      * {@code .nupkg} upload, so this hardens the parser against XXE the same way any other
@@ -47,7 +116,7 @@ final class NuspecXml {
     static Metadata parse(byte[] content) {
         Document document;
         try {
-            document = XmlParser.parseDocument(new String(content, StandardCharsets.UTF_8));
+            document = XmlParser.parseDocument(content);
         } catch (Exception e) {
             throw new IllegalStateException("Could not parse the uploaded package's .nuspec file.", e);
         }
@@ -77,7 +146,24 @@ final class NuspecXml {
      * crafted upload could otherwise plant inside a subdirectory.
      */
     static Metadata extractFromNupkg(byte[] nupkgBytes) {
-        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(nupkgBytes))) {
+        return extractFromNupkg(new ByteArrayInputStream(nupkgBytes));
+    }
+
+    /**
+     * {@code extractFromNupkg(byte[])}'s own streamed sibling, for an upload too large to ever
+     * hold as one array: {@link ZipInputStream} reads entries sequentially, the same way for a
+     * file as for a resident array, so this never needed random/seekable access to begin with.
+     */
+    static Metadata extractFromNupkg(Path nupkgFile) {
+        try (InputStream in = Files.newInputStream(nupkgFile)) {
+            return extractFromNupkg(in);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read the uploaded package as a .nupkg archive.", e);
+        }
+    }
+
+    private static Metadata extractFromNupkg(InputStream nupkgStream) {
+        try (ZipInputStream zip = new ZipInputStream(nupkgStream)) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
                 String name = entry.getName();

@@ -90,15 +90,40 @@ public class CfnResourceDispatcher {
                 existingPhysicalId, existingAttributes, event -> {}, null);
     }
 
-    /**
-     * {@code priorProperties} are the resource's properties in the previous template, unresolved,
-     * or null when there is none; see {@link ProvisionContext#previouslyDeclared(String)}.
-     */
     public StackResource provision(String logicalId, String resourceType, JsonNode properties,
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName, String existingPhysicalId,
                                    Map<String, String> existingAttributes, Consumer<StackEvent> progress,
                                    JsonNode priorProperties) {
+        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
+                existingPhysicalId, existingAttributes, progress, priorProperties, null);
+    }
+
+    /**
+     * {@code priorProperties} are the resource's properties in the previous template, unresolved,
+     * or null when there is none; see {@link ProvisionContext#previouslyDeclared(String)}.
+     * {@code changes} is what the engine found changed in them, or null when it made no statement;
+     * see {@link ProvisionContext#changes(String, JsonNode)}.
+     */
+    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName, String existingPhysicalId,
+                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress,
+                                   JsonNode priorProperties, PropertyChanges changes) {
+        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
+                existingPhysicalId, existingAttributes, progress, priorProperties, changes, null);
+    }
+
+    /**
+     * The same with the permissions boundary a delegation registered for whoever created the stack,
+     * which the role provisioner applies to a role it creates.
+     */
+    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName, String existingPhysicalId,
+                                   Map<String, String> existingAttributes, Consumer<StackEvent> progress,
+                                   JsonNode priorProperties, PropertyChanges changes,
+                                   String delegatedRoleBoundaryArn) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -110,7 +135,7 @@ public class CfnResourceDispatcher {
             if (owner != null) {
                 owner.provision(resource, properties,
                         new ProvisionContext(engine, region, accountId, stackName, existingPhysicalId, progress,
-                                priorProperties));
+                                priorProperties, changes, delegatedRoleBoundaryArn));
                 // A provisioner that migrated a stub without writing its own Arn would leave the
                 // stub's, and the real resource would read as a stub on its next update.
                 String arn = resource.getAttributes().get("Arn");

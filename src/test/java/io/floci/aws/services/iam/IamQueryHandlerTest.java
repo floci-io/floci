@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.ServerCertificate;
@@ -17,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -61,7 +63,8 @@ class IamQueryHandlerTest {
                 "fabricated-key", null, Map.of())).thenReturn(certificate);
         when(service.getServerCertificate(CERTIFICATE_NAME)).thenReturn(certificate);
         when(service.listServerCertificates(null)).thenReturn(List.of(certificate));
-        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null, null);
+        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null,
+                new RequestContext(), null);
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ServerCertificateName", CERTIFICATE_NAME);
@@ -88,14 +91,15 @@ class IamQueryHandlerTest {
         role.setAssumeRolePolicyDocument("{}");
         role.setCreateDate(Instant.parse(stored));
         IamService service = mock(IamService.class);
-        when(service.createRole(ROLE_NAME, "/", "{}", null, 3600, Map.of(), null)).thenReturn(role);
+        when(service.createRole(ROLE_NAME, "/", EMPTY_POLICY_DOCUMENT, null, 3600, Map.of(), null)).thenReturn(role);
         when(service.getValidatedRole(ROLE_NAME)).thenReturn(role);
-        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null, null);
+        IamQueryHandler handler = new IamQueryHandler(service, null, null, null, null, null, null, null, null,
+                new RequestContext(), null);
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleName", ROLE_NAME);
         params.putSingle("Path", "/");
-        params.putSingle("AssumeRolePolicyDocument", "{}");
+        params.putSingle("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT);
 
         for (String action : List.of("CreateRole", "GetRole")) {
             try (Response response = handler.handle(action, params, null)) {

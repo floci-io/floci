@@ -95,6 +95,7 @@ class EventBusDeleteOwnershipTest {
         rule.setResourceType("AWS::Events::Rule");
         rule.setPhysicalId("orders-rule");
         rule.getAttributes().put("EventBusName", BUS);
+        when(eventBridgeService.ruleExists("orders-rule", BUS, REGION)).thenReturn(true);
         when(eventBridgeService.listTargetsByRule("orders-rule", BUS, REGION))
                 .thenThrow(new IllegalStateException("storage unavailable"));
 
@@ -104,6 +105,23 @@ class EventBusDeleteOwnershipTest {
         assertEquals("InternalFailure", error.getErrorCode());
         assertTrue(error.getMessage().contains("storage unavailable"), error.getMessage());
         verify(eventBridgeService, never()).deleteRule("orders-rule", BUS, REGION);
+    }
+
+    @Test
+    void aRuleNamedBeforeValidationThatIsAlreadyGoneIsTreatedAsDeleted() {
+        StackResource rule = new StackResource();
+        rule.setLogicalId("OrdersRule");
+        rule.setResourceType("AWS::Events::Rule");
+        rule.setPhysicalId("team/orders-rule");
+        rule.getAttributes().put("EventBusName", BUS);
+        when(eventBridgeService.ruleExists("team/orders-rule", BUS, REGION)).thenReturn(false);
+        when(eventBridgeService.listTargetsByRule("team/orders-rule", BUS, REGION))
+                .thenThrow(new AwsException("ValidationException", "invalid rule name", 400));
+
+        assertDoesNotThrow(() -> provisioner.delete(rule, REGION));
+
+        verify(eventBridgeService, never()).listTargetsByRule("team/orders-rule", BUS, REGION);
+        verify(eventBridgeService, never()).deleteRule("team/orders-rule", BUS, REGION);
     }
 
     private StackResource resource(String createdTimeAttr) {

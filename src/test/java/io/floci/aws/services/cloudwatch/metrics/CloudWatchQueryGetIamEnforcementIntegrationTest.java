@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import com.google.rpc.Status;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
@@ -25,6 +26,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -87,6 +89,39 @@ class CloudWatchQueryGetIamEnforcementIntegrationTest {
                 .queryParam("Action", "ListMetrics").queryParam("Version", "2010-08-01")
                 .queryParam("Namespace", namespace).get("/").then().statusCode(200)
                 .body(not(containsString(namespace)));
+    }
+
+    @Test
+    void otlpIngestionRequiresPutMetricData() throws Exception {
+        given().contentType("application/json").body("{}").post("/v1/metrics").then().statusCode(403)
+                .body("code", equalTo(7)).body("message", equalTo("Request is missing Authentication Token"));
+        byte[] unsigned = given().contentType("application/x-protobuf").body(new byte[] {10, 0})
+                .post("/v1/metrics").then().statusCode(403).extract().asByteArray();
+        assertEquals(7, Status.parseFrom(unsigned).getCode());
+        given().header("Authorization", "Bearer invalid").contentType("application/json")
+                .body("{}").post("/v1/metrics").then().statusCode(403).body("code", equalTo(7));
+        String user = "otlp-" + UUID.randomUUID();
+        String admin = auth("000000000000", "iam");
+        String accessKey = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), admin, user).accessKeyId();
+        for (String path : new String[] {"/v1/metrics", "/v1/metrics;ignored=yes", "/v1;ignored=yes/metrics",
+                "/v1/%6detrics"}) {
+            given().urlEncodingEnabled(false).contentType("application/json").body("{}").post(path)
+                    .then().statusCode(403).body("code", equalTo(7));
+            given().urlEncodingEnabled(false).header("Authorization", auth(accessKey, "monitoring"))
+                    .contentType("application/json").body("{}").post(path).then().statusCode(403)
+                    .body("code", equalTo(7));
+        }
+        given().header("Authorization", admin).contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "PutUserPolicy").formParam("Version", "2010-05-08")
+                .formParam("UserName", user).formParam("PolicyName", "otlp")
+                .formParam("PolicyDocument", """
+                        {"Version":"2012-10-17","Statement":[{
+                          "Effect":"Allow","Action":"cloudwatch:PutMetricData","Resource":"*"
+                        }]}
+                        """)
+                .post("/").then().statusCode(200);
+        given().header("Authorization", auth(accessKey, "monitoring"))
+                .contentType("application/json").body("{}").post("/v1/metrics").then().statusCode(200);
     }
 
     @Test

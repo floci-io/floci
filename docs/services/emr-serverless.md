@@ -13,7 +13,9 @@ EMR Serverless is an AWS service that provides serverless data analytics environ
 | `floci.services.emrserverless.docker-network` | Docker network for job run containers | the global default |
 | `floci.services.emrserverless.image-template` | Image for a `docker` job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release |
 | `floci.services.emrserverless.hive-image-template` | Image for a `docker` Hive job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/hive/%s:latest` |
-| `floci.services.emrserverless.reconcile-containers-on-startup` | Remove the drivers a previous run of this Floci left on the Docker daemon before the first job run starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace | `true` |
+| `floci.services.emrserverless.executor-containers` | How many executors a `docker` Spark job run may have at once, each in a container of its own (see **Executors** under [Running Spark job runs](#running-spark-job-runs)); `0`, the default, runs a run's executors in its driver's container, in Spark's local mode | `0` |
+| `floci.services.emrserverless.honour-architectures` | Run a `docker` job run's driver and executors for its application's `architecture` (see **Architecture** under [Running Spark job runs](#running-spark-job-runs)); `false` runs them on the Docker host's own platform | `false` |
+| `floci.services.emrserverless.reconcile-containers-on-startup` | Remove the drivers and executors a previous run of this Floci left on the Docker daemon before the first job run starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace | `true` |
 
 ## Endpoints
 
@@ -56,6 +58,24 @@ another.
 `interactiveConfiguration`, `identityCenterConfiguration` and `jobLevelCostAllocationConfiguration`
 among them, and `GetApplication` returns each as it was written.
 
+`UpdateApplication` answers with the updated application, as `GetApplication` reports it.
+
+`UpdateApplication` changes any setting of a `CREATED` or `STOPPED` application, and of a `STARTED` one its
+`maximumCapacity` and its custom images, `imageConfiguration` and `workerTypeSpecifications`, as the user guide's
+"Updating Running Applications" describes. For every other setting the API reference's "An application has to be in
+a stopped or created state in order to be updated" holds: a `STARTED` application's update naming one, even beside
+those or with its current value, is refused with `ValidationException`, "Application must be in a stopped or created
+state in order to be updated.", and so is an image change on an application with `initialCapacity` ("Custom image
+updates on running applications are not supported on applications with pre-initialized capacity configured"). A run
+already going keeps the image and the maximum capacity it was launched with, and a new run, or a new attempt of a
+run, takes the application's current ones: "New workloads submitted after the update automatically will use the new
+image, while existing workloads continue with the original image". On a release up to 7.13 whose
+`applicationLevelDigestResolution` is left true, or any whose image configuration sets it true, "Custom images are
+resolved to a digest at application start; that digest is used for all jobs until the application restarts": a new
+run keeps the image the application resolved as it started (see **Image** under job runs) until it starts again,
+unless the update turns that image configuration's `applicationLevelDigestResolution` to false, after which each run
+resolves the image it is given.
+
 `DeleteApplication` leaves the application in `TERMINATED` state. `GetApplication` continues to
 report that state so lifecycle waiters can observe it, while an unfiltered `ListApplications`
 omits the terminated application. A terminated application cannot be started or stopped again.
@@ -80,9 +100,16 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   (HTTP 409) "Request did not match the original".
 * **Execution timeout**: `executionTimeoutMinutes` is 0 to 1,000,000, 0 meaning no timeout. From
   release `emr-7.11.0`, a `BATCH` run's timeout must be 1 to 10080 minutes (7 days), as the model and
-  the 7.11.0 release notes say; a run outside that is refused with `ValidationException`.
+  the 7.11.0 release notes say; a run outside that is refused with `ValidationException`. The AWS runtime for
+  Apache Spark's releases, `emr-spark-8.0.0` on, hold their `BATCH` runs to it too: the notes apply it "from this
+  release onwards", and the release list puts them after EMR Serverless 7.14.0.
 * **CancelJobRun** moves a run that has not finished to `CANCELLED`. A finished run answers
   `ValidationException` "Job run is not in a cancellable state".
+* **StopApplication** refuses an application with a run that has not finished, a `STREAMING` run or
+  a `CANCELLING` one included, as the API reference says "All scheduled and running jobs must be
+  completed or cancelled before stopping an application." It answers `ValidationException`, the one
+  error the model declares for this, with that sentence as its message: AWS's own message is not
+  recorded, so the wording is Floci's reading.
 * **ListJobRuns** returns the newest runs first, filtered by `states`, `createdAtAfter`,
   `createdAtBefore` and `mode`, at most 50 per page. With several `states`, the runs are grouped by
   state in the order the filter names them. A state or mode that does not exist, or more than 8
@@ -114,7 +141,31 @@ run executes. Floci starts one container per run from the application's custom i
 (see **Image** below), or else from the release's image, the base image AWS publishes for customizing
 EMR Serverless images (`public.ecr.aws/emr-serverless/spark/<release>`, and `spark4/<release>` for the
 AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
-`spark-submit` in local mode in it: the container holds the driver and its executors.
+`spark-submit` in it, in Spark's local mode by default: the container holds the driver and its executors.
+With `executor-containers` above `0`, each executor runs in a container of its own instead, as each has a
+worker of its own on EMR Serverless (see **Executors** below).
+
+* **Executors**: with `executor-containers` above `0`, Floci starts an executor's container as the driver asks
+  for one, of the same image as the driver's or the application's for its executors (see **Image**), on the
+  same network, with the same credentials and trust store. Its worker offers the run's `spark.executor.cores` and `spark.executor.memory`,
+  which Floci reads from the running driver, so they come from the image's `spark-defaults`, the run's
+  configuration or its `sparkSubmitParameters` alike: 4 cores and 14 GB unless the run says otherwise. How many
+  run follows Spark's dynamic allocation, on by default, which starts with `spark.dynamicAllocation.initialExecutors`
+  (3) and releases an idle executor after `spark.dynamicAllocation.executorIdleTimeout`, when its shuffle data
+  allows: Floci removes the container of an executor Spark released. With dynamic allocation off,
+  `spark.executor.instances` start. A run has at most `executor-containers` executors at once,
+  and none that would take the workers of its application's runs, their drivers' among them, past the application's
+  `maximumCapacity`, which "is cumulative across all workers at any given point in time" and of which "no new
+  resources will be created once any one of the defined limits is hit": a worker counts its cores, its memory with
+  Spark's overhead rounded up to a whole GB, and its disk, `spark.emr-serverless.executor.disk` or
+  `spark.emr-serverless.driver.disk`, 20 GB by default. The overhead is the run's `spark.executor.memoryOverhead`
+  (or the driver's), else that share of the memory its `spark.executor.memoryOverheadFactor` gives, else
+  `spark.emr-serverless.memoryOverheadFactor`'s, else 10%, and at least 384 MB. The master's address, the run's
+  secret and the UI's kill links (see below) come after the run's own options, so none of them replaces these.
+  Every executor's container goes with its driver, however the run ends, as does one that ended before it, and a
+  hard stop's leftovers go as its driver's do. With `executor-containers` at `0`,
+  the default, or on the host's network or another container's network namespace, where two runs' ports would meet, the
+  executors run in the driver's container instead, in Spark's local mode.
 
 * **States**: a run is `SCHEDULED` while its image is pulled and its container starts (the first run
   of a release pulls its image, 3.5 to 4.3 GB unpacked; a pull still downloading after
@@ -156,8 +207,9 @@ AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
   Floci reads each archive as the run's account. One it cannot read fails the run before its driver
   starts, with "Job run could not start" naming it, and one that does not unpack fails the run as a
   driver's failure does. Spark also unpacks every archive itself, into its own files folder, where
-  `SparkFiles.get` finds it. A `spark.executorEnv.<KEY>` needs nothing more from Floci: local mode's
-  executors run in the driver's JVM, and Spark gives these variables to the Python workers it starts.
+  `SparkFiles.get` finds it, and, with executors in containers of their own, into each executor's working
+  directory. A `spark.executorEnv.<KEY>` needs nothing more from Floci: Spark gives these variables to its
+  executors, in the driver's JVM in local mode, and the Python workers they start.
 * **Credentials**: the container gets a session for the run's execution role when IAM knows the role,
   otherwise the account's placeholder credentials, and `AWS_ENDPOINT_URL` pointing at Floci, so the
   job's own SDK clients reach Floci too.
@@ -185,9 +237,8 @@ AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
   any; both are created as needed, in the run's account and Region. A `logTypes` sends only the driver's
   types it names, and none of the driver's output when it names only `SPARK_EXECUTOR`.
 * **Image**: an application's custom image runs in place of the release's: the `Driver` worker type's
-  `imageConfiguration` in `workerTypeSpecifications`, or else the application's `imageConfiguration`,
-  which applies to every worker type (local mode runs the executors in the driver's container, so an
-  `Executor` image is not used). An `<account>.dkr.ecr.<region>.amazonaws.com/<repository>:<tag>` URI
+  `imageConfiguration` in `workerTypeSpecifications` for the driver and the `Executor` worker type's for the
+  executors in containers of their own (local mode runs them in the driver's container), or else the application's `imageConfiguration`, which applies to every worker type. An `<account>.dkr.ecr.<region>.amazonaws.com/<repository>:<tag>` URI
   leads to Floci's [ECR](ecr.md), as a Lambda function's or an ECS task's image does, so the image is
   pushed to a repository there; the `repositoryUri` Floci's ECR hands out works too. The image is pulled
   again for every run, so a tag pushed again is what the next run gets; when the pull fails the image the
@@ -197,7 +248,25 @@ AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
   a `repositoryUri` from Floci's ECR, is in another Region, both with `ValidationException` in Floci's own
   wording. An update that leaves `imageUri` out removes that image configuration. Without a custom image,
   `image-template` names another image than the release's, such as a mirror or a dated tag of it:
-  `registry.internal/emr-serverless/spark/%s:20250425`.
+  `registry.internal/emr-serverless/spark/%s:20250425`. `GetJobRun` reports the image configurations each attempt
+  applies, as its application had them when the attempt was made: its `imageConfiguration`, and its worker types'
+  in `workerTypeSpecifications` (those the application resolved as it started, with that digest), as AWS's do when
+  digests are resolved for each run ("To identify which image
+  version each job is running, the GetJobRun API response returns the resolvedImageDigest for that specific job").
+  The driver's configuration, its worker type's or else the application's, has the `resolvedImageDigest` of the
+  image the attempt pulled for the driver, its manifest digest in Floci's ECR; the executors' has theirs, or the
+  driver's where the two share one. No other has a digest, even one naming the same image, such as the `Executor`
+  image while local mode runs the executors in the driver's container, or a Hive run's `TezTask` image. Nor does
+  one built locally under that URI, nor any without the `docker` runner mode, which pulls no image.
+* **Architecture**: a run's containers, its driver's and its executors', run on the Docker host's own platform by
+  default. With `honour-architectures` on (`FLOCI_SERVICES_EMRSERVERLESS_HONOUR_ARCHITECTURES=true`) they run the
+  image for its application's `architecture`, `linux/amd64` for `X86_64` and `linux/arm64` for `ARM64`, the
+  release's images being published for both and a custom image pulled for that platform; an application that names
+  none still runs on the host's own, where on EMR Serverless "x86_64 is the default option". It is off by default,
+  as Lambda's is, because tools such as Terraform name `X86_64` unless told otherwise, which on an arm64 host would
+  move every run to emulation. A host of another architecture runs the image under emulation, which Docker Desktop
+  has and a Linux host gets from QEMU's `binfmt_misc` handlers; without it the driver cannot start
+  ("exec format error") and the run fails. Floci does not fall back to the host's platform when the setting is on.
 
 ## Running Hive job runs
 
@@ -233,15 +302,15 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
 
 ## Limitations and Differences from AWS
 
-* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, and a Hive run with Tez in local mode, so worker counts and sizes, initial and maximum capacity are not applied. A driver's failure is `FAILED` in Floci's own wording. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, no `HIVE_LOG`, `TEZ_AM` or `TEZ_TASK` logs of a Hive run, whose own log stays in its container, and `encryptionKeyArn` is ignored).
+* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in Spark's local mode in one container unless `executor-containers` is above `0` (see **Executors** below), and a Hive run with Tez in local mode in one container: in local mode, worker counts and sizes, initial and maximum capacity are not applied. A driver's failure is `FAILED` in Floci's own wording. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (no executor logs, which local mode does not have and executors' containers take with them, no `HIVE_LOG`, `TEZ_AM` or `TEZ_TASK` logs of a Hive run, whose own log stays in its container, and `encryptionKeyArn` is ignored).
+* **Executors**: with `executor-containers` above `0`, a Spark run's executors run in containers of their own, but at most `executor-containers` of them, rather than as many as dynamic allocation asks for, and a container's memory and cores are not limited to its worker's size, which only Spark's settings follow. `initialCapacity` is not applied: no worker is waiting, so each starts as the run asks for it. Spark's master is Spark's own standalone master, in the driver's container, where EMR Serverless has its own (`spark.master` reads `spark://...`), and the driver's UI, which the release's image turns off, is on, with its kill links off, as Floci follows the driver through it: a run that turns it off again (`spark.ui.enabled=false`) gets a single executor container 30 seconds after its driver starts, whose worker offers 32 cores and 256 GB, as Floci cannot read the run's own sizes, and which, like its driver's, counts for nothing against the application's `maximumCapacity`.
 * **A driver that is not its application's type**: AWS documents no answer for a `hive` run on a Spark application, or a `sparkSubmit` run on a Hive application. In the `docker` mode Floci records such a run, then fails it without running, in Floci's own wording, as its application's image could not run it.
 * **Mandatory Hive properties**: Floci does not refuse a Hive run without `hive.exec.scratchdir` or `hive.metastore.warehouse.dir`. Hive then keeps its scratch files and its managed tables' data in the container, which go with it.
 * **Unsourced errors**: AWS documents neither the error for a run submitted to an application whose auto-start is off nor the one for a run on a terminated application; Floci answers both with `ValidationException`. The same holds for a `BATCH` timeout outside 1 to 10080 minutes on `emr-7.11.0` or later (`ValidationException`) and for `GetJobRun` naming an attempt a run never made (`ResourceNotFoundException`), both in Floci's own wording. A run needs a `jobDriver`, as every `JobRun` carries one, and `jobDriver` is a union, so a run without a driver, or with one that sets both `sparkSubmit` and `hive` or neither, is refused with `ValidationException` too, in Floci's own wording.
 * **Archives**: only the archives of `spark.archives` that are in S3 are unpacked into the driver's working
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
-* **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. Every run resolves its image again, as releases from 7.14 do and earlier ones with `applicationLevelDigestResolution` false: Floci keeps no digest from the application's start, and reports no `resolvedImageDigest`, on the application or on a job run.
-* **StopApplication with running jobs**: AWS requires running jobs to finish or be cancelled before an application stops. Floci does not enforce it; with the default duration of `0` no `BATCH` run is ever running.
+* **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. An image's digest is resolved as the application starts where its `applicationLevelDigestResolution` is true, or left unset on EMR 7.13 or earlier, as the user guide's table has it, and AWS's "Custom images are resolved to a digest at application start; that digest is used for all jobs until the application restarts": the application's image configuration gets the digest of the image in Floci's ECR as its `resolvedImageDigest`, and each run pulls the image by it until the application starts again; a stopped application reports none. An image outside ECR, one in another account's repository (Floci does not check that the application may pull it), or one Floci's ECR does not hold or cannot read without Docker, has no digest to read and is resolved for each run, as every image is from 7.14 on; any other answer from Floci's ECR fails `StartApplication` with `InternalServerException`; such a run's digest comes from its attempt's own pull (see **Image** above), and a job run's image configurations carry no `applicationLevelDigestResolution`.
 * **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Data Plane**: Floci does not implement the data-plane API, such as interactive sessions.

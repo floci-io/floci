@@ -51,13 +51,14 @@ class LambdaCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
-        // Scalar properties and flat tag lists only, so a passthrough engine keeps this isolated.
+        // Literal properties only, so a passthrough engine keeps this isolated.
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null || node.isMissingNode() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         return new ProvisionContext(engine, REGION, "000000000000", "my-stack");
     }
 
@@ -163,6 +164,42 @@ class LambdaCfnProvisionerTest {
         verify(lambda).tagResource(FUNCTION_ARN + "my-fn", Map.of("team", "b"));
         verify(lambda, never()).createFunction(anyString(), anyMap());
         assertEquals("team", r.getAttributes().get(TEMPLATE_TAG_KEYS_ATTR));
+    }
+
+    @Test
+    void unrelatedUpdateOmitsAnUnchangedLegacyOversizedEnvironment() {
+        Map<String, String> variables = Map.of("BIG", "x".repeat(5000));
+        stubInPlaceUpdate("my-fn", Map.of()).setEnvironment(variables);
+        ObjectNode props = props("my-fn").put("Description", "updated description");
+        props.putObject("Environment").set("Variables", mapper.valueToTree(variables));
+
+        provisioner.provision(function("my-fn"), props, updateCtx("my-fn"));
+
+        verify(lambda).updateFunctionConfiguration(eq(REGION), eq("my-fn"), argThat(request ->
+                !request.containsKey("Environment") && "updated description".equals(request.get("Description"))));
+    }
+
+    @Test
+    void changedEnvironmentStillReachesLambdaValidation() {
+        stubInPlaceUpdate("my-fn", Map.of()).setEnvironment(Map.of("MARKER", "original"));
+        Map<String, String> variables = Map.of("BIG", "x".repeat(5000));
+        ObjectNode props = props("my-fn");
+        props.putObject("Environment").set("Variables", mapper.valueToTree(variables));
+
+        provisioner.provision(function("my-fn"), props, updateCtx("my-fn"));
+
+        verify(lambda).updateFunctionConfiguration(eq(REGION), eq("my-fn"), argThat(request ->
+                Map.of("Variables", variables).equals(request.get("Environment"))));
+    }
+
+    @Test
+    void removingEnvironmentStillClearsStoredVariables() {
+        stubInPlaceUpdate("my-fn", Map.of()).setEnvironment(Map.of("MARKER", "original"));
+
+        provisioner.provision(function("my-fn"), props("my-fn"), updateCtx("my-fn"));
+
+        verify(lambda).updateFunctionConfiguration(eq(REGION), eq("my-fn"), argThat(request ->
+                Map.of("Variables", Map.of()).equals(request.get("Environment"))));
     }
 
     @Test

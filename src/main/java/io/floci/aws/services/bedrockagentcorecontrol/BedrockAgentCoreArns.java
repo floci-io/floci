@@ -12,9 +12,8 @@ final class BedrockAgentCoreArns {
     }
 
     /**
-     * The resource of an AgentCore ARN without its qualifier: {@code agent/<uuid>} for
-     * {@code arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>}. Null when the value
-     * is not an ARN.
+     * The resource of an AgentCore ARN without a colon qualifier, including nested runtime endpoint
+     * paths. Null when the value is not an ARN.
      */
     static String resource(String arn) {
         if (!AwsArnUtils.isArn(arn)) {

@@ -14,6 +14,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -1138,7 +1139,7 @@ class IamIntegrationTest {
             .formParam("Action", "PutRolePolicy")
             .formParam("RoleName", "TestRole")
             .formParam("PolicyName", "inline-logging")
-            .formParam("PolicyDocument", "{\"Version\":\"2012-10-17\"}")
+            .formParam("PolicyDocument", EMPTY_POLICY_DOCUMENT)
             .header("Authorization",
                     "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
         .when()

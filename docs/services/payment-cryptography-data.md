@@ -130,8 +130,8 @@ client that talks to the control plane does not reach it by accident.
 - **The American Express cryptogram is refused rather than approximated.** The AEIPS session
   key derivation is proprietary and there is nothing to verify it against, and a plausible
   wrong cryptogram is the one outcome worse than an error. The EMV 4.1 tree derivation, the
-  one the `Emv2000` attributes ask for, is refused for the same reason: it needs the card's
-  public key certificate.
+  one the `Emv2000` attributes ask for, is refused as well: it is over the master key and
+  the ATC, and this service does not implement that construction.
 - **The card requests are checked against the model.** The account number is twelve to
   nineteen digits, the expiry is four of them, the service code is three, and the PAN
   sequence number is two: the EMV ones, as the model states them. A formatted account

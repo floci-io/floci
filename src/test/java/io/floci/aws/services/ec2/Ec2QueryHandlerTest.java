@@ -250,7 +250,7 @@ class Ec2QueryHandlerTest {
         assertEquals(200, response.getStatus());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
-        verify(service).createTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture());
+        verify(service).createTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture(), eq(false));
         assertEquals(List.of("", "", "present"),
                 tags.getValue().stream().map(Tag::getValue).toList());
     }
@@ -267,7 +267,7 @@ class Ec2QueryHandlerTest {
         assertEquals(200, response.getStatus());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
-        verify(service).deleteTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture());
+        verify(service).deleteTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture(), eq(false));
         assertNull(tags.getValue().getFirst().getValue());
     }
 
@@ -660,7 +660,7 @@ class Ec2QueryHandlerTest {
     void aSecurityGroupDryRunWithoutAVpcIdNeedsTheDefaultVpcToExist() {
         Ec2Service service = mock(Ec2Service.class);
         when(service.requireSecurityGroupVpc("us-east-1", null)).thenThrow(new AwsException(
-                "InvalidVpcID.NotFound", "The vpc ID 'vpc-default-us-east-1' does not exist", 400));
+                "InvalidVpcID.NotFound", "The vpc ID '" + Ec2Service.defaultVpcId("us-east-1") + "' does not exist", 400));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("GroupName", "test");
         params.putSingle("GroupDescription", "test");

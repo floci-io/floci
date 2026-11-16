@@ -27,18 +27,20 @@ import java.util.Set;
  * {@code hadoop-streaming} or {@code hadoop-lzo} one through the image's {@code hadoop}, with MapReduce in local
  * mode; an {@code s3-dist-cp} one runs Floci's own S3DistCp. On a cluster with Hive, whose image holds Hive too, a
  * {@code command-runner.jar} step running {@code hive-script}, as the AWS CLI writes a Hive step, or {@code hive}
- * runs Hive.
+ * runs Hive. One running {@code pig-script}, as the AWS CLI writes a Pig step, runs EMR's, which runs the
+ * {@code pig} Floci adds to a cluster with Pig, with Pig's configuration of its own ({@link #pigEnvironment}).
  */
 final class EmrSparkSteps {
 
     // No source gives AWS's wording for these; they are Floci's.
-    static final String NOT_RUN = "Floci does not run this step: pig-script is not in the image steps run in.";
+    static final String NOT_RUN = "Floci does not run this step: Pig is not in the image steps run in."
+            + " floci.services.emr.pig.enabled adds Apache Pig to it.";
     static final String INTERRUPTED = "Floci stopped while the step was running.";
 
     private static final String COMMAND_RUNNER = "command-runner.jar";
     private static final String SCRIPT_RUNNER = "script-runner.jar";
     private static final String SPARK_SUBMIT = "spark-submit";
-    // Local mode is Floci's, so a step's own master and deploy mode are dropped.
+    // Local mode is Floci's, so a step's own master and deploy mode are dropped, unless its cluster runs YARN.
     private static final Set<String> DROPPED_OPTIONS = Set.of("--master", "--deploy-mode");
     // spark-submit's options that take no value (SparkSubmitOptionParser's switches); every other takes one.
     private static final Set<String> SWITCHES = Set.of("--help", "-h", "--supervise", "--usage-error", "--verbose",
@@ -53,6 +55,7 @@ final class EmrSparkSteps {
     // The release pages' core-site, which will "Change values in Hadoop's core-site.xml file", and spark-log4j2,
     // which will "Change values in Spark's log4j2.properties file".
     private static final String CORE_SITE = "core-site";
+    private static final String HDFS_SITE = "hdfs-site";
     private static final String SPARK_LOG4J2 = "spark-log4j2";
     // And mapred-site, which will "Change values in the MapReduce application's mapred-site.xml file", hadoop-log4j
     // "Change values in Hadoop's log4j.properties file", and hadoop-env "Change values in the Hadoop environment for
@@ -64,8 +67,34 @@ final class EmrSparkSteps {
     private static final String SPARK_HADOOP_PREFIX = "spark.hadoop.";
     // spark-submit gives the JVM it runs an application's main class in the Java options of this variable.
     private static final String SPARK_SUBMIT_OPTS = "SPARK_SUBMIT_OPTS";
-    // The Release Guide's command-runner.jar tools that the EMR Serverless images do not have.
-    private static final Set<String> UNAVAILABLE_TOOLS = Set.of("pig-script");
+    // The AWS CLI's Pig step on a release is command-runner.jar running "pig-script --run-pig-script --args" and the
+    // step's arguments; the image has EMR's pig-script, which runs pig with them, or says "Pig isn't installed.", as
+    // the image has no pig unless Floci adds it.
+    private static final String PIG_SCRIPT = "pig-script";
+    private static final String PIG = "pig";
+    // The Release Guide's Pig classifications: pig-properties will "Change values in Pig's pig.properties file",
+    // pig-log4j "Change values in Pig's log4j.properties file", and pig-env "Change values in the Pig environment",
+    // through its export classification. Pig 0.16.0 and later "use Apache Tez", the Release Guide's Pig considerations
+    // say: "You can explicitly set exectype=mapreduce in the pig-properties configuration classification to use
+    // MapReduce." A cluster's tez-site is Tez's, which Pig takes as it does a Hadoop property, ahead of pig-properties.
+    private static final String PIG_PROPERTIES = "pig-properties";
+    private static final String PIG_LOG4J = "pig-log4j";
+    private static final String PIG_ENV = "pig-env";
+    private static final String TEZ_SITE = "tez-site";
+    private static final String PIG_EXECTYPE = "exectype";
+    private static final String PIG_TEZ = "tez";
+    // Pig's setting for the log4j.properties it reads, which then is the one the cluster's pig-log4j changes.
+    private static final String PIG_LOG4J_CONF = "log4jconf";
+    // Pig sets the file system of each of a script's inputs to the job's working directory, the default file system's
+    // home of the user it runs as, which S3A, Floci's s3://, refuses when it names another file system. Named without
+    // one, it is the same folder in HDFS, and Hadoop fills in the user.
+    private static final String WORKING_DIR = "mapreduce.job.working.dir";
+    private static final String USER_HOME = "/user/${user.name}";
+    // A cluster runs no MapReduce JobHistory server, which a job client asks for a job once its application master has
+    // gone, as Pig does for each MapReduce job's task reports and counters: Pig asks for no task reports, and its
+    // client asks the server once rather than three times, each attempt waiting about ten seconds to connect.
+    private static final String PIG_NO_TASK_REPORT = "pig.stats.notaskreport";
+    private static final String CLIENT_RETRIES = "yarn.app.mapreduce.client.max-retries";
     // The AWS CLI's Hive step on a release is command-runner.jar running "hive-script --run-hive-script --args"
     // and the step's arguments, the ones the image's hive-script runs hive with; a step can also run hive itself.
     private static final String HIVE_SCRIPT = "hive-script";
@@ -77,7 +106,7 @@ final class EmrSparkSteps {
     // hive-site, which will "Change values in Hive's hive-site.xml"; and hive-env's exports, which will "Change
     // values in the Hive environment".
     private static final String HIVE_SITE = "hive-site";
-    private static final List<String> HIVE_CLASSIFICATIONS = List.of(CORE_SITE, "tez-site", HIVE_SITE);
+    private static final List<String> HIVE_CLASSIFICATIONS = List.of(CORE_SITE, TEZ_SITE, HIVE_SITE);
     private static final String HIVE_ENV = "hive-env";
     // EMR's MapReduce jars are in /usr/lib/hadoop-mapreduce, as the image's own hadoop-streaming script has it,
     // which the image does not have; its streaming jar is in /usr/lib/hadoop.
@@ -115,12 +144,13 @@ final class EmrSparkSteps {
     /**
      * What follows Floci's own settings on {@code spark-submit}'s command line for {@code step}, or null for
      * a step Floci does not run. For {@code command-runner.jar spark-submit ...}, the arguments after
-     * {@code spark-submit}, without its {@code --master} and {@code --deploy-mode}: options come before the
-     * application, so one after it is the application's own and kept. For a custom JAR, its main class, if
+     * {@code spark-submit}, without its {@code --master} and {@code --deploy-mode} unless its cluster runs YARN
+     * ({@code onYarn}), where they hold as on EMR: options come before the application, so one after it is the
+     * application's own and kept. For a custom JAR, its main class, if
      * the step names one (otherwise {@code spark-submit} reads the JAR's manifest), the JAR and the step's
      * arguments. A JAR EMR has in {@code /usr/lib/hadoop-mapreduce} is the image's copy of it.
      */
-    static List<String> application(EmrStep step) {
+    static List<String> application(EmrStep step, boolean onYarn) {
         String jar = step.getJar();
         if (jar == null || jar.isBlank() || named(jar, SCRIPT_RUNNER)) {
             return null;
@@ -128,7 +158,8 @@ final class EmrSparkSteps {
         List<String> args = step.getArgs() != null ? step.getArgs() : List.of();
         if (named(jar, COMMAND_RUNNER)) {
             return !args.isEmpty() && named(args.getFirst(), SPARK_SUBMIT)
-                    ? withoutMasterOrDeployMode(args.subList(1, args.size())) : null;
+                    ? onYarn ? List.copyOf(args.subList(1, args.size()))
+                    : withoutMasterOrDeployMode(args.subList(1, args.size())) : null;
         }
         List<String> application = new ArrayList<>();
         if (step.getMainClass() != null && !step.getMainClass().isBlank()) {
@@ -142,11 +173,12 @@ final class EmrSparkSteps {
 
     /**
      * The command a step that is not a Spark step runs, or null for one Floci does not run: a
-     * {@code command-runner.jar} step's arguments, its command first, unless it names a tool the image does
-     * not have; Floci's S3DistCp with the arguments of an {@code s3-dist-cp} one; a {@code script-runner.jar}
-     * step's script, the first of its arguments, with the rest.
+     * {@code command-runner.jar} step's arguments, its command first, unless it runs {@code pig-script} on a cluster
+     * that installs Pig, which Floci has not added ({@code pigMissing}), where EMR's would run it; on one that does not,
+     * EMR's {@code pig-script} runs and finds no {@code pig}, as it does there. Floci's S3DistCp with the arguments of an
+     * {@code s3-dist-cp} one; a {@code script-runner.jar} step's script, the first of its arguments, with the rest.
      */
-    static List<String> command(EmrStep step) {
+    static List<String> command(EmrStep step, boolean pigMissing) {
         String jar = step.getJar();
         List<String> args = step.getArgs() != null ? step.getArgs() : List.of();
         if (jar == null || args.isEmpty()) {
@@ -158,7 +190,7 @@ final class EmrSparkSteps {
                 command.addAll(args.subList(1, args.size()));
                 return command;
             }
-            return named(args.getFirst(), SPARK_SUBMIT) || UNAVAILABLE_TOOLS.contains(args.getFirst())
+            return named(args.getFirst(), SPARK_SUBMIT) || pigMissing && named(args.getFirst(), PIG_SCRIPT)
                     ? null : List.copyOf(args);
         }
         if (named(jar, SCRIPT_RUNNER)) {
@@ -231,16 +263,75 @@ final class EmrSparkSteps {
      * Spark."
      */
     static boolean installsHive(String releaseLabel, String applications, ObjectMapper objectMapper) {
+        return installs(releaseLabel, applications, objectMapper, HIVE, HCATALOG);
+    }
+
+    /**
+     * Whether a cluster installs Pig: its {@code Applications} name it, unless its release is of the AWS runtime for
+     * Apache Spark, whose release notes say "Pig and Oozie are not included".
+     */
+    static boolean installsPig(String releaseLabel, String applications, ObjectMapper objectMapper) {
+        return installs(releaseLabel, applications, objectMapper, PIG);
+    }
+
+    // Whether a cluster's Applications name any of names, in any case, unless its release is of the AWS runtime for
+    // Apache Spark, which installs neither Hive, HCatalog nor Pig.
+    private static boolean installs(String releaseLabel, String applications, ObjectMapper objectMapper,
+                                    String... names) {
         if (releaseLabel != null && EmrServerlessSparkRunner.sparkRuntime(releaseLabel)) {
             return false;
         }
         for (JsonNode application : stored(applications, objectMapper)) {
             String name = application.path("Name").asText();
-            if (HIVE.equalsIgnoreCase(name) || HCATALOG.equalsIgnoreCase(name)) {
-                return true;
+            for (String installed : names) {
+                if (installed.equalsIgnoreCase(name)) {
+                    return true;
+                }
             }
         }
         return false;
+    }
+
+    /**
+     * The variables a step's command gets on a cluster with Floci's Pig, which make its {@code pig} read a Pig
+     * configuration of its own: {@code pig.properties} lines that run Pig on Tez, as EMR's does, from a working
+     * directory S3A takes, with no wait on a JobHistory server the cluster does not run, then the cluster's
+     * {@code tez-site} and {@code pig-properties}, a later one winning, and,
+     * with a {@code pig-log4j}, Pig's setting to read the {@code log4j.properties} that gets its lines;
+     * {@code pig-env}'s exports start its {@code pig-env.sh}.
+     */
+    static Map<String, String> pigEnvironment(String configurations, ObjectMapper objectMapper) {
+        Map<String, String> properties = new LinkedHashMap<>();
+        properties.put(PIG_EXECTYPE, PIG_TEZ);
+        properties.put(WORKING_DIR, USER_HOME);
+        properties.put(PIG_NO_TASK_REPORT, "true");
+        properties.put(CLIENT_RETRIES, "1");
+        Map<String, String> log4j = properties(configurations, objectMapper, PIG_LOG4J);
+        if (!log4j.isEmpty()) {
+            properties.put(PIG_LOG4J_CONF, EmrServerlessSparkRunner.PIG_CONF + "/log4j.properties");
+        }
+        properties.putAll(properties(configurations, objectMapper, TEZ_SITE));
+        properties.putAll(properties(configurations, objectMapper, PIG_PROPERTIES));
+        Map<String, String> variables = new LinkedHashMap<>();
+        variables.put(EmrServerlessSparkRunner.PIG_PROPERTIES_VARIABLE,
+                EmrServerlessSparkRunner.propertiesLines(properties));
+        if (!log4j.isEmpty()) {
+            variables.put(EmrServerlessSparkRunner.PIG_LOG4J_VARIABLE, EmrServerlessSparkRunner.propertiesLines(log4j));
+        }
+        Map<String, String> exports = exports(configurations, objectMapper, PIG_ENV);
+        if (!exports.isEmpty()) {
+            variables.put(EmrServerlessSparkRunner.PIG_ENV_VARIABLE, EmrServerlessSparkRunner.exportLines(exports));
+        }
+        return variables;
+    }
+
+    /**
+     * The S3 folder its YARN applications' logs go to, or null when a cluster has no {@code LogUri}: the Management
+     * Guide's {@code /cluster-id/containers}, "Application container logs. The logs for each YARN application are
+     * stored in these locations".
+     */
+    static String containerLogFolder(EmrCluster cluster) {
+        return EmrServerlessSparkRunner.logFolder(cluster.getLogUri(), cluster.getId() + "/containers/");
     }
 
     /**
@@ -269,6 +360,11 @@ final class EmrSparkSteps {
                 .forEach((key, value) -> properties.put(SPARK_HADOOP_PREFIX + key, value));
         properties.putAll(properties(configurations, objectMapper, SPARK_DEFAULTS));
         return properties;
+    }
+
+    /** The properties of a cluster's {@code hdfs-site}, of which Floci's HDFS applies {@code dfs.replication}. */
+    static Map<String, String> hdfsSite(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, HDFS_SITE);
     }
 
     /** The properties of a cluster's {@code core-site}, which its steps' {@code hadoop} command gets too. */

@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
@@ -123,7 +124,7 @@ class EksResourceTaggingIntegrationTest {
     private static void createRole(String role) {
         given().header("Authorization", auth("iam")).contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/")
-                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT).post("/").then().statusCode(200);
     }
 
     private static void createCluster(String name, String roleArn) {

@@ -1249,17 +1249,16 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             organization.setResourcePolicyId(policyId);
             organization.setResourcePolicyArn(
                     arn(organization.getMasterAccountId(), "resourcepolicy/" + organization.getId() + "/" + policyId));
+            if (tags != null) {
+                organization.getResourcePolicyTags().putAll(tags);
+            }
+        } else if (tags != null && !tags.isEmpty()) {
+            // The model says Tags apply only when this call creates the policy and that it throws
+            // otherwise, without naming the error. An empty list has no tags to apply.
+            throw invalidInput("Tags apply only to the initial creation of the resource policy."
+                    + " Use TagResource and UntagResource to change its tags.");
         }
         organization.setResourcePolicyContent(content);
-        if (tags != null) {
-            // Put replaces rather than merges: a caller that supplies Tags is stating the full set,
-            // so a key it no longer lists is dropped. The resource policy is not addressable by
-            // TagResource/UntagResource the way accounts, OUs, roots and policies are, so this call
-            // is the only way CloudFormation can converge Tags on an update. Omitting Tags
-            // entirely (null) leaves the existing ones untouched.
-            organization.getResourcePolicyTags().clear();
-            organization.getResourcePolicyTags().putAll(tags);
-        }
         organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
         return resourcePolicyView(organization);
     }
@@ -1289,7 +1288,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
     // ──────────────────────────── Handshakes ────────────────────────────
 
     public Handshake inviteAccountToOrganization(String callerAccountId, String targetId, String targetType,
-                                                 String notes) {
+                                                 String notes, Map<String, String> tags) {
         Organization organization = requireManagementAccount(callerAccountId);
         if (targetId == null || targetId.isEmpty()) {
             throw invalidInput("Target.Id is required.");
@@ -1298,6 +1297,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         if (!"ACCOUNT".equals(resolvedType) && !"EMAIL".equals(resolvedType)) {
             throw invalidInput("Target.Type must be ACCOUNT or EMAIL.");
         }
+        validateTags(tags);
 
         String invitedAccountId = null;
         String invitedEmail = null;
@@ -1334,6 +1334,9 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         Handshake handshake = newHandshake(organization, HANDSHAKE_INVITE);
         handshake.setTargetAccountId(invitedAccountId);
         handshake.setTargetEmail(invitedEmail);
+        if (tags != null) {
+            handshake.getTags().putAll(tags);
+        }
         handshake.getParties().add(new HandshakeParty(organization.getId(), "ORGANIZATION"));
         handshake.getParties().add(new HandshakeParty(targetId, resolvedType));
 
@@ -1378,6 +1381,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
                     : "account-" + callerAccountId + "@example.com";
             OrganizationAccount account = newMemberAccount(
                     organization, callerAccountId, email, "invited-" + callerAccountId, "INVITED");
+            account.getTags().putAll(handshake.getTags());
             accounts.putForAccount(organization.getMasterAccountId(), callerAccountId, account);
             attachFullAwsAccess(organization, callerAccountId);
             handshake.setTargetAccountId(callerAccountId);
@@ -1800,6 +1804,10 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             OrganizationPolicy policy = requirePolicy(organization, resourceId);
             return new TagOwner(policy.getTags(),
                     () -> policies.putForAccount(master, resourceId, policy));
+        }
+        if (resourceId.equals(organization.getResourcePolicyId())) {
+            return new TagOwner(organization.getResourcePolicyTags(),
+                    () -> organizations.putForAccount(master, organization.getId(), organization));
         }
         throw new AwsException("TargetNotFoundException",
                 "We can't find a resource with the ResourceId " + resourceId + ".", 400);

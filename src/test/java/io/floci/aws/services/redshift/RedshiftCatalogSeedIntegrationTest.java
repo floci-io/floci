@@ -3,8 +3,6 @@ package io.floci.aws.services.redshift;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -14,12 +12,10 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
-import java.util.Objects;
 import java.util.UUID;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -59,19 +55,6 @@ class RedshiftCatalogSeedIntegrationTest {
 
     private static String jdbcUrl(Cluster cluster) {
         return "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
-        try {
-            return Awaitility.await()
-                    .atMost(Duration.ofSeconds(30))
-                    .pollDelay(Duration.ZERO)
-                    .pollInterval(Duration.ofMillis(500))
-                    .ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(jdbcUrl(cluster), username, password), Objects::nonNull);
-        } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(jdbcUrl(cluster), username, password);
-        }
     }
 
     @Test
