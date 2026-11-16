@@ -127,14 +127,8 @@ public class EventBridgeInvoker {
                 serviceRegistry, regionResolver, objectMapper, config, appSyncTargetInvoker);
     }
 
-    // The client API destinations are delivered with: sslContext, when given, adds the extra CAs in
-    // floci.tls.extra-ca-path, and Floci's CA when TLS is on, to the JVM's roots
     private static HttpClient apiDestinationClient(SSLContext sslContext) {
-        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5));
-        if (sslContext != null) {
-            builder.sslContext(sslContext);
-        }
-        return builder.build();
+        return ContainerCaBundle.httpClientBuilder(sslContext).connectTimeout(Duration.ofSeconds(5)).build();
     }
 
     public EventBridgeInvoker(LambdaService lambdaService,
