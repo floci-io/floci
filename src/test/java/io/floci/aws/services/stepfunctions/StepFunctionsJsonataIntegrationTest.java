@@ -32,9 +32,54 @@ class StepFunctionsJsonataIntegrationTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 3})
+    void existsOfAnIndexedConstructedObjectPathReturnsFalse(int count) throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Probe",
+                    "States": {
+                        "Probe": {
+                            "Type": "Pass",
+                            "Output": "{% $exists([$states.input.Items.{'ok':true}][0].ok) %}",
+                            "End": true
+                        }
+                    }
+                }
+                """;
+        String machine = createStateMachine("jsonata-constructed-exists-" + count, definition);
+        String input = "{\"Items\":[" + "{},".repeat(count).replaceFirst(",$", "") + "]}";
+        assertFalse(objectMapper.readTree(waitForExecution(startExecution(machine, input))).asBoolean());
+    }
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 3})
+    void directIndexedConstructedObjectPathStillFailsAsUndefined(int count) throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Probe",
+                    "States": {
+                        "Probe": {
+                            "Type": "Pass",
+                            "Output": "{% [$states.input.Items.{'ok':true}][0].ok %}",
+                            "End": true
+                        }
+                    }
+                }
+                """;
+        String machine = createStateMachine("jsonata-constructed-undefined-" + count, definition);
+        String input = "{\"Items\":[" + "{},".repeat(count).replaceFirst(",$", "") + "]}";
+        Response failure = waitForExecutionFailure(startExecution(machine, input));
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("returned nothing (undefined)"));
+        assertFalse(failure.jsonPath().getString("cause").contains("cannot be cast"));
     }
 
     @Test
