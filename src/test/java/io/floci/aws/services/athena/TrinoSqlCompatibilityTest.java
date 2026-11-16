@@ -280,6 +280,39 @@ class TrinoSqlCompatibilityTest {
                         List.of("1); SELECT (2", "1; SELECT 2", "1, 2", "'a b', 1")));
     }
 
+    /**
+     * An open quote would turn the literals after the placeholder inside out, so the semicolons in them would end
+     * the statement. Athena (engine v3) returns {@code 'a} as the string {@code 'a}.
+     */
+    @Test
+    void aValueLeavingAQuoteOpenIsBoundAsAStringAndAddsNoStatement() {
+        String bound = TrinoSqlCompatibility.bindParameters(
+                "INSERT INTO t VALUES (?, '); INSERT INTO t2 VALUES (9); --')", List.of("'a"));
+
+        assertEquals("INSERT INTO t VALUES ('''a', '); INSERT INTO t2 VALUES (9); --')", bound);
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements(bound));
+        assertEquals("INSERT INTO t VALUES ('''' || '); INSERT INTO t VALUES (9); --')",
+                TrinoSqlCompatibility.bindParameters("INSERT INTO t VALUES (? || '); INSERT INTO t VALUES (9); --')",
+                        List.of("'")));
+    }
+
+    /** As on Athena (engine v3): a lone name is a string, even where a column has it; TRUE, NULL and the like are not. */
+    @Test
+    void aLoneNameIsBoundAsAStringAndAKeywordAsAnExpression() {
+        assertEquals("SELECT 'x' AS a, '\"x\"' AS b, (true) AS c, (null) AS d, (current_date) AS e, (abs(-3)) AS f",
+                TrinoSqlCompatibility.bindParameters("SELECT ? AS a, ? AS b, ? AS c, ? AS d, ? AS e, ? AS f",
+                        List.of("x", "\"x\"", "true", "null", "current_date", "abs(-3)")));
+    }
+
+    /** Athena (engine v3) returns 1 for both: the value is a token of its own. */
+    @Test
+    void aBoundValueIsSpacedFromTheTokensAroundIt() {
+        assertEquals("SELECT 1 e2", TrinoSqlCompatibility.bindParameters("SELECT ?e2", List.of("1")));
+        assertEquals("SELECT 1", TrinoSqlCompatibility.bindParameters("SELECT?", List.of("1")));
+        assertEquals("SELECT (1 + 1)", TrinoSqlCompatibility.bindParameters("SELECT?", List.of("1 + 1")));
+        assertEquals("SELECT 'a' || 'b'", TrinoSqlCompatibility.bindParameters("SELECT ? || 'b'", List.of("'a'")));
+    }
+
     /** A literal goes in as if written in place, so a JSON path given as a parameter is translated too. */
     @Test
     void aLiteralValueIsBoundBareAndTranslatedAsIfWrittenInPlace() {

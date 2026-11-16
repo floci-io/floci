@@ -293,6 +293,12 @@ public class AthenaService {
                     // checks parameters before it analyzes a statement. Hive DDL never gets this far, and binds none.
                     // The checks read the unbound query, where `col = ?` already counts as a static equality.
                     String statement = TrinoSqlCompatibility.bindParameters(query, parameters);
+                    // A value bound as Athena binds it cannot add a statement (see bindParameters). The engine runs
+                    // every statement of a write, so the bound statement is checked again rather than trusted.
+                    if (TrinoSqlCompatibility.holdsSeveralStatements(statement)) {
+                        throw new AwsException("InvalidRequestException",
+                                "Only one sql statement is allowed. Got: " + statement, 400);
+                    }
                     List<Table> projectionTables = tablesForProjectionCheck(database);
                     PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
                     PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);

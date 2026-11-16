@@ -65,6 +65,10 @@ final class TrinoSqlCompatibility {
     private static final Pattern MULTI_WORD_TYPE = Pattern.compile(
             "DOUBLE\\s+PRECISION|(TIMESTAMP|TIME)(\\s*\\(\\s*\\d+\\s*\\))?\\s+WITH(OUT)?\\s+TIME\\s+ZONE",
             Pattern.CASE_INSENSITIVE);
+    /** Trino's reserved words that are an expression on their own, so a parameter value, not a name. */
+    private static final Set<String> EXPRESSION_KEYWORDS = Set.of("TRUE", "FALSE", "NULL", "CURRENT_DATE",
+            "CURRENT_TIME", "CURRENT_TIMESTAMP", "LOCALTIME", "LOCALTIMESTAMP", "CURRENT_USER", "CURRENT_CATALOG",
+            "CURRENT_SCHEMA", "CURRENT_PATH");
 
     private TrinoSqlCompatibility() {
     }
@@ -201,10 +205,19 @@ final class TrinoSqlCompatibility {
             String expression = withoutComments(values.get(k)).strip();
             boolean literal = !expression.isEmpty() && (skipLiteralOrComment(expression, 0) == expression.length()
                     || expression.chars().allMatch(c -> Character.isDigit(c) || c == '.'));
-            bound.append(statement, last, at).append(literal ? expression : "(" + expression + ")");
+            // Spaced where it would run into the text around it: 1 bound in SELECT ?e2 is not 1e2.
+            String before = at > 0 && runsInto(statement.charAt(at - 1)) ? " " : "";
+            String after = at + 1 < statement.length() && runsInto(statement.charAt(at + 1)) ? " " : "";
+            bound.append(statement, last, at).append(before).append(literal ? expression : "(" + expression + ")")
+                    .append(after);
             last = at + 1;
         }
         return bound.append(statement, last, statement.length()).toString();
+    }
+
+    /** Whether a bound value next to {@code c} would join the token {@code c} belongs to. */
+    private static boolean runsInto(char c) {
+        return isIdentifierChar(c) || c == '.' || c == '\'' || c == '"' || c == '`';
     }
 
     /**
@@ -213,10 +226,17 @@ final class TrinoSqlCompatibility {
      * {@code 1); SELECT (2} as the string {@code 1);SELECT(2}, {@code 1; SELECT 2} as {@code 1;SELECT2} and
      * {@code 1, 2} as the one parameter {@code 1,2}, so a value can neither end the statement nor add a
      * parameter. A value is taken for more than one expression when, outside its literals and comments, it
-     * holds a semicolon or a comma outside brackets, or its brackets don't balance.
+     * holds a semicolon or a comma outside brackets, its brackets don't balance, or it leaves a quote open:
+     * Athena returns {@code 'a} as the string {@code 'a}, and bound as written it would turn the literals after
+     * the placeholder inside out.
      *
-     * <p>TODO: Athena also reads a value naming a column ({@code x}) as the string {@code 'x'}; it is bound
-     * as an expression here.
+     * <p>A lone name is not a value either: Athena returns {@code x} as the string {@code x} and {@code "x"} as
+     * {@code "x"}, even where a column has that name. The words that are expressions on their own, such as
+     * {@code TRUE}, {@code NULL} and {@code CURRENT_DATE} ({@link #EXPRESSION_KEYWORDS}), stay expressions, as
+     * on Athena.
+     *
+     * <p>TODO: Athena reads any value naming a column as a string ({@code x + 1} as {@code x+1}); only a lone
+     * name is here, and a longer expression naming one is bound as written.
      */
     private static String usingListEntry(String value) {
         StringBuilder tokens = new StringBuilder(value.length());
@@ -227,7 +247,8 @@ final class TrinoSqlCompatibility {
             char c = value.charAt(i);
             int skipped = skipLiteralOrComment(value, i);
             if (skipped > i) {
-                if (c == '\'' || c == '"') {
+                if (c == '\'' || c == '"' || c == '`') {
+                    expression &= closedQuote(value, i);
                     tokens.append(value, i, skipped);
                 }
                 i = skipped;
@@ -245,7 +266,19 @@ final class TrinoSqlCompatibility {
             }
             i++;
         }
-        return expression && depth == 0 ? value : "'" + tokens.toString().replace("'", "''") + "'";
+        String text = tokens.toString();
+        boolean bareName = !text.isEmpty() && !Character.isDigit(text.charAt(0))
+                && text.chars().allMatch(ch -> isIdentifierChar((char) ch))
+                && !EXPRESSION_KEYWORDS.contains(text.toUpperCase(Locale.ROOT));
+        boolean quotedName = !text.isEmpty() && (text.charAt(0) == '"' || text.charAt(0) == '`')
+                && skipQuoted(text, 0) == text.length();
+        return expression && depth == 0 && !bareName && !quotedName ? value : "'" + text.replace("'", "''") + "'";
+    }
+
+    /** Whether the literal or quoted name starting at {@code i} is closed; {@link #skipQuoted} runs off an open one. */
+    private static boolean closedQuote(String sql, int i) {
+        // A character after the text tells a quote closed at the very end from one left open.
+        return skipQuoted(sql + " ", i) <= sql.length();
     }
 
     /**
