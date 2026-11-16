@@ -1573,6 +1573,12 @@ public class AslExecutor {
         // variant arrives here as the bare runTask resource and simply launches the task while the token
         // future blocks for SendTaskSuccess.
         if (integration.isAnySuffix("ecs", "runTask")) {
+            // AWS defines request-response, .sync and .waitForTaskToken for ecs:runTask, so any other
+            // pattern (.sync:2) is refused before a task is launched rather than after.
+            String suffix = integration.suffix();
+            if (!suffix.isEmpty() && !".sync".equals(suffix) && !".waitForTaskToken".equals(suffix)) {
+                throw OptimizedIntegrations.unsupported(integration);
+            }
             // A non-null taskToken means the original resource ended with .waitForTaskToken (stripped
             // upstream). Its failure semantics match .sync — a task placement failure fails the state —
             // whereas request-response returns the {Tasks,Failures} envelope without failing the state.
@@ -2337,12 +2343,6 @@ public class AslExecutor {
             }
             resp.putArray("Failures");
             return resp;
-        }
-
-        if (!".sync".equals(mode)) {
-            // Only request-response (""), .sync and .waitForTaskToken are valid; reject typos rather
-            // than silently treating an unknown suffix as .sync.
-            throw new FailStateException("States.TaskFailed", "Unsupported ecs:runTask mode: " + mode);
         }
 
         // .sync — wait until every launched task reaches STOPPED, then surface success or failure.
