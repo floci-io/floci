@@ -130,6 +130,12 @@ public class LambdaFunctionStore implements Resettable {
         return backend.get(regionKey(region, functionName, version));
     }
 
+    /** As {@link #getForAccount}, reading a pre-multi-account record in place instead of moving it. */
+    public Optional<LambdaFunction> readForAccount(
+            String accountId, String region, String functionName, String version) {
+        return AccountAwareStorageBackend.readInAccount(backend, accountId, regionKey(region, functionName, version));
+    }
+
     private static boolean belongsToAccount(LambdaFunction function, String accountId) {
         if (function.getAccountId() != null && !function.getAccountId().isBlank()) {
             return accountId.equals(function.getAccountId());

@@ -28,7 +28,9 @@ import java.util.Optional;
  * random suffix included, and its tags; EventBridge Scheduler, for its default schedule group and its groups' tags;
  * CloudFormation, for the stack or the stack set a name names, whose id it minted, and the tags of a stack, a stack set
  * or a change set; S3 Tables, for the table a request names by its table bucket, namespace and name, and the tags of a
- * table bucket or a table); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver}
+ * table bucket or a table; Lambda, for the layer version a layer version ARN selects, the image of a MicroVM and the
+ * execution of a callback, and the tags of a function, an event source mapping, a web function, a MicroVM image or a
+ * network connector); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver}
  * through {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on
  * that service directly.</p>
  *

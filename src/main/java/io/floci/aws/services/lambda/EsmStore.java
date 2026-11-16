@@ -65,6 +65,11 @@ public class EsmStore {
         return backend.get(uuid);
     }
 
+    /** As {@link #getForAccount}, also reading a pre-multi-account mapping of the default account in place. */
+    public Optional<EventSourceMapping> readForAccount(String accountId, String uuid) {
+        return AccountAwareStorageBackend.readInAccount(backend, accountId, uuid);
+    }
+
     public List<EventSourceMapping> listByFunction(String functionKey) {
         return backend.scan(k -> {
             EventSourceMapping esm = backend.get(k).orElse(null);

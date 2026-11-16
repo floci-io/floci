@@ -84,6 +84,18 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return store.get(key);
     }
 
+    /**
+     * As {@link #getInAccount}, also finding a pre-multi-account entry of the default account, read in place
+     * ({@link #getLegacyForAccount}), for a lookup that must leave the store as it is, as IAM's reads of a
+     * resource's tags must.
+     */
+    public static <V> Optional<V> readInAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            return aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key));
+        }
+        return store.get(key);
+    }
+
     /** Writes {@code value} in {@code accountId}; the counterpart of {@link #getInAccount}. */
     public static <V> void putInAccount(StorageBackend<String, V> store, String accountId, String key, V value) {
         if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {

@@ -2146,7 +2146,7 @@ class ResourceArnBuilderTest {
         Instance<LambdaMicrovmsService> instance = mock(Instance.class);
         when(instance.isResolvable()).thenReturn(true);
         when(instance.get()).thenReturn(microvms);
-        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, instance));
+        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, null, instance, null));
 
         assertEquals(List.of(image), lambda(backed, "GET", "/2025-09-09/microvms/microvm-1", "GetMicrovm"));
         assertEquals(List.of(image), lambda(backed, "POST", "/2025-09-09/microvms/microvm-1/suspend",
@@ -2514,7 +2514,7 @@ class ResourceArnBuilderTest {
         String callbackId = Base64.getEncoder().encodeToString((execution + "|c1|nonce").getBytes(StandardCharsets.UTF_8));
         @SuppressWarnings("unchecked")
         Instance<LambdaMicrovmsService> none = mock(Instance.class);
-        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, none));
+        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, null, none, null));
         assertEquals(List.of(execution), lambda(backed, "POST",
                 "/2025-12-01/durable-execution-callbacks/" + callbackId.replace("/", "%2F") + "/succeed",
                 "SendDurableExecutionCallbackSuccess"));
