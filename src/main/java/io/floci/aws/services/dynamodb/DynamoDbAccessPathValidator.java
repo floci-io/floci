@@ -164,6 +164,32 @@ final class DynamoDbAccessPathValidator {
         }
     }
 
+    /**
+     * @return the value a validated sort-key condition holds as its last key in read order, as in
+     *         {@code sk = :v}, {@code sk <= :v} read forward or {@code sk BETWEEN :a AND :b}, or
+     *         {@code null} when the condition has no such bound
+     */
+    static JsonNode keyConditionInclusiveEnd(String expression, JsonNode names, JsonNode values,
+                                             String sortKey, boolean forward) {
+        TokenType closingBound = forward ? TokenType.LE : TokenType.GE;
+        for (Expr rawCondition : keyConditions(expression)) {
+            Expr condition = normalizeOperandOrder(rawCondition);
+            if (!sortKey.equals(conditionAttribute(condition, names))) {
+                continue;
+            }
+            Operand bound = switch (condition) {
+                case CompareExpr compare when compare.op() == TokenType.EQ || compare.op() == closingBound ->
+                        compare.right();
+                case BetweenExpr between -> forward ? between.high() : between.low();
+                default -> null;
+            };
+            return bound instanceof PlaceholderOperand placeholder && values != null
+                    ? values.get(placeholder.name())
+                    : null;
+        }
+        return null;
+    }
+
     private static List<Expr> keyConditions(String expression) {
         return DynamoDbKeyConditionParser.conditions(parseExpression(expression, "KeyConditionExpression"));
     }

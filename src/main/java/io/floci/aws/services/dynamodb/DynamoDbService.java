@@ -1614,6 +1614,7 @@ public class DynamoDbService {
         if (items == null) return new QueryResult(List.of(), 0, 0, null, List.of());
 
         List<JsonNode> results = new ArrayList<>();
+        List<JsonNode> partition = new ArrayList<>();
 
         if (keyConditions != null) {
             String partitionKeyValue = extractComparisonValue(keyConditions.get(pkName));
@@ -1621,6 +1622,7 @@ public class DynamoDbService {
                 boolean partitionKeyMatches = pkNames.stream().allMatch(name -> item.has(name)
                         && matchesAttributeValue(item.get(name), extractComparisonValue(keyConditions.get(name))));
                 if (!partitionKeyMatches) continue;
+                partition.add(item);
                 if (skName != null && keyConditions.has(skName)) {
                     JsonNode skCondition = keyConditions.get(skName);
                     if (matchesKeyCondition(item.get(skName), skCondition)) {
@@ -1632,7 +1634,7 @@ public class DynamoDbService {
             }
         } else if (keyConditionExpression != null) {
             results = queryWithExpression(items, accessPath, partitionKeyValuePlaceholder,
-                    keyConditionExpression, expressionAttrValues, exprAttrNames);
+                    keyConditionExpression, expressionAttrValues, exprAttrNames, partition);
         }
 
         // Filter out items without GSI key attributes (sparse index behavior).
@@ -1677,15 +1679,12 @@ public class DynamoDbService {
         // The size check comes first for each item — per the Query API reference,
         // "if the processed dataset size exceeds 1 MB before DynamoDB reaches this
         // limit, it stops the operation", so an item that would cross the 1 MB cap
-        // is not read and does not count toward Limit. DynamoDB does not look ahead
-        // either way: a read that stops at a boundary always returns a
-        // LastEvaluatedKey, even when the boundary happens to be the last item of
-        // the result set ("the absence of LastEvaluatedKey is the only way to know
-        // that you have reached the end of the result set").
+        // is not read and does not count toward Limit.
         final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int accSize = 0;
         long billedBytes = 0;
         int included = -1; // index one past the last included item; -1 = no boundary hit
+        boolean stoppedByLimit = false;
         for (int i = 0; i < evaluatedItems.size(); i++) {
             int sz = readItemSize(evaluatedItems.get(i), accessPath, table);
             if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
@@ -1696,11 +1695,19 @@ public class DynamoDbService {
             billedBytes += billedReadSize(evaluatedItems.get(i), accessPath, table, sz);
             if (limit != null && limit > 0 && i + 1 >= limit) {
                 included = i + 1; // the Limit cap stops the read AFTER this item
+                stoppedByLimit = true;
                 break;
             }
         }
         if (included > 0) {
-            lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(included - 1), pkName, sortKeyNames, indexName != null);
+            JsonNode last = evaluatedItems.get(included - 1);
+            boolean rangeEnded = stoppedByLimit && included == evaluatedItems.size()
+                    && endsKeyRange(partition, accessPath, last, (a, b) -> direction * keyOrder.compare(a, b),
+                            () -> keyRangeInclusiveEnd(accessPath, keyConditions, keyConditionExpression,
+                                    exprAttrNames, expressionAttrValues, direction > 0));
+            if (!rangeEnded) {
+                lastEvaluatedKey = buildKeyNode(table, last, pkName, sortKeyNames, indexName != null);
+            }
             evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, included));
         }
 
@@ -5045,12 +5052,56 @@ public class DynamoDbService {
         return items.subMap(encodedPk + "#", true, encodedPk + "$", false).values();
     }
 
+    // A read that stops at Limit on its last match leaves out LastEvaluatedKey when the partition
+    // holds another item past it, which the key condition then excludes. A table read also leaves
+    // it out on the condition's inclusive bound, as no other item can share that key.
+    private static boolean endsKeyRange(List<JsonNode> partition, DynamoDbAccessPath accessPath, JsonNode last,
+                                        Comparator<JsonNode> readOrder, Supplier<JsonNode> inclusiveEnd) {
+        List<String> partitionKeys = accessPath.partitionKeyNames();
+        Set<String> keyAttributes = accessPath.keyAttributeNames();
+        for (JsonNode item : partition) {
+            if (compareKeyAttributes(item, last, partitionKeys) == 0
+                    && keyAttributes.stream().allMatch(key -> hasNonNullAttribute(item, key))
+                    && readOrder.compare(item, last) > 0) {
+                return true;
+            }
+        }
+        JsonNode end = inclusiveEnd.get();
+        return end != null && ExpressionEvaluator.compareAttributeValues(last.get(accessPath.sortKeyName()), end) == 0;
+    }
+
+    private static JsonNode keyRangeInclusiveEnd(DynamoDbAccessPath accessPath, JsonNode keyConditions,
+                                                 String keyConditionExpression, JsonNode exprAttrNames,
+                                                 JsonNode exprAttrValues, boolean forward) {
+        String sortKey = accessPath.sortKeyName();
+        if (accessPath.isIndex() || sortKey == null) {
+            return null;
+        }
+        if (keyConditions == null) {
+            return keyConditionExpression == null ? null : DynamoDbAccessPathValidator.keyConditionInclusiveEnd(
+                    keyConditionExpression, exprAttrNames, exprAttrValues, sortKey, forward);
+        }
+        JsonNode condition = keyConditions.get(sortKey);
+        JsonNode values = condition == null ? null : condition.get("AttributeValueList");
+        if (values == null || values.isEmpty()) {
+            return null;
+        }
+        return switch (condition.path("ComparisonOperator").asText("EQ")) {
+            case "EQ" -> values.get(0);
+            case "LE" -> forward ? values.get(0) : null;
+            case "GE" -> forward ? null : values.get(0);
+            case "BETWEEN" -> values.get(forward ? 1 : 0);
+            default -> null;
+        };
+    }
+
     private List<JsonNode> queryWithExpression(ConcurrentSkipListMap<String, JsonNode> items,
                                                 DynamoDbAccessPath accessPath,
                                                 String partitionKeyValuePlaceholder,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
-                                                JsonNode exprAttrNames) {
+                                                JsonNode exprAttrNames,
+                                                List<JsonNode> partition) {
         List<JsonNode> results = new ArrayList<>();
         String partitionKeyName = accessPath.partitionKeyName();
         String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
@@ -5063,6 +5114,7 @@ public class DynamoDbService {
                     && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
             }
+            partition.add(item);
             if (keyCondition == null) {
                 keyCondition = ExpressionEvaluator.parse(expression);
             }
