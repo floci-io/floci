@@ -58,6 +58,7 @@ public class SidecarSchemaCompiler {
             Map.entry("AWSByte", "base64"));
 
     private static final Pattern DIRECTIVE_USE = Pattern.compile("@(\\w+)");
+    private static final Pattern SCALAR_DEFINITION = Pattern.compile("\\bscalar\\s+([_A-Za-z][_0-9A-Za-z]*)");
 
     private final GraphqlSidecarClient sidecarClient;
 
@@ -83,23 +84,23 @@ public class SidecarSchemaCompiler {
 
     /** The SDL to actually send the sidecar for plan/execute: same injection as at validation time. */
     public String withDirectivesAndScalars(String sdl) {
+        List<String> declaredScalars = declaredScalars(sdl);
         StringBuilder sb = new StringBuilder();
         for (AppSyncDirective directive : AppSyncDirective.values()) {
             sb.append(directive.sdl()).append('\n');
         }
         sb.append('\n');
         for (String scalarName : SCALAR_NAMES) {
-            sb.append("scalar ").append(scalarName).append('\n');
+            if (!declaredScalars.contains(scalarName)) {
+                sb.append("scalar ").append(scalarName).append('\n');
+            }
         }
         sb.append('\n').append(sdl);
         return sb.toString();
     }
 
     private void validateNoUnknownDirectives(String sdl) {
-        String clean = sdl
-                .replaceAll("\"\"\"[\\s\\S]*?\"\"\"", "")
-                .replaceAll("\"(?:[^\"\\\\]|\\\\.)*\"", "")
-                .replaceAll("#[^\n]*", "");
+        String clean = stripIgnoredTokens(sdl);
         Matcher matcher = DIRECTIVE_USE.matcher(clean);
         while (matcher.find()) {
             String name = matcher.group(1);
@@ -109,6 +110,68 @@ public class SidecarSchemaCompiler {
                                 toCodeError("VALIDATION_ERROR", "Unknown directive: @" + name, 0, 0))));
             }
         }
+    }
+
+    private List<String> declaredScalars(String sdl) {
+        Matcher matcher = SCALAR_DEFINITION.matcher(stripIgnoredTokens(sdl));
+        List<String> declaredScalars = new ArrayList<>();
+        while (matcher.find()) {
+            declaredScalars.add(matcher.group(1));
+        }
+        return declaredScalars;
+    }
+
+    /** Replaces GraphQL comments and string tokens while preserving whitespace and line breaks. */
+    private String stripIgnoredTokens(String sdl) {
+        StringBuilder clean = new StringBuilder(sdl.length());
+        int index = 0;
+        while (index < sdl.length()) {
+            char current = sdl.charAt(index);
+            if (current == '#') {
+                while (index < sdl.length() && sdl.charAt(index) != '\n' && sdl.charAt(index) != '\r') {
+                    clean.append(' ');
+                    index++;
+                }
+            } else if (sdl.startsWith("\"\"\"", index)) {
+                clean.append("   ");
+                index += 3;
+                while (index < sdl.length() && !sdl.startsWith("\"\"\"", index)) {
+                    char blockChar = sdl.charAt(index);
+                    if (blockChar == '\\' && sdl.startsWith("\\\"\"\"", index)) {
+                        clean.append("    ");
+                        index += 4;
+                    } else {
+                        clean.append(blockChar == '\n' || blockChar == '\r' ? blockChar : ' ');
+                        index++;
+                    }
+                }
+                if (index < sdl.length()) {
+                    clean.append("   ");
+                    index += 3;
+                }
+            } else if (current == '"') {
+                clean.append(' ');
+                index++;
+                while (index < sdl.length() && sdl.charAt(index) != '"') {
+                    if (sdl.charAt(index) == '\\' && index + 1 < sdl.length()) {
+                        clean.append("  ");
+                        index += 2;
+                    } else {
+                        char stringChar = sdl.charAt(index);
+                        clean.append(stringChar == '\n' || stringChar == '\r' ? stringChar : ' ');
+                        index++;
+                    }
+                }
+                if (index < sdl.length()) {
+                    clean.append(' ');
+                    index++;
+                }
+            } else {
+                clean.append(current);
+                index++;
+            }
+        }
+        return clean.toString();
     }
 
     private AwsException toAwsException(SchemaValidationException e) {
