@@ -311,7 +311,7 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyIsGoneUnderTheNameItWasSavedUnder() {
+    void aDeletedKeyIsFoundUnderTheNameItIsSavedUnderNow() {
         InMemoryStorage<String, PaymentCryptographyKey> store = new InMemoryStorage<>();
         PaymentCryptographyService old = serviceOverLegacyStore(store);
         PaymentCryptographyKey key = createKey("us-east-1");
@@ -320,7 +320,9 @@ class PaymentCryptographyServiceTest {
         old.deleteKey(key);
 
         assertNull(store.get(key.getKeyId()).orElse(null),
-                "the key is gone under the name it was saved under too");
+                "the key is still under the name that was replaced");
+        assertEquals("DELETE_PENDING",
+                old.findKey("us-east-1", key.getArn()).getKeyState());
     }
 
     @Test
@@ -369,13 +371,14 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyTakesItsAliasesWithIt() {
+    void aDeletedKeyKeepsItsAliasesWhileItIsPending() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.createAlias("alias/team/card-key", key);
         service.deleteKey(key);
 
-        assertNull(service.findKey("us-east-1", key.getArn()));
-        assertNull(service.findAlias("us-east-1", "alias/team/card-key"));
+        assertEquals("DELETE_PENDING", service.findKey("us-east-1", key.getArn()).getKeyState());
+        assertNotNull(service.findAlias("us-east-1", "alias/team/card-key"),
+                "the alias went with a key that is still there");
     }
 
     @Test
@@ -390,15 +393,46 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyDoesNotComeBackWhenItIsTagged() {
+    void aDeletedKeyKeepsItsTagsWhileItIsPending() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.tag(key, Map.of("owner", "team"));
+        service.deleteKey(key);
+
+        assertEquals("team", service.listTags(key).get("owner"));
+        assertEquals("DELETE_PENDING", service.findKey("us-east-1", key.getArn()).getKeyState());
+    }
+
+    @Test
+    void aDeletedKeyIsRestored() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.deleteKey(key);
 
-        AwsException gone = assertThrows(AwsException.class,
-                () -> service.tag(key, Map.of("owner", "team")));
-        assertEquals("ResourceNotFoundException", gone.getErrorCode());
-        assertNull(service.findKey("us-east-1", key.getKeyId()),
-                "the key is in the store again after it was deleted");
+        PaymentCryptographyKey restored = service.restoreKey(key);
+
+        assertEquals("CREATE_COMPLETE", restored.getKeyState());
+        assertTrue(restored.isEnabled(), "a restored key is disabled");
+        assertEquals(0, restored.getDeletePendingTimestamp(),
+                "a restored key is still pending deletion");
+        assertEquals("CREATE_COMPLETE", service.findKey("us-east-1", key.getArn()).getKeyState());
+    }
+
+    @Test
+    void aKeyThatIsNotPendingDeletionIsNotRestored() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.restoreKey(key));
+        assertEquals("ConflictException", conflict.getErrorCode());
+    }
+
+    @Test
+    void aKeyThatIsAlreadyPendingDeletionIsNotDeletedAgain() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.deleteKey(key);
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.deleteKey(key));
+        assertEquals("ConflictException", conflict.getErrorCode());
     }
 
     /** The policy that grants different permissions to different accounts. */
@@ -681,10 +715,11 @@ class PaymentCryptographyServiceTest {
     @Test
     void theKeysAreListedByTheirState() {
         createKey("us-east-1");
-        createKey("us-east-1");
+        PaymentCryptographyKey deleted = createKey("us-east-1");
+        service.deleteKey(deleted);
 
-        assertEquals(2, service.listKeys("us-east-1", "CREATE_COMPLETE").size());
-        assertEquals(0, service.listKeys("us-east-1", "DELETE_PENDING").size());
+        assertEquals(1, service.listKeys("us-east-1", "CREATE_COMPLETE").size());
+        assertEquals(1, service.listKeys("us-east-1", "DELETE_PENDING").size());
         assertEquals(0, service.listKeys("us-east-1", "CREATE_IN_PROGRESS").size());
     }
 

@@ -11,7 +11,8 @@
 | `CreateKey` | Create a key with fresh material |
 | `GetKey` | Get a key's attributes, state and check value |
 | `ListKeys` | List the keys of a region |
-| `DeleteKey` | Delete a key |
+| `DeleteKey` | Schedule a key for deletion |
+| `RestoreKey` | Cancel a scheduled key deletion |
 | `StartKeyUsage` | Start the use of a key |
 | `StopKeyUsage` | Stop the use of a key |
 | `CreateAlias` | Point an alias name at a key |
@@ -54,11 +55,16 @@
   copy of its primary's material and metadata, so a replica carries the primary's tags
   and a change to them is replicated. The alias names are the region's own: an alias
   names a key in its own region, and a replica is named by an alias of that region.
-- **Deletion:** `DeleteKey` removes the key and the aliases that name it, and answers
-  with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
-  A key that is gone does not come back: a tagging request for it is refused. The
-  service deletes a key the moment it is asked to, so the waiting period of
-  `DeleteKeyInDays` is checked against the range the model states and is not waited for.
+- **Deletion and restore:** `DeleteKey` disables the key and answers with the key, its
+  state `DELETE_PENDING` and the moment its deletion takes effect. The key is kept, so it
+  stays readable and keeps its aliases and tags until the waiting period ends.
+  `DeleteKeyInDays` is checked against the range the model states. `RestoreKey` cancels a
+  scheduled deletion and returns the key to `CREATE_COMPLETE`, enabled and with no pending
+  deletion timestamp; a key that is not pending deletion is refused with
+  `ConflictException`. The waiting period is not swept by a timer: the emulator keeps the
+  key pending rather than deleting it on a clock. A key that is already pending deletion
+  is refused with `ConflictException`, because the deletion is already under way, and the
+  replicas of the key carry its pending state, as they carry the rest of its metadata.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled`, `Tags`,
   `DeriveKeyUsage` and `ReplicationRegions`, and a key created disabled or with tags
   comes back that way. The `KeyUsage` and the
@@ -245,7 +251,8 @@
   on, so a policy that names another key is refused. The reference attaches a policy to the
   primary key alone, so a replica takes none and a request that names one is refused. The
   access the policy grants is not enforced: the service's operations are not among the ones
-  IAM checks.
+  IAM checks. A key that is pending deletion keeps its policy, because the key is still
+  there.
 - **Key usage:** `StopKeyUsage` disables the key and records when it stopped, and
   `StartKeyUsage` enables it again and records when it started. The moment recorded is the
   moment the key changed state, so a request that names a key that is already in the state
@@ -253,9 +260,12 @@
   readable and its material stays where it is, so it can be started again. A replica is
   read-only, so the change is made on the primary, and a request that names a replica is
   refused. The change reaches the replicas: a stop on the primary stops the use of the
-  replicas too, as the reference says.
-- **Not yet emulated:** the key restore operation, the multi-party approval operations
-  and the certificate signing request.
+  replicas too, as the reference says. A key that is pending deletion is not the caller's
+  to start or stop: the reference does not publish the answer for that case, so the
+  request is refused with `ConflictException`, which is the code the service uses for a
+  request that conflicts with the state of a key.
+- **Not yet emulated:** the multi-party approval operations and the certificate signing
+  request.
 
 ## Configuration
 

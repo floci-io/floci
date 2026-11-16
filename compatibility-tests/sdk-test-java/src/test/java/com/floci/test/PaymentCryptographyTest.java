@@ -785,6 +785,18 @@ class PaymentCryptographyTest {
         assertThat(deleted.enabled()).isFalse();
     }
 
+    @Test
+    void aDeletedKeyIsRestored() {
+        Key created = createAesKey();
+        client.deleteKey(k -> k.keyIdentifier(created.keyArn()));
+
+        Key restored = client.restoreKey(k -> k.keyIdentifier(created.keyArn())).key();
+
+        assertThat(restored.keyState()).isEqualTo(KeyState.CREATE_COMPLETE);
+        assertThat(restored.enabled()).isTrue();
+        assertThat(restored.deletePendingTimestamp()).isNull();
+    }
+
     /** A listing names the state of the keys it wants, and the service answers with those keys alone. */
     @Test
     void theKeysAreListedByTheirState() {
