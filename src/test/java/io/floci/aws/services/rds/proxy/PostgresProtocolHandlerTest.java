@@ -749,6 +749,79 @@ class PostgresProtocolHandlerTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void iamReplicationSessionNeedsTheTokenRolesReplicationPrivilege(boolean privileged) throws Exception {
+        AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
+        AtomicReference<String> privilegeQuery = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, backendStartup, new AtomicReference<>(),
+                            "approle", true, (in, out) -> {
+                                answerRoleAdmission(in, out, "approle", true, true);
+                                privilegeQuery.set(readSimpleQuery(in));
+                                writeDataRow(out, "100", privileged ? "t" : "f");
+                                writeCommandComplete(out, "SELECT 1");
+                                writeReadyForQuery(out);
+                                if (!privileged) {
+                                    assertEquals(-1, in.read(), "refusal must close the backend");
+                                }
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                clientStartup.put("replication", "database");
+                writeStartup(clientOut, clientStartup);
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+
+                if (privileged) {
+                    readAuthenticationOk(clientIn);
+                    assertEquals("approle", readParametersUntilReadyForQuery(clientIn).get("session_authorization"));
+                } else {
+                    Map<Character, String> refusal = readErrorResponse(clientIn);
+                    assertEquals("FATAL", refusal.get('S'));
+                    assertEquals("42501", refusal.get('C'));
+                    assertEquals("permission denied to start WAL sender", refusal.get('M'));
+                    assertEquals(-1, clientIn.read());
+                }
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+
+            assertEquals(List.of("user", "database", "client_encoding", "replication"),
+                    List.copyOf(backendStartup.get().keySet()));
+            assertEquals("database", backendStartup.get().get("replication"));
+            assertEquals(PostgresProtocolHandler.replicationPrivilegeQuery(), privilegeQuery.get());
+        }
+    }
+
     @Test
     void iamSessionIsRefusedWhenPostgresRefusesAStartupParameterForTheTokenRole() throws Exception {
         try (ServerSocket backendServer = new ServerSocket(0);
@@ -1125,19 +1198,26 @@ class PostgresProtocolHandlerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"f", "FALSE", "n", "no", "of", "OFF", "0"})
-    void sessionSettingsTreatEveryFalseReplicationValueAsAnOrdinaryConnection(String value) throws Exception {
+    @ValueSource(strings = {"f", "OFF", "0", "database", "true", "on", "maybe"})
+    void sessionSettingsLeaveReplicationToTheBackendStartup(String value) throws Exception {
         assertEquals(List.of(), PostgresProtocolHandler.sessionSettings(
                 Map.of("user", "approle", "replication", value)));
     }
 
     @ParameterizedTest
-    @CsvSource({"database,0A000", "true,0A000", "t,0A000", "on,0A000", "1,0A000", "o,22023", "maybe,22023"})
-    void sessionSettingsRefuseAReplicationConnectionOrAValuePostgresCannotRead(String value, String sqlState) {
-        PostgresProtocolHandler.StartupParameterException e = assertThrows(
-                PostgresProtocolHandler.StartupParameterException.class,
-                () -> PostgresProtocolHandler.sessionSettings(Map.of("user", "approle", "replication", value)));
-        assertEquals(sqlState, e.sqlState());
+    @CsvSource({"database,true", "true,true", "t,true", "on,true", "1,true",
+            "false,false", "off,false", "0,false", "DATABASE,false", "o,false", "maybe,false"})
+    void requestsReplicationReadsTheValuesPostgresStartsAWalSenderFor(String value, boolean expected) {
+        assertEquals(expected, PostgresProtocolHandler.requestsReplication(Map.of("replication", value)));
+    }
+
+    @Test
+    void handoverStartupParametersCarryTheClientsReplicationChoice() {
+        assertEquals(Map.of("client_encoding", "UTF8"),
+                PostgresProtocolHandler.handoverStartupParameters(Map.of("application_name", "svc"), Map.of()));
+        assertEquals(List.of("options", "client_encoding", "replication"), List.copyOf(
+                PostgresProtocolHandler.handoverStartupParameters(
+                        Map.of("replication", "database"), Map.of("options", "-c work_mem=8MB")).keySet()));
     }
 
     @ParameterizedTest

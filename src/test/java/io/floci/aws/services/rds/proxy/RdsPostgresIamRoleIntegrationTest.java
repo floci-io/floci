@@ -211,6 +211,37 @@ class RdsPostgresIamRoleIntegrationTest {
     }
 
     @Test
+    void iamLogicalReplicationConnectionRequiresTheReplicationPrivilege() throws Exception {
+        String id = uniqueId();
+        try {
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
+            asMaster(port, "CREATE ROLE app_user LOGIN", "GRANT rds_iam TO app_user");
+            Properties replication = token(port, "app_user");
+            replication.setProperty("replication", "database");
+            replication.setProperty("assumeMinServerVersion", "10");
+            replication.setProperty("preferQueryMode", "simple");
+            SQLException refused = assertThrows(SQLException.class, () -> connect(port, replication).close());
+            assertEquals("42501", refused.getSQLState());
+
+            asMaster(port, "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') "
+                    + "THEN CREATE ROLE rds_replication; END IF; END $$", "GRANT rds_replication TO app_user");
+            try (Connection connection = connect(port, replication);
+                 Statement statement = connection.createStatement()) {
+                try (ResultSet rows = statement.executeQuery("IDENTIFY_SYSTEM")) {
+                    assertTrue(rows.next());
+                    assertEquals("appdb", rows.getString("dbname"));
+                }
+                try (ResultSet rows = statement.executeQuery("SELECT session_user")) {
+                    assertTrue(rows.next());
+                    assertEquals("app_user", rows.getString(1));
+                }
+            }
+        } finally {
+            deleteInstance(id);
+        }
+    }
+
+    @Test
     void roleLookupIgnoresClientEncodingAndCatalogShadows() throws Exception {
         String id = uniqueId();
         String name = "café\"reader";

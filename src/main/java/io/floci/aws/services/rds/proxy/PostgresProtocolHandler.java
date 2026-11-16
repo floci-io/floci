@@ -352,7 +352,7 @@ public class PostgresProtocolHandler {
             if (!forwardStartupParameters) {
                 backendParameters = Map.of();
             } else if (iamHandover) {
-                backendParameters = Map.of("client_encoding", "UTF8");
+                backendParameters = handoverStartupParameters(startup.parameters(), Map.of());
             } else {
                 backendParameters = startup.parameters();
             }
@@ -434,11 +434,9 @@ public class PostgresProtocolHandler {
                     backend.setSoTimeout(handshakeTimeoutMillis);
                     backendIn = backend.getInputStream();
                     backendOut = backend.getOutputStream();
-                    Map<String, String> withDefaults = new LinkedHashMap<>();
-                    withDefaults.put("options", startupOptions(defaults.atStartup()));
-                    withDefaults.put("client_encoding", "UTF8");
                     backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
-                            effectiveDbName, withDefaults);
+                            effectiveDbName, handoverStartupParameters(startup.parameters(),
+                                    Map.of("options", startupOptions(defaults.atStartup()))));
                     if (backendRejection != null) {
                         clientOut.write(backendRejection);
                         clientOut.flush();
@@ -566,6 +564,17 @@ public class PostgresProtocolHandler {
                                     : !selectedRole.allowed() ? (databaseIamAuthentication
                                             ? "final LOGIN and rds_iam membership required" : "final LOGIN required")
                                     : "role identity changed during handover");
+                    return null;
+                }
+                // PostgreSQL checks the replication privilege only when the WAL sender starts,
+                // which it did as the master, and never again for replication commands.
+                if (requestsReplication(startup.parameters()) && !hasReplicationPrivilege(backendIn, backendOut)) {
+                    LOG.infov("RDS IAM replication connection refused for role {0}: replication privilege required",
+                            SigV4RequestValidator.sanitizeForLog(clientUsername));
+                    sendErrorResponse(clientOut, "FATAL", "42501", "permission denied to start WAL sender");
+                    clientOut.flush();
+                    closeQuietly(client);
+                    closeQuietly(backend);
                     return null;
                 }
             }
@@ -1350,7 +1359,8 @@ public class PostgresProtocolHandler {
     /**
      * The run-time parameters a StartupMessage asks for, in the order PostgreSQL applies them:
      * the {@code -c} switches in {@code options} first, then every other parameter as sent.
-     * {@code user}, {@code database} and {@code _pq_.} protocol extensions are not parameters.
+     * {@code user}, {@code database}, {@code replication} and {@code _pq_.} protocol extensions
+     * are not run-time parameters.
      */
     static List<SessionSetting> sessionSettings(Map<String, String> startupParameters)
             throws StartupParameterException {
@@ -1362,25 +1372,49 @@ public class PostgresProtocolHandler {
         for (Map.Entry<String, String> parameter : startupParameters.entrySet()) {
             String name = parameter.getKey();
             if ("user".equals(name) || "database".equals(name) || "options".equals(name)
-                    || name.startsWith("_pq_.")) {
-                continue;
-            }
-            if ("replication".equals(name)) {
-                String value = parameter.getValue();
-                Boolean replication = "database".equals(value) ? Boolean.TRUE : parseBool(value);
-                if (replication == null) {
-                    throw new StartupParameterException("22023",
-                            "invalid value for parameter \"replication\": \"" + value + "\"");
-                }
-                if (replication) {
-                    throw new StartupParameterException("0A000",
-                            "replication connections are not supported for IAM sessions through the proxy");
-                }
+                    || "replication".equals(name) || name.startsWith("_pq_.")) {
                 continue;
             }
             settings.add(new SessionSetting(name, parameter.getValue()));
         }
         return settings;
+    }
+
+    /**
+     * The StartupMessage parameters of a backend session opened as the master for a handover:
+     * {@code base}, UTF-8 for the proxy's own queries, and the client's {@code replication},
+     * which can only be chosen at connection start.
+     */
+    static Map<String, String> handoverStartupParameters(Map<String, String> clientParameters,
+                                                         Map<String, String> base) {
+        Map<String, String> parameters = new LinkedHashMap<>(base);
+        parameters.put("client_encoding", "UTF8");
+        String replication = clientParameters.get("replication");
+        if (replication != null) {
+            parameters.put("replication", replication);
+        }
+        return parameters;
+    }
+
+    static boolean requestsReplication(Map<String, String> startupParameters) {
+        String value = startupParameters.get("replication");
+        return value != null && ("database".equals(value) || Boolean.TRUE.equals(parseBool(value)));
+    }
+
+    /**
+     * Whether the session's role may start a WAL sender: a superuser, a role with the
+     * {@code REPLICATION} attribute, or a direct or indirect member of {@code rds_replication}.
+     */
+    static String replicationPrivilegeQuery() {
+        return "SELECT r.oid::pg_catalog.text, r.rolsuper OR r.rolreplication OR EXISTS ("
+                + "SELECT 1 FROM pg_catalog.pg_roles g WHERE g.rolname OPERATOR(pg_catalog.=) 'rds_replication' "
+                + "AND pg_catalog.pg_has_role(r.oid, g.oid, 'MEMBER')) "
+                + "FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) SESSION_USER";
+    }
+
+    private static boolean hasReplicationPrivilege(InputStream in, OutputStream out) throws IOException {
+        List<SessionSetting> rows = settingsFromDataRows(runQuery(in, out, replicationPrivilegeQuery()));
+        return rows.size() == 1 && "t".equals(rows.getFirst().value());
     }
 
     /**

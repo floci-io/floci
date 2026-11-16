@@ -178,6 +178,39 @@ class RdsJdbcCompatTest {
 
     @Test
     @Order(5)
+    @DisplayName("Logical replication connection with IAM auth token")
+    void logicalReplicationConnectionWithIamAuthToken() throws Exception {
+        assumeInstanceCreated();
+
+        try (Connection admin = openPostgresConnection(USERNAME, PASSWORD);
+             Statement statement = admin.createStatement()) {
+            statement.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') "
+                    + "THEN CREATE ROLE rds_replication; END IF; END $$");
+            statement.execute("GRANT rds_replication TO " + IAM_USERNAME);
+        }
+
+        String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                .hostname(TestFixtures.proxyHost())
+                .port(proxyPort)
+                .username(IAM_USERNAME)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build());
+        Properties properties = postgresProperties(IAM_USERNAME, token);
+        properties.setProperty("replication", "database");
+        properties.setProperty("assumeMinServerVersion", "10");
+        properties.setProperty("preferQueryMode", "simple");
+
+        try (Connection connection = DriverManager.getConnection(postgresUrl(proxyPort), properties);
+             Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("IDENTIFY_SYSTEM")) {
+            assertThat(resultSet.next()).isTrue();
+            assertThat(resultSet.getString("dbname")).isEqualTo(DATABASE);
+        }
+    }
+
+    @Test
+    @Order(6)
     @DisplayName("IAM auth rejected on instance created without IAM")
     void iamAuthRejectedWhenDisabledAtCreate() throws Exception {
         assumeInstanceCreated();
@@ -226,7 +259,7 @@ class RdsJdbcCompatTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     @DisplayName("Toggle IAM via modify on a running instance")
     void toggleIamViaModifyOnRunningInstance() throws Exception {
         assumeInstanceCreated();
@@ -313,7 +346,7 @@ class RdsJdbcCompatTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     @DisplayName("Modify password keeps proxy reachable and delete releases port")
     void modifyKeepsProxyReachableAndDeleteReleasesPort() throws Exception {
         assumeInstanceCreated();
