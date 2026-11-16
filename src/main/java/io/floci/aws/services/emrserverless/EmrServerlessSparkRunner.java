@@ -122,6 +122,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // The port of a cluster's NameNode, HDFS's own default, which hdfs:// paths and those without a scheme
     // ("hdfs:// (or no prefix)") reach through the cluster's primary node.
     private static final int HDFS_PORT = 8020;
+    /** The ports of a cluster's MapReduce JobHistory server on its primary node, Hadoop's own defaults. */
+    public static final int JOB_HISTORY_PORT = 10020;
+    public static final int JOB_HISTORY_WEB_PORT = 19888;
     // Spark's default checkpoint manager goes through Hadoop's FileContext, which refuses an hdfs:// path without a
     // host, though "hdfs:///path-to-data" and "/path-to-data" "would resolve to the same location in HDFS", as the
     // Management Guide puts it; so a streaming query keeps its checkpoints through the file system instead.
@@ -1254,7 +1257,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A MapReduce job on the cluster's YARN: its application master and tasks find Hadoop in the nodes' layout, which
     // yarn.application.classpath's default does not name, and S3A's AWS SDK, reach Floci with the step's AWS environment,
     // and are sized for a NodeManager as Spark's executors are. The image's core-site.xml names the LZO codec, so its
-    // jars come too.
+    // jars come too. Its client asks the cluster's JobHistory server about it once its application master has ended.
     private static List<SparkSetting> yarnMapReduceSettings(Job job, List<String> executorEnvironment) {
         String root = hadoopRoot(job);
         List<String> classPath = new ArrayList<>(hadoopLayout(root));
@@ -1269,7 +1272,20 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("mapreduce.reduce.env", environment),
                 new SparkSetting("yarn.app.mapreduce.am.resource.mb", "1024"),
                 new SparkSetting("mapreduce.map.memory.mb", "768"),
-                new SparkSetting("mapreduce.reduce.memory.mb", "768"));
+                new SparkSetting("mapreduce.reduce.memory.mb", "768"),
+                jobHistory(job), jobHistoryWeb(job));
+    }
+
+    // The cluster's MapReduce JobHistory server on its primary node, which a MapReduce job's client asks about it once
+    // its application master has ended, and its web pages.
+    private static SparkSetting jobHistory(Job job) {
+        return new SparkSetting("mapreduce.jobhistory.address",
+                job.storage().resourceManager() + ":" + JOB_HISTORY_PORT);
+    }
+
+    private static SparkSetting jobHistoryWeb(Job job) {
+        return new SparkSetting("mapreduce.jobhistory.webapp.address",
+                job.storage().resourceManager() + ":" + JOB_HISTORY_WEB_PORT);
     }
 
     /**
@@ -1291,13 +1307,16 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     // Hive's Tez on the cluster's YARN, sized as its tasks are by Hive's own settings: a task's two virtual cores never
-    // match the one YARN's default scheduler grants, so Tez would give each container back.
+    // match the one YARN's default scheduler grants, so Tez would give each container back. A query that runs MapReduce
+    // instead, its hive.execution.engine set to mr, asks the cluster's JobHistory server about its jobs.
     private static List<SparkSetting> hiveOnYarnSettings(Job job, List<String> executorEnvironment) {
         String root = hadoopRoot(job);
         List<SparkSetting> settings = new ArrayList<>(tezOnYarnSettings(job, executorEnvironment,
                 List.of(root + "/hive/lib/hive-exec.jar"), "HIVE_HOME=" + root + "/hive"));
         settings.add(new SparkSetting("hive.tez.container.size", "768"));
         settings.add(new SparkSetting("hive.tez.cpu.vcores", "1"));
+        settings.add(jobHistory(job));
+        settings.add(jobHistoryWeb(job));
         return settings;
     }
 

@@ -118,6 +118,9 @@ class EmrPigStepsNightlyIntegrationTest {
         assertEquals("COMPLETED", state(mapReduce), () -> logs(mapReduce));
         assertEquals(SUMS, objects("out/mapreduce/"));
         assertTrue(logs(mapReduce).contains("MapReduceLauncher"), () -> logs(mapReduce));
+        // Its counters, which Pig's client gets from the cluster's JobHistory server once each job's application master
+        // has ended.
+        assertTrue(logs(mapReduce).contains("Successfully read 4 records"), () -> logs(mapReduce));
     }
 
     private void startCluster() {

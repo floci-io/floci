@@ -26,8 +26,7 @@ class EmrSparkStepsTest {
     private static final String HIVE_AND_SPARK = "[{\"Name\": \"Spark\"}, {\"Name\": \"hive\"}]";
     private static final String RELEASE = "emr-7.5.0";
     // The pig.properties lines Floci gives every Pig after its exectype, ahead of the cluster's.
-    private static final String FLOCIS_PIG_LINES = "mapreduce.job.working.dir = /user/${user.name}\n"
-            + "pig.stats.notaskreport = true\nyarn.app.mapreduce.client.max-retries = 1";
+    private static final String FLOCIS_PIG_LINES = "mapreduce.job.working.dir = /user/${user.name}";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -199,7 +198,6 @@ class EmrSparkStepsTest {
         // Tez, as EMR's Pig 0.16.0 and later, from a working directory S3A takes as HDFS does, then tez-site's, then
         // pig-properties', a later line winning.
         assertEquals(String.join("\n", "exectype = tez", "mapreduce.job.working.dir = /user/${user.name}",
-                "pig.stats.notaskreport = true", "yarn.app.mapreduce.client.max-retries = 1",
                 "tez.grouping.max-size = 268435456",
                 "tez.am.resource.memory.mb = 1536", "pig.exec.reducers.max = 8"),
                 variables.get("FLOCI_PIG_PROPERTIES"));
