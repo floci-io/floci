@@ -64,6 +64,12 @@ class DsqlRoleNamesTest {
                 + "|ALTER DEFAULT PRIVILEGES FOR USER dx_a, dx_b IN SCHEMA s REVOKE ALL ON TABLES FROM dx_c",
         "DROP OWNED BY a, b CASCADE|DROP OWNED BY dx_a, dx_b CASCADE",
         "ALTER SCHEMA s OWNER TO CURRENT_USER|ALTER SCHEMA s OWNER TO CURRENT_USER",
+        // Not role positions: a column, constraint or attribute called owner, renamed.
+        "ALTER TABLE t RENAME COLUMN owner TO x|ALTER TABLE t RENAME COLUMN owner TO x",
+        "ALTER TABLE t RENAME owner TO x|ALTER TABLE t RENAME owner TO x",
+        "ALTER TABLE t RENAME CONSTRAINT owner TO c|ALTER TABLE t RENAME CONSTRAINT owner TO c",
+        "ALTER TYPE ty RENAME ATTRIBUTE owner TO y|ALTER TYPE ty RENAME ATTRIBUTE owner TO y",
+        "ALTER TABLE owner OWNER TO app|ALTER TABLE owner OWNER TO dx_app",
     })
     void roleNamesAreTranslatedWhereSqlNamesARole(String sql, String expected) {
         assertEquals(expected, DsqlStatements.rewriteQuery(sql, NAMES).sql());

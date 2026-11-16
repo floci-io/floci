@@ -32,6 +32,7 @@ public final class DsqlStatements {
     private static final Set<String> ROLE_KINDS = Set.of("ROLE", "USER", "GROUP");
     private static final Set<String> ROLE_SPECIFIERS = Set.of("CURRENT_ROLE", "CURRENT_USER", "SESSION_USER", "PUBLIC",
             "NONE");
+    private static final Set<String> RENAME_TARGETS = Set.of("RENAME", "COLUMN", "CONSTRAINT", "ATTRIBUTE");
     private static final Pattern SIMPLE_IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_$]*");
 
     private DsqlStatements() {
@@ -567,7 +568,9 @@ public final class DsqlStatements {
                 }
                 if (alter) {
                     for (int i = 2; i + 2 < tokens.size(); i++) {
-                        if ("OWNER".equals(word(tokens, i)) && "TO".equals(word(tokens, i + 1))) {
+                        // A column, constraint or attribute called owner, renamed, is not the OWNER TO clause.
+                        boolean renamed = RENAME_TARGETS.contains(word(tokens, i - 1));
+                        if (!renamed && "OWNER".equals(word(tokens, i)) && "TO".equals(word(tokens, i + 1))) {
                             addName(tokens, i + 2, at);
                         }
                     }
