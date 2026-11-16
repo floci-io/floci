@@ -7,9 +7,6 @@ import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ports;
-import com.github.dockerjava.core.DefaultDockerClientConfig;
-import com.github.dockerjava.core.DockerClientImpl;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceConfigAccess;
@@ -18,6 +15,7 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
+import io.floci.aws.testing.TestDockerClients;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -25,7 +23,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.io.IOException;
-import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -57,16 +54,7 @@ class RdsContainerManagerPostgresTest {
     @BeforeAll
     void setUp() {
         try {
-            DefaultDockerClientConfig clientConfig = DefaultDockerClientConfig
-                    .createDefaultConfigBuilder()
-                    .build();
-            ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
-                    .dockerHost(clientConfig.getDockerHost())
-                    .maxConnections(10)
-                    .connectionTimeout(Duration.ofSeconds(10))
-                    .responseTimeout(Duration.ofMinutes(5))
-                    .build();
-            dockerClient = DockerClientImpl.getInstance(clientConfig, httpClient);
+            dockerClient = TestDockerClients.local();
             dockerClient.pingCmd().exec();
         } catch (Exception e) {
             assumeTrue(false, "Docker is not available: " + e.getMessage());

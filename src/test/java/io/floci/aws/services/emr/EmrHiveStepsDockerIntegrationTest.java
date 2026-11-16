@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.ContainerDataPlaneProfile;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.S3TestClients;
@@ -50,7 +51,6 @@ class EmrHiveStepsDockerIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String REGION = "us-east-1";
-    private static final String ROWS = "a,1\nb,2\nc,3\n";
     private static final String HIVE_AND_SPARK = "[{\"Name\":\"Hadoop\"},{\"Name\":\"Hive\"},{\"Name\":\"Spark\"}]";
 
     @RegisterExtension
@@ -76,34 +76,16 @@ class EmrHiveStepsDockerIntegrationTest {
         bucket = "emr-hive-" + UUID.randomUUID().toString().substring(0, 8);
         s3.createBucket(request -> request.bucket(bucket));
         cleanup.register(() -> S3TestClients.deleteBucket(s3, bucket));
-        put("data/rows/rows.csv", ROWS);
+        put("data/rows/rows.csv", HiveCatalogJobs.ROWS);
     }
 
     @Test
     void hiveAndSparkStepsShareTheClustersMetastoreServiceAndHdfs() {
         // The two steps that read what the first one made, and need nothing from each other, run at once.
         startCluster(HIVE_AND_SPARK, "[]", null, 2);
-        put("queries/load.q", """
-                create external table kv (k string, v int)
-                  row format delimited fields terminated by ',' location '${INPUT}';
-                create table scaled as select k, v * 10 as v from kv;
-                create table pinned (k string) location 'hdfs:///floci/pinned';
-                insert into pinned select k from kv;
-                """);
-        put("queries/report.q", """
-                insert overwrite directory '${OUTPUT}' row format delimited fields terminated by ','
-                  select k, v from scaled order by k;
-                select k, v from scaled order by k;
-                select k from from_spark order by k;
-                """);
-        put("jobs/catalog.py", """
-                import sys
-                from pyspark.sql import SparkSession
-                spark = SparkSession.builder.enableHiveSupport().getOrCreate()
-                rows = sorted(f"{row.k}{row.v}" for row in spark.sql("select k, v from scaled").collect())
-                spark.createDataFrame([(" ".join(rows),)], ["value"]).coalesce(1).write.text(sys.argv[1])
-                spark.sql("create table from_spark stored as textfile as select upper(k) as k from scaled")
-                """);
+        put("queries/load.q", HiveCatalogJobs.LOAD_QUERY);
+        put("queries/report.q", HiveCatalogJobs.REPORT_QUERY);
+        put("jobs/catalog.py", HiveCatalogJobs.CATALOG_JOB);
 
         assertEquals("COMPLETED", hiveStep("-f", s3Uri("queries/load.q"), "-d", "INPUT=" + s3Uri("data/rows/")));
         // Its data is in the cluster's HDFS, which a step in the Spark image reads as hdfs://, and so is an hdfs://
@@ -115,12 +97,12 @@ class EmrHiveStepsDockerIntegrationTest {
         assertEquals("COMPLETED", state(cat));
         assertEquals("a\u000110\nb\u000120\nc\u000130\na\nb\nc\n", stepLog(cat, "stdout.gz"));
         assertEquals("COMPLETED", state(spark));
-        assertEquals("a10 b20 c30\n", objects("out/spark/"));
+        assertEquals(HiveCatalogJobs.CATALOG_OUTPUT, objects("out/spark/"));
         // The tables the first step and the Spark step made are in the cluster's metastore for a later Hive step.
         String report = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
                 "-f", s3Uri("queries/report.q"), "-d", "OUTPUT=" + s3Uri("out/report/"));
         assertEquals("COMPLETED", state(report));
-        assertEquals("a,10\nb,20\nc,30\n", objects("out/report/"));
+        assertEquals(HiveCatalogJobs.REPORT_OUTPUT, objects("out/report/"));
         String reported = stepLog(report, "stdout.gz");
         assertTrue(reported.contains("a\t10\nb\t20\nc\t30\n") && reported.contains("A\nB\nC\n"), reported);
     }
@@ -246,14 +228,9 @@ class EmrHiveStepsDockerIntegrationTest {
         return state(addStep("command-runner.jar", command.toArray(String[]::new)));
     }
 
-    /** Adds one step to the cluster and returns its id. */
+    /** Adds one step to the cluster, named after its first argument, and returns its id. */
     private String addStep(String jar, String... args) {
-        ObjectNode request = JSON.createObjectNode().put("JobFlowId", clusterId);
-        ObjectNode step = request.putArray("Steps").addObject().put("Name", args[0]).put("ActionOnFailure", "CONTINUE");
-        ObjectNode hadoopJarStep = step.putObject("HadoopJarStep").put("Jar", jar);
-        List.of(args).forEach(hadoopJarStep.putArray("Args")::add);
-        return emr("AddJobFlowSteps", request.toString()).then().statusCode(200).extract().jsonPath()
-                .getString("StepIds[0]");
+        return EmrRequests.addStep(clusterId, args[0], jar, args);
     }
 
     private String state(String stepId) {

@@ -87,6 +87,14 @@ jobs:
         if: steps.list.outputs.count != '0'
         run: ./mvnw test-compile -B
 
+      # A check that runs Floci in a container, as a user's Docker setup does, runs this image: this commit's own
+      # build, made from the compiled application as docker/Dockerfile.jvm-package describes.
+      - name: Build the Floci image
+        if: steps.list.outputs.count != '0'
+        run: |
+          ./mvnw package -B -q -DskipTests
+          docker build -q -f docker/Dockerfile.jvm-package -t floci/floci:nightly-check .
+
       # nightly.txt is never empty here: an empty includesFile would make surefire run the whole suite.
       - name: Run the nightly checks
         if: steps.list.outputs.count != '0'
@@ -95,6 +103,7 @@ jobs:
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/nightly.txt"
           -Dsurefire.failIfNoTests=true
           -Dnightly.checks.enabled=true
+          -Dnightly.checks.floci-image=floci/floci:nightly-check
 
       - name: Image prefetch results
         if: always() && steps.list.outputs.count != '0'
