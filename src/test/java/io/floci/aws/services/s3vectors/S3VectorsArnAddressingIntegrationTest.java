@@ -13,7 +13,9 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 
 /**
  * Every S3 Vectors call that names a vector bucket takes its {@code vectorBucketName} or its {@code vectorBucketArn},
@@ -157,6 +159,48 @@ class S3VectorsArnAddressingIntegrationTest {
             post("/DeleteIndex", "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"events\"}").statusCode(200);
             post("/DeleteVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200);
         }
+    }
+
+    /**
+     * A name no call could reach the bucket by, blank or with a slash, is refused on create, as S3 Vectors refuses it
+     * (measured on AWS), the length first. A bucket of a name AWS refuses otherwise is still made: see above.
+     */
+    @Test
+    void aBucketNameNoCallCouldReachIsRefusedOnCreate() {
+        refused(post("/CreateVectorBucket", "{\"vectorBucketName\":\"\"}"), "1 validation error detected. "
+                + "Value with length 0 at '/vectorBucketName' failed to satisfy constraint: "
+                + "Member must have length between 3 and 63, inclusive");
+        for (String name : List.of("a/b", "   ", bucketName() + "/index/events")) {
+            refused(post("/CreateVectorBucket", "{\"vectorBucketName\":\"" + name + "\"}"), "Invalid vector bucket name");
+            post("/ListVectorBuckets", "{}").statusCode(200).body("vectorBuckets.vectorBucketName", not(hasItem(name)));
+        }
+    }
+
+    /**
+     * An index name no call could reach the index by is refused before the bucket is looked for, as S3 Vectors does
+     * (measured on AWS for a slash), and nothing is left that would keep its bucket from being deleted.
+     */
+    @Test
+    void anIndexNameNoCallCouldReachIsRefusedOnCreate() {
+        refused(post("/CreateIndex", index(bucketName(), "a/b")), "Invalid index name");
+        String bucket = bucketName();
+        post("/CreateVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200);
+        try {
+            refused(post("/CreateIndex", index(bucket, "a/b")), "Invalid index name");
+            refused(post("/CreateIndex", index(bucket, "   ")), "Invalid index name");
+            refused(post("/CreateIndex", index(bucket, "")), "1 validation error detected. "
+                    + "Value with length 0 at '/indexName' failed to satisfy constraint: "
+                    + "Member must have length between 3 and 63, inclusive");
+            post("/ListIndexes", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200)
+                    .body("indexes", hasSize(0));
+        } finally {
+            post("/DeleteVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200);
+        }
+    }
+
+    private static String index(String bucket, String index) {
+        return "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"" + index + "\",\"dataType\":\"float32\","
+                + "\"dimension\":2,\"distanceMetric\":\"cosine\"}";
     }
 
     private static String bucketName() {

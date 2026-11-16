@@ -82,6 +82,7 @@ public class S3VectorsService {
 
     public VectorBucket createVectorBucket(String bucketName, Object encryptionConfiguration,
                                           Map<String, String> tags, String region) {
+        requireAddressableName(bucketName, "vectorBucketName", "Invalid vector bucket name");
         synchronized (lockFor(bucketName, region)) {
             String key = buildStorageKey(region, bucketName);
             if (store.get(key).isPresent()) {
@@ -242,6 +243,24 @@ public class S3VectorsService {
         return resolved;
     }
 
+    /**
+     * Refuses, on create, a name no call could reach what it made by: a blank one, which every call reads as left
+     * out, or one with a slash, which splits the ARN it would get. S3 Vectors refuses both, checking the length first
+     * (measured on AWS: an empty bucket name, and a bucket and an index name with a slash). Its other naming rules
+     * aren't checked here, so a name it would refuse otherwise is still taken as given.
+     */
+    private static void requireAddressableName(String name, String member, String invalidMessage) {
+        if (name == null || !(name.isBlank() || name.indexOf('/') >= 0)) {
+            return;
+        }
+        if (name.length() < 3 || name.length() > 63) {
+            throw new AwsException("ValidationException", "1 validation error detected. Value with length "
+                    + name.length() + " at '/" + member
+                    + "' failed to satisfy constraint: Member must have length between 3 and 63, inclusive", 400);
+        }
+        throw new AwsException("ValidationException", invalidMessage, 400);
+    }
+
     /** A member's value, or null when the request left it out or empty. */
     private static String given(String member) {
         return member == null || member.isBlank() ? null : member;
@@ -329,6 +348,7 @@ public class S3VectorsService {
     public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
                                    String distanceMetric, List<String> nonFilterableMetadataKeys,
                                    Object encryptionConfiguration, Map<String, String> tags, String region) {
+        requireAddressableName(indexName, "indexName", "Invalid index name");
         if (dimension < 1 || dimension > 4096) {
             throw new AwsException("ValidationException", "Dimension must be between 1 and 4096.", 400);
         }
