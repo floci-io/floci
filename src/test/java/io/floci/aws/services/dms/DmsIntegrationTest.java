@@ -156,7 +156,8 @@ class DmsIntegrationTest {
         dms("CreateReplicationSubnetGroup", region)
                 .body("{\"ReplicationSubnetGroupIdentifier\":\"tf-default-probe\","
                         + "\"ReplicationSubnetGroupDescription\":\"terraform managed\","
-                        + "\"SubnetIds\":[\"subnet-0076c559b61d263a2\",\"subnet-01e650421ef5d6441\"]}")
+                        + "\"SubnetIds\":[\"" + Ec2Service.defaultSubnetId(region, "a") + "\",\""
+                        + Ec2Service.defaultSubnetId(region, "b") + "\"]}")
         .when()
                 .post("/")
         .then()
