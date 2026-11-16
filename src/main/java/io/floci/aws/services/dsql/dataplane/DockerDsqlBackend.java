@@ -143,7 +143,7 @@ public class DockerDsqlBackend implements DsqlBackend {
     }
 
     private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException {
-        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, "admin");
+        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, DsqlEndpoint.ADMIN);
         try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
             statement.execute(script);
         }

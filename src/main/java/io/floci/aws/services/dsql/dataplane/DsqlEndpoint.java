@@ -77,7 +77,7 @@ public class DsqlEndpoint {
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
     static final Duration EXPIRY_GRACE = Duration.ofSeconds(5);
     private static final int HANDSHAKE_TIMEOUT_MILLIS = 30_000;
-    private static final String ADMIN = "admin";
+    static final String ADMIN = "admin";
 
     private final DsqlTlsCertificates certificates;
     private final IamService iamService;
