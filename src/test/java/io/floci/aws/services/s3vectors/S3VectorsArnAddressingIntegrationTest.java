@@ -142,19 +142,22 @@ class S3VectorsArnAddressingIntegrationTest {
         }
     }
 
-    /** An ARN of another account names no bucket of the caller's, even one of the same name. */
+    /**
+     * An ARN of another account is refused with an AccessDeniedException that carries no message, as S3 Vectors does
+     * (measured on AWS), even when the caller has a bucket and an index of those names.
+     */
     @Test
-    void anArnOfAnotherAccountIsNotFound() {
+    void anArnOfAnotherAccountIsRefused() {
         String bucket = bucketName();
         post("/CreateVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200);
         post("/CreateIndex", "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"events\","
                 + "\"dataType\":\"float32\",\"dimension\":2,\"distanceMetric\":\"cosine\"}").statusCode(200);
         String other = "arn:aws:s3vectors:us-east-1:111122223333:bucket/" + bucket;
         try {
-            post("/GetVectorBucket", byBucketArn(other)).statusCode(404).body("__type", equalTo("NotFoundException"));
-            post("/ListIndexes", byBucketArn(other)).statusCode(404).body("__type", equalTo("NotFoundException"));
-            post("/GetIndex", byIndexArn(other + "/index/events")).statusCode(404)
-                    .body("__type", equalTo("NotFoundException"));
+            for (ValidatableResponse response : List.of(post("/GetVectorBucket", byBucketArn(other)),
+                    post("/ListIndexes", byBucketArn(other)), post("/GetIndex", byIndexArn(other + "/index/events")))) {
+                response.statusCode(403).body("__type", equalTo("AccessDeniedException")).body("message", equalTo(""));
+            }
         } finally {
             post("/DeleteIndex", "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"events\"}").statusCode(200);
             post("/DeleteVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200);
@@ -196,6 +199,25 @@ class S3VectorsArnAddressingIntegrationTest {
         } finally {
             post("/DeleteVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200);
         }
+    }
+
+    /**
+     * An ARN of another Region than the request's, or of another partition, is refused as S3 Vectors refuses it
+     * (measured on AWS), by calls of each kind that take one (bucket, index, ListVectors and policy), the partition
+     * checked first.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"/GetVectorBucket", "/DeleteVectorBucket", "/ListIndexes", "/GetIndex", "/DeleteIndex",
+            "/ListVectors", "/GetVectorBucketPolicy"})
+    void anArnOfAnotherRegionOrPartitionIsRefused(String path) {
+        boolean byIndex = List.of("/GetIndex", "/DeleteIndex", "/ListVectors").contains(path);
+        String bucket = bucketName();
+        String west = "arn:aws:s3vectors:us-west-2:000000000000:bucket/" + bucket;
+        String china = "arn:aws-cn:s3vectors:cn-north-1:000000000000:bucket/" + bucket;
+        refused(post(path, byIndex ? byIndexArn(west + "/index/events") : byBucketArn(west)),
+                "Unexpected value for ARN region component");
+        refused(post(path, byIndex ? byIndexArn(china + "/index/events") : byBucketArn(china)),
+                "Unexpected value for ARN partition component");
     }
 
     private static String index(String bucket, String index) {

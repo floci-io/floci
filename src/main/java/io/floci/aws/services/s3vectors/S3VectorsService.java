@@ -206,14 +206,15 @@ public class S3VectorsService {
         String name = given(bucketName);
         String arn = given(bucketArn);
         requireBucketChoice(name, arn);
-        return inThisAccount(resolveBucket(name, arn, region, regionResolver::partitionForRegion, "ValidationException"));
+        return inRequestScope(resolveBucket(name, arn, region, regionResolver::partitionForRegion, "ValidationException"),
+                region);
     }
 
     /**
      * The vector bucket a request names, by {@code vectorBucketName} or by {@code vectorBucketArn}, refused as S3
      * Vectors refuses a request that gives neither or both. The name is read as given, as CreateVectorBucket takes
-     * it, so a bucket it made stays reachable by its name and by the ARN it was given. An ARN is looked up in the
-     * Region it names; a bucket it names in another account is not found.
+     * it, so a bucket it made stays reachable by its name and by the ARN it was given. An ARN outside the request's
+     * partition, Region or account is refused ({@link #inRequestScope}).
      */
     public ResolvedBucket bucketTarget(String bucketName, String bucketArn, String region) {
         String name = given(bucketName);
@@ -222,8 +223,8 @@ public class S3VectorsService {
         if (arn == null) {
             return new ResolvedBucket(name, region, null);
         }
-        return inThisAccount(bucketOfArn(arn, arnParts(arn, false, "ValidationException"),
-                regionResolver::partitionForRegion, "ValidationException"));
+        return inRequestScope(bucketOfArn(arn, arnParts(arn, false, "ValidationException"),
+                regionResolver::partitionForRegion, "ValidationException"), region);
     }
 
     /** S3 Vectors' refusal of a request that names a bucket by neither its name nor its ARN, or by both. */
@@ -234,11 +235,23 @@ public class S3VectorsService {
         }
     }
 
-    /** A bucket an ARN names in another account is not found. */
-    private ResolvedBucket inThisAccount(ResolvedBucket resolved) {
-        if (resolved.accountId() != null && !store.accountId().equals(resolved.accountId())) {
-            throw new AwsException("NotFoundException",
-                    "The vector bucket " + resolved.bucketName() + " does not exist.", 404);
+    /**
+     * Refuses, as S3 Vectors does (measured on AWS), a bucket an ARN names outside the request's partition, Region or
+     * account: another partition or Region with a ValidationException, the partition first, and another account with
+     * an AccessDeniedException that carries no message. A bucket named by its name is the request's own.
+     */
+    private ResolvedBucket inRequestScope(ResolvedBucket resolved, String region) {
+        if (resolved.accountId() == null) {
+            return resolved;
+        }
+        if (!regionResolver.partitionForRegion(resolved.region()).equals(regionResolver.partitionForRegion(region))) {
+            throw new AwsException("ValidationException", "Unexpected value for ARN partition component", 400);
+        }
+        if (!region.equals(resolved.region())) {
+            throw new AwsException("ValidationException", "Unexpected value for ARN region component", 400);
+        }
+        if (!store.accountId().equals(resolved.accountId())) {
+            throw new AwsException("AccessDeniedException", "", 403);
         }
         return resolved;
     }
@@ -515,8 +528,8 @@ public class S3VectorsService {
 
     /**
      * The index a request names, by its {@code vectorBucketName} and {@code indexName} or by its {@code indexArn},
-     * refused as S3 Vectors refuses a request that gives neither or mixes them. The ARN's bucket is read as a bucket
-     * ARN is: in the Region it names, and not found in another account.
+     * refused as S3 Vectors refuses a request that gives neither or mixes them. The ARN's bucket is checked as a bucket
+     * ARN is ({@link #inRequestScope}).
      */
     public ResolvedIndex resolveIndexTarget(String bucketName, String indexName, String indexArn, String region) {
         String bucket = given(bucketName);
@@ -532,8 +545,8 @@ public class S3VectorsService {
             return new ResolvedIndex(bucket, index, region);
         }
         String[] parts = arnParts(arn, true, "ValidationException");
-        ResolvedBucket owner = inThisAccount(bucketOfArn(arn, parts, regionResolver::partitionForRegion,
-                "ValidationException"));
+        ResolvedBucket owner = inRequestScope(bucketOfArn(arn, parts, regionResolver::partitionForRegion,
+                "ValidationException"), region);
         return new ResolvedIndex(owner.bucketName(), parts[3], owner.region());
     }
 
