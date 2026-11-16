@@ -10,7 +10,6 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -44,18 +43,7 @@ public class DsqlDatabases {
 
     @Inject
     public DsqlDatabases(DockerDsqlBackend docker, ExternalDsqlBackend external, EmulatorConfig config) {
-        this.strategy = select(config.services().dsql().backend(), docker, external);
-    }
-
-    private static DsqlBackend select(String configured, DockerDsqlBackend docker, ExternalDsqlBackend external) {
-        EmulatorConfig.DsqlServiceConfig.Backend kind;
-        try {
-            kind = EmulatorConfig.DsqlServiceConfig.Backend.valueOf(configured.trim().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException("floci.services.dsql.backend must be docker or external, not '"
-                    + configured + "'", e);
-        }
-        return switch (kind) {
+        this.strategy = switch (config.services().dsql().backend()) {
             case DOCKER -> docker;
             case EXTERNAL -> external;
         };

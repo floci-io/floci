@@ -2006,10 +2006,11 @@ public interface EmulatorConfig {
 
         /**
          * Where cluster databases live: {@code docker} runs a PostgreSQL container per cluster,
-         * {@code external} uses one PostgreSQL server that already runs, see {@link External}.
+         * {@code external} uses one PostgreSQL server that already runs, see {@link External}. Any
+         * other value fails Floci's start.
          */
         @WithDefault("docker")
-        String backend();
+        Backend backend();
 
         /** The PostgreSQL server of the {@code external} backend. */
         External external();
@@ -2024,11 +2025,17 @@ public interface EmulatorConfig {
             @WithDefault("5432")
             int port();
 
-            /** Database that holds the clusters' schemas. */
+            /**
+             * Maintenance database Floci connects to in order to create, and later drop, each
+             * cluster's own database and roles.
+             */
             @WithDefault("postgres")
             String database();
 
-            /** Role Floci connects as; it must be able to create roles and schemas. */
+            /**
+             * Role Floci connects as. It must be a superuser: Floci installs event triggers and
+             * creates each cluster's database and roles.
+             */
             @WithDefault("postgres")
             String username();
 

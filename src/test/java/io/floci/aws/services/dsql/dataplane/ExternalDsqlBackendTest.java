@@ -208,7 +208,7 @@ class ExternalDsqlBackendTest {
 
     private static EmulatorConfig unreachableExternalServer() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().dsql().backend()).thenReturn("external");
+        when(config.services().dsql().backend()).thenReturn(EmulatorConfig.DsqlServiceConfig.Backend.EXTERNAL);
         when(config.services().dsql().external().host()).thenReturn(Optional.of("127.0.0.1"));
         // Nothing listens on port 1, so every connection is refused at once.
         when(config.services().dsql().external().port()).thenReturn(1);
