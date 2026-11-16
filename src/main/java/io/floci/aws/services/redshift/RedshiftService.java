@@ -10,6 +10,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceCallAuthorizer;
+import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -534,7 +535,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 clusters.put(identifier, cluster);
             }
             clusters.flush();
-            throw new AwsException("InternalFailure", "Failed to start container: " + e.getMessage(), 500);
+            throw clusterStartFailure("Failed to start container: ", e);
         }
 
         clusters.put(identifier, cluster);
@@ -2711,7 +2712,7 @@ public class RedshiftService implements ManagedSecretRotator {
         } catch (Exception e) {
             rollbackSnapshotRestore(cluster, proxyPort);
             emitClusterRestoreFailure(clusterIdentifier, snapshotIdentifier);
-            throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
+            throw clusterStartFailure("Failed to restore cluster from snapshot: ", e);
         }
 
         storeCluster(cluster);
@@ -4152,6 +4153,14 @@ public class RedshiftService implements ManagedSecretRotator {
     // ── Proxy Helpers (shared with modify/reboot/restore) ────────────────────
 
     private static final String CLUSTER_DB_NAME = "dev";
+
+    private static AwsException clusterStartFailure(String context, Exception e) {
+        if (e instanceof ContainerRejectedException) {
+            // A 500 makes SDKs retry the same rejected create for minutes.
+            return new AwsException("InsufficientClusterCapacity", e.getMessage(), 400);
+        }
+        return new AwsException("InternalFailure", context + e.getMessage(), 500);
+    }
 
     private int allocateProxyPort() {
         int base = config.services().redshift().proxyBasePort();

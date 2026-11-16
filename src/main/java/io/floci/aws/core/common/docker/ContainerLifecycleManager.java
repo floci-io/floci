@@ -343,7 +343,15 @@ public class ContainerLifecycleManager {
         labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
         createCmd.withLabels(labels);
 
-        String containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+        String containerId;
+        try {
+            containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+        } catch (DockerException e) {
+            if (ContainerRejectedException.isRejection(e)) {
+                throw new ContainerRejectedException(e);
+            }
+            throw e;
+        }
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
     }
