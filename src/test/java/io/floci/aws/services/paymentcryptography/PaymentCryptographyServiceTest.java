@@ -402,6 +402,24 @@ class PaymentCryptographyServiceTest {
         assertEquals("DELETE_PENDING", service.findKey("us-east-1", key.getArn()).getKeyState());
     }
 
+
+    @Test
+    void aScheduledDeletionCarriesTheMomentItTakesEffect() {
+        // The reference says the pending timestamp is the date and time after which the key
+        // is deleted, and that the waiting period is seven days unless the request names
+        // one.
+        PaymentCryptographyKey key = createKey("us-east-1");
+        long before = Instant.now().getEpochSecond();
+
+        PaymentCryptographyKey pending = service.deleteKey(key);
+
+        assertEquals("DELETE_PENDING", pending.getKeyState());
+        assertFalse(pending.isEnabled(), "a key that is pending deletion is enabled");
+        assertTrue(pending.getDeletePendingTimestamp() >= before + 7 * 86_400L
+                        && pending.getDeletePendingTimestamp() <= Instant.now().getEpochSecond()
+                                + 7 * 86_400L,
+                "the pending timestamp is not the moment the deletion takes effect");
+    }
     @Test
     void aDeletedKeyIsRestored() {
         PaymentCryptographyKey key = createKey("us-east-1");
