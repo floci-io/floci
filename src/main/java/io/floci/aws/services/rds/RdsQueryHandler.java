@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.XmlBuilder;
+import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
@@ -232,6 +233,10 @@ public class RdsQueryHandler {
             };
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        } catch (ContainerRejectedException e) {
+            // A 500 makes SDKs retry the same rejected create for minutes.
+            LOG.warnv("RDS {0} failed: {1}", action, e.getMessage());
+            return AwsQueryResponse.error("InsufficientDBInstanceCapacity", e.getMessage(), AwsNamespaces.RDS, 400);
         } catch (Exception e) {
             LOG.errorv(e, "Unexpected error in RDS {0}", action);
             return AwsQueryResponse.error("InternalFailure",

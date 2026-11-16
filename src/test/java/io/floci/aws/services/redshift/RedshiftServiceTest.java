@@ -1,6 +1,7 @@
 package io.floci.aws.services.redshift;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.exception.DockerException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -8,6 +9,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceCallAuthorizer;
+import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -953,6 +955,19 @@ class RedshiftServiceTest {
                 null, List.of(), List.of("invalid"), "invalid"));
         verifyNoInteractions(cm);
         verify(clusterBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void createClusterAnswersADockerRejectionWithANonRetryableCapacityError() {
+        when(cm.start("111111111111", "c1", "admin", "pw")).thenThrow(new ContainerRejectedException(
+                new DockerException("authorization denied by plugin: --mounts is not allowed", 403)));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCluster("c1", "dc2.large",
+                "admin", "pw", null, List.of(), List.of(), null));
+
+        assertEquals("InsufficientClusterCapacity", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("--mounts is not allowed"));
     }
 
     @Test

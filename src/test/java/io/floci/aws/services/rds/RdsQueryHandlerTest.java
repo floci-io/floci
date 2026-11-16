@@ -1,7 +1,9 @@
 package io.floci.aws.services.rds;
 
+import com.github.dockerjava.api.exception.DockerException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
@@ -930,6 +932,26 @@ class RdsQueryHandlerTest {
 
         String body = (String) response.getEntity();
         assertFalse(body.contains("<MasterUserSecret>"));
+    }
+
+    @Test
+    void createDbClusterAnswersADockerRejectionWithANonRetryableCapacityError() {
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), anyBoolean()))
+                .thenThrow(new ContainerRejectedException(
+                        new DockerException("authorization denied by plugin: --mounts is not allowed", 403)));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InsufficientDBInstanceCapacity</Code>"));
+        assertTrue(body.contains("--mounts is not allowed"));
     }
 
     @Test
