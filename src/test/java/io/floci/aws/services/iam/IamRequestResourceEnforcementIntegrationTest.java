@@ -1913,6 +1913,42 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Glue holds on the resource a request names, a job's and a
+     * schema registry's, so an allow on one team's tag lets the caller read that team's job and registry and not
+     * another's.
+     */
+    @Test
+    void aGlueResourceTagConditionReadsTheTagsOfTheJobAndTheRegistry() {
+        String tagged = "res-tag-job-" + suffix();
+        String other = "res-tag-job-" + suffix();
+        String jobRest = "\",\"Role\":\"arn:aws:iam::" + ACCOUNT + ":role/glue\","
+                + "\"Command\":{\"Name\":\"glueetl\",\"ScriptLocation\":\"s3://scripts/job.py\"}";
+        glue("CreateJob", "{\"Name\":\"" + tagged + jobRest + ",\"Tags\":{\"team\":\"data\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + tagged + "\"}"));
+        glue("CreateJob", "{\"Name\":\"" + other + jobRest + ",\"Tags\":{\"team\":\"web\"}}").statusCode(200);
+        cleanup.register(() -> glue("DeleteJob", "{\"JobName\":\"" + other + "\"}"));
+        String taggedRegistry = "res-tag-reg-" + suffix();
+        String otherRegistry = "res-tag-reg-" + suffix();
+        glue("CreateRegistry", "{\"RegistryName\":\"" + taggedRegistry + "\",\"Tags\":{\"team\":\"data\"}}")
+                .statusCode(200);
+        cleanup.register(() -> glue("DeleteRegistry", "{\"RegistryId\":{\"RegistryName\":\"" + taggedRegistry
+                + "\"}}"));
+        glue("CreateRegistry", "{\"RegistryName\":\"" + otherRegistry + "\"}").statusCode(200);
+        cleanup.register(() -> glue("DeleteRegistry", "{\"RegistryId\":{\"RegistryName\":\"" + otherRegistry
+                + "\"}}"));
+
+        User user = user("res-glue-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"glue:GetJob\",\"glue:GetRegistry\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetJob", "1.1", "{\"JobName\":\"" + other + "\"}"), "glue:GetJob");
+        send(user, "glue", "AWSGlue.GetRegistry", "1.1", "{\"RegistryId\":{\"RegistryName\":\"" + taggedRegistry
+                + "\"}}").statusCode(200);
+        refusedJson(send(user, "glue", "AWSGlue.GetRegistry", "1.1", "{\"RegistryId\":{\"RegistryName\":\""
+                + otherRegistry + "\"}}"), "glue:GetRegistry");
+    }
+
+    /**
      * What Glue's batch deletes name, the tables of {@code TablesToDelete} and the connections of
      * {@code ConnectionNameList}, is checked one by one, so a deny scoped to one of them holds under an allow on
      * everything.
