@@ -255,6 +255,9 @@ public final class GlueTableResolver {
      * <p>Partition values are not stored in the data files. In the default {@code column=value}
      * layout DuckDB's Hive partitioning supplies them by name; with a {@code storage.location.template}
      * each one is taken from the object's path instead, as Athena does, and cast to the key's type.
+     *
+     * <p>A data column declared {@code timestamp} reads as Athena's {@code timestamp(3)}, whatever the file
+     * stores: see {@link #parquetTimestamps} and {@link #typedTextColumn}.
      */
     public static String buildProjection(Table table) {
         List<Column> declared = declaredColumns(table);
@@ -279,6 +282,7 @@ public final class GlueTableResolver {
         Map<String, Column> templatedKeys = templatedKeys(table, template);
         Map<String, Column> textColumns = readsDelimitedText(table) ? columnsByName(declared) : Map.of();
         Map<String, Column> hiveKeys = hivePartitionKeys(table, template);
+        Map<String, Column> parquetTimestamps = parquetTimestamps(table);
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < names.size(); i++) {
             if (i > 0) {
@@ -288,9 +292,11 @@ public final class GlueTableResolver {
             Column key = templatedKeys.get(name.toLowerCase(Locale.ROOT));
             Column hiveKey = hiveKeys.get(name.toLowerCase(Locale.ROOT));
             Column text = textColumns.get(name.toLowerCase(Locale.ROOT));
+            Column parquetTimestamp = parquetTimestamps.get(name.toLowerCase(Locale.ROOT));
             String value = key != null ? partitionValue(table, template, key)
                     : hiveKey != null ? typedKey(table, hiveKey, quote(name))
-                    : text != null ? typedText(quote(name), text.getType())
+                    : text != null ? typedTextColumn(quote(name), text.getType())
+                    : parquetTimestamp != null ? parquetTimestamp(quote(name))
                     : quote(name);
             sb.append(value).append(" AS ").append(quote(name));
         }
@@ -343,6 +349,7 @@ public final class GlueTableResolver {
         Set<String> keyNames = new HashSet<>();
         keys.forEach(key -> keyNames.add(key.getName().toLowerCase(Locale.ROOT)));
         Map<String, Column> textColumns = readsDelimitedText(table) ? columnsByName(declaredColumns(table)) : Map.of();
+        Map<String, Column> parquetTimestamps = parquetTimestamps(table);
         List<String> projected = new ArrayList<>();
         for (Column column : declaredColumns(table)) {
             String name = column.getName();
@@ -352,7 +359,10 @@ public final class GlueTableResolver {
             }
             Column text = textColumns.get(name.toLowerCase(Locale.ROOT));
             String read = "r." + quote(name);
-            projected.add((text != null ? typedText(read, text.getType()) : read) + " AS " + quote(name));
+            String value = text != null ? typedTextColumn(read, text.getType())
+                    : parquetTimestamps.containsKey(name.toLowerCase(Locale.ROOT)) ? parquetTimestamp(read)
+                    : read;
+            projected.add(value + " AS " + quote(name));
         }
         List<String> rows = new ArrayList<>();
         List<String> globs = new ArrayList<>();
@@ -484,6 +494,78 @@ public final class GlueTableResolver {
     private static String typedText(String text, String glueType) {
         String type = scalarType(glueType);
         return "VARCHAR".equals(type) ? text : "TRY_CAST(" + text + " AS " + type + ")";
+    }
+
+    /**
+     * A delimited-text data column as its declared type ({@link #typedText}), a {@code timestamp} at
+     * Athena's millisecond precision ({@link #athenaTimestamp}): LazySimpleSerDe reads
+     * {@code 09:30:00.1235} as {@code 09:30:00.123} on Athena.
+     */
+    private static String typedTextColumn(String text, String glueType) {
+        String typed = typedText(text, glueType);
+        return "TIMESTAMP".equals(scalarType(glueType)) ? athenaTimestamp(typed) : typed;
+    }
+
+    /**
+     * Whether the view of {@code table} reads a Parquet column as a timestamp, which converts in the
+     * session's time zone and so is only correct in a UTC session, Athena's own: see
+     * {@link #parquetTimestamp}.
+     */
+    public static boolean readsParquetTimestamps(Table table) {
+        return !parquetTimestamps(table).isEmpty();
+    }
+
+    /**
+     * The Parquet data columns {@code table} declares {@code timestamp}, by lowercased name.
+     *
+     * <p>Athena types such a column by its declaration, and DuckDB by what the file stores, which
+     * differs from it for most writers: a UTC-adjusted timestamp ({@code isAdjustedToUTC}, what
+     * Spark, pyarrow and DuckDB itself write for a zoned value) reads as
+     * {@code TIMESTAMP WITH TIME ZONE}, rendered {@code 2026-03-14 09:30:00+00}, and a NANOS one
+     * (pandas' unit) as {@code TIMESTAMP_NS}, rendered with nine digits. Partition keys are left out:
+     * their values come from paths or the catalog, not the files.
+     *
+     * <p>A name is resolved to its first declaration, as {@link #buildProjection} projects it.
+     *
+     * <p>TODO: a JSON table's {@code timestamp} column is still typed as DuckDB infers it, and a
+     * {@code timestamp} partition key keeps a value's microseconds where Athena would presumably
+     * truncate them (unchecked; such values rarely carry a fraction).
+     */
+    private static Map<String, Column> parquetTimestamps(Table table) {
+        if (table == null || table.getStorageDescriptor() == null || isIcebergTable(table)
+                || !"read_parquet".equals(inferReadFunction(table)) || table.getStorageDescriptor().getColumns() == null) {
+            return Map.of();
+        }
+        Map<String, Column> columns = new HashMap<>(columnsByName(table.getStorageDescriptor().getColumns()));
+        columns.values().removeIf(column -> !"TIMESTAMP".equals(scalarType(column.getType())));
+        return columns;
+    }
+
+    /**
+     * A Parquet column declared {@code timestamp} as Athena reads it: the UTC wall-clock time at
+     * millisecond precision ({@link #athenaTimestamp}).
+     *
+     * <p>The column is cast to a plain {@code TIMESTAMP} first, which every timestamp DuckDB reads
+     * from Parquet converts to: a UTC-adjusted one (taken at UTC, the session's zone, see
+     * {@link #readsParquetTimestamps}), MICROS, NANOS and the legacy INT96. A plain {@code CAST},
+     * not a {@code TRY_CAST}: Athena fails a query on a file whose column does not hold a timestamp.
+     */
+    private static String parquetTimestamp(String column) {
+        return athenaTimestamp("CAST(" + column + " AS TIMESTAMP)");
+    }
+
+    /**
+     * A {@code TIMESTAMP} value at Athena's precision. A Hive table's {@code timestamp} is Trino's
+     * {@code timestamp(3)} on Athena, which truncates what a file stores to milliseconds, towards
+     * the past (engine v3: {@code .1235} reads as {@code .123}, {@code 1969-12-31 23:59:59.9995} as
+     * {@code .999}), as {@code date_trunc} does. DuckDB's {@code TIMESTAMP_MS} would round instead,
+     * and has no cast from {@code TIMESTAMP_NS}.
+     *
+     * <p>TODO: DuckDB truncates NANOS to micros towards zero, so a value before 1970 less than a
+     * microsecond past a millisecond reads one millisecond late.
+     */
+    private static String athenaTimestamp(String timestamp) {
+        return "date_trunc('millisecond', " + timestamp + ")";
     }
 
     /**
