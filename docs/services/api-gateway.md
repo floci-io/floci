@@ -24,6 +24,33 @@ bundle Floci gives the containers it launches (see [TLS](../configuration/tls.md
 authorizer on a Floci user pool verifies its tokens, as one on a Cognito user pool does on AWS. Its
 address is still a private one, so it also needs `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`.
 
+## Integration target addresses
+
+REST API `HTTP` and `HTTP_PROXY` integrations, HTTP API `HTTP_PROXY` integrations and WebSocket API
+HTTP integrations send the request from Floci itself, so Floci screens where it may go. When an
+integration is invoked, Floci resolves the integration URI's host and refuses link-local and cloud
+instance-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`).
+
+How a refusal reaches the caller depends on the integration:
+
+- `HTTP_PROXY`, on a REST or an HTTP API, answers `502`.
+- A REST `HTTP` integration treats the refusal like a backend `502` and runs it through the
+  integration responses, so with only a default `200` response the client gets `200`. A
+  `5\d{2}` selection pattern surfaces it.
+- A WebSocket integration fails with `500`: `$connect` rejects the upgrade, and a message route
+  sends no reply.
+
+For an `http://` URI, Floci connects to the address it checked, so a name that resolves differently
+on a second lookup cannot reach a refused address. For an `https://` URI, it checks the address and
+then hands the URL to the JDK HTTP client, which resolves the name again when it connects, so a name
+that changes between the two lookups is not screened. Treat the check as the boundary for `http://`
+targets only.
+
+Loopback and private addresses stay reachable, since an integration in front of a service on the
+same host or in a neighbouring container is the normal case in local development. Unlike the JWT
+policy above, no setting refuses them, so keep Floci off networks where untrusted callers can
+create integrations.
+
 ## Custom API IDs
 
 API IDs are generated randomly, which means endpoint URLs change every time you recreate an API. To pin
