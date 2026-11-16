@@ -145,8 +145,9 @@ class IotMqttTopicAuthorizationIntegrationTest {
         IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
         device.attachNewPolicy(receiveOnly(prefix + "/ok"), cleanup);
         MqttClient subscriber = connectTls(device, "sub-" + System.nanoTime());
-        MqttClient publisher = connectPlain("pub-" + System.nanoTime());
+        MqttClient publisher = null;
         try {
+            publisher = connectPlain("pub-" + System.nanoTime());
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
             subscriber.subscribe(prefix + "/+", 1, (topic, message) -> received.add(topic));
 
@@ -157,7 +158,9 @@ class IotMqttTopicAuthorizationIntegrationTest {
             assertNull(received.poll(500, TimeUnit.MILLISECONDS));
             assertTrue(subscriber.isConnected());
         } finally {
-            closeV3(publisher);
+            if (publisher != null) {
+                closeV3(publisher);
+            }
             closeV3(subscriber);
         }
     }
@@ -192,8 +195,9 @@ class IotMqttTopicAuthorizationIntegrationTest {
         IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
         String policy = device.attachNewPolicy(receiveOnly("*"), cleanup);
         MqttClient subscriber = connectTls(device, "sub-" + System.nanoTime());
-        MqttClient publisher = connectPlain("pub-" + System.nanoTime());
+        MqttClient publisher = null;
         try {
+            publisher = connectPlain("pub-" + System.nanoTime());
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
             subscriber.subscribe(prefix + "/+", 1, (topic, message) -> received.add(topic));
             given().contentType("application/json").body(Map.of("policyDocument", receiveOnly(prefix + "/kept")))
@@ -206,7 +210,9 @@ class IotMqttTopicAuthorizationIntegrationTest {
             assertEquals(prefix + "/kept", received.poll(10, TimeUnit.SECONDS));
             assertNull(received.poll(500, TimeUnit.MILLISECONDS));
         } finally {
-            closeV3(publisher);
+            if (publisher != null) {
+                closeV3(publisher);
+            }
             closeV3(subscriber);
         }
     }
