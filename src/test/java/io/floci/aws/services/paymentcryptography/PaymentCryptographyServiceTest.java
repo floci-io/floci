@@ -418,7 +418,7 @@ class PaymentCryptographyServiceTest {
     @Test
     void aPolicyIsNotAttachedToAReplica() {
         // The reference attaches a policy to the primary key alone, so a replica takes none.
-        PaymentCryptographyKey primary = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey primary = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
         PaymentCryptographyKey replica = service.findKey("us-west-2", primary.getKeyId());
 
         AwsException refused = assertThrows(AwsException.class,
