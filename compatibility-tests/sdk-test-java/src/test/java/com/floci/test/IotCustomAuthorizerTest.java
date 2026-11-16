@@ -760,6 +760,19 @@ class IotCustomAuthorizerTest {
 
     @ParameterizedTest(name = "{0}")
     @EnumSource(Mqtt.class)
+    @DisplayName("the default authorizer refuses an unsigned CONNECT its function denies")
+    void mqttUnsignedDeniedByTheDefaultAuthorizer(Mqtt version) {
+        iot.setDefaultAuthorizer(r -> r.authorizerName(authorizer));
+        try {
+            assertRefused(version, new Target(mqttUri, clientId, clientId,
+                    "deny".getBytes(StandardCharsets.UTF_8), Map.of()));
+        } finally {
+            iot.clearDefaultAuthorizer(r -> { });
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Mqtt.class)
     @DisplayName("WebSocket event: name in the username, empty query, lower-case headers")
     void mqttEventShapeNameInUsername(Mqtt version) throws Exception {
         assertConnects(version, target(namedUsername(authorizer), "shape:ws-user"));
