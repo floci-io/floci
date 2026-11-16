@@ -223,8 +223,7 @@ class RdsPostgresIamRoleIntegrationTest {
             SQLException refused = assertThrows(SQLException.class, () -> connect(port, replication).close());
             assertEquals("42501", refused.getSQLState());
 
-            asMaster(port, "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') "
-                    + "THEN CREATE ROLE rds_replication; END IF; END $$", "GRANT rds_replication TO app_user");
+            asMaster(port, "GRANT rds_replication TO app_user");
             try (Connection connection = connect(port, replication);
                  Statement statement = connection.createStatement()) {
                 try (ResultSet rows = statement.executeQuery("IDENTIFY_SYSTEM")) {

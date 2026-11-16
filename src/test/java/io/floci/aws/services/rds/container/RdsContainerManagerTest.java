@@ -312,6 +312,14 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void postgresInitSqlCreatesRdsReplicationRoleWhenMissing() {
+        String sql = RdsContainerManager.postgresIamRoleInitSql();
+
+        assertTrue(sql.contains("rolname = 'rds_replication'"));
+        assertTrue(sql.contains("CREATE ROLE rds_replication"));
+    }
+
+    @Test
     void mysqlMasterGrantSqlGrantsGlobalPrivilegesWithGrantOption() {
         String sql = RdsContainerManager.mysqlMasterGrantSql("admin");
 

@@ -935,6 +935,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam') THEN
                         CREATE ROLE rds_iam;
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') THEN
+                        CREATE ROLE rds_replication;
+                    END IF;
                 END
                 $$;
                 """;

@@ -184,8 +184,6 @@ class RdsJdbcCompatTest {
 
         try (Connection admin = openPostgresConnection(USERNAME, PASSWORD);
              Statement statement = admin.createStatement()) {
-            statement.execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') "
-                    + "THEN CREATE ROLE rds_replication; END IF; END $$");
             statement.execute("GRANT rds_replication TO " + IAM_USERNAME);
         }
 
