@@ -10,6 +10,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -18,6 +19,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 
@@ -35,6 +37,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
     private static final String HMAC = "HmacSHA256";
     private static final int SECRET_BYTES = 32;
     private static final int FORCE_DROP_VERSION = 13;
+    private static final int SCRAM_ITERATIONS = 4096;
+    private static final int SCRAM_SALT_BYTES = 16;
 
     private final EmulatorConfig config;
 
@@ -64,7 +68,7 @@ public class ExternalDsqlBackend implements DsqlBackend {
                     execute(server, "CREATE ROLE " + quote(names.owner()) + " NOLOGIN");
                     createdOwner = true;
                 }
-                String password = literal(derive(secret, names.admin()));
+                String password = literal(verifier(secret, names.admin()));
                 if (roleExists(server, names.admin())) {
                     execute(server, "ALTER ROLE " + quote(names.admin()) + " PASSWORD " + password);
                 } else {
@@ -91,7 +95,7 @@ public class ExternalDsqlBackend implements DsqlBackend {
                 names.database(), host(), String.valueOf(external().port()));
         return new DsqlDatabases.Backend(host(), external().port(), names.database(), external().username(),
                 external().password().orElse(null), new PrefixedRoleNames(cluster.getIdentifier()),
-                role -> derive(secret, role));
+                new DerivedCredentials(secret));
     }
 
     /**
@@ -173,6 +177,48 @@ public class ExternalDsqlBackend implements DsqlBackend {
             return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("HMAC-SHA256 is not available", e);
+        }
+    }
+
+    /**
+     * The SCRAM-SHA-256 verifier of a backend role's derived password, in PostgreSQL's format,
+     * {@code SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>}, which {@code PASSWORD}
+     * stores as it is. The salt, the first 16 bytes of HMAC-SHA256 of {@code scram-salt:<role>}
+     * keyed by the cluster's secret, is the same each time, so setting it again changes nothing.
+     */
+    static String verifier(String secret, String backendRole) {
+        try {
+            Mac mac = Mac.getInstance(HMAC);
+            mac.init(new SecretKeySpec(Base64.getDecoder().decode(secret), HMAC));
+            byte[] salt = Arrays.copyOf(mac.doFinal(("scram-salt:" + backendRole).getBytes(StandardCharsets.UTF_8)),
+                    SCRAM_SALT_BYTES);
+            byte[] salted = BackendAuthenticator.saltedPassword(derive(secret, backendRole), salt, SCRAM_ITERATIONS);
+            byte[] clientKey = BackendAuthenticator.hmac(salted, "Client Key".getBytes(StandardCharsets.UTF_8));
+            byte[] storedKey = MessageDigest.getInstance("SHA-256").digest(clientKey);
+            byte[] serverKey = BackendAuthenticator.hmac(salted, "Server Key".getBytes(StandardCharsets.UTF_8));
+            Base64.Encoder base64 = Base64.getEncoder();
+            return "SCRAM-SHA-256$" + SCRAM_ITERATIONS + ":" + base64.encodeToString(salt) + "$"
+                    + base64.encodeToString(storedKey) + ":" + base64.encodeToString(serverKey);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("SCRAM-SHA-256 is not available", e);
+        }
+    }
+
+    /** Each backend role's password and its verifier, derived from the cluster's secret. */
+    private record DerivedCredentials(String secret) implements BackendCredentials {
+        @Override
+        public String passwordFor(String backendRole) {
+            return derive(secret, backendRole);
+        }
+
+        @Override
+        public String verifierFor(String backendRole) {
+            return verifier(secret, backendRole);
+        }
+
+        @Override
+        public String toString() {
+            return "DerivedCredentials[secret=***]";
         }
     }
 

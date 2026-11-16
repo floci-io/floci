@@ -176,6 +176,47 @@ class ExternalDsqlBackendIntegrationTest {
         assertFalse(cluster.getBackendSecret() == null);
     }
 
+    @Test
+    void passwordsAreStoredAsScramVerifiersThatALoginSetsAgain() throws Exception {
+        String id = "mnopqrstuvwxyzabcdefghijkl";
+        String admin = "d" + id + "_admin";
+        String owner = "dsqlowner_" + id;
+        ExternalDsqlBackend backend = new ExternalDsqlBackend(config());
+        DsqlCluster cluster = new DsqlCluster();
+        cluster.setIdentifier(id);
+        DsqlDatabases.Backend started = backend.start(cluster);
+        try {
+            String verifier = started.credentials().verifierFor(admin);
+            String password = started.credentials().passwordFor(admin);
+            assertTrue(verifier.startsWith("SCRAM-SHA-256$4096:"), verifier);
+            assertEquals(verifier, single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"
+                    + admin + "'"), "the server keeps the verifier Floci sent, not one of its own");
+            try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+                statement.execute("ALTER ROLE " + admin + " PASSWORD 'changed-behind-flocis-back'");
+            }
+
+            assertTrue(DsqlEndpoint.setLoginPassword(started, admin));
+
+            assertEquals(verifier, single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"
+                    + admin + "'"));
+            try (Connection login = DriverManager.getConnection(started.jdbcUrl(), admin, password);
+                 Statement statement = login.createStatement();
+                 ResultSet row = statement.executeQuery("SELECT current_user")) {
+                assertTrue(row.next());
+                assertEquals(admin, row.getString(1));
+            }
+            assertFalse(DsqlEndpoint.setLoginPassword(started, "d" + id + "_nosuch"), "a missing role is left alone");
+            assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname = 'd" + id
+                    + "_nosuch'"));
+            assertFalse(DsqlEndpoint.setLoginPassword(started, owner), "a role that cannot log in is left alone");
+            assertEquals("true", single("postgres", "SELECT (rolpassword IS NULL)::text FROM pg_authid"
+                    + " WHERE rolname = '" + owner + "'"));
+        } finally {
+            cluster.setPendingBackendRoles(backend.rolesToDrop(cluster));
+            backend.stop(cluster, true);
+        }
+    }
+
     private EmulatorConfig config() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().dsql().external().host()).thenReturn(Optional.of("127.0.0.1"));

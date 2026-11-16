@@ -143,7 +143,7 @@ final class BackendAuthenticator {
         byte[] authMessage = (clientFirstBare + "," + serverFirst + "," + withoutProof)
                 .getBytes(StandardCharsets.UTF_8);
         try {
-            byte[] salted = pbkdf2(salt, iterations);
+            byte[] salted = saltedPassword(password, salt, iterations);
             byte[] clientKey = hmac(salted, "Client Key".getBytes(StandardCharsets.UTF_8));
             byte[] storedKey = MessageDigest.getInstance("SHA-256").digest(clientKey);
             byte[] clientSignature = hmac(storedKey, authMessage);
@@ -176,7 +176,8 @@ final class BackendAuthenticator {
         }
     }
 
-    private byte[] pbkdf2(byte[] salt, int iterations) throws GeneralSecurityException {
+    /** SCRAM's SaltedPassword: PBKDF2 with HMAC-SHA256 (RFC 5802, section 3). */
+    static byte[] saltedPassword(String password, byte[] salt, int iterations) throws GeneralSecurityException {
         PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
         try {
             return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
@@ -185,7 +186,7 @@ final class BackendAuthenticator {
         }
     }
 
-    private static byte[] hmac(byte[] key, byte[] data) throws GeneralSecurityException {
+    static byte[] hmac(byte[] key, byte[] data) throws GeneralSecurityException {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data);
