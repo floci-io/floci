@@ -5,7 +5,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.ApplyMethod;
-import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
 import software.amazon.awssdk.services.rds.model.Parameter;
 
 import java.sql.Connection;
@@ -26,6 +25,7 @@ class RdsForceSslCompatTest {
     @Test
     @DisplayName("rds.force_ssl=1 refuses a plaintext connection and accepts TLS")
     void forceSslRefusesPlaintextConnections() throws Exception {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Connects through the Floci proxy host with test credentials");
         String group = TestFixtures.uniqueName("force-ssl");
         String instanceId = TestFixtures.uniqueName("rds-force-ssl");
         try (RdsClient rds = TestFixtures.rdsClient()) {
@@ -40,23 +40,15 @@ class RdsForceSslCompatTest {
                                 .applyMethod(ApplyMethod.IMMEDIATE)
                                 .build()));
 
-                int port;
-                try {
-                    CreateDbInstanceResponse response = rds.createDBInstance(r -> r
-                            .dbInstanceIdentifier(instanceId)
-                            .dbInstanceClass("db.t3.micro")
-                            .engine("postgres")
-                            .masterUsername(USERNAME)
-                            .masterUserPassword(PASSWORD)
-                            .dbName(DATABASE)
-                            .allocatedStorage(20)
-                            .dbParameterGroupName(group));
-                    port = response.dbInstance().endpoint().port();
-                } catch (Exception e) {
-                    Assumptions.assumeTrue(false,
-                            "RDS instance creation unavailable in this environment: " + e.getMessage());
-                    return;
-                }
+                int port = rds.createDBInstance(r -> r
+                        .dbInstanceIdentifier(instanceId)
+                        .dbInstanceClass("db.t3.micro")
+                        .engine("postgres")
+                        .masterUsername(USERNAME)
+                        .masterUserPassword(PASSWORD)
+                        .dbName(DATABASE)
+                        .allocatedStorage(20)
+                        .dbParameterGroupName(group)).dbInstance().endpoint().port();
 
                 try {
                     try (Connection connection = TestFixtures.awaitJdbcConnection(url(port), properties("require"))) {
