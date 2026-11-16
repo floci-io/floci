@@ -1,10 +1,13 @@
 package io.floci.aws.testing;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.emr.EmrService;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.restassured.response.Response;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
@@ -13,6 +16,7 @@ import static org.awaitility.Awaitility.await;
 /** One EMR JSON-protocol call, in the default Region or a named one. */
 public final class EmrRequests {
 
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final Set<String> UNFINISHED_STEP_STATES = Set.of("PENDING", "RUNNING");
     private static final Set<String> TERMINATED_CLUSTER_STATES = Set.of("TERMINATED", "TERMINATED_WITH_ERRORS");
     private static final Duration STEP_TIMEOUT = Duration.ofMinutes(5);
@@ -33,6 +37,19 @@ public final class EmrRequests {
                         + "/elasticmapreduce/aws4_request, SignedHeaders=host, Signature=abc")
                 .header("X-Amz-Target", "ElasticMapReduce." + action)
                 .body(body).when().post("/");
+    }
+
+    /**
+     * Adds one {@code CONTINUE} step named {@code name} to the cluster, running {@code jar} with {@code args}, and returns
+     * its id.
+     */
+    public static String addStep(String clusterId, String name, String jar, String... args) {
+        ObjectNode request = JSON.createObjectNode().put("JobFlowId", clusterId);
+        ObjectNode step = request.putArray("Steps").addObject().put("Name", name).put("ActionOnFailure", "CONTINUE");
+        ObjectNode hadoopJarStep = step.putObject("HadoopJarStep").put("Jar", jar);
+        List.of(args).forEach(hadoopJarStep.putArray("Args")::add);
+        return emr("AddJobFlowSteps", request.toString()).then().statusCode(200).extract().jsonPath()
+                .getString("StepIds[0]");
     }
 
     /**

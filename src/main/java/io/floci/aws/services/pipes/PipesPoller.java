@@ -15,9 +15,9 @@ import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.kinesis.model.KinesisRecord;
 import io.floci.aws.services.pipes.model.DesiredState;
 import io.floci.aws.services.pipes.model.Pipe;
+import io.floci.aws.services.sqs.SqsEventRecordBuilder;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.Message;
-import io.floci.aws.services.sqs.model.MessageAttributeValue;
 import io.vertx.core.Vertx;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -35,6 +35,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.LongSupplier;
 
 @ApplicationScoped
 public class PipesPoller implements Resettable {
@@ -58,6 +59,7 @@ public class PipesPoller implements Resettable {
     private final ObjectMapper objectMapper;
     private final String baseUrl;
     private final String defaultRegion;
+    private volatile LongSupplier clockMs = System::currentTimeMillis;
     private final ConcurrentHashMap<String, Long> timerIds = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> activePolls = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> kinesisIterators = new ConcurrentHashMap<>();
@@ -89,6 +91,10 @@ public class PipesPoller implements Resettable {
         this.objectMapper = objectMapper;
         this.baseUrl = config.effectiveBaseUrl();
         this.defaultRegion = config.defaultRegion();
+    }
+
+    void setClockForTest(LongSupplier clockMs) {
+        this.clockMs = clockMs;
     }
 
     @PreDestroy
@@ -750,36 +756,8 @@ public class PipesPoller implements Resettable {
     private List<ObjectNode> buildSqsRecordNodes(List<Message> messages, Pipe pipe) {
         List<ObjectNode> nodes = new ArrayList<>();
         for (Message msg : messages) {
-            ObjectNode record = objectMapper.createObjectNode();
-            record.put("messageId", msg.getMessageId());
-            record.put("receiptHandle", msg.getReceiptHandle());
-            record.put("body", msg.getBody());
-            ObjectNode attrs = record.putObject("attributes");
-            attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
-            attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
-            attrs.put("SenderId", AwsArnUtils.accountOrDefault(pipe.getSource(), "000000000000"));
-            attrs.put("ApproximateFirstReceiveTimestamp",
-                    String.valueOf(msg.getFirstReceiveTimestamp() != null
-                            ? msg.getFirstReceiveTimestamp().toEpochMilli()
-                            : System.currentTimeMillis()));
-            ObjectNode msgAttrs = record.putObject("messageAttributes");
-            for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
-                ObjectNode attrNode = msgAttrs.putObject(entry.getKey());
-                MessageAttributeValue val = entry.getValue();
-                if (val.getBinaryValue() != null) {
-                    attrNode.put("binaryValue", Base64.getEncoder().encodeToString(val.getBinaryValue()));
-                } else if (val.getStringValue() != null) {
-                    attrNode.put("stringValue", val.getStringValue());
-                }
-                attrNode.putArray("stringListValues");
-                attrNode.putArray("binaryListValues");
-                attrNode.put("dataType", val.getDataType());
-            }
-            record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
-            record.put("eventSource", "aws:sqs");
-            record.put("eventSourceARN", pipe.getSource());
-            record.put("awsRegion", extractRegionFromArn(pipe.getSource()));
-            nodes.add(record);
+            nodes.add(SqsEventRecordBuilder.build(objectMapper, msg, pipe.getSource(),
+                    extractRegionFromArn(pipe.getSource()), clockMs));
         }
         return nodes;
     }

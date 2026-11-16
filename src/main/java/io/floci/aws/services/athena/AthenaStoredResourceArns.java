@@ -6,20 +6,23 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
  * What IAM asks Athena of the resources a request names: the workgroup and the data catalog its handlers use for a
- * request naming none, {@code primary} and {@code AwsDataCatalog}.
+ * request naming none, {@code primary} and {@code AwsDataCatalog}, and the tags of a workgroup or a data catalog.
  */
 @ApplicationScoped
 public class AthenaStoredResourceArns implements StoredResourceArns {
 
     private final RegionResolver regionResolver;
+    private final AthenaService athena;
 
     @Inject
-    public AthenaStoredResourceArns(RegionResolver regionResolver) {
+    public AthenaStoredResourceArns(RegionResolver regionResolver, AthenaService athena) {
         this.regionResolver = regionResolver;
+        this.athena = athena;
     }
 
     @Override
@@ -40,5 +43,10 @@ public class AthenaStoredResourceArns implements StoredResourceArns {
                     "datacatalog/" + AthenaService.DEFAULT_CATALOG));
             default -> Optional.empty();
         };
+    }
+
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        return athena.storedTags(arn);
     }
 }

@@ -106,6 +106,9 @@ public class Instance {
     // Security-group ingress ports published on the host via socat sidecars:
     // container app port -> allocated host port. Not part of the AWS wire format.
     private Map<Integer, Integer> publishedPorts = new LinkedHashMap<>();
+    // The family each published port admits, when it is not ANY: with security-group enforcement on,
+    // a port only one family's world-open rule opens. Not part of the AWS wire format.
+    private Map<Integer, PublishedPortFamily> publishedPortFamilies = new LinkedHashMap<>();
 
     public Instance() {}
 
@@ -271,6 +274,16 @@ public class Instance {
         return publishedPorts;
     }
     public void setPublishedPorts(Map<Integer, Integer> publishedPorts) { this.publishedPorts = publishedPorts; }
+
+    public Map<Integer, PublishedPortFamily> getPublishedPortFamilies() {
+        if (publishedPortFamilies == null) {
+            publishedPortFamilies = new LinkedHashMap<>();
+        }
+        return publishedPortFamilies;
+    }
+    public void setPublishedPortFamilies(Map<Integer, PublishedPortFamily> publishedPortFamilies) {
+        this.publishedPortFamilies = publishedPortFamilies;
+    }
 
     public String getRootVolumeId() { return rootVolumeId; }
     public void setRootVolumeId(String rootVolumeId) { this.rootVolumeId = rootVolumeId; }

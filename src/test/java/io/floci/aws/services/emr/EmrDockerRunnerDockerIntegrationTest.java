@@ -12,6 +12,7 @@ import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.ContainerDataPlaneProfile;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.S3TestClients;
@@ -487,12 +488,7 @@ class EmrDockerRunnerDockerIntegrationTest {
 
     /** Adds one step to the cluster and returns the state it ended in. */
     private String runStep(String jar, String... args) {
-        ObjectNode request = JSON.createObjectNode().put("JobFlowId", clusterId);
-        ObjectNode step = request.putArray("Steps").addObject().put("Name", jar).put("ActionOnFailure", "CONTINUE");
-        ObjectNode hadoopJarStep = step.putObject("HadoopJarStep").put("Jar", jar);
-        List.of(args).forEach(hadoopJarStep.putArray("Args")::add);
-        String stepId = emr("AddJobFlowSteps", request.toString())
-                .then().statusCode(200).extract().jsonPath().getString("StepIds[0]");
+        String stepId = EmrRequests.addStep(clusterId, jar, jar, args);
         return awaitStep(clusterId, stepId).jsonPath().getString("Step.Status.State");
     }
 

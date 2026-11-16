@@ -901,6 +901,51 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body(containsString("ResourceNotFoundException"));
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CodeBuild holds on a project and a report group, so an allow
+     * on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void aCodeBuildResourceTagConditionReadsTheTagsOfTheProjectAndTheReportGroup() {
+        String tagged = codeBuildProject("res-tag-project-" + suffix(), "data");
+        String other = codeBuildProject("res-tag-project-" + suffix(), "web");
+        String taggedGroup = codeBuildReportGroup("res-tag-group-" + suffix(), "data");
+        String otherGroup = codeBuildReportGroup("res-tag-group-" + suffix(), "web");
+
+        User user = user("res-codebuild-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"codebuild:BatchGetProjects\","
+                + "\"codebuild:BatchGetReportGroups\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + tagged + "\"]}").statusCode(200);
+        refusedJson(codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + other + "\"]}"),
+                "codebuild:BatchGetProjects");
+        codeBuild(user, "BatchGetReportGroups", "{\"reportGroupArns\":[\"" + taggedGroup + "\"]}").statusCode(200);
+        refusedJson(codeBuild(user, "BatchGetReportGroups", "{\"reportGroupArns\":[\"" + otherGroup + "\"]}"),
+                "codebuild:BatchGetReportGroups");
+    }
+
+    private String codeBuildProject(String name, String team) {
+        adminJson("codebuild", "CodeBuild_20161006.CreateProject").body("{\"name\":\"" + name
+                + "\",\"source\":{\"type\":\"NO_SOURCE\",\"buildspec\":\"version: 0.2\"},"
+                + "\"artifacts\":{\"type\":\"NO_ARTIFACTS\"},\"environment\":{\"type\":\"LINUX_CONTAINER\","
+                + "\"image\":\"aws/codebuild/standard:7.0\",\"computeType\":\"BUILD_GENERAL1_SMALL\"},"
+                + "\"serviceRole\":\"arn:aws:iam::" + ACCOUNT + ":role/codebuild-role\","
+                + "\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("codebuild", "CodeBuild_20161006.DeleteProject")
+                .body("{\"name\":\"" + name + "\"}").post("/"));
+        return name;
+    }
+
+    private String codeBuildReportGroup(String name, String team) {
+        String arn = adminJson("codebuild", "CodeBuild_20161006.CreateReportGroup").body("{\"name\":\"" + name
+                + "\",\"type\":\"TEST\",\"exportConfig\":{\"exportConfigType\":\"NO_EXPORT\"},"
+                + "\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]}").post("/").then().statusCode(200)
+                .extract().path("reportGroup.arn");
+        cleanup.register(() -> adminJson("codebuild", "CodeBuild_20161006.DeleteReportGroup")
+                .body("{\"arn\":\"" + arn + "\"}").post("/"));
+        return arn;
+    }
+
     /** A Managed Service for Apache Flink application is checked on the ARN its name gives. */
     @Test
     void anApplicationIsCheckedOnTheArnItsNameGives() {
@@ -945,6 +990,45 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "athena:ListQueryExecutions");
         refusedJson(send(user, "athena", "AmazonAthena.StartQueryExecution", "1.1", "{\"QueryString\":\"SELECT 1\"}"),
                 "athena:StartQueryExecution");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Athena holds on a workgroup and a data catalog, so an allow
+     * on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void anAthenaResourceTagConditionReadsTheTagsOfTheWorkgroupAndTheDataCatalog() {
+        String workGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "data");
+        String otherWorkGroup = athenaTagged("CreateWorkGroup", "res-tag-wg-" + suffix(), "web");
+        String catalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "data");
+        String otherCatalog = athenaTagged("CreateDataCatalog", "res_tag_cat_" + suffix(), "web");
+
+        User user = user("res-athena-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"athena:GetWorkGroup\",\"athena:GetDataCatalog\"],"
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + workGroup + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":\"" + otherWorkGroup
+                + "\"}"), "athena:GetWorkGroup");
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + catalog + "\"}").statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"" + otherCatalog
+                + "\"}"), "athena:GetDataCatalog");
+    }
+
+    /** An Athena workgroup or {@code LAMBDA} data catalog of the name, tagged with the team, deleted afterwards. */
+    private String athenaTagged(String operation, String name, String team) {
+        String body = "CreateWorkGroup".equals(operation) ? "{\"Name\":\"" + name + "\""
+                : "{\"Name\":\"" + name + "\",\"Type\":\"LAMBDA\"";
+        adminJson("athena", "AmazonAthena." + operation).body(body + ",\"Tags\":[{\"Key\":\"team\",\"Value\":\""
+                + team + "\"}]}").post("/").then().statusCode(200);
+        if ("CreateWorkGroup".equals(operation)) {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteWorkGroup")
+                    .body("{\"WorkGroup\":\"" + name + "\"}").post("/"));
+        } else {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteDataCatalog")
+                    .body("{\"Name\":\"" + name + "\"}").post("/"));
+        }
+        return name;
     }
 
     /**

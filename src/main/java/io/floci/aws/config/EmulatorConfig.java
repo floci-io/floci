@@ -3685,7 +3685,8 @@ public interface EmulatorConfig {
         /**
          * When true, TCP ports opened by an instance's security-group ingress rules are
          * published on the host via a socat sidecar container, both at launch and on later
-         * authorize-security-group-ingress. Set false to keep security groups as metadata only.
+         * authorize-security-group-ingress. With security-group enforcement on, only ports a rule
+         * opens to every address (0.0.0.0/0 or ::/0) are. Set false to publish none.
          */
         @WithDefault("true")
         boolean publishSecurityGroupPorts();

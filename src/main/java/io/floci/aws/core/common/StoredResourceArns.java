@@ -31,7 +31,9 @@ import java.util.Optional;
  * table bucket or a table; Lambda, for the layer version a layer version ARN selects, the image of a MicroVM and the
  * execution of a callback, and the tags of a function, an event source mapping, a web function, a MicroVM image or a
  * network connector; Glue, for the tags of a resource it tags; Step Functions, for the tags of a state machine, its
- * versions and executions, and an activity); looked up lazily by {@code ResourceArnBuilder} and
+ * versions and executions, and an activity; CodeBuild, for the project a build belongs to and the tags of a project or
+ * a report group; Athena, for the workgroup and the data catalog a request naming none uses and the tags of a
+ * workgroup or a data catalog); looked up lazily by {@code ResourceArnBuilder} and
  * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
  * ARN is of, so IAM never depends on that service directly.</p>
  *
