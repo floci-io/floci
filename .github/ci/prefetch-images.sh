@@ -13,6 +13,8 @@
 # so a test that pulled the image itself can be told apart from a prefetch that failed or was
 # still downloading. The lines go to a file because the pulls outlive the workflow step that
 # started them and the step's stdout is closed by then.
+# A nightly check, a *NightlyIntegrationTest class, keys its images on its own name: ci.yml leaves those names out
+# of the list it passes, so they are pulled only for nightly-checks.yml, which passes nothing else.
 # Usage: prefetch-images.sh <shard.txt>
 set -u
 SHARD_FILE="${1:-}"
