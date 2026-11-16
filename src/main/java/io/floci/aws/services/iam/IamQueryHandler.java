@@ -2190,10 +2190,20 @@ public class IamQueryHandler {
         PolicyExclusions exclusions = PolicyExclusions.from(params);
         List<String> inputDocuments = readablePolicyInputList(params);
         String inputBoundary = inputBoundaryDocument(params);
-        CallerContext caller = withInputDocuments(
-                iamService.resolvePrincipalContext(policySourceArn, exclusions), inputDocuments, inputBoundary);
-        List<String> actionNames = requireActionNames(params);
+        // SCPs enter a simulation only when the call asks for them, the way the console includes
+        // them only when "AWS Organizations SCPs" is ticked, so the levels the call handed in are
+        // the whole of the organization the simulation runs against. They are read where the other
+        // handed-in documents are, ahead of the lookup, so a principal that does not exist cannot
+        // answer for an input this operation refuses: that is the rule above, and these two inputs
+        // live under it as well.
+        List<List<String>> scpLevels = organizationPolicyLevels(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        SimulationScenarios.requireScenarioResources(params.getFirst("ResourceHandlingOption"),
+                resourceArns);
+        CallerContext caller = withInputDocuments(
+                iamService.resolvePrincipalContext(policySourceArn, exclusions), inputDocuments, inputBoundary)
+                .withScpLevels(scpLevels);
+        List<String> actionNames = requireActionNames(params);
         // Keyed without regard to case, as the evaluator compares condition key names: a value
         // the call supplied has to shadow a populated one however the call spelled the key.
         Map<String, List<String>> context = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
@@ -2218,10 +2228,55 @@ public class IamQueryHandler {
     private Response handleSimulateCustomPolicy(MultivaluedMap<String, String> params) {
         List<String> policyInputList = requirePolicyInputList(params);
         List<String> actionNames = requireActionNames(params);
+        // Read before the scenario, as the principal simulation reads them, so a bad level and a
+        // bad scenario are answered in the same order whichever operation was called.
+        List<List<String>> scpLevels = organizationPolicyLevels(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        SimulationScenarios.requireScenarioResources(params.getFirst("ResourceHandlingOption"),
+                resourceArns);
         Map<String, List<String>> context = extractContextEntries(params);
-        CallerContext caller = new CallerContext(policyInputList, null, inputBoundaryDocument(params));
+        CallerContext caller = new CallerContext(policyInputList, null, inputBoundaryDocument(params),
+                scpLevels);
         return simulationResults("SimulateCustomPolicy", params, caller, actionNames, resourceArns, context);
+    }
+
+    /**
+     * The service control policies a simulation was handed, one list per level of an
+     * organization. The member's reference describes both the shape and the order: "An ordered
+     * list of service control policies (SCPs) to include in the simulation. Each element
+     * represents one level of an Organizations hierarchy, from the organization root to the
+     * account. The simulator evaluates SCPs in the order that you provide, consistent with how
+     * Organizations enforces SCPs." So the levels go to the evaluator as the caller's effective
+     * SCPs, which is the walk a live request already takes through them, in the order the request
+     * wrote. How many levels there may be is the model's to say, seven on this list, and the
+     * declared constraints are read ahead of this.
+     *
+     * <p>Each document is held to being a policy document, as the documents of the other input
+     * lists are, and a level naming none is no level: a request that carries the member and
+     * nothing in it simulates with no organization above it rather than with an empty root.
+     */
+    private List<List<String>> organizationPolicyLevels(MultivaluedMap<String, String> params) {
+        List<List<String>> levels = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember level
+                : AwsQueryLists.members(params, "OrderedOrganizationPolicyInputList", null)) {
+            List<String> documents = new ArrayList<>();
+            for (AwsQueryLists.IndexedMember document : AwsQueryLists.members(params,
+                    level.prefix() + ".ServiceControlPolicyInputList", null)) {
+                String policy = params.getFirst(document.prefix());
+                if (policy == null) {
+                    continue;
+                }
+                if (!policyEvaluator.readsAsPolicyDocument(policy)) {
+                    throw new AwsException("InvalidInput", "Ordered organization policy input list"
+                            + " item " + level.index() + " has invalid content", 400);
+                }
+                documents.add(policy);
+            }
+            if (!documents.isEmpty()) {
+                levels.add(List.copyOf(documents));
+            }
+        }
+        return levels.isEmpty() ? null : List.copyOf(levels);
     }
 
     /**
