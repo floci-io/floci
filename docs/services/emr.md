@@ -289,7 +289,9 @@ holding the driver and its executors, or a command or a script. The cluster itse
   service", as the Management Guide puts it, in the primary node's container, with a NodeManager beside it on a cluster
   created with no core node, which keeps it, and its DataNode, as core nodes are added, the blocks it holds staying in
   reach, and the cluster's Spark, MapReduce (see **Hadoop streaming and MapReduce**) and Hive's Tez (see **Hive steps**)
-  run on them. A
+  run on them. Beside them runs the MapReduce JobHistory server EMR's primary node runs too (a release's `mapred-site`
+  classification "Restarts Hadoop MapReduce-HistoryServer"), on Hadoop's own ports, 10020 and 19888 for its web
+  pages, from the jobs' history in the cluster's HDFS, and the node is ready once it answers. A
   Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
   mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
   mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's
@@ -335,8 +337,10 @@ holding the driver and its executors, or a command or a script. The cluster itse
   application master and tasks in YARN's containers on the cluster's nodes. A step's `hadoop` command, and so
   `hadoop-streaming`, a `hadoop jar` and `hdfs dfs`, run from the nodes' Hadoop (`/usr/lib`, or the one an `emr-spark-*`
   release keeps in `/opt`), with a `mapred-site.xml` that names YARN, the nodes' folders and the step's AWS environment,
-  and an application master of 1 GB and tasks of 768 MB, which the cluster's `mapred-site` replaces. A custom JAR step's
-  MapReduce gets the same. Where the cluster runs no YARN, a step's `hadoop` command runs MapReduce in local mode, in
+  and an application master of 1 GB and tasks of 768 MB, which the cluster's `mapred-site` replaces, and that names the
+  JobHistory server, which a client asks about a job once its application master has ended, for its counters and
+  task reports as Pig does after each of its MapReduce jobs. A custom JAR step's MapReduce gets the same, and a Hive
+  step's settings name the server too, for a query whose `hive.execution.engine` is `mr`. Where the cluster runs no YARN, a step's `hadoop` command runs MapReduce in local mode, in
   its own JVM: the image has MapReduce only in Spark's shaded Hadoop client, which
   Floci makes the
   command's MapReduce home (`HADOOP_MAPRED_HOME`, unless a `spark-env` export names one), so it is on the
@@ -444,15 +448,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `mapreduce.job.working.dir=/user/${user.name}`, then the cluster's `tez-site` and `pig-properties`, a later key
   winning, Pig passing the Hadoop and Tez ones on to its jobs. Pig sets the working directory of each input's file
   system to it, which S3A, Floci's `s3://`, refuses when it names another file system, as Hadoop's own default, the
-  HDFS home with its scheme, does; without a scheme, it is the same HDFS folder. The cluster runs no MapReduce
-  JobHistory server, which a job client asks about a job whose application master has ended, as Pig does for each
-  MapReduce job's task reports and counters, so Floci's lines also set `pig.stats.notaskreport=true` and
-  `yarn.app.mapreduce.client.max-retries=1`: Pig asks for no task reports, and asks once for the counters, which costs
-  about ten seconds a job. A `pig-log4j` adds its lines to the `log4j.properties` Pig then reads, and the exports of
-  `pig-env` start its `pig-env.sh`. Any command a step runs on such a cluster, `command-runner.jar pig ...` or a
-  script's, gets the same. With `pig.enabled` off, a Pig step on a cluster whose `Applications` name Pig is `FAILED`
-  without running ("Floci does not run this step: Pig is not in the image steps run in. floci.services.emr.pig.enabled
-  adds Apache Pig to it.").
+  HDFS home with its scheme, does; without a scheme, it is the same HDFS folder. A `pig-log4j` adds its lines to the
+  `log4j.properties` Pig then reads, and the exports of `pig-env` start its `pig-env.sh`. Any command a step runs on
+  such a cluster, `command-runner.jar pig ...` or a script's, gets the same. With `pig.enabled` off, a Pig step on a
+  cluster whose `Applications` name Pig is `FAILED` without running ("Floci does not run this step: Pig is not in the
+  image steps run in. floci.services.emr.pig.enabled adds Apache Pig to it.").
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
@@ -660,10 +660,6 @@ holding the driver and its executors, or a command or a script. The cluster itse
 - **MapReduce and Tez in local mode where there is no YARN.** Only a cluster that runs YARN (see **YARN**) runs them on
   it; on any other, `hadoop-streaming`, a custom JAR's MapReduce and Hive's and Pig's Tez run in the step's
   container.
-- **No MapReduce JobHistory server.** EMR runs one (a release's `mapred-site` classification "Restarts Hadoop
-  MapReduce-HistoryServer"); Floci's primary node does not, so a client asking about a MapReduce job whose application
-  master has ended waits for it, and gets no counters or task reports. Pig, which asks after each of its MapReduce
-  jobs, is set to ask once (see **Pig steps**).
 - **Pig is Apache's 0.18.0, and only with `pig.enabled`.** EMR's 7.x releases ship Pig 0.17.0, whose Apache build is
   for Hadoop 2; no AWS image carries Pig, so Floci downloads Apache's 0.18.0, for Hadoop 3, when it is enabled, and
   runs it on the image's Tez (see **Pig steps**).

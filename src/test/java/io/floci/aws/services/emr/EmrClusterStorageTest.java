@@ -376,6 +376,11 @@ class EmrClusterStorageTest {
         assertEquals("0.0.0.0", Files.readString(bind).strip());
     }
 
+    // A node script's wait until condition holds, which ends the node if one of its daemons exits meanwhile.
+    private static String waitUntil(String condition) {
+        return "until " + condition + "; do [ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; ";
+    }
+
     // bash running script with FLOCI_HDFS_BIND at 0.0.0.0, and FLOCI_HDFS_SUBNET at subnet unless it is null.
     private static ProcessBuilder shell(String script, String subnet) {
         ProcessBuilder shell = new ProcessBuilder("bash", "-c", script);
@@ -1335,16 +1340,28 @@ class EmrClusterStorageTest {
                         + " yarn resourcemanager & n=\\$\\(\\(n \\+ 1\\)\\); if \\[ -z \"\\$FLOCI_NODE_WORKERS\" \\]; then "
                         + "JDK_JAVA_OPTIONS=\"--add-opens=java\\.base/java\\.lang=ALL-UNNAMED[^\"]*\""
                         + " yarn nodemanager &").matcher(entrypoint.get(2)).find()));
-        // Started with the NameNode, as neither needs the HDFS to start; ready once the NodeManager has registered,
-        // and the node gone if either daemon exits while starting.
-        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
-                "yarn nodemanager & n=$((n + 1)); fi; fi; "
-                        + "until curl -sf -m 5 \"http://$(cat /tmp/floci-hdfs-bind):9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"")
+        // The MapReduce JobHistory server EMR's primary node runs too, a client asking it about a job whose application
+        // master has ended, on Hadoop's own ports and listening where HDFS does.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
+                "\"<property><name>mapreduce.jobhistory.address</name><value>$FLOCI_HDFS_HOST:10020</value></property>\"",
+                "\"<property><name>mapreduce.jobhistory.webapp.address</name>"
+                        + "<value>$FLOCI_HDFS_HOST:19888</value></property>\"",
+                "\"<property><name>mapreduce.jobhistory.admin.address</name>"
+                        + "<value>$FLOCI_HDFS_HOST:10033</value></property>\"",
+                "\"<property><name>mapreduce.jobhistory.bind-host</name><value>$FLOCI_HDFS_BIND</value></property>\"",
+                "'</configuration>' > /tmp/floci-hdfs-conf/mapred-site.xml || exit"))));
+        // Started with the NameNode, as none needs the HDFS to start; ready once the NodeManager has registered and the
+        // JobHistory server answers, and the node gone if any daemon exits while starting.
+        verify(spec).withEntrypoint(argThat(entrypoint -> Pattern.compile("yarn nodemanager & n=\\$\\(\\(n \\+ 1\\)\\); fi; "
+                        + "JDK_JAVA_OPTIONS=\"--add-opens=java\\.base/java\\.lang=ALL-UNNAMED[^\"]*\" mapred historyserver & "
+                        + "n=\\$\\(\\(n \\+ 1\\)\\); fi; until curl -sf -m 5 \"http://\\$\\(cat /tmp/floci-hdfs-bind\\):9870/jmx")
+                        .matcher(entrypoint.get(2)).find()
                 && entrypoint.get(2).contains("if [ -n \"$FLOCI_YARN_MEMORY_MB\" ]; then "
-                        + "until curl -sf -m 5 http://$(cat /tmp/floci-hdfs-bind):8088/ws/v1/cluster/metrics"
-                        + " | grep -q \"\\\"activeNodes\\\":[1-9]\"; do "
-                        + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; fi;"
-                        + " touch /tmp/floci-hdfs-ready")));
+                        + waitUntil("curl -sf -m 5 http://$(cat /tmp/floci-hdfs-bind):8088/ws/v1/cluster/metrics"
+                                + " | grep -q \"\\\"activeNodes\\\":[1-9]\"")
+                        + waitUntil("curl -sf -m 5 http://$(cat /tmp/floci-hdfs-bind):19888/ws/v1/history/info"
+                                + " | grep -q historyInfo")
+                        + "fi; touch /tmp/floci-hdfs-ready")));
     }
 
     @Test
@@ -1366,7 +1383,7 @@ class EmrClusterStorageTest {
             int export = script.indexOf("export HADOOP_HOME=$h/hadoop HADOOP_COMMON_HOME=$h/hadoop"
                     + " HADOOP_LIBEXEC_DIR=$h/hadoop/libexec HADOOP_HDFS_HOME=$h/hadoop-hdfs"
                     + " HADOOP_MAPRED_HOME=$h/hadoop-mapreduce HADOOP_YARN_HOME=$h/hadoop-yarn"
-                    + " PATH=$h/hadoop-hdfs/bin:$h/hadoop-yarn/bin:$h/hadoop/bin:$PATH");
+                    + " PATH=$h/hadoop-hdfs/bin:$h/hadoop-yarn/bin:$h/hadoop-mapreduce/bin:$h/hadoop/bin:$PATH");
             return script.contains("  h=$FLOCI_HADOOP_FOLDER") && export > 0 && export < script.indexOf("exec setpriv");
         }));
     }

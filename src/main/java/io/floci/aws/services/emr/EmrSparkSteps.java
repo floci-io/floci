@@ -90,11 +90,6 @@ final class EmrSparkSteps {
     // one, it is the same folder in HDFS, and Hadoop fills in the user.
     private static final String WORKING_DIR = "mapreduce.job.working.dir";
     private static final String USER_HOME = "/user/${user.name}";
-    // A cluster runs no MapReduce JobHistory server, which a job client asks for a job once its application master has
-    // gone, as Pig does for each MapReduce job's task reports and counters: Pig asks for no task reports, and its
-    // client asks the server once rather than three times, each attempt waiting about ten seconds to connect.
-    private static final String PIG_NO_TASK_REPORT = "pig.stats.notaskreport";
-    private static final String CLIENT_RETRIES = "yarn.app.mapreduce.client.max-retries";
     // The AWS CLI's Hive step on a release is command-runner.jar running "hive-script --run-hive-script --args"
     // and the step's arguments, the ones the image's hive-script runs hive with; a step can also run hive itself.
     private static final String HIVE_SCRIPT = "hive-script";
@@ -295,8 +290,7 @@ final class EmrSparkSteps {
     /**
      * The variables a step's command gets on a cluster with Floci's Pig, which make its {@code pig} read a Pig
      * configuration of its own: {@code pig.properties} lines that run Pig on Tez, as EMR's does, from a working
-     * directory S3A takes, with no wait on a JobHistory server the cluster does not run, then the cluster's
-     * {@code tez-site} and {@code pig-properties}, a later one winning, and,
+     * directory S3A takes, then the cluster's {@code tez-site} and {@code pig-properties}, a later one winning, and,
      * with a {@code pig-log4j}, Pig's setting to read the {@code log4j.properties} that gets its lines;
      * {@code pig-env}'s exports start its {@code pig-env.sh}.
      */
@@ -304,8 +298,6 @@ final class EmrSparkSteps {
         Map<String, String> properties = new LinkedHashMap<>();
         properties.put(PIG_EXECTYPE, PIG_TEZ);
         properties.put(WORKING_DIR, USER_HOME);
-        properties.put(PIG_NO_TASK_REPORT, "true");
-        properties.put(CLIENT_RETRIES, "1");
         Map<String, String> log4j = properties(configurations, objectMapper, PIG_LOG4J);
         if (!log4j.isEmpty()) {
             properties.put(PIG_LOG4J_CONF, EmrServerlessSparkRunner.PIG_CONF + "/log4j.properties");

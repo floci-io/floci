@@ -1104,6 +1104,11 @@ class EmrServerlessSparkRunnerTest {
         assertTrue(site.contains("<name>yarn.app.mapreduce.am.resource.mb</name><value>1024</value>"), site);
         assertTrue(site.contains("<name>mapreduce.map.memory.mb</name><value>768</value>"), site);
         assertTrue(site.contains("<name>mapreduce.reduce.memory.mb</name><value>768</value>"), site);
+        // The cluster's JobHistory server, which the job's client asks about it once its application master has ended.
+        assertTrue(site.contains("<name>mapreduce.jobhistory.address</name>"
+                + "<value>ip-10-0-0-1.ec2.internal:10020</value>"), site);
+        assertTrue(site.contains("<name>mapreduce.jobhistory.webapp.address</name>"
+                + "<value>ip-10-0-0-1.ec2.internal:19888</value>"), site);
     }
 
     @Test
@@ -1265,7 +1270,10 @@ class EmrServerlessSparkRunnerTest {
                 // A task's two would never match the one YARN's default scheduler grants.
                 "hive.tez.cpu.vcores=1",
                 "tez.runtime.intermediate-output.should-compress=false",
-                "tez.runtime.intermediate-input.is-compressed=false")) {
+                "tez.runtime.intermediate-input.is-compressed=false",
+                // The cluster's JobHistory server, for a query whose hive.execution.engine is mr.
+                "mapreduce.jobhistory.address=ip-10-0-0-1.ec2.internal:10020",
+                "mapreduce.jobhistory.webapp.address=ip-10-0-0-1.ec2.internal:19888")) {
             assertTrue(arguments.contains(setting), setting + " in " + arguments);
         }
         assertTrue(arguments.contains("tez.cluster.additional.classpath.prefix=$PWD/*:/usr/lib/hive/lib/hive-exec.jar:"

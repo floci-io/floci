@@ -1068,8 +1068,7 @@ class EmrServiceContainerStepsTest {
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(args, job.command());
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
-        assertEquals("exectype = tez\nmapreduce.job.working.dir = /user/${user.name}\npig.stats.notaskreport = true\n"
-                + "yarn.app.mapreduce.client.max-retries = 1\npig.exec.reducers.max = 8",
+        assertEquals("exectype = tez\nmapreduce.job.working.dir = /user/${user.name}\npig.exec.reducers.max = 8",
                 job.environment().get("FLOCI_PIG_PROPERTIES"));
     }
 
