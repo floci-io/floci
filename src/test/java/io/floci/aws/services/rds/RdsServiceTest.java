@@ -7482,9 +7482,28 @@ class RdsServiceTest {
 
         assertEquals("14", modified.getEngineVersion());
         assertEquals("new-options", modified.getOptionGroupName());
-        AwsException missingChange = assertThrows(AwsException.class, () ->
-                rdsService.modifyDbSnapshot("mysnap", null, null, "us-east-1"));
-        assertEquals("InvalidParameterCombination", missingChange.getErrorCode());
+    }
+
+    @Test
+    void modifyDbSnapshotNamingNothingReturnsTheSnapshotUnchanged() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("MOCK_DUMP_DATA");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+        rdsService.modifyDbSnapshot("mysnap", "14", "new-options", "us-east-1");
+
+        DbSnapshot unchanged = rdsService.modifyDbSnapshot("mysnap", null, null, "us-east-1");
+
+        assertEquals("mysnap", unchanged.getDbSnapshotIdentifier());
+        assertEquals("14", unchanged.getEngineVersion());
+        assertEquals("new-options", unchanged.getOptionGroupName());
+        DbSnapshot stored = rdsService.describeDbSnapshots("mysnap", null, "us-east-1").iterator().next();
+        assertEquals("14", stored.getEngineVersion());
+        assertEquals("new-options", stored.getOptionGroupName());
+        AwsException missing = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbSnapshot("no-such-snap", null, null, "us-east-1"));
+        assertEquals("DBSnapshotNotFound", missing.getErrorCode());
     }
 
     @Test

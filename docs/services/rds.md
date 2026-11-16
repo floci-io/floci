@@ -208,8 +208,10 @@ checked against the instance's other window. Modifications apply immediately —
     `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
     state (no real cross-account sharing). Available manual snapshots can be deleted, copied by
     identifier or ARN, and modified. Copies retain the source data and can copy source tags or add
-    request tags. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
-    the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
+    request tags. AWS doesn't document a `ModifyDBSnapshot` that names neither `EngineVersion` nor
+    `OptionGroupName`; Floci returns the snapshot unchanged, since the model requires only the
+    identifier and declares no fault for a request with nothing to change. Snapshots are
+    region-scoped like DB instances and clusters: `DBSnapshotArn` reflects the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
     for that same region. Cluster snapshots follow the same lifecycle: `CreateDBClusterSnapshot`
     dumps the cluster's database, `RestoreDBClusterFromSnapshot` loads it into a new cluster, and
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
