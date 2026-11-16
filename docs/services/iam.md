@@ -1301,12 +1301,13 @@ partition's. It is minted once per account and kept across a disable, so re-enab
 same URL. AWS does not document which way that goes; the reasoning is that a relying party
 verifying tokens will have pinned the URL, so regenerating it would break verification silently.
 
-Two things the feature references are not modeled. The issuer URL is documented as hosting OIDC
-discovery endpoints at `/.well-known/openid-configuration` and `/.well-known/jwks.json`, and the
-operation's description points at a `GetWebIdentityToken` API for obtaining JWTs. Neither is served
-here: these six are the management operations only. `JwtVendingEnabled` is therefore reported as
-true whenever the feature is enabled, which is the only reading available, since nothing in the API
-toggles it separately.
+The issuer URL is documented as hosting OIDC discovery endpoints at
+`/.well-known/openid-configuration` and `/.well-known/jwks.json`, and the operation's description
+points at STS's `GetWebIdentityToken` for obtaining JWTs. STS serves both: the token operation, and
+the two discovery documents under a Floci route keyed by the issuer's UUID, since the issuer's own
+host does not reach Floci (see [STS, Verifying a token](sts.md#verifying-a-token)).
+`JwtVendingEnabled` is reported as true whenever the feature is enabled, which is the only reading
+available, since nothing in the API toggles it separately.
 
 `SetSecurityTokenServicePreferences` stores the version, and `GetAccountSummary` reports it as
 `GlobalEndpointTokenVersion`, which the operation's own description requires. What does not follow
