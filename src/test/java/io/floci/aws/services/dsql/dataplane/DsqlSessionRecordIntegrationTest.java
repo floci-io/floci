@@ -2,8 +2,9 @@ package io.floci.aws.services.dsql.dataplane;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.Container;
-import com.github.dockerjava.api.model.ContainerNetwork;
-import com.github.dockerjava.api.model.ContainerPort;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.services.dsql.DsqlClusterFixture;
 import io.floci.aws.services.dsql.DsqlDatabasesProfile;
@@ -22,10 +23,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -50,6 +49,15 @@ class DsqlSessionRecordIntegrationTest {
 
     @Inject
     DockerClient dockerClient;
+
+    @Inject
+    ContainerLifecycleManager lifecycleManager;
+
+    @Inject
+    ContainerBuilder containerBuilder;
+
+    @Inject
+    EmulatorConfig config;
 
     @Inject
     DsqlEndpoint endpoint;
@@ -92,8 +100,9 @@ class DsqlSessionRecordIntegrationTest {
     }
 
     /**
-     * Where the cluster's database container answers: the loopback port Docker published for it, or,
-     * when Floci runs in a container and publishes none, the container's address on its network.
+     * Where the cluster's database container answers, resolved as {@link DsqlDatabases#start} resolves
+     * it: its published loopback port, or, when Floci runs in a container, its address on the DSQL
+     * Docker network.
      */
     private DsqlDatabases.Backend databaseOf(String identifier) {
         List<Container> containers = dockerClient.listContainersCmd()
@@ -101,22 +110,10 @@ class DsqlSessionRecordIntegrationTest {
                         ContainerStorageHelper.RESOURCE_ID_LABEL, identifier))
                 .exec();
         assertEquals(1, containers.size(), "the cluster's database container");
-        Container container = containers.get(0);
-        Integer published = Arrays.stream(container.getPorts())
-                .filter(port -> port.getPrivatePort() != null && port.getPrivatePort() == PORT)
-                .map(ContainerPort::getPublicPort)
-                .filter(Objects::nonNull)
-                .findFirst()
-                .orElse(null);
-        if (published != null) {
-            return new DsqlDatabases.Backend("127.0.0.1", published);
-        }
-        String address = container.getNetworkSettings().getNetworks().values().stream()
-                .map(ContainerNetwork::getIpAddress)
-                .filter(ip -> ip != null && !ip.isEmpty())
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("the database container has no address"));
-        return new DsqlDatabases.Backend(address, PORT);
+        String network = containerBuilder.resolveDockerNetwork(config.services().dsql().dockerNetwork()).orElse(null);
+        ContainerLifecycleManager.EndpointInfo address =
+                lifecycleManager.resolveEndpoint(containers.get(0).getId(), PORT, network);
+        return new DsqlDatabases.Backend(address.host(), address.port());
     }
 
     private String single(String sql) throws SQLException {
