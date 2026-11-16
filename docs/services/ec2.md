@@ -1256,10 +1256,12 @@ profile.
 
 | Action | Description |
 |--------|-------------|
-| CreateNetworkInterface | Creates a standalone elastic network interface (ENI) in a subnet, unattached. |
+| CreateNetworkInterface | Creates a standalone elastic network interface (ENI) in a subnet, unattached. `Ipv6Addresses` names IPv6 addresses inside one of the subnet's IPv6 blocks; `Ipv6AddressCount` draws that many from the subnet. Left out, the subnet's `AssignIpv6AddressOnCreation` gives the interface one address; an explicit `0` overrides it. |
 | DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service, both an instance's implicit primary interface and standalone ENIs created via `CreateNetworkInterface`. |
 | AttachNetworkInterface | Attaches an available standalone ENI to a running or stopped instance at a device index. |
 | DetachNetworkInterface | Detaches a standalone ENI by attachment ID, returning it to `available`. |
+| AssignIpv6Addresses | Gives a standalone ENI or an instance's launch-created interface the named IPv6 addresses (`Ipv6Addresses.N`) or a count drawn from its subnet (`Ipv6AddressCount`); one of the two is required. `assignedIpv6Addresses` lists only the addresses the call added. An address outside the subnet's IPv6 blocks answers `InvalidParameterValue`, one another interface holds `InvalidIPAddress.InUse`. Prefix delegation (`Ipv6Prefix`, `Ipv6PrefixCount`) answers `UnsupportedOperation`. |
+| UnassignIpv6Addresses | Removes the named IPv6 addresses (`Ipv6Addresses.N`) from an interface; `unassignedIpv6Addresses` lists only the ones it held. `Ipv6Prefix` answers `UnsupportedOperation`. |
 | ModifyNetworkInterfaceAttribute | Changes a standalone ENI or an instance's launch-created interface: its security groups (`SecurityGroupId.N`), `Description`, `SourceDestCheck`, or its attachment's `DeleteOnTermination`. On an instance's primary interface the groups and the check are the instance's too. With security-group enforcement on, a group change reaches the interface's firewall before it is stored. The members Floci does not apply (`EnablePrimaryIpv6`, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `AssociatePublicIpAddress`, `AssociatedSubnetIds`, and the attachment's `DefaultEnaQueueCount` and `EnaQueueCount`) answer `UnsupportedOperation` rather than `true` with nothing changed. |
 | DeleteNetworkInterface | Deletes a standalone ENI. Fails while the ENI is still attached, matching AWS. |
 

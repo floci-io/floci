@@ -43,10 +43,7 @@ public class Ec2QueryHandler {
             .withZone(ZoneOffset.UTC);
 
     /** ReplaceRoute targets AWS accepts that a stored {@code Route} cannot represent here. */
-    /**
-     * ModifyNetworkInterfaceAttribute members Floci does not apply, as their query names prefix them. Each is refused,
-     * as ReplaceRoute refuses a target it cannot store, rather than answering true with nothing changed.
-     */
+    /** ModifyNetworkInterfaceAttribute members Floci does not apply, as their query names prefix them. */
     private static final List<String> UNAPPLIED_INTERFACE_ATTRIBUTES = List.of("EnablePrimaryIpv6",
             "EnaSrdSpecification", "ConnectionTrackingSpecification", "AssociatePublicIpAddress", "AssociatedSubnetId",
             "Attachment.DefaultEnaQueueCount", "Attachment.EnaQueueCount");
@@ -358,6 +355,8 @@ public class Ec2QueryHandler {
                 case "AttachNetworkInterface" -> handleAttachNetworkInterface(params, region);
                 case "DetachNetworkInterface" -> handleDetachNetworkInterface(params, region);
                 case "ModifyNetworkInterfaceAttribute" -> handleModifyNetworkInterfaceAttribute(params, region);
+                case "AssignIpv6Addresses" -> handleAssignIpv6Addresses(params, region);
+                case "UnassignIpv6Addresses" -> handleUnassignIpv6Addresses(params, region);
                 // Volumes
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
@@ -5494,7 +5493,20 @@ public class Ec2QueryHandler {
             }
             xml.end("privateIpAddressesSet");
         }
+        xml.raw(ipv6AddressesSetXml(ni.getIpv6Addresses()));
         return xml.build();
+    }
+
+    /** An interface's {@code ipv6AddressesSet}, left out when it holds no IPv6 address. */
+    private static String ipv6AddressesSetXml(List<String> addresses) {
+        if (addresses == null || addresses.isEmpty()) {
+            return "";
+        }
+        XmlBuilder xml = new XmlBuilder().start("ipv6AddressesSet");
+        for (String address : addresses) {
+            xml.start("item").elem("ipv6Address", address).elem("isPrimaryIpv6", "false").end("item");
+        }
+        return xml.end("ipv6AddressesSet").build();
     }
 
     private static String networkInterfaceAssociationXml(NetworkInterfaceAssociation association) {
@@ -5542,9 +5554,14 @@ public class Ec2QueryHandler {
             securityGroupIds = getList(p, "Groups.SecurityGroupId");
         }
         List<Tag> tagList = parseTagsForResource(p, "network-interface");
+        List<String> ipv6Addresses = new ArrayList<>();
+        for (int i = 1; p.getFirst("Ipv6Addresses." + i + ".Ipv6Address") != null; i++) {
+            ipv6Addresses.add(p.getFirst("Ipv6Addresses." + i + ".Ipv6Address"));
+        }
+        Integer ipv6AddressCount = parseOptionalInt(p.getFirst("Ipv6AddressCount"), "Ipv6AddressCount");
 
         NetworkInterface ni = service.createNetworkInterface(region, subnetId, description,
-                privateIpAddress, privateIpAddresses, securityGroupIds, tagList);
+                privateIpAddress, privateIpAddresses, ipv6Addresses, ipv6AddressCount, securityGroupIds, tagList);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateNetworkInterfaceResponse", AwsNamespaces.EC2)
@@ -5580,18 +5597,65 @@ public class Ec2QueryHandler {
         return booleanResponse("DetachNetworkInterface");
     }
 
-    private Response handleModifyNetworkInterfaceAttribute(MultivaluedMap<String, String> p, String region) {
+    private Response handleAssignIpv6Addresses(MultivaluedMap<String, String> p, String region) {
+        String networkInterfaceId = requireNetworkInterfaceId(p);
+        refuseUnappliedMembers(p, "AssignIpv6Addresses", List.of("Ipv6Prefix", "Ipv6PrefixCount"));
+        // botocore's Ipv6Addresses member carries the locationName ipv6Addresses, which the EC2 protocol
+        // capitalizes into the query name the SDKs and the CLI send: Ipv6Addresses.N.
+        List<String> assigned = service.assignIpv6Addresses(region, networkInterfaceId,
+                getList(p, "Ipv6Addresses"), parseOptionalInt(p.getFirst("Ipv6AddressCount"), "Ipv6AddressCount"));
+        return ipv6AddressesResponse("AssignIpv6Addresses", "assignedIpv6Addresses", networkInterfaceId, assigned);
+    }
+
+    private Response handleUnassignIpv6Addresses(MultivaluedMap<String, String> p, String region) {
+        String networkInterfaceId = requireNetworkInterfaceId(p);
+        refuseUnappliedMembers(p, "UnassignIpv6Addresses", List.of("Ipv6Prefix"));
+        List<String> unassigned = service.unassignIpv6Addresses(region, networkInterfaceId,
+                getList(p, "Ipv6Addresses"));
+        return ipv6AddressesResponse("UnassignIpv6Addresses", "unassignedIpv6Addresses", networkInterfaceId,
+                unassigned);
+    }
+
+    private static String requireNetworkInterfaceId(MultivaluedMap<String, String> p) {
         String networkInterfaceId = p.getFirst("NetworkInterfaceId");
         if (networkInterfaceId == null || networkInterfaceId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter NetworkInterfaceId",
                     400);
         }
-        for (String member : UNAPPLIED_INTERFACE_ATTRIBUTES) {
+        return networkInterfaceId;
+    }
+
+    /**
+     * Refuses a call naming a member Floci does not apply (prefix delegation among them), as ReplaceRoute refuses a
+     * target it cannot store, rather than answering as though it had been applied. {@code members} are query-name
+     * prefixes.
+     */
+    private static void refuseUnappliedMembers(MultivaluedMap<String, String> p, String action, List<String> members) {
+        for (String member : members) {
             if (p.keySet().stream().anyMatch(name -> name.equals(member) || name.startsWith(member + "."))) {
-                throw new AwsException("UnsupportedOperation",
-                        "ModifyNetworkInterfaceAttribute with " + member + " is not supported.", 400);
+                throw new AwsException("UnsupportedOperation", action + " with " + member + " is not supported.",
+                        400);
             }
         }
+    }
+
+    private Response ipv6AddressesResponse(String action, String listName, String networkInterfaceId,
+                                           List<String> addresses) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(action + "Response", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("networkInterfaceId", networkInterfaceId)
+                .start(listName);
+        for (String address : addresses) {
+            xml.elem("item", address);
+        }
+        xml.end(listName).end(action + "Response");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyNetworkInterfaceAttribute(MultivaluedMap<String, String> p, String region) {
+        String networkInterfaceId = requireNetworkInterfaceId(p);
+        refuseUnappliedMembers(p, "ModifyNetworkInterfaceAttribute", UNAPPLIED_INTERFACE_ATTRIBUTES);
         // The SDKs and the CLI send the group list as SecurityGroupId.N: botocore's Groups member carries that
         // locationName, and the EC2 protocol serializes a list by it.
         Ec2Service.NetworkInterfaceAttributeChange change = new Ec2Service.NetworkInterfaceAttributeChange(
@@ -5710,6 +5774,7 @@ public class Ec2QueryHandler {
                     .raw(associationXml)
                     .end("item")
                     .end("privateIpAddressesSet")
+                    .raw(ipv6AddressesSetXml(eni.getIpv6Addresses()))
                     .end("item");
         }
         xml.end("networkInterfaceSet");
