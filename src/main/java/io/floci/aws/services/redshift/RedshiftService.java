@@ -3,6 +3,7 @@ package io.floci.aws.services.redshift;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
@@ -2208,7 +2209,7 @@ public class RedshiftService implements ManagedSecretRotator {
         }
         Set<String> regions = new LinkedHashSet<>();
         for (String zone : zones.values()) {
-            String region = zone == null || zone.isEmpty() ? null : zone.substring(0, zone.length() - 1);
+            String region = AvailabilityZoneIds.regionOf(zone);
             regions.add(region != null && Ec2Service.isModelledAvailabilityZone(region, zone) ? region : null);
         }
         return regions.size() == 1 ? regions.iterator().next() : null;
