@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.container.HostVolumePolicy;
 import io.floci.aws.services.ecs.model.CapacityProviderStrategyItem;
@@ -29,6 +30,7 @@ import io.floci.aws.services.ecs.model.UpdateServiceRequest;
 import io.floci.aws.services.ecs.model.Volume;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -91,8 +93,9 @@ class EcsCfnProvisionerTest {
 
     private final EcsService ecs = mock(EcsService.class);
     private final HostVolumePolicy hostVolumePolicy = mock(HostVolumePolicy.class);
-    private final EcsCfnProvisioner provisioner = new EcsCfnProvisioner(ecs, hostVolumePolicy);
     private final ObjectMapper mapper = new ObjectMapper();
+    private final EcsCfnProvisioner provisioner = new EcsCfnProvisioner(ecs,
+            new EcsJsonHandler(ecs, mapper, hostVolumePolicy));
 
     private ProvisionContext ctx() {
         return ctx(null);
@@ -237,7 +240,7 @@ class EcsCfnProvisionerTest {
         ArrayNode volumes = props.putArray("Volumes");
         ObjectNode efs = volumes.addObject().put("Name", "shared").putObject("EFSVolumeConfiguration");
         efs.put("FilesystemId", "fs-1234").put("RootDirectory", "/")
-                .put("TransitEncryption", "ENABLED").put("TransitEncryptionPort", 2049);
+                .put("TransitEncryption", "ENABLED").put("TransitEncryptionPort", "2049");
         efs.putObject("AuthorizationConfig").put("AccessPointId", "fsap-1234").put("IAM", "ENABLED");
         volumes.addObject().put("Name", "host-data").putObject("Host").put("SourcePath", "/host/data");
         volumes.addObject().put("Name", "scratch");
@@ -273,7 +276,8 @@ class EcsCfnProvisionerTest {
         ObjectNode props = mapper.createObjectNode().put("Family", "web");
         ObjectNode efs = props.putArray("Volumes").addObject().put("Name", "shared")
                 .putObject("EFSVolumeConfiguration");
-        efs.put("FilesystemId", "fs-1234").put("RootDirectory", "/data");
+        efs.put("FilesystemId", "fs-1234").put("RootDirectory", "/data")
+                .put("TransitEncryption", "ENABLED");
         efs.putObject("AuthorizationConfig").put("AccessPointId", "fsap-1234");
 
         AwsException failure = assertThrows(AwsException.class,
@@ -282,6 +286,95 @@ class EcsCfnProvisionerTest {
         assertEquals("InvalidParameterException", failure.getErrorCode());
         assertEquals("Root directory must either be omitted or set to '/' when an EFS access point "
                 + "is specified in authorizationConfig.accessPointId.", failure.getMessage());
+        verifyNoInteractions(ecs);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ACCESS_POINT,", "ACCESS_POINT,DISABLED", "IAM,", "IAM,DISABLED"})
+    void taskDefinitionRejectsUnencryptedEfsAuthorization(String authorizationKind, String transitEncryption) {
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        ObjectNode efs = props.putArray("Volumes").addObject().put("Name", "shared")
+                .putObject("EFSVolumeConfiguration");
+        efs.put("FilesystemId", "fs-1234");
+        if (transitEncryption != null) {
+            efs.put("TransitEncryption", transitEncryption);
+        }
+        ObjectNode authorization = efs.putObject("AuthorizationConfig");
+        if ("ACCESS_POINT".equals(authorizationKind)) {
+            authorization.put("AccessPointId", "fsap-1234");
+        } else {
+            authorization.put("IAM", "ENABLED");
+        }
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(ecs);
+    }
+
+    @Test
+    void taskDefinitionRequiresNameForEfsVolume() {
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        props.putArray("Volumes").addObject().putObject("EFSVolumeConfiguration")
+                .put("FilesystemId", "fs-1234");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(ecs);
+    }
+
+    @Test
+    void taskDefinitionRequiresNameForS3FilesVolume() {
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        props.putArray("Volumes").addObject().putObject("S3FilesVolumeConfiguration")
+                .put("FileSystemArn", "arn:aws:s3:::files");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(ecs);
+    }
+
+    @Test
+    void taskDefinitionRequiresNameForConfiguredAtLaunchVolume() {
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        props.putArray("Volumes").addObject().put("ConfiguredAtLaunch", true);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(ecs);
+    }
+
+    @Test
+    void taskDefinitionRejectsConflictingVolumeConfigurations() {
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        ObjectNode volume = props.putArray("Volumes").addObject().put("Name", "shared");
+        volume.putObject("Host").put("SourcePath", "/host/data");
+        volume.putObject("EFSVolumeConfiguration").put("FilesystemId", "fs-1234");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(ecs);
+    }
+
+    @Test
+    void taskDefinitionRejectsLaunchConfiguredVolumeWithDockerConfiguration() {
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        props.putArray("Volumes").addObject().put("Name", "shared").put("ConfiguredAtLaunch", true)
+                .putObject("DockerVolumeConfiguration").put("Driver", "local");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
         verifyNoInteractions(ecs);
     }
 
@@ -322,6 +415,10 @@ class EcsCfnProvisionerTest {
         when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
 
         ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        ArrayNode volumes = props.putArray("Volumes");
+        volumes.addObject().put("Name", "shared");
+        volumes.addObject().put("Name", "host-data");
+        volumes.addObject().put("Name", "scratch");
         ArrayNode mountPoints = props.putArray("ContainerDefinitions").addObject()
                 .put("Name", "app").put("Image", "nginx:1").putArray("MountPoints");
         mountPoints.addObject().put("SourceVolume", "shared")
@@ -339,6 +436,21 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
+    void taskDefinitionRejectsMountFromUnknownVolume() {
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        props.putArray("Volumes").addObject().put("Name", "shared");
+        props.putArray("ContainerDefinitions").addObject().put("Name", "app").put("Image", "nginx:1")
+                .putArray("MountPoints").addObject().put("SourceVolume", "missing")
+                .put("ContainerPath", "/mnt/data");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx()));
+
+        assertEquals("InvalidParameterException", failure.getErrorCode());
+        verifyNoInteractions(ecs);
+    }
+
+    @Test
     void taskDefinitionKeepsUnsupportedVolumeKindsForDescribeRoundTrip() {
         TaskDefinition td = new TaskDefinition();
         td.setTaskDefinitionArn(TASK_DEF_ARN);
@@ -346,7 +458,8 @@ class EcsCfnProvisionerTest {
 
         ObjectNode props = mapper.createObjectNode().put("Family", "web");
         ArrayNode volumes = props.putArray("Volumes");
-        ObjectNode docker = volumes.addObject().put("Name", "docker").putObject("DockerVolumeConfiguration");
+        ObjectNode docker = volumes.addObject().put("Name", "docker").put("ConfiguredAtLaunch", false)
+                .putObject("DockerVolumeConfiguration");
         docker.put("Driver", "local").put("Autoprovision", true);
         docker.putObject("DriverOpts").put("type", "tmpfs");
         ObjectNode fsx = volumes.addObject().put("Name", "fsx")
@@ -361,8 +474,9 @@ class EcsCfnProvisionerTest {
         provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx());
 
         List<Volume> parsed = registered().getVolumes();
-        assertEquals(Map.of("dockerVolumeConfiguration", Map.of("driver", "local", "autoprovision", true,
-                "driverOpts", Map.of("type", "tmpfs"))), parsed.get(0).unparsed());
+        assertEquals(Map.of("configuredAtLaunch", false,
+                "dockerVolumeConfiguration", Map.of("driver", "local", "autoprovision", true,
+                        "driverOpts", Map.of("type", "tmpfs"))), parsed.get(0).unparsed());
         assertEquals(Map.of("fsxWindowsFileServerVolumeConfiguration", Map.of("fileSystemId", "fs-5678",
                 "rootDirectory", "\\data", "authorizationConfig", Map.of("credentialsParameter", "secret",
                         "domain", "example.com"))), parsed.get(1).unparsed());
@@ -370,6 +484,22 @@ class EcsCfnProvisionerTest {
                 parsed.get(2).unparsed());
         assertEquals(Map.of("configuredAtLaunch", true), parsed.get(3).unparsed());
         assertEquals(Map.of("host", Map.of()), parsed.get(4).unparsed());
+    }
+
+    @Test
+    void taskDefinitionPassesThroughUnknownVolumeMembers() {
+        TaskDefinition td = new TaskDefinition();
+        td.setTaskDefinitionArn(TASK_DEF_ARN);
+        when(ecs.registerTaskDefinition(any(RegisterTaskDefinitionRequest.class), eq(REGION))).thenReturn(td);
+
+        ObjectNode props = mapper.createObjectNode().put("Family", "web");
+        ObjectNode volume = props.putArray("Volumes").addObject().put("Name", "shared");
+        volume.putObject("FutureVolumeOption").put("Mode", "durable");
+
+        provisioner.provision(resource("AWS::ECS::TaskDefinition", "TaskDef"), props, ctx());
+
+        assertEquals(Map.of("futureVolumeOption", Map.of("mode", "durable")),
+                registered().getVolumes().get(0).unparsed());
     }
 
     @Test

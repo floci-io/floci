@@ -1493,7 +1493,7 @@ public class EcsJsonHandler {
         return new HealthCheck(command, interval, timeout, retries, startPeriod);
     }
 
-    private List<Volume> parseVolumes(JsonNode node) {
+    public List<Volume> parseVolumes(JsonNode node) {
         List<Volume> result = new ArrayList<>();
         if (!node.isArray()) {
             return result;
@@ -1548,7 +1548,7 @@ public class EcsJsonHandler {
                 auth.path("iam").asText(null));
     }
 
-    private List<MountPoint> parseMountPoints(JsonNode node) {
+    public List<MountPoint> parseMountPoints(JsonNode node) {
         List<MountPoint> result = new ArrayList<>();
         if (!node.isArray()) {
             return result;

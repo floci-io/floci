@@ -4,12 +4,13 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
-import io.floci.aws.services.ecs.container.HostVolumePolicy;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.CapacityProviderStrategyItem;
 import io.floci.aws.services.ecs.model.ClusterSetting;
@@ -18,7 +19,6 @@ import io.floci.aws.services.ecs.model.CreateServiceRequest;
 import io.floci.aws.services.ecs.model.EcsCluster;
 import io.floci.aws.services.ecs.model.EcsLoadBalancer;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
-import io.floci.aws.services.ecs.model.EfsVolumeConfiguration;
 import io.floci.aws.services.ecs.model.FirelensConfiguration;
 import io.floci.aws.services.ecs.model.HealthCheck;
 import io.floci.aws.services.ecs.model.KeyValuePair;
@@ -63,12 +63,12 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private static final TypeReference<List<ClusterSetting>> SETTINGS = new TypeReference<>() { };
 
     private final EcsService ecsService;
-    private final HostVolumePolicy hostVolumePolicy;
+    private final EcsJsonHandler ecsJsonHandler;
 
     @Inject
-    public EcsCfnProvisioner(EcsService ecsService, HostVolumePolicy hostVolumePolicy) {
+    public EcsCfnProvisioner(EcsService ecsService, EcsJsonHandler ecsJsonHandler) {
         this.ecsService = ecsService;
-        this.hostVolumePolicy = hostVolumePolicy;
+        this.ecsJsonHandler = ecsJsonHandler;
     }
 
     @Override
@@ -268,7 +268,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
         request.setFamily(family);
         request.setContainerDefinitions(parseContainerDefinitions(props.get("ContainerDefinitions"), ctx));
-        request.setVolumes(parseVolumes(ctx.engine().resolveNode(props.path("Volumes"))));
+        JsonNode volumes = ctx.engine().resolveNode(props.path("Volumes"));
+        validateCfnVolumes(volumes);
+        request.setVolumes(ecsJsonHandler.parseVolumes(normalizeCfnEcsArray(volumes)));
+        validateMountSources(request.getContainerDefinitions(), request.getVolumes());
         request.setNetworkMode(parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode")));
         request.setCpu(ctx.resolveOptional(props, "Cpu"));
         request.setMemory(ctx.resolveOptional(props, "Memory"));
@@ -523,7 +526,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 () -> ecsService.deleteService(cluster, name, true, region), "ServiceNotFoundException");
     }
 
-    private static List<ContainerDefinition> parseContainerDefinitions(JsonNode node, ProvisionContext ctx) {
+    private List<ContainerDefinition> parseContainerDefinitions(JsonNode node, ProvisionContext ctx) {
         List<ContainerDefinition> result = new ArrayList<>();
         if (node == null || node.isNull()) {
             return result;
@@ -547,7 +550,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 def.setMemoryReservation(item.path("MemoryReservation").asInt());
             }
             def.setPortMappings(parsePortMappings(item.path("PortMappings")));
-            def.setMountPoints(parseMountPoints(item.path("MountPoints")));
+            def.setMountPoints(ecsJsonHandler.parseMountPoints(normalizeCfnEcsArray(item.path("MountPoints"))));
             def.setEnvironment(parseEnvironment(item.path("Environment")));
             def.setSecrets(parseSecrets(item.path("Secrets")));
             def.setLogConfiguration(parseLogConfiguration(item.path("LogConfiguration")));
@@ -581,95 +584,104 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 optionalInt(node, "Timeout"), optionalInt(node, "Retries"), optionalInt(node, "StartPeriod"));
     }
 
-    private static List<MountPoint> parseMountPoints(JsonNode node) {
-        List<MountPoint> result = new ArrayList<>();
-        if (!node.isArray()) {
-            return result;
-        }
-        for (JsonNode item : node) {
-            if (item.isObject()) {
-                result.add(new MountPoint(item.path("SourceVolume").asText(null),
-                        item.path("ContainerPath").asText(null),
-                        item.hasNonNull("ReadOnly") ? item.path("ReadOnly").asBoolean() : null));
+    private static void validateMountSources(List<ContainerDefinition> containers, List<Volume> volumes) {
+        for (ContainerDefinition container : containers) {
+            for (MountPoint mount : container.getMountPoints()) {
+                String source = mount.sourceVolume();
+                if (source != null && !source.isBlank()
+                        && volumes.stream().noneMatch(volume -> source.equals(volume.name()))) {
+                    throw new AwsException("InvalidParameterException",
+                            "Mount point sourceVolume must reference a task definition volume: " + source, 400);
+                }
             }
         }
-        return result;
     }
 
-    private List<Volume> parseVolumes(JsonNode node) {
-        List<Volume> result = new ArrayList<>();
+    private static void validateCfnVolumes(JsonNode node) {
         if (node == null || !node.isArray()) {
-            return result;
+            return;
         }
         for (JsonNode item : node) {
             if (!item.isObject()) {
                 continue;
             }
             JsonNode efs = item.path("EFSVolumeConfiguration");
-            JsonNode authorization = efs.path("AuthorizationConfig");
-            EfsVolumeConfiguration efsConfiguration = null;
-            if (efs.isObject()) {
-                String fileSystemId = efs.path("FilesystemId").asText(null);
-                if (fileSystemId == null || fileSystemId.isBlank()) {
-                    throw new AwsException("InvalidParameterException",
-                            "EFS volume configuration requires a fileSystemId.", 400);
-                }
-                String rootDirectory = efs.path("RootDirectory").asText(null);
-                String accessPointId = authorization.path("AccessPointId").asText(null);
-                if (accessPointId != null && !accessPointId.isBlank()
-                        && rootDirectory != null && !rootDirectory.isBlank() && !"/".equals(rootDirectory)) {
-                    throw new AwsException("InvalidParameterException",
-                            "Root directory must either be omitted or set to '/' when an EFS access point "
-                                    + "is specified in authorizationConfig.accessPointId.", 400);
-                }
-                efsConfiguration = new EfsVolumeConfiguration(fileSystemId, rootDirectory,
-                        efs.path("TransitEncryption").asText(null),
-                        efs.hasNonNull("TransitEncryptionPort") ? efs.path("TransitEncryptionPort").asInt() : null,
-                        accessPointId, authorization.path("IAM").asText(null));
+            String name = item.path("Name").asText(null);
+            if ((efs.isObject() || item.path("S3FilesVolumeConfiguration").isObject()
+                    || item.path("ConfiguredAtLaunch").asBoolean(false))
+                    && (name == null || name.isBlank())) {
+                throw new AwsException("InvalidParameterException",
+                        "EFS, S3 Files, and configured-at-launch volumes require a name.", 400);
             }
-            Map<String, Object> unparsed = new LinkedHashMap<>();
+            JsonNode authorization = efs.path("AuthorizationConfig");
+            if (efs.isObject()) {
+                String accessPointId = authorization.path("AccessPointId").asText(null);
+                String transitEncryption = efs.path("TransitEncryption").asText(null);
+                String iam = authorization.path("IAM").asText(null);
+                if (((accessPointId != null && !accessPointId.isBlank()) || "ENABLED".equals(iam))
+                        && !"ENABLED".equals(transitEncryption)) {
+                    throw new AwsException("InvalidParameterException",
+                            "Transit encryption must be ENABLED when EFS access point or IAM authorization is used.",
+                            400);
+                }
+            }
+            int configurationCount = efs.isObject() ? 1 : 0;
             for (String member : List.of("Host", "DockerVolumeConfiguration",
                     "FSxWindowsFileServerVolumeConfiguration", "S3FilesVolumeConfiguration", "ConfiguredAtLaunch")) {
                 if (item.hasNonNull(member)) {
-                    String apiMember = switch (member) {
-                        case "FSxWindowsFileServerVolumeConfiguration" -> "fsxWindowsFileServerVolumeConfiguration";
-                        case "S3FilesVolumeConfiguration" -> "s3filesVolumeConfiguration";
-                        default -> Character.toLowerCase(member.charAt(0)) + member.substring(1);
-                    };
-                    unparsed.put(apiMember, toEcsVolumeValue(item.get(member)));
+                    if (!"ConfiguredAtLaunch".equals(member) || item.path(member).asBoolean()) {
+                        configurationCount++;
+                    }
                 }
             }
-            String hostSourcePath = item.path("Host").path("SourcePath").asText(null);
-            if (hostSourcePath != null && !hostSourcePath.isBlank()) {
-                hostVolumePolicy.validate(hostSourcePath);
+            if (configurationCount > 1) {
+                throw new AwsException("InvalidParameterException",
+                        "A task definition volume can specify only one volume configuration.", 400);
             }
-            result.add(new Volume(item.path("Name").asText(null),
-                    hostSourcePath, efsConfiguration,
-                    unparsed.isEmpty() ? null : unparsed));
+        }
+    }
+
+    private static ArrayNode normalizeCfnEcsArray(JsonNode node) {
+        ArrayNode result = MAPPER.createArrayNode();
+        if (node != null && node.isArray()) {
+            node.forEach(item -> {
+                if (item.isObject()) {
+                    result.add(normalizeCfnEcsNode(item));
+                }
+            });
         }
         return result;
     }
 
-    private static Object toEcsVolumeValue(JsonNode node) {
+    private static JsonNode normalizeCfnEcsNode(JsonNode node) {
         if (node.isObject()) {
-            Map<String, Object> value = new LinkedHashMap<>();
+            ObjectNode result = MAPPER.createObjectNode();
             node.fields().forEachRemaining(field -> {
-                if (!field.getValue().isNull()) {
-                    String key = field.getKey();
-                    Object memberValue = "DriverOpts".equals(key) || "Labels".equals(key)
-                            ? MAPPER.convertValue(field.getValue(), Object.class)
-                            : toEcsVolumeValue(field.getValue());
-                    value.put(Character.toLowerCase(key.charAt(0)) + key.substring(1), memberValue);
+                String key = field.getKey();
+                JsonNode value = field.getValue();
+                String apiKey = switch (key) {
+                    case "EFSVolumeConfiguration" -> "efsVolumeConfiguration";
+                    case "FSxWindowsFileServerVolumeConfiguration" -> "fsxWindowsFileServerVolumeConfiguration";
+                    case "S3FilesVolumeConfiguration" -> "s3filesVolumeConfiguration";
+                    case "FilesystemId" -> "fileSystemId";
+                    case "IAM" -> "iam";
+                    default -> key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
+                };
+                if ("TransitEncryptionPort".equals(key) && value.isTextual()) {
+                    result.put(apiKey, value.asInt());
+                } else {
+                    result.set(apiKey, "DriverOpts".equals(key) || "Labels".equals(key)
+                            ? value.deepCopy() : normalizeCfnEcsNode(value));
                 }
             });
-            return value;
+            return result;
         }
         if (node.isArray()) {
-            List<Object> value = new ArrayList<>();
-            node.forEach(item -> value.add(toEcsVolumeValue(item)));
-            return value;
+            ArrayNode result = MAPPER.createArrayNode();
+            node.forEach(item -> result.add(normalizeCfnEcsNode(item)));
+            return result;
         }
-        return MAPPER.convertValue(node, Object.class);
+        return node.deepCopy();
     }
 
     private static Integer optionalInt(JsonNode node, String member) {

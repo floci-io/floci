@@ -139,6 +139,7 @@ import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.FlowLogService;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.container.HostVolumePolicy;
 import io.floci.aws.services.efs.EfsService;
@@ -427,7 +428,8 @@ final class CfnProvisionerFixture {
             }
             if (ecsService != null) {
                 discovered.add(new EcsCapacityCfnProvisioner(ecsService));
-                discovered.add(new EcsCfnProvisioner(ecsService, Mockito.mock(HostVolumePolicy.class)));
+                discovered.add(new EcsCfnProvisioner(ecsService, new EcsJsonHandler(ecsService,
+                        objectMapper, Mockito.mock(HostVolumePolicy.class))));
             }
             if (efsService != null) {
                 discovered.add(new EfsCfnProvisioner(efsService));
