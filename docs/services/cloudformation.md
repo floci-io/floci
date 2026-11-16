@@ -762,6 +762,12 @@ resource schema declares (measured). Floci reads them the same way, before anyth
   records a warning event for a value that it does not convert itself and the handler does
   (`" 128"`, `"0128"`, `" true"`); Floci does not.
 
+`Volumes` and container `MountPoints` reach the registered ECS task definition and appear in
+`DescribeTaskDefinition`. EFS, host and ephemeral volumes use the existing ECS volume models;
+host source paths use the same allowlist check as `RegisterTaskDefinition`. Docker, FSx Windows
+File Server and S3 Files volume settings survive the describe round trip but have no local mount
+backend. EFS uses a local named volume rather than a real NFS data plane.
+
 ## Account-Aware Provisioning
 
 Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace

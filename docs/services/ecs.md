@@ -1044,6 +1044,11 @@ ephemeral storage shared by the containers in that task. Each container's `mount
 the volume, mount path and read-only mode. Floci creates a Docker volume for each mounted task
 volume; different tasks get separate storage even when they use the same task definition.
 
+Both `RegisterTaskDefinition` and CloudFormation task definitions reject a mount source that
+does not name a declared volume, a volume with multiple configuration kinds, and an EFS access
+point or IAM authorization without transit encryption enabled. EFS, S3 Files and
+configured-at-launch volumes require a name; generic volumes and mount members remain optional.
+
 Task teardown removes this storage after the containers have been removed. Cleanup also runs
 when a task exits naturally or fails to launch. The task reconciler retries failed removals,
 including cleanup left pending by a failed launch or a state reset.

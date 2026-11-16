@@ -4,10 +4,12 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.CapacityProviderStrategyItem;
@@ -59,10 +61,12 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private static final TypeReference<List<ClusterSetting>> SETTINGS = new TypeReference<>() { };
 
     private final EcsService ecsService;
+    private final EcsJsonHandler ecsJsonHandler;
 
     @Inject
-    public EcsCfnProvisioner(EcsService ecsService) {
+    public EcsCfnProvisioner(EcsService ecsService, EcsJsonHandler ecsJsonHandler) {
         this.ecsService = ecsService;
+        this.ecsJsonHandler = ecsJsonHandler;
     }
 
     @Override
@@ -262,6 +266,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
         request.setFamily(family);
         request.setContainerDefinitions(parseContainerDefinitions(props.get("ContainerDefinitions"), ctx));
+        JsonNode volumes = props.path("Volumes");
+        request.setVolumes(ecsJsonHandler.parseVolumes(normalizeCfnEcsArray(volumes)));
+        EcsJsonHandler.validateMountSources(request.getContainerDefinitions(), request.getVolumes());
         request.setNetworkMode(parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode")));
         request.setCpu(ctx.resolveOptional(props, "Cpu"));
         request.setMemory(ctx.resolveOptional(props, "Memory"));
@@ -516,7 +523,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 () -> ecsService.deleteService(cluster, name, true, region), "ServiceNotFoundException");
     }
 
-    private static List<ContainerDefinition> parseContainerDefinitions(JsonNode node, ProvisionContext ctx) {
+    private List<ContainerDefinition> parseContainerDefinitions(JsonNode node, ProvisionContext ctx) {
         List<ContainerDefinition> result = new ArrayList<>();
         if (node == null || node.isNull()) {
             return result;
@@ -540,6 +547,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 def.setMemoryReservation(item.path("MemoryReservation").asInt());
             }
             def.setPortMappings(parsePortMappings(item.path("PortMappings")));
+            def.setMountPoints(ecsJsonHandler.parseMountPoints(normalizeCfnEcsArray(item.path("MountPoints"))));
             def.setEnvironment(parseEnvironment(item.path("Environment")));
             def.setSecrets(parseSecrets(item.path("Secrets")));
             def.setLogConfiguration(parseLogConfiguration(item.path("LogConfiguration")));
@@ -571,6 +579,49 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
         return new HealthCheck(toStringList(node.path("Command")), optionalInt(node, "Interval"),
                 optionalInt(node, "Timeout"), optionalInt(node, "Retries"), optionalInt(node, "StartPeriod"));
+    }
+
+    private static ArrayNode normalizeCfnEcsArray(JsonNode node) {
+        ArrayNode result = MAPPER.createArrayNode();
+        if (node != null && node.isArray()) {
+            node.forEach(item -> {
+                if (item.isObject()) {
+                    result.add(normalizeCfnEcsNode(item));
+                }
+            });
+        }
+        return result;
+    }
+
+    private static JsonNode normalizeCfnEcsNode(JsonNode node) {
+        if (node.isObject()) {
+            ObjectNode result = MAPPER.createObjectNode();
+            node.fields().forEachRemaining(field -> {
+                String key = field.getKey();
+                JsonNode value = field.getValue();
+                String apiKey = switch (key) {
+                    case "EFSVolumeConfiguration" -> "efsVolumeConfiguration";
+                    case "FSxWindowsFileServerVolumeConfiguration" -> "fsxWindowsFileServerVolumeConfiguration";
+                    case "S3FilesVolumeConfiguration" -> "s3filesVolumeConfiguration";
+                    case "FilesystemId" -> "fileSystemId";
+                    case "IAM" -> "iam";
+                    default -> key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
+                };
+                if ("TransitEncryptionPort".equals(key) && value.isTextual()) {
+                    result.put(apiKey, value.asInt());
+                } else {
+                    result.set(apiKey, "DriverOpts".equals(key) || "Labels".equals(key)
+                            ? value.deepCopy() : normalizeCfnEcsNode(value));
+                }
+            });
+            return result;
+        }
+        if (node.isArray()) {
+            ArrayNode result = MAPPER.createArrayNode();
+            node.forEach(item -> result.add(normalizeCfnEcsNode(item)));
+            return result;
+        }
+        return node.deepCopy();
     }
 
     private static Integer optionalInt(JsonNode node, String member) {
