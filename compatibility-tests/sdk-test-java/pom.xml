@@ -255,6 +255,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>rds</artifactId>
         </dependency>
+        <!-- Synchronous HTTP transport for local RDS read timeouts -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache5-client</artifactId>
+        </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>dsql</artifactId>
