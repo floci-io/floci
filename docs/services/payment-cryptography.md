@@ -54,8 +54,9 @@
   A key that is gone does not come back: a tagging request for it is refused. The
   service deletes a key the moment it is asked to, so the waiting period of
   `DeleteKeyInDays` is checked against the range the model states and is not waited for.
-- **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
-  created disabled or with tags comes back that way. The `KeyUsage` and the
+- **Creating a key:** `CreateKey` takes `Exportable`, `Enabled`, `Tags`,
+  `DeriveKeyUsage` and `ReplicationRegions`, and a key created disabled or with tags
+  comes back that way. The `KeyUsage` and the
   `KeyModesOfUse` of the key are required, as the reference requires them. The answer
   carries every mode of use the reference gives a key, the ones the key was not made
   with as false, so a caller reading them finds a boolean for each of them. The check
@@ -67,12 +68,12 @@
   refused, and the permission check reads the same member the request does.
 - **Listing by state:** `ListKeys` takes a `KeyState` and answers with the keys in
   that state alone, and with every key when it names none. Each key in the list is the
-  summary the model names: its identifier, its state, its attributes, its check value
-  and its two flags.
-- **The members a request may name that the service does not read:** `CreateKey` and
-  `ImportKey` take `ReplicationRegions`, and `ImportKey` takes `RequesterComment`, and the
-  service reads none of them. No replica is made and no approval is recorded, because the
-  replication and the multi-party approval are not emulated.
+  summary the model names: its identifier, its state, its attributes, its check value,
+  its two flags and, for a key that is replicated, the kind of key it is and the region
+  it is the primary of.
+- **The members a request may name that the service does not read:** `ImportKey` takes
+  `RequesterComment`, and the service reads none of it. No approval is recorded, because
+  the multi-party approval is not emulated.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
   that names none removes the key the alias names and leaves the alias. `CreateAlias`
   refuses an alias without a key, as the reference does, though its model requires
@@ -198,13 +199,14 @@
   the account are set with `EnableDefaultKeyReplicationRegions` and
   `DisableDefaultKeyReplicationRegions` and read with
   `GetDefaultKeyReplicationRegions`. A key created while the account has default Regions
-  takes them unless it names its own, and says which it did. Taking the replica Regions
-  away is how the replication is turned off for a key, so a key that replicates nowhere
-  is not a multi-region key and carries no type at all. The Regions a request names have
-  to be Regions the service serves and names of Regions, and the Region of the primary is
-  not one to add or to take away, so a request that cannot be carried out is refused
-  rather than answered as if it had named no Region at all. A refused request leaves no
-  key behind.
+  takes them unless it names its own, and says which it did. A key whose Regions are
+  changed afterwards has a configuration of its own, and says so. Taking the replica
+  Regions away is how the replication is turned off for a key, so a key that replicates
+  nowhere is not a multi-region key and carries no type at all. A Region a request names
+  has to be a name of a Region this service serves, and the Region of the primary is not
+  one to replicate to, to add or to take away, so a request that cannot be carried out is
+  refused rather than answered as if it had named no Region at all. A refused request
+  leaves no key behind.
 - **The default Regions are the ones of the Region they are read in:** each Region has its
   own default Regions, so a key created in a Region takes the default Regions of that
   Region and not the ones of another. A key's own replication takes precedence over the
