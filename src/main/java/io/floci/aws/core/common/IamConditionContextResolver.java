@@ -10,6 +10,7 @@ import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
 import io.floci.aws.services.dynamodb.DynamoDbConditionKeys;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
+import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.dynamodb.DynamoDbTableNames;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -1336,6 +1337,9 @@ public class IamConditionContextResolver {
      */
     List<DynamoDbTransactionItem> dynamoDbTransactionItems(String action, ContainerRequestContext ctx,
                                                          String region, String accountId) {
+        if ("dynamodb:BatchExecuteStatement".equals(action) || "dynamodb:ExecuteTransaction".equals(action)) {
+            return dynamoDbStatementItems(action, ctx, region, accountId);
+        }
         boolean read = "dynamodb:TransactGetItems".equals(action);
         if (!read && !"dynamodb:TransactWriteItems".equals(action)) {
             return List.of();
@@ -1382,6 +1386,49 @@ public class IamConditionContextResolver {
                 checks.add(new DynamoDbTransactionItem(itemAction,
                         ResourceArnBuilder.toDynamoDbTableArn(executionTable, region, accountId), context));
             }
+        }
+        return checks;
+    }
+
+    /**
+     * One check per PartiQL statement of a batch or transaction, on the statement's own PartiQL action and
+     * table, as a single ExecuteStatement is checked. A statement with no PartiQL action keeps the batch's
+     * own action, which no PartiQL grant covers. Statements of a transaction carry
+     * {@code dynamodb:EnclosingOperation} {@code ExecuteTransaction}.
+     */
+    private List<DynamoDbTransactionItem> dynamoDbStatementItems(String action, ContainerRequestContext ctx,
+                                                                 String region, String accountId) {
+        boolean transaction = "dynamodb:ExecuteTransaction".equals(action);
+        JsonNode body = bufferedJsonBody(ctx);
+        JsonNode statements = body == null ? null : body.get(transaction ? "TransactStatements" : "Statements");
+        if (statements == null || !statements.isArray()) {
+            return List.of();
+        }
+        List<DynamoDbTransactionItem> checks = new ArrayList<>();
+        for (JsonNode request : statements) {
+            JsonNode statementNode = request == null ? null : request.get("Statement");
+            String statement = statementNode != null && statementNode.isTextual() ? statementNode.asText() : null;
+            String statementAction = DynamoDbPartiQLParser.iamAction(statement);
+            String tableName = DynamoDbPartiQLParser.extractTable(statement);
+            String resource = tableName == null || tableName.isEmpty()
+                    ? "*" : ResourceArnBuilder.toDynamoDbTableArn(tableName, region, accountId);
+            Map<String, List<String>> context = new LinkedHashMap<>();
+            if (transaction) {
+                context.put("dynamodb:EnclosingOperation", List.of("ExecuteTransaction"));
+            }
+            if (statementAction == null) {
+                checks.add(new DynamoDbTransactionItem(action, resource, context));
+                continue;
+            }
+            DynamoDbConditionKeys.Result keys = DynamoDbConditionKeys.extract(statementAction, request,
+                    describeTargetTable(tableName));
+            if (!keys.attributes().isEmpty()) {
+                context.put("dynamodb:Attributes", keys.attributes());
+            }
+            if (keys.select() != null) {
+                context.put("dynamodb:Select", List.of(keys.select()));
+            }
+            checks.add(new DynamoDbTransactionItem(statementAction, resource, context));
         }
         return checks;
     }
