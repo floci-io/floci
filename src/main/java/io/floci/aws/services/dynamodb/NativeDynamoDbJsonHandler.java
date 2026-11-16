@@ -978,7 +978,7 @@ public class NativeDynamoDbJsonHandler {
         }
         String tableName = request.path("TableName").asText();
         // UpdateItem lists every problem of a short name, the pattern first.
-        if (!tableName.isEmpty() && !AwsArnUtils.looksLikeArn(tableName)) {
+        if (DynamoDbTableNames.isShortName(tableName)) {
             throwValidationErrors(nameViolations(tableName, "tableName"));
         }
         DynamoDbTableNames.resolve(tableName);

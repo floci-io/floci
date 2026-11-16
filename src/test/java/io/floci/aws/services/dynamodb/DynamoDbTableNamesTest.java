@@ -183,6 +183,28 @@ class DynamoDbTableNamesTest {
                 () -> DynamoDbTableNames.resolveForItemCall(name)).getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            a!   | have length greater than or equal to 3
+            😀😀 | satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            """)
+    void everyCallReportsTheFirstProblemOfTheNameInAnArn(String name, String rule) {
+        String arn = "arn:aws:dynamodb:eu-west-2:123456789012:table/" + name;
+        String expected = "1 validation error detected: Value '" + arn
+                + "' at 'tableName' failed to satisfy constraint: Table name of ARN must " + rule;
+        assertEquals(expected, assertThrows(AwsException.class, () -> DynamoDbTableNames.resolve(arn)).getMessage());
+        assertEquals(expected, assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolveForItemCall(arn)).getMessage());
+    }
+
+    @Test
+    void anEmojiCountsTwiceInTheNameOfAnArn() {
+        String arn = "arn:aws:dynamodb:eu-west-2:123456789012:table/" + "😀".repeat(128);
+        assertEquals("1 validation error detected: Value '" + arn + "' at 'tableName' failed to satisfy constraint: "
+                + "Table name of ARN must have length less than or equal to 255", assertThrows(AwsException.class,
+                () -> DynamoDbTableNames.resolveForItemCall(arn)).getMessage());
+    }
+
     static String nameErrors(String name, String problems) {
         List<String> errors = new ArrayList<>();
         for (String problem : problems.split(", ")) {
