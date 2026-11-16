@@ -667,10 +667,10 @@ public class EcrService implements ResourceProvider, Resettable {
             tags = List.of();
             registryAvailable = false;
         } else try {
-            tags = listTagsOrThrow(account, region, repositoryName);
+            String internal = resolveRegistryRepoNameStrict(account, region, repositoryName);
+            tags = registryManager.httpClient().listTagsStrict(internal);
             if (tags.isEmpty() && !force) {
-                untaggedImages = holdsImage(account, region, repositoryName,
-                        resolveRegistryRepoNameStrict(account, region, repositoryName));
+                untaggedImages = holdsImage(account, region, repositoryName, internal);
             }
         } catch (Exception e) {
             if (isRegistryUnreachable(e)) {
@@ -1952,16 +1952,6 @@ public class EcrService implements ResourceProvider, Resettable {
             }
         }
         return false;
-    }
-
-    /**
-     * Lists tags and propagates registry failures. Used by force-delete to
-     * distinguish "registry unreachable" (skip cleanup) from "registry
-     * available but listing failed" (abort deletion).
-     */
-    private List<String> listTagsOrThrow(String account, String region, String repoName) throws Exception {
-        return registryManager.httpClient()
-                .listTagsStrict(resolveRegistryRepoNameStrict(account, region, repoName));
     }
 
     /**
