@@ -25,6 +25,8 @@ final class BackendAuthenticator {
 
     private static final String SCRAM = "SCRAM-SHA-256";
     private static final int NONCE_BYTES = 18;
+    /** PostgreSQL stores 4096; a server asking for far more would only make Floci burn CPU. */
+    static final int MAX_ITERATIONS = 1_000_000;
 
     private final String user;
     private final String password;
@@ -33,6 +35,7 @@ final class BackendAuthenticator {
 
     private String clientFirstBare;
     private byte[] serverSignature;
+    private boolean scramVerified;
 
     BackendAuthenticator(String user, String password) {
         this(user, password, newNonce(), "");
@@ -53,7 +56,11 @@ final class BackendAuthenticator {
         return Base64.getEncoder().encodeToString(bytes);
     }
 
-    /** The answer to an authentication request ({@code R}), or empty when none is due. */
+    /**
+     * The answer to an authentication request ({@code R}), or empty when none is due. An
+     * AuthenticationOk that comes while a SCRAM exchange has not yet proved the server's signature
+     * is refused, as the server would then be one that never knew the password.
+     */
     Optional<PostgresWire.Message> answer(PostgresWire.Message authRequest) throws IOException {
         byte[] body = authRequest.body();
         if (authRequest.type() != 'R' || body.length < 4) {
@@ -61,7 +68,12 @@ final class BackendAuthenticator {
         }
         int code = PostgresWire.int32(body, 0);
         return switch (code) {
-            case 0 -> Optional.empty();
+            case 0 -> {
+                if (clientFirstBare != null && !scramVerified) {
+                    throw new IOException("backend accepted the login before proving its SCRAM signature");
+                }
+                yield Optional.empty();
+            }
             case 3 -> Optional.of(new PostgresWire.Message((byte) 'p', PostgresWire.cStringBytes(password)));
             case 5 -> Optional.of(md5(body));
             case 10 -> Optional.of(saslInitial(body));
@@ -136,6 +148,10 @@ final class BackendAuthenticator {
         if (nonce == null || salt == null || iterations <= 0) {
             throw new IOException("malformed SCRAM message from the backend");
         }
+        if (iterations > MAX_ITERATIONS) {
+            throw new IOException("backend asks for " + iterations + " SCRAM iterations, more than "
+                    + MAX_ITERATIONS);
+        }
         if (!nonce.startsWith(clientNonce)) {
             throw new IOException("backend SCRAM nonce does not extend the client nonce");
         }
@@ -174,6 +190,7 @@ final class BackendAuthenticator {
         if (!MessageDigest.isEqual(serverSignature, received)) {
             throw new IOException("backend server signature mismatch");
         }
+        scramVerified = true;
     }
 
     /** SCRAM's SaltedPassword: PBKDF2 with HMAC-SHA256 (RFC 5802, section 3). */

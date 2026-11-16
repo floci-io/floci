@@ -87,6 +87,39 @@ class BackendAuthenticatorTest {
     }
 
     @Test
+    void authenticationOkBeforeTheServerSignatureIsRefused() throws Exception {
+        BackendAuthenticator afterInitial = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        afterInitial.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        assertThrows(IOException.class, () -> afterInitial.answer(auth(0)));
+
+        BackendAuthenticator afterContinue = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        afterContinue.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        afterContinue.answer(auth(11, text(SERVER_FIRST)));
+        IOException refused = assertThrows(IOException.class, () -> afterContinue.answer(auth(0)));
+        assertEquals("backend accepted the login before proving its SCRAM signature", refused.getMessage());
+    }
+
+    @Test
+    void authenticationOkAfterAVerifiedServerSignatureIsAccepted() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        authenticator.answer(auth(11, text(SERVER_FIRST)));
+        authenticator.answer(auth(12, text(SERVER_FINAL)));
+
+        assertTrue(authenticator.answer(auth(0)).isEmpty());
+    }
+
+    @Test
+    void tooManyServerIterationsAreRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+
+        IOException refused = assertThrows(IOException.class, () -> authenticator.answer(auth(11,
+                text("r=" + NONCE + "x,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=" + (BackendAuthenticator.MAX_ITERATIONS + 1)))));
+        assertEquals("backend asks for 1000001 SCRAM iterations, more than 1000000", refused.getMessage());
+    }
+
+    @Test
     void unsupportedMechanismFails() {
         BackendAuthenticator authenticator = new BackendAuthenticator("u", "p");
 

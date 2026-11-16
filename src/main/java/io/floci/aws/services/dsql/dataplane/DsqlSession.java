@@ -690,6 +690,12 @@ final class DsqlSession {
                         case 'R' -> {
                             boolean ok = message.body().length >= 4 && PostgresWire.int32(message.body(), 0) == 0;
                             if (ok) {
+                                // An unfinished SCRAM exchange means the server never proved it knows the password.
+                                if (authenticator != null && !answerAuthentication(message, authenticator)) {
+                                    refuse(out, "08006", ACCESS_DENIED, null);
+                                    closeQuietly(client);
+                                    return;
+                                }
                                 authenticating = false;
                                 startup.add(message);
                                 continue;
