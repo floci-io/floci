@@ -573,7 +573,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleListTables(JsonNode request, String region) {
         Integer limit = request.has("Limit") ? request.get("Limit").asInt() : null;
-        String exclusiveStart = request.has("ExclusiveStartTableName")
+        String exclusiveStart = request.hasNonNull("ExclusiveStartTableName")
                 ? request.get("ExclusiveStartTableName").asText() : null;
 
         List<String> violations = new ArrayList<>();

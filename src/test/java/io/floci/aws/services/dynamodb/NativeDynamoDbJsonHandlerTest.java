@@ -3378,12 +3378,12 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals(message, ex.getMessage());
     }
 
-    @Test
-    void listTablesStartsAfterAValidNameThatNoTableHas() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"ExclusiveStartTableName\":\"Aaa\"}", "{\"ExclusiveStartTableName\":null}"})
+    void listTablesAcceptsAStartNameNoTableHasAndANullOne(String request) throws Exception {
         createUsersTable("eu-west-1");
 
-        Response response = handler.handle("ListTables", mapper.readTree("{\"ExclusiveStartTableName\":\"Aaa\"}"),
-                "eu-west-1");
+        Response response = handler.handle("ListTables", mapper.readTree(request), "eu-west-1");
         assertTrue(response.getEntity().toString().contains("Users"), response.getEntity().toString());
     }
 
