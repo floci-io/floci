@@ -1,10 +1,7 @@
 package io.floci.aws.services.athena;
 
 import io.floci.aws.services.floci.duck.FlociDuckClient;
-import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.model.Column;
-import io.floci.aws.services.glue.model.Database;
-import io.floci.aws.services.glue.model.Partition;
 import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
@@ -16,21 +13,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.athena.AthenaSidecarFixture.column;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.when;
 
 /**
  * Reads columns declared {@code timestamp} through the real floci-duck sidecar, with the views Athena builds, and
@@ -82,11 +72,7 @@ class AthenaTimestampColumnSidecarIntegrationTest {
     @Inject
     S3Service s3Service;
 
-    private String bucket;
-    private String schema;
-    private final List<String> keys = new ArrayList<>();
-    private final List<Table> tables = new ArrayList<>();
-    private final Map<String, List<Partition>> partitions = new HashMap<>();
+    private AthenaSidecarFixture glue;
 
     @BeforeAll
     static void requireDocker() {
@@ -95,36 +81,31 @@ class AthenaTimestampColumnSidecarIntegrationTest {
 
     @BeforeEach
     void createBucket() {
-        bucket = "athena-timestamp-" + System.nanoTime();
-        schema = "timestamps_" + System.nanoTime();
-        s3Service.createBucket(bucket, "us-east-1");
+        glue = new AthenaSidecarFixture(duck, s3Service, "timestamp");
     }
 
     @AfterEach
     void deleteBucket() {
-        for (String key : keys) {
-            s3Service.deleteObject(bucket, key);
-        }
-        s3Service.deleteBucket(bucket);
+        glue.close();
     }
 
     @Test
     void parquetColumnsDeclaredTimestampReadAsAthenasTimestamp() {
         writeParquet("events/part-0.parquet");
-        tables.add(parquetTable("events", List.of()));
+        glue.add(parquetTable("events", List.of()));
 
-        assertEquals(EXPECTED, query(SELECT + view("events") + " ORDER BY id"));
+        assertEquals(EXPECTED, glue.query(SELECT + glue.view("events") + " ORDER BY id"));
     }
 
     /** The views pin the session to UTC, so a session that starts in another zone still reads UTC. */
     @Test
     void theUtcWallClockTimeDoesNotDependOnTheSessionsZone() {
         writeParquet("events/part-0.parquet");
-        tables.add(parquetTable("events", List.of()));
-        String sql = "SELECT CAST(ts AS VARCHAR) AS ts FROM " + view("events") + " WHERE id = 1";
+        glue.add(parquetTable("events", List.of()));
+        String sql = "SELECT CAST(ts AS VARCHAR) AS ts FROM " + glue.view("events") + " WHERE id = 1";
 
         List<Map<String, Object>> rows = duck.query(sql, "SET TimeZone = 'America/Toronto';\n"
-                + builder().build(null, sql));
+                + glue.builder().build(null, sql));
 
         assertEquals("2026-03-14 09:30:00", rows.getFirst().get("ts"));
     }
@@ -133,26 +114,26 @@ class AthenaTimestampColumnSidecarIntegrationTest {
     @Test
     void aPartitionedTableReadsItsTimestampsTheSameWay() {
         writeParquet("events/dt=2026-03-14/part-0.parquet");
-        tables.add(parquetTable("events", List.of(column("dt", "string"))));
-        partitions.put("events", List.of(GluePartitions.partition(null, "2026-03-14")));
+        glue.add(parquetTable("events", List.of(column("dt", "string"))));
+        glue.register("events", GluePartitions.partition(null, "2026-03-14"));
 
-        assertEquals(EXPECTED, query(SELECT + view("events") + " ORDER BY id"));
+        assertEquals(EXPECTED, glue.query(SELECT + glue.view("events") + " ORDER BY id"));
     }
 
     /** An empty table, which reads no files, gives its columns the type a full one does. */
     @Test
     void anEmptyTableTypesItsTimestampsAsAFullOneDoes() {
-        tables.add(parquetTable("events", List.of()));
+        glue.add(parquetTable("events", List.of()));
 
-        assertEquals(List.of(Map.of("ts_type", "TIMESTAMP", "ts_ns_type", "TIMESTAMP")), query(
+        assertEquals(List.of(Map.of("ts_type", "TIMESTAMP", "ts_ns_type", "TIMESTAMP")), glue.query(
                 "SELECT typeof(any_value(ts)) AS ts_type, typeof(any_value(ts_ns)) AS ts_ns_type FROM "
-                        + view("events")));
+                        + glue.view("events")));
     }
 
     /** Delimited text has the same precision: LazySimpleSerDe reads {@code .1235} as {@code .123} on Athena too. */
     @Test
     void delimitedTextTimestampsReadAtMillisecondPrecision() {
-        put("text/part-0.tsv", "1\t2026-03-14 09:30:00.1235\n2\t1969-12-31 23:59:59.9995\n3\t\\N\n");
+        glue.put("text/part-0.tsv", "1\t2026-03-14 09:30:00.1235\n2\t1969-12-31 23:59:59.9995\n3\t\\N\n");
         StorageDescriptor descriptor = descriptor("text");
         descriptor.setInputFormat("org.apache.hadoop.mapred.TextInputFormat");
         StorageDescriptor.SerDeInfo serde = new StorageDescriptor.SerDeInfo();
@@ -160,13 +141,13 @@ class AthenaTimestampColumnSidecarIntegrationTest {
         serde.setParameters(Map.of("field.delim", "\t"));
         descriptor.setSerdeInfo(serde);
         descriptor.setColumns(List.of(column("id", "int"), column("ts", "timestamp")));
-        tables.add(table("text", descriptor, List.of()));
+        glue.add(table("text", descriptor, List.of()));
 
         assertEquals(List.of(
                 Map.of("id", "1", "ts", "2026-03-14 09:30:00.123", "ts_type", "TIMESTAMP"),
                 Map.of("id", "2", "ts", "1969-12-31 23:59:59.999", "ts_type", "TIMESTAMP"),
                 Map.of("id", "3", "ts", "null", "ts_type", "TIMESTAMP")),
-                query("SELECT id, CAST(ts AS VARCHAR) AS ts, typeof(ts) AS ts_type FROM " + view("text")
+                glue.query("SELECT id, CAST(ts AS VARCHAR) AS ts, typeof(ts) AS ts_type FROM " + glue.view("text")
                         + " ORDER BY id"));
     }
 
@@ -182,21 +163,21 @@ class AthenaTimestampColumnSidecarIntegrationTest {
         Table table = parquetTable("mismatch", List.of());
         table.getStorageDescriptor().setColumns(List.of(column("id", "int"), column("epoch", "timestamp"),
                 column("iso", "timestamp"), column("day", "timestamp"), column("raw", "timestamp")));
-        tables.add(table);
+        glue.add(table);
 
-        assertEquals(List.of(Map.of("id", "1")), query("SELECT id FROM " + view("mismatch")));
+        assertEquals(List.of(Map.of("id", "1")), glue.query("SELECT id FROM " + glue.view("mismatch")));
         assertEquals(List.of(Map.of("epoch", "2026-03-14 09:30:00")),
-                query("SELECT CAST(epoch AS VARCHAR) AS epoch FROM " + view("mismatch")));
+                glue.query("SELECT CAST(epoch AS VARCHAR) AS epoch FROM " + glue.view("mismatch")));
         RuntimeException iso = assertThrows(RuntimeException.class,
-                () -> query("SELECT iso FROM " + view("mismatch")));
+                () -> glue.query("SELECT iso FROM " + glue.view("mismatch")));
         assertTrue(iso.getMessage().contains("HIVE_BAD_DATA: Malformed Parquet file. Field iso's type BINARY in parquet"
                 + " file is incompatible with type timestamp(3) defined in table schema"), iso.getMessage());
         RuntimeException raw = assertThrows(RuntimeException.class,
-                () -> query("SELECT raw FROM " + view("mismatch")));
+                () -> glue.query("SELECT raw FROM " + glue.view("mismatch")));
         assertTrue(raw.getMessage().contains("HIVE_BAD_DATA: Malformed Parquet file. Field raw's type BINARY"),
                 raw.getMessage());
         RuntimeException day = assertThrows(RuntimeException.class,
-                () -> query("SELECT day FROM " + view("mismatch")));
+                () -> glue.query("SELECT day FROM " + glue.view("mismatch")));
         assertTrue(day.getMessage().contains(
                 "SERIALIZATION_ERROR: Could not serialize column 'day' of type 'timestamp(3)'"), day.getMessage());
     }
@@ -210,13 +191,8 @@ class AthenaTimestampColumnSidecarIntegrationTest {
 
     /** Writes the rows {@code select} gives to {@code key} as Parquet, through the sidecar. */
     private void writeParquet(String key, String select) {
-        duck.query("COPY (" + select + ") TO 's3://" + bucket + "/" + key + "' (FORMAT PARQUET)", null);
-        keys.add(key);
-    }
-
-    private void put(String key, String content) {
-        s3Service.putObject(bucket, key, content.getBytes(StandardCharsets.UTF_8), "application/octet-stream", null);
-        keys.add(key);
+        duck.query("COPY (" + select + ") TO 's3://" + glue.bucket() + "/" + key + "' (FORMAT PARQUET)", null);
+        glue.wrote(key);
     }
 
     private Table parquetTable(String name, List<Column> partitionKeys) {
@@ -231,7 +207,7 @@ class AthenaTimestampColumnSidecarIntegrationTest {
 
     private StorageDescriptor descriptor(String root) {
         StorageDescriptor descriptor = new StorageDescriptor();
-        descriptor.setLocation("s3://" + bucket + "/" + root + "/");
+        descriptor.setLocation("s3://" + glue.bucket() + "/" + root + "/");
         return descriptor;
     }
 
@@ -243,39 +219,7 @@ class AthenaTimestampColumnSidecarIntegrationTest {
         return table;
     }
 
-    private GlueViewDdlBuilder builder() {
-        GlueService glue = Mockito.mock(GlueService.class);
-        Database database = new Database();
-        database.setName(schema);
-        when(glue.getDatabases()).thenReturn(List.of(database));
-        when(glue.getTables(schema)).thenReturn(tables);
-        when(glue.getPartitions(eq(schema), anyString()))
-                .thenAnswer(call -> partitions.getOrDefault(call.getArgument(1), List.of()));
-        return new GlueViewDdlBuilder(glue, s3Service);
-    }
-
-    private List<Map<String, String>> query(String sql) {
-        List<Map<String, String>> rows = new ArrayList<>();
-        for (Map<String, Object> row : duck.query(sql, builder().build(null, sql))) {
-            Map<String, String> values = new LinkedHashMap<>();
-            row.forEach((column, value) -> values.put(column, String.valueOf(value)));
-            rows.add(values);
-        }
-        return rows;
-    }
-
-    private String view(String table) {
-        return "\"" + schema + "\".\"" + table + "\"";
-    }
-
     private static Map<String, String> row(String id, String ts, String tsNs) {
         return Map.of("id", id, "ts", ts, "ts_ns", tsNs, "ts_type", "TIMESTAMP", "ts_ns_type", "TIMESTAMP");
-    }
-
-    private static Column column(String name, String type) {
-        Column column = new Column();
-        column.setName(name);
-        column.setType(type);
-        return column;
     }
 }
