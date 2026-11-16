@@ -216,18 +216,22 @@ still wins over the backend.
 
 The server must:
 
-- run PostgreSQL 16 or later;
+- run PostgreSQL 16 or later. Floci checks the version when a cluster starts and fails the cluster,
+  creating nothing, on an older server, whose `CREATEROLE` would let one cluster's `admin` alter
+  the roles of every other cluster;
 - let the configured user in as a superuser: Floci installs event triggers, reads `pg_authid`,
   runs `CREATE DATABASE ... OWNER` and ends sessions on a cluster's database when it is deleted;
 - be reachable over plain TCP. Floci does not use TLS to the server, so run both on a private
   network or on localhost.
 
+Use a PostgreSQL server dedicated to Floci: clusters share its catalogs, and Floci's superuser
+manages roles and databases on it.
+
 Each cluster gets a database `dsql_<cluster-id>`, a role `d<cluster-id>_<name>` for each of its
 roles (`d<cluster-id>_admin` for `admin`), and a hidden owner role `dsqlowner_<cluster-id>`.
-Clusters cannot see or connect to one another's databases, and the same role name can exist in
-each. Floci signs in to the server for each client itself: role passwords are stored as SCRAM
-verifiers derived from a per-cluster secret that Floci keeps with the cluster and clients never
-see.
+Clusters cannot connect to or read one another's data, and the same role name can exist in each.
+Floci signs in to the server for each client itself: role passwords are stored as SCRAM verifiers
+derived from a per-cluster secret that Floci keeps with the cluster and clients never see.
 
 What differs from the Docker backend:
 
@@ -241,6 +245,8 @@ What differs from the Docker backend:
   in string literals: `SET ROLE 'app'`, `has_table_privilege('app', ...)`, `pg_has_role` and
   `information_schema` filters on a grantee need the backend name.
 - Some errors the server sends while a connection starts may name a backend role or database.
+- Clients can see the other clusters' databases, roles and sessions in `pg_database`, `pg_roles`
+  and `pg_stat_activity`: their names only, not their data or queries.
 - A role that owns objects in another database of the same server cannot be dropped, so the
   cluster stays `DELETING` until those objects are gone; Floci retries on its next start.
 
