@@ -13,6 +13,7 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -31,7 +32,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * a database of its own, {@code dsql_<id>}, owned by the NOLOGIN role {@code dsqlowner_<id>}, and
  * its backend roles carry the prefix {@code d<id>_}, starting with its admin. Floci connects as the
  * configured user, which must be able to create databases and roles, and gives each backend role a
- * password derived from the cluster's secret, as the server is not assumed to trust Floci.
+ * password derived from the cluster's secret, as the server is not assumed to trust Floci. The
+ * server must run PostgreSQL 16 or later, whose CREATEROLE keeps each admin to its own roles.
  */
 @ApplicationScoped
 public class ExternalDsqlBackend implements DsqlBackend {
@@ -39,7 +41,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
     private static final Logger LOG = Logger.getLogger(ExternalDsqlBackend.class);
     private static final String HMAC = "HmacSHA256";
     private static final int SECRET_BYTES = 32;
-    private static final int FORCE_DROP_VERSION = 13;
+    /** Before 16, CREATEROLE lets a cluster's admin alter and grant every other cluster's roles. */
+    static final int MIN_SERVER_VERSION = 16;
     private static final int SCRAM_ITERATIONS = 4096;
     private static final int SCRAM_SALT_BYTES = 16;
 
@@ -53,7 +56,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
     /**
      * Creates the cluster's owner, admin and database where missing, then installs DSQL's dialect
      * in the database. The secret is set on {@code cluster} the first time, for the caller to save
-     * with it. On failure, what this attempt created is dropped again, and nothing else.
+     * with it. On failure, what this attempt created is dropped again, and nothing else. A server
+     * older than PostgreSQL 16 is refused before anything is created.
      */
     @Override
     public DsqlDatabases.Backend start(DsqlCluster cluster) throws SQLException {
@@ -66,6 +70,7 @@ public class ExternalDsqlBackend implements DsqlBackend {
         boolean createdAdmin = false;
         boolean createdDatabase = false;
         try (Connection server = connect(external().database())) {
+            requireSupportedVersion(server, host() + ":" + external().port());
             try {
                 if (!roleExists(server, names.owner())) {
                     execute(server, "CREATE ROLE " + quote(names.owner()) + " NOLOGIN");
@@ -292,8 +297,19 @@ public class ExternalDsqlBackend implements DsqlBackend {
             terminate.setString(1, names.database());
             terminate.execute();
         }
-        boolean force = server.getMetaData().getDatabaseMajorVersion() >= FORCE_DROP_VERSION;
-        execute(server, "DROP DATABASE IF EXISTS " + quote(names.database()) + (force ? " WITH (FORCE)" : ""));
+        execute(server, "DROP DATABASE IF EXISTS " + quote(names.database()) + " WITH (FORCE)");
+    }
+
+    /**
+     * Refuses a server older than PostgreSQL 16. Isolating the clusters from one another rests on
+     * its CREATEROLE, which only lets a role alter and grant the roles it created itself.
+     */
+    static void requireSupportedVersion(Connection server, String where) throws SQLException {
+        DatabaseMetaData metaData = server.getMetaData();
+        if (metaData.getDatabaseMajorVersion() < MIN_SERVER_VERSION) {
+            throw new SQLException("Floci's external DSQL backend needs PostgreSQL " + MIN_SERVER_VERSION
+                    + " or later; " + where + " runs " + metaData.getDatabaseProductVersion());
+        }
     }
 
     private static boolean roleExists(Connection server, String role) throws SQLException {

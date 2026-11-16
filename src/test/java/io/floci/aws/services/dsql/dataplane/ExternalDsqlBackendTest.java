@@ -13,6 +13,8 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Base64;
@@ -30,7 +32,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class ExternalDsqlBackendTest {
@@ -109,6 +113,34 @@ class ExternalDsqlBackendTest {
         assertThrows(SQLException.class, () -> new ExternalDsqlBackend(unreachableExternalServer()).start(cluster));
 
         assertEquals(SECRET, cluster.getBackendSecret());
+    }
+
+    @Test
+    void aServerOlderThanPostgresql16IsRefusedNamingItsVersion() throws SQLException {
+        Connection server = serverOfVersion(15, "15.8");
+
+        SQLException refused = assertThrows(SQLException.class,
+                () -> ExternalDsqlBackend.requireSupportedVersion(server, "db.example:5433"));
+
+        assertEquals("Floci's external DSQL backend needs PostgreSQL 16 or later; db.example:5433 runs 15.8",
+                refused.getMessage());
+        verify(server).getMetaData();
+        verifyNoMoreInteractions(server);
+    }
+
+    @Test
+    void postgresql16AndLaterAreAccepted() throws SQLException {
+        ExternalDsqlBackend.requireSupportedVersion(serverOfVersion(16, "16.4"), "db.example:5432");
+        ExternalDsqlBackend.requireSupportedVersion(serverOfVersion(17, "17.2"), "db.example:5432");
+    }
+
+    private static Connection serverOfVersion(int major, String version) throws SQLException {
+        Connection server = mock(Connection.class);
+        DatabaseMetaData metaData = mock(DatabaseMetaData.class);
+        when(server.getMetaData()).thenReturn(metaData);
+        when(metaData.getDatabaseMajorVersion()).thenReturn(major);
+        when(metaData.getDatabaseProductVersion()).thenReturn(version);
+        return server;
     }
 
     private static EmulatorConfig unreachableExternalServer() {
