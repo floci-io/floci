@@ -11,6 +11,7 @@ import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
 import io.floci.aws.services.dynamodb.DynamoDbConditionKeys;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
+import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.dynamodb.DynamoDbTableNames;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -1322,6 +1323,16 @@ public class IamConditionContextResolver {
         DynamoDbConditionKeys.Result keys = dynamoDbKeys(action, body, table, ctx);
 
         Map<String, List<String>> conditions = new LinkedHashMap<>();
+        putKeyConditions(conditions, keys);
+        List<String> returnValues = singleItemReturnValues(action, body);
+        if (!returnValues.isEmpty()) {
+            conditions.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
+        }
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    /** Adds the request-derived {@code LeadingKeys}, {@code Attributes} and {@code Select} that were resolved. */
+    private static void putKeyConditions(Map<String, List<String>> conditions, DynamoDbConditionKeys.Result keys) {
         if (!keys.leadingKeys().isEmpty()) {
             conditions.put("dynamodb:LeadingKeys", keys.leadingKeys());
         }
@@ -1331,11 +1342,6 @@ public class IamConditionContextResolver {
         if (keys.select() != null) {
             conditions.put("dynamodb:Select", List.of(keys.select()));
         }
-        List<String> returnValues = singleItemReturnValues(action, body);
-        if (!returnValues.isEmpty()) {
-            conditions.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
-        }
-        return conditions.isEmpty() ? null : conditions;
     }
 
     private static List<String> singleItemReturnValues(String action, JsonNode body) {
@@ -1363,6 +1369,9 @@ public class IamConditionContextResolver {
      */
     List<DynamoDbTransactionItem> dynamoDbTransactionItems(String action, ContainerRequestContext ctx,
                                                          String region, String accountId) {
+        if ("dynamodb:BatchExecuteStatement".equals(action) || "dynamodb:ExecuteTransaction".equals(action)) {
+            return dynamoDbStatementItems(action, ctx, region, accountId);
+        }
         boolean read = "dynamodb:TransactGetItems".equals(action);
         if (!read && !"dynamodb:TransactWriteItems".equals(action)) {
             return List.of();
@@ -1393,15 +1402,7 @@ public class IamConditionContextResolver {
                         : DynamoDbConditionKeys.extract(itemAction, request, table);
                 Map<String, List<String>> context = new LinkedHashMap<>();
                 context.put("dynamodb:EnclosingOperation", List.of(read ? "TransactGetItems" : "TransactWriteItems"));
-                if (!keys.leadingKeys().isEmpty()) {
-                    context.put("dynamodb:LeadingKeys", keys.leadingKeys());
-                }
-                if (!keys.attributes().isEmpty()) {
-                    context.put("dynamodb:Attributes", keys.attributes());
-                }
-                if (keys.select() != null) {
-                    context.put("dynamodb:Select", List.of(keys.select()));
-                }
+                putKeyConditions(context, keys);
                 if (!read && request.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
                     context.put("dynamodb:ReturnValues",
                             List.of(request.path("ReturnValuesOnConditionCheckFailure").asText()));
@@ -1409,6 +1410,38 @@ public class IamConditionContextResolver {
                 checks.add(new DynamoDbTransactionItem(itemAction,
                         ResourceArnBuilder.toDynamoDbTableArn(executionTable, region, accountId), context));
             }
+        }
+        return checks;
+    }
+
+    /**
+     * One check per PartiQL statement of a batch or transaction, on the statement's own PartiQL action and
+     * table, as a single ExecuteStatement is checked. A statement with no PartiQL action keeps the batch's
+     * own action, which no PartiQL grant covers. Statements of a transaction carry
+     * {@code dynamodb:EnclosingOperation} {@code ExecuteTransaction}.
+     */
+    private List<DynamoDbTransactionItem> dynamoDbStatementItems(String action, ContainerRequestContext ctx,
+                                                                 String region, String accountId) {
+        boolean transaction = "dynamodb:ExecuteTransaction".equals(action);
+        String operation = action.substring("dynamodb:".length());
+        List<DynamoDbTransactionItem> checks = new ArrayList<>();
+        for (JsonNode request : DynamoDbConditionKeys.partiQLStatementRequests(operation, bufferedJsonBody(ctx))) {
+            String statement = DynamoDbConditionKeys.partiQLStatement(request);
+            String statementAction = DynamoDbPartiQLParser.iamAction(statement);
+            String tableName = DynamoDbPartiQLParser.extractTable(statement);
+            String resource = tableName == null || tableName.isEmpty()
+                    ? "*" : ResourceArnBuilder.toDynamoDbTableArn(tableName, region, accountId);
+            Map<String, List<String>> context = new LinkedHashMap<>();
+            if (transaction) {
+                context.put("dynamodb:EnclosingOperation", List.of("ExecuteTransaction"));
+            }
+            if (statementAction == null) {
+                checks.add(new DynamoDbTransactionItem(action, resource, context));
+                continue;
+            }
+            putKeyConditions(context, DynamoDbConditionKeys.extract(statementAction, request,
+                    describeTargetTable(tableName)));
+            checks.add(new DynamoDbTransactionItem(statementAction, resource, context));
         }
         return checks;
     }
@@ -1450,15 +1483,7 @@ public class IamConditionContextResolver {
             DynamoDbConditionKeys.Result keys = dynamoDbKeys(
                     action, single, describeTargetTable(reference), ctx);
             Map<String, List<String>> conditions = new LinkedHashMap<>();
-            if (!keys.leadingKeys().isEmpty()) {
-                conditions.put("dynamodb:LeadingKeys", keys.leadingKeys());
-            }
-            if (!keys.attributes().isEmpty()) {
-                conditions.put("dynamodb:Attributes", keys.attributes());
-            }
-            if (keys.select() != null) {
-                conditions.put("dynamodb:Select", List.of(keys.select()));
-            }
+            putKeyConditions(conditions, keys);
             contexts.add(conditions);
         });
         return contexts.isEmpty() ? List.of(Map.of()) : contexts;
