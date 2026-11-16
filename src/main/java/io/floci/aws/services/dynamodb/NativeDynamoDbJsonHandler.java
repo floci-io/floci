@@ -847,14 +847,14 @@ public class NativeDynamoDbJsonHandler {
             rejectMixedParameters(request, List.of("Expected", "ConditionalOperator"), List.of("ConditionExpression"));
             requireNonEmptyMap(exprAttrNames, "ExpressionAttributeNames");
             requireNonEmptyMap(exprAttrValues, "ExpressionAttributeValues");
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues, false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
             requireReadableValues(exprAttrValues, "");
             if (conditionExpression == null) {
                 requireAbsentWithoutExpression(exprAttrNames, "ExpressionAttributeNames");
                 requireAbsentWithoutExpression(exprAttrValues, "ExpressionAttributeValues");
             }
             requireNonEmptyExpression(conditionExpression, "ConditionExpression");
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(request.get("Expected")), false);
             DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
             ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
             ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
@@ -1009,11 +1009,11 @@ public class NativeDynamoDbJsonHandler {
         requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, true);
         ObjectNode attributeUpdateValues = legacyValues(attributeUpdates);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(attributeUpdateValues);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(
-                legacyValues(request.has("Expected") ? request.get("Expected") : null));
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(
+                legacyValues(request.has("Expected") ? request.get("Expected") : null), true);
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
         JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
@@ -1390,9 +1390,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(keyConditionExpr, "KeyConditionExpression");
         DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(keyConditions), false);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(keyConditions), false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors first, then key-condition errors, then projection errors.
@@ -1548,7 +1548,8 @@ public class NativeDynamoDbJsonHandler {
 
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(legacyValues(scanFilter), false);
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors before projection errors.
         ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
@@ -3097,7 +3098,7 @@ public class NativeDynamoDbJsonHandler {
             addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
             throwValidationErrors(onFailureErrors);
             // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
-            DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+            DynamoDbAttributeValueValidator.requireValueNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
             requireValidTransactExpressions(op, false);
         }
         if ("Update".equals(action.type()) && op.has("UpdateExpression")) {
