@@ -739,6 +739,15 @@ public class SnsService implements Resettable, ResourceProvider {
         topicStore.put(key, topic);
     }
 
+    /** Exists for CloudFormation rollback: SetTopicAttributes cannot unset an attribute. */
+    public synchronized void removeTopicAttribute(String topicArn, String attributeName, String region) {
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        topic.getAttributes().remove(attributeName);
+        topicStore.put(key, topic);
+    }
+
     /**
      * Adds a statement to the topic's policy granting {@code accountIds} the named SNS actions,
      * written as AWS writes it: the label is its {@code Sid}, each account becomes its
