@@ -876,6 +876,33 @@ class IotMqttEnabledIntegrationTest {
     }
 
     @Test
+    void listSubscriptionsReportsADisconnectedPersistentSession() throws Exception {
+        String clientId = uniqueClientId("persistent-listed");
+        String topic = "devices/" + clientId + "/commands";
+        try (MqttTestClient device = MqttTestClient.connect(clientId, false)) {
+            device.subscribe(topic, 1);
+        }
+        awaitSessionsEnded(clientId, 1);
+
+        given()
+        .when()
+            .get("/connections/{clientId}/subscriptions", clientId)
+        .then()
+            .statusCode(200)
+            .body("subscriptions[0].topicFilter", equalTo(topic));
+
+        MqttTestClient.connect(clientId, true).close();
+        awaitSessionsEnded(clientId, 2);
+
+        given()
+        .when()
+            .get("/connections/{clientId}/subscriptions", clientId)
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
     void mqtt5SessionWithAnExpiryIntervalResumesUntilTheIntervalElapses() throws Exception {
         String clientId = uniqueClientId("mqtt5-persistent");
         String topic = "devices/" + clientId + "/commands";

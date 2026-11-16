@@ -1223,7 +1223,10 @@ public class IotService {
     }
 
     public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken) {
-        getConnection(clientId);
+        validateMqttClientId(clientId);
+        if (!mqttBrokerService.hasSession(clientId)) {
+            throw new AwsException("ResourceNotFoundException", "MQTT client has no session: " + clientId, 404);
+        }
         return paginate(mqttBrokerService.listSubscriptions(clientId), maxResults, nextToken);
     }
 

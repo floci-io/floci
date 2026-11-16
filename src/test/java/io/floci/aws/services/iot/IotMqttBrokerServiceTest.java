@@ -40,9 +40,11 @@ import io.vertx.core.net.PemKeyCertOptions;
 import io.vertx.core.net.SocketAddress;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttTopicSubscription;
+import io.vertx.mqtt.messages.MqttDisconnectMessage;
 import io.vertx.mqtt.messages.MqttPublishMessage;
 import io.vertx.mqtt.messages.MqttSubscribeMessage;
 import io.vertx.mqtt.messages.MqttUnsubscribeMessage;
+import io.vertx.mqtt.messages.codes.MqttDisconnectReasonCode;
 import jakarta.enterprise.inject.Instance;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
@@ -158,6 +160,8 @@ class IotMqttBrokerServiceTest {
             "TLS_RSA_WITH_AES_128_GCM_SHA256", "TLS_RSA_WITH_AES_128_CBC_SHA256", "TLS_RSA_WITH_AES_128_CBC_SHA",
             "TLS_RSA_WITH_AES_256_GCM_SHA384", "TLS_RSA_WITH_AES_256_CBC_SHA256", "TLS_RSA_WITH_AES_256_CBC_SHA");
 
+    private static final MqttDisconnectMessage DISCONNECT =
+            MqttDisconnectMessage.create(MqttDisconnectReasonCode.NORMAL, MqttProperties.NO_PROPERTIES);
     private static Vertx vertx;
     private static FlociCertificateAuthority ca;
     private static CertificateGenerator.GeneratedCertificate bootLeaf;
@@ -749,7 +753,7 @@ class IotMqttBrokerServiceTest {
 
         assertDoesNotThrow(() -> broker.handleEndpoint(replacement, false));
 
-        verify(replacement).accept(anyBoolean());
+        verify(replacement).accept(anyBoolean(), any(MqttProperties.class));
         awaitPresence("connected", "closed-takeover", 2);
         List<JsonNode> events = presenceOf("closed-takeover");
         assertEquals(List.of("connected", "disconnected", "connected"), eventTypes(events), events.toString());
@@ -765,8 +769,8 @@ class IotMqttBrokerServiceTest {
 
         broker.handleEndpoint(second, false);
 
-        verify(first).accept(false);
-        verify(second).accept(true);
+        verify(first).accept(eq(false), any(MqttProperties.class));
+        verify(second).accept(eq(true), any(MqttProperties.class));
     }
 
     @Test
@@ -776,13 +780,134 @@ class IotMqttBrokerServiceTest {
         assertTrue(broker.disconnectClient("deleted-persistent", false));
         MqttEndpoint resumed = persistentEndpoint("deleted-persistent");
         broker.handleEndpoint(resumed, false);
-        verify(resumed).accept(true);
+        verify(resumed).accept(eq(true), any(MqttProperties.class));
 
         assertTrue(broker.disconnectClient("deleted-persistent", true));
         MqttEndpoint fresh = persistentEndpoint("deleted-persistent");
         broker.handleEndpoint(fresh, false);
 
-        verify(fresh).accept(false);
+        verify(fresh).accept(eq(false), any(MqttProperties.class));
+    }
+
+    @Test
+    void anEarlierSessionsExpiryDoesNotEndASessionStoredAfterIt() throws Exception {
+        startBrokerRecordingPublishes();
+        broker.handleEndpoint(mqtt5Endpoint("re-expiring", 1), false);
+        broker.disconnectClient("re-expiring", false);
+        broker.handleEndpoint(mqtt5Endpoint("re-expiring", 60), false);
+        broker.disconnectClient("re-expiring", false);
+
+        Thread.sleep(1_500);
+        MqttEndpoint resumed = mqtt5Endpoint("re-expiring", 60);
+        broker.handleEndpoint(resumed, false);
+
+        verify(resumed).accept(eq(true), any(MqttProperties.class));
+    }
+
+    @Test
+    void aQos1PublishWhileAResumedSessionIsBeingAcceptedIsDelivered() throws Exception {
+        startBrokerRecordingPublishes();
+        String topic = "devices/resuming/commands";
+        MqttEndpoint first = persistentEndpoint("resuming");
+        broker.handleEndpoint(first, false);
+        subscribeQos1(first, topic);
+        broker.disconnectClient("resuming", false);
+        MqttEndpoint resuming = persistentEndpoint("resuming");
+        AtomicBoolean accepted = new AtomicBoolean();
+        when(resuming.isConnected()).thenAnswer(invocation -> accepted.get());
+        when(resuming.accept(anyBoolean(), any())).thenAnswer(invocation -> {
+            broker.publish(topic, "during-accept".getBytes(StandardCharsets.UTF_8), 1);
+            accepted.set(true);
+            return resuming;
+        });
+
+        broker.handleEndpoint(resuming, false);
+
+        verify(resuming).publish(eq(topic), eq(Buffer.buffer("during-accept")), eq(MqttQoS.AT_LEAST_ONCE),
+                eq(false), eq(false), anyInt(), any(MqttProperties.class));
+    }
+
+    @Test
+    void aTakeoverBeforeAResumedSessionIsAcceptedReceivesItsStoredMessages() throws Exception {
+        startBrokerRecordingPublishes();
+        String topic = "devices/taken-over/commands";
+        MqttEndpoint first = persistentEndpoint("taken-over");
+        broker.handleEndpoint(first, false);
+        subscribeQos1(first, topic);
+        broker.disconnectClient("taken-over", false);
+        broker.publish(topic, "stored".getBytes(StandardCharsets.UTF_8), 1);
+        MqttEndpoint resuming = persistentEndpoint("taken-over");
+        MqttEndpoint replacement = persistentEndpoint("taken-over");
+        when(resuming.accept(anyBoolean(), any())).thenAnswer(invocation -> {
+            broker.handleEndpoint(replacement, false);
+            return resuming;
+        });
+
+        broker.handleEndpoint(resuming, false);
+
+        verify(replacement).accept(eq(true), any(MqttProperties.class));
+        verify(replacement).publish(eq(topic), eq(Buffer.buffer("stored")), eq(MqttQoS.AT_LEAST_ONCE),
+                eq(false), eq(false), anyInt(), any(MqttProperties.class));
+        verify(resuming, never()).publish(eq(topic), any(), any(), anyBoolean(), anyBoolean(), anyInt(),
+                any(MqttProperties.class));
+    }
+
+    @Test
+    void aDisconnectSessionExpiryOfZeroEndsAPersistentSession() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint device = mqtt5Endpoint("disconnect-ends", 3600);
+        broker.handleEndpoint(device, false);
+
+        disconnectWithSessionExpiry(device, 0);
+        MqttEndpoint reconnected = mqtt5Endpoint("disconnect-ends", 3600);
+        broker.handleEndpoint(reconnected, false);
+
+        verify(reconnected).accept(eq(false), any(MqttProperties.class));
+    }
+
+    @Test
+    void aDisconnectSessionExpiryReplacesTheOneFromConnect() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint device = mqtt5Endpoint("disconnect-extends", 1);
+        broker.handleEndpoint(device, false);
+
+        disconnectWithSessionExpiry(device, 60);
+        Thread.sleep(1_500);
+        MqttEndpoint reconnected = mqtt5Endpoint("disconnect-extends", 60);
+        broker.handleEndpoint(reconnected, false);
+
+        verify(reconnected).accept(eq(true), any(MqttProperties.class));
+    }
+
+    @Test
+    void aDisconnectSessionExpiryCannotPersistASessionThatConnectedWithoutOne() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint device = mqtt5Endpoint("disconnect-ephemeral", 0);
+        broker.handleEndpoint(device, false);
+
+        disconnectWithSessionExpiry(device, 60);
+        MqttEndpoint reconnected = mqtt5Endpoint("disconnect-ephemeral", 60);
+        broker.handleEndpoint(reconnected, false);
+
+        verify(reconnected).accept(eq(false), any(MqttProperties.class));
+    }
+
+    @Test
+    void connackReportsASessionExpiryIntervalOnlyWhenItLowersTheRequestedOne() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint capped = mqtt5Endpoint("expiry-capped", 7200);
+        MqttEndpoint kept = mqtt5Endpoint("expiry-kept", 60);
+
+        broker.handleEndpoint(capped, false);
+        broker.handleEndpoint(kept, false);
+
+        ArgumentCaptor<MqttProperties> cappedConnack = ArgumentCaptor.forClass(MqttProperties.class);
+        verify(capped).accept(eq(false), cappedConnack.capture());
+        assertEquals(3600, cappedConnack.getValue()
+                .getProperty(MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value()).value());
+        ArgumentCaptor<MqttProperties> keptConnack = ArgumentCaptor.forClass(MqttProperties.class);
+        verify(kept).accept(eq(false), keptConnack.capture());
+        assertNull(keptConnack.getValue().getProperty(MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value()));
     }
 
     /**
@@ -1146,8 +1271,8 @@ class IotMqttBrokerServiceTest {
         subscribeHandler.get().handle(subscribe);
         MqttEndpoint departing = mock(MqttEndpoint.class);
         when(departing.clientIdentifier()).thenReturn("departing");
-        AtomicReference<Handler<Void>> disconnectHandler = new AtomicReference<>();
-        when(departing.disconnectHandler(any())).thenAnswer(invocation -> {
+        AtomicReference<Handler<MqttDisconnectMessage>> disconnectHandler = new AtomicReference<>();
+        when(departing.disconnectMessageHandler(any())).thenAnswer(invocation -> {
             disconnectHandler.set(invocation.getArgument(0));
             return departing;
         });
@@ -1158,7 +1283,7 @@ class IotMqttBrokerServiceTest {
         ExecutorService departingEventLoop = Executors.newSingleThreadExecutor();
         subscriberMonitor.lock();
         try {
-            Future<?> callback = departingEventLoop.submit(() -> disconnectHandler.get().handle(null));
+            Future<?> callback = departingEventLoop.submit(() -> disconnectHandler.get().handle(DISCONNECT));
 
             assertDoesNotThrow(() -> callback.get(5, TimeUnit.SECONDS),
                     "the disconnect callback returned while the subscriber's monitor is held");
@@ -1306,9 +1431,9 @@ class IotMqttBrokerServiceTest {
     void connectivityHistoryOfAClientIdIsKeptPerAccountAndRegion() {
         when(config.defaultRegion()).thenReturn("us-east-1");
         when(config.defaultAccountId()).thenReturn("111111111111");
-        AtomicReference<Handler<Void>> disconnectInA = new AtomicReference<>();
+        AtomicReference<Handler<MqttDisconnectMessage>> disconnectInA = new AtomicReference<>();
         broker.handleEndpoint(endpointCapturing("device-1", disconnectInA, new AtomicReference<>()), false);
-        disconnectInA.get().handle(null);
+        disconnectInA.get().handle(DISCONNECT);
 
         when(config.defaultAccountId()).thenReturn("222222222222");
         AtomicReference<Handler<Void>> closeInB = new AtomicReference<>();
@@ -1384,17 +1509,17 @@ class IotMqttBrokerServiceTest {
     void aResetForgetsEndedSessionsButNotLiveOnes() {
         when(config.defaultRegion()).thenReturn("us-east-1");
         when(config.defaultAccountId()).thenReturn("111111111111");
-        AtomicReference<Handler<Void>> disconnectGone = new AtomicReference<>();
+        AtomicReference<Handler<MqttDisconnectMessage>> disconnectGone = new AtomicReference<>();
         broker.handleEndpoint(endpointCapturing("gone", disconnectGone, new AtomicReference<>()), false);
-        disconnectGone.get().handle(null);
-        AtomicReference<Handler<Void>> disconnectLive = new AtomicReference<>();
+        disconnectGone.get().handle(DISCONNECT);
+        AtomicReference<Handler<MqttDisconnectMessage>> disconnectLive = new AtomicReference<>();
         broker.handleEndpoint(endpointCapturing("live", disconnectLive, new AtomicReference<>()), false);
 
         broker.clear();
 
         assertTrue(broker.connectivity("111111111111", "us-east-1", "gone").isEmpty());
         assertTrue(broker.connectivity("111111111111", "us-east-1", "live").orElseThrow().connected());
-        disconnectLive.get().handle(null);
+        disconnectLive.get().handle(DISCONNECT);
         assertEquals("CLIENT_INITIATED_DISCONNECT",
                 broker.connectivity("111111111111", "us-east-1", "live").orElseThrow().disconnectReason());
     }
@@ -1464,12 +1589,12 @@ class IotMqttBrokerServiceTest {
         }
     }
 
-    private static MqttEndpoint endpointCapturing(String clientId, AtomicReference<Handler<Void>> disconnect,
+    private static MqttEndpoint endpointCapturing(String clientId, AtomicReference<Handler<MqttDisconnectMessage>> disconnect,
                                                   AtomicReference<Handler<Void>> close) {
         MqttEndpoint endpoint = mock(MqttEndpoint.class);
         when(endpoint.clientIdentifier()).thenReturn(clientId);
         when(endpoint.isConnected()).thenReturn(true);
-        when(endpoint.disconnectHandler(any())).thenAnswer(invocation -> {
+        when(endpoint.disconnectMessageHandler(any())).thenAnswer(invocation -> {
             disconnect.set(invocation.getArgument(0));
             return endpoint;
         });
@@ -2070,6 +2195,38 @@ class IotMqttBrokerServiceTest {
         });
         client.subscribe(topicFilter, 0);
         return client;
+    }
+
+    private static MqttEndpoint mqtt5Endpoint(String clientId, int sessionExpiry) {
+        MqttEndpoint endpoint = persistentEndpoint(clientId);
+        when(endpoint.protocolVersion()).thenReturn(5);
+        when(endpoint.connectProperties()).thenReturn(sessionExpiryProperties(sessionExpiry));
+        return endpoint;
+    }
+
+    private static MqttProperties sessionExpiryProperties(int sessionExpiry) {
+        MqttProperties properties = new MqttProperties();
+        properties.add(new MqttProperties.IntegerProperty(
+                MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value(), sessionExpiry));
+        return properties;
+    }
+
+    private static void disconnectWithSessionExpiry(MqttEndpoint endpoint, int sessionExpiry) {
+        ArgumentCaptor<Handler<MqttDisconnectMessage>> disconnect = handlerCaptor();
+        verify(endpoint).disconnectMessageHandler(disconnect.capture());
+        disconnect.getValue().handle(MqttDisconnectMessage.create(
+                MqttDisconnectReasonCode.NORMAL, sessionExpiryProperties(sessionExpiry)));
+    }
+
+    private static void subscribeQos1(MqttEndpoint endpoint, String topicFilter) {
+        ArgumentCaptor<Handler<MqttSubscribeMessage>> subscribe = handlerCaptor();
+        verify(endpoint).subscribeHandler(subscribe.capture());
+        MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
+        when(requested.topicName()).thenReturn(topicFilter);
+        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_LEAST_ONCE);
+        MqttSubscribeMessage message = mock(MqttSubscribeMessage.class);
+        when(message.topicSubscriptions()).thenReturn(List.of(requested));
+        subscribe.getValue().handle(message);
     }
 
     private static MqttEndpoint persistentEndpoint(String clientId) {

@@ -348,6 +348,7 @@ public class IotMqttBrokerService implements Resettable {
         });
         sessionsByClient.clear();
         subscriptionsByClient.clear();
+        storedSessions.values().forEach(stored -> vertx.cancelTimer(stored.expiryTimer()));
         storedSessions.clear();
         if (mqttServer != null) {
             mqttServer.close().toCompletionStage().toCompletableFuture().join();
@@ -395,7 +396,7 @@ public class IotMqttBrokerService implements Resettable {
                 return false;
             }
             if (cleanSession) {
-                storedSessions.remove(clientId);
+                discardStoredSession(clientId);
                 subscriptionsByClient.remove(clientId);
             }
         }
@@ -439,6 +440,10 @@ public class IotMqttBrokerService implements Resettable {
             }
             return Optional.ofNullable(lastDisconnects.get(new HistoryKey(accountId, region, clientId)));
         }
+    }
+
+    boolean hasSession(String clientId) {
+        return getConnection(clientId).isPresent() || storedSessions.containsKey(clientId);
     }
 
     List<String> listSubscriptions(String clientId) {
@@ -537,12 +542,14 @@ public class IotMqttBrokerService implements Resettable {
         String clientId = endpoint.clientIdentifier();
         boolean cleanSession = endpoint.isCleanSession();
         int protocolVersion = endpoint.protocolVersion();
-        long sessionExpirySeconds = sessionExpirySeconds(endpoint);
+        long requestedSessionExpiry = protocolVersion == 5
+                ? sessionExpiryInterval(endpoint.connectProperties(), 0)
+                : cleanSession ? 0 : PERSISTENT_SESSION_EXPIRY_SECONDS;
+        long sessionExpirySeconds = Math.min(requestedSessionExpiry, PERSISTENT_SESSION_EXPIRY_SECONDS);
         String principal = device == null ? null : device.certificate().getCertificateId();
         ClientSession session;
         ClientSession replaced = null;
         boolean sessionPresent;
-        List<QueuedMessage> resumed = List.of();
         synchronized (sessionLock) {
             long versionNumber = presenceVersions.merge(clientId, 0L, (last, unused) -> last + 1);
             session = new ClientSession(
@@ -565,14 +572,13 @@ public class IotMqttBrokerService implements Resettable {
                     new AtomicInteger());
             ClientSession previous = sessionsByClient.put(clientId, session);
             boolean takeover = previous != null && previous.endpoint() != endpoint;
-            StoredSession stored = storedSessions.remove(clientId);
+            StoredSession stored = storedSessions.get(clientId);
             sessionPresent = !cleanSession && (takeover
                     ? previous.sessionExpirySeconds() > 0 && sameMqttVersion(previous.protocolVersion(), protocolVersion)
                     : stored != null && sameMqttVersion(stored.protocolVersion(), protocolVersion));
             if (!sessionPresent) {
+                discardStoredSession(clientId);
                 subscriptionsByClient.remove(clientId);
-            } else if (stored != null) {
-                resumed = stored.queued();
             }
             if (takeover) {
                 endSession(previous, DUPLICATE_CLIENTID);
@@ -598,9 +604,23 @@ public class IotMqttBrokerService implements Resettable {
             endpoint.publishHandler(message -> handlePublish(session, message));
             endpoint.pingHandler(ignored -> received(session));
             endpoint.publishAcknowledgeHandler(ignored -> received(session));
-            endpoint.disconnectHandler(ignored -> endSession(session, CLIENT_INITIATED_DISCONNECT));
+            endpoint.disconnectMessageHandler(message -> endSession(session, CLIENT_INITIATED_DISCONNECT,
+                    session.sessionExpirySeconds() == 0 ? 0 : Math.min(PERSISTENT_SESSION_EXPIRY_SECONDS,
+                            sessionExpiryInterval(message.properties(), session.sessionExpirySeconds()))));
             endpoint.closeHandler(ignored -> endSession(session, keepAliveExpired(session) ? MQTT_KEEP_ALIVE_TIMEOUT : CONNECTION_LOST));
-            endpoint.accept(sessionPresent);
+            MqttProperties connack = new MqttProperties();
+            if (requestedSessionExpiry > sessionExpirySeconds) {
+                connack.add(new MqttProperties.IntegerProperty(
+                        MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value(), (int) sessionExpirySeconds));
+            }
+            endpoint.accept(sessionPresent, connack);
+            List<QueuedMessage> resumed = List.of();
+            synchronized (sessionLock) {
+                if (sessionsByClient.get(clientId) == session) {
+                    StoredSession stored = discardStoredSession(clientId);
+                    resumed = stored == null ? List.of() : stored.queued();
+                }
+            }
             for (QueuedMessage message : resumed) {
                 endpoint.publish(message.topic(), Buffer.buffer(message.payload()), MqttQoS.AT_LEAST_ONCE, false, false,
                         session.packetId(MqttQoS.AT_LEAST_ONCE), message.properties());
@@ -616,19 +636,10 @@ public class IotMqttBrokerService implements Resettable {
         publishPresence(session, "connected", null);
     }
 
-    /**
-     * How long the session outlives its connection: MQTT 3 sessions that are not clean last AWS's
-     * persistent session expiry period, MQTT 5 sessions their Session Expiry Interval up to it.
-     */
-    private static long sessionExpirySeconds(MqttEndpoint endpoint) {
-        if (endpoint.protocolVersion() != 5) {
-            return endpoint.isCleanSession() ? 0 : PERSISTENT_SESSION_EXPIRY_SECONDS;
-        }
-        MqttProperties properties = endpoint.connectProperties();
+    private static long sessionExpiryInterval(MqttProperties properties, long absent) {
         MqttProperties.MqttProperty<?> interval = properties == null ? null
                 : properties.getProperty(MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value());
-        long requested = interval == null ? 0 : Integer.toUnsignedLong((Integer) interval.value());
-        return Math.min(requested, PERSISTENT_SESSION_EXPIRY_SECONDS);
+        return interval == null ? absent : Integer.toUnsignedLong((Integer) interval.value());
     }
 
     /** AWS IoT resumes an MQTT 3 session only over MQTT 3, and an MQTT 5 session only over MQTT 5. */
@@ -850,8 +861,7 @@ public class IotMqttBrokerService implements Resettable {
      * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription, at the
      * lower of {@code qos} and the highest QoS among its matching subscriptions. Netty encodes
      * {@code properties} only for an MQTT 5 subscriber. A QoS 1 publish matching a QoS 1
-     * subscription of a disconnected persistent session is stored for it instead; offline
-     * sessions are visited first, so a session resuming meanwhile gets the copy at least once.
+     * subscription of a disconnected persistent session is stored for it instead.
      */
     private void fanOut(String topic, byte[] payload, int qos, MqttProperties properties) {
         byte[] safePayload = payload == null ? new byte[0] : payload.clone();
@@ -920,6 +930,10 @@ public class IotMqttBrokerService implements Resettable {
      * session replaced by a newer connection leaves it alone.
      */
     private boolean endSession(ClientSession session, String reason) {
+        return endSession(session, reason, session.sessionExpirySeconds());
+    }
+
+    private boolean endSession(ClientSession session, String reason, long sessionExpirySeconds) {
         synchronized (sessionLock) {
             if (!session.ended().compareAndSet(false, true)) {
                 return false;
@@ -927,11 +941,13 @@ public class IotMqttBrokerService implements Resettable {
             lastDisconnects.put(session.historyKey(), session.disconnected(reason));
             if (sessionsByClient.remove(session.clientId(), session)) {
                 presenceVersions.computeIfPresent(session.clientId(), (id, version) -> version + 1);
-                if (session.sessionExpirySeconds() > 0) {
-                    store(session);
+                if (sessionExpirySeconds > 0) {
+                    store(session, sessionExpirySeconds);
+                } else {
+                    discardStoredSession(session.clientId());
                 }
             }
-            if (session.sessionExpirySeconds() == 0) {
+            if (sessionExpirySeconds == 0) {
                 subscriptionsByClient.remove(session.clientId());
             }
             publishPresence(session, "disconnected", reason);
@@ -939,17 +955,28 @@ public class IotMqttBrokerService implements Resettable {
         }
     }
 
-    private void store(ClientSession session) {
+    private void store(ClientSession session, long sessionExpirySeconds) {
         String clientId = session.clientId();
-        StoredSession stored = new StoredSession(session.protocolVersion(), new ArrayList<>());
-        storedSessions.put(clientId, stored);
-        vertx.setTimer(TimeUnit.SECONDS.toMillis(session.sessionExpirySeconds()), ignored -> {
+        StoredSession unresumed = discardStoredSession(clientId);
+        long expiryTimer = vertx.setTimer(TimeUnit.SECONDS.toMillis(sessionExpirySeconds), timer -> {
             synchronized (sessionLock) {
-                if (storedSessions.remove(clientId, stored)) {
+                StoredSession stored = storedSessions.get(clientId);
+                if (stored != null && stored.expiryTimer() == timer) {
+                    storedSessions.remove(clientId);
                     subscriptionsByClient.remove(clientId);
                 }
             }
         });
+        storedSessions.put(clientId, new StoredSession(session.protocolVersion(),
+                unresumed == null ? new ArrayList<>() : unresumed.queued(), expiryTimer));
+    }
+
+    private StoredSession discardStoredSession(String clientId) {
+        StoredSession stored = storedSessions.remove(clientId);
+        if (stored != null) {
+            vertx.cancelTimer(stored.expiryTimer());
+        }
+        return stored;
     }
 
     /**
@@ -1094,7 +1121,7 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /** A disconnected persistent session; its queue is only touched under the session lock. */
-    private record StoredSession(int protocolVersion, List<QueuedMessage> queued) {
+    private record StoredSession(int protocolVersion, List<QueuedMessage> queued, long expiryTimer) {
     }
 
     private record QueuedMessage(String topic, byte[] payload, MqttProperties properties) {
