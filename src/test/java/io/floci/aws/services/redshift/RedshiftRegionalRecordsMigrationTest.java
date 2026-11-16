@@ -17,6 +17,8 @@ import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
 import io.floci.aws.services.redshift.proxy.RedshiftProxyManager;
 import io.floci.aws.testing.StorageFactories;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -45,50 +47,64 @@ class RedshiftRegionalRecordsMigrationTest {
     @TempDir
     Path directory;
 
+    private EmulatorConfig config;
+    private StorageFactory factory;
+    private AccountAwareStorageBackend<ClusterParameterGroup> groups;
+    private AccountAwareStorageBackend<ClusterSubnetGroup> subnets;
+    private AccountAwareStorageBackend<SnapshotSchedule> schedules;
+    private AccountAwareStorageBackend<SnapshotCopyGrant> grants;
+    private AccountAwareStorageBackend<Cluster> clusters;
+
+    /** Opens the service's stores in the test's directory; each test fills them as an older Floci stored them. */
+    @BeforeEach
+    void openStores() {
+        config = StorageFactories.config(directory, ACCOUNT);
+        factory = StorageFactories.open(config, "persistent");
+        groups = factory.create("redshift", "redshift-parameter-groups.json",
+                new TypeReference<Map<String, ClusterParameterGroup>>() { });
+        subnets = factory.create("redshift", "redshift-subnet-groups.json",
+                new TypeReference<Map<String, ClusterSubnetGroup>>() { });
+        schedules = factory.create("redshift", "redshift-snapshot-schedules.json",
+                new TypeReference<Map<String, SnapshotSchedule>>() { });
+        grants = factory.create("redshift", "redshift-snapshot-copy-grants.json",
+                new TypeReference<Map<String, SnapshotCopyGrant>>() { });
+        clusters = factory.create("redshift", "redshift-clusters.json",
+                new TypeReference<Map<String, Cluster>>() { });
+    }
+
+    @AfterEach
+    void closeStores() {
+        factory.shutdownAll();
+    }
+
     @Test
     void recordsStoredWithoutARegionMoveToTheDefaultRegionAndToEachRegionWhoseClustersUseThem() {
-        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
-        StorageFactory factory = StorageFactories.open(config, "persistent");
-        try {
-            AccountAwareStorageBackend<ClusterParameterGroup> groups = factory.create("redshift", "redshift-parameter-groups.json",
-                    new TypeReference<Map<String, ClusterParameterGroup>>() { });
-            AccountAwareStorageBackend<ClusterSubnetGroup> subnets = factory.create("redshift", "redshift-subnet-groups.json",
-                    new TypeReference<Map<String, ClusterSubnetGroup>>() { });
-            AccountAwareStorageBackend<SnapshotSchedule> schedules = factory.create("redshift", "redshift-snapshot-schedules.json",
-                    new TypeReference<Map<String, SnapshotSchedule>>() { });
-            AccountAwareStorageBackend<SnapshotCopyGrant> grants = factory.create("redshift", "redshift-snapshot-copy-grants.json",
-                    new TypeReference<Map<String, SnapshotCopyGrant>>() { });
-            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
-                    new TypeReference<Map<String, Cluster>>() { });
-            groups.putForAccount(ACCOUNT, "analytics", new ClusterParameterGroup("analytics", "redshift-1.0", "d"));
-            subnets.putForAccount(ACCOUNT, "private", new ClusterSubnetGroup("private", "d", null, List.of()));
-            schedules.putForAccount(ACCOUNT, "nightly", new SnapshotSchedule("nightly", "d", List.of("rate(12 hours)")));
-            grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", "key"));
-            Cluster west = pausedCluster("west", "eu-west-1");
-            west.setClusterParameterGroupName("analytics");
-            west.setSnapshotScheduleIdentifier("nightly");
-            clusters.putForAccount(ACCOUNT, "west", west);
-            Cluster east = pausedCluster("east", null);
-            east.setSnapshotCopyDestinationRegion("us-west-2");
-            east.setSnapshotCopyGrantName("copies");
-            clusters.putForAccount(ACCOUNT, "east", east);
+        groups.putForAccount(ACCOUNT, "analytics", new ClusterParameterGroup("analytics", "redshift-1.0", "d"));
+        subnets.putForAccount(ACCOUNT, "private", new ClusterSubnetGroup("private", "d", null, List.of()));
+        schedules.putForAccount(ACCOUNT, "nightly", new SnapshotSchedule("nightly", "d", List.of("rate(12 hours)")));
+        grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", "key"));
+        Cluster west = pausedCluster("west", "eu-west-1");
+        west.setClusterParameterGroupName("analytics");
+        west.setSnapshotScheduleIdentifier("nightly");
+        clusters.putForAccount(ACCOUNT, "west", west);
+        Cluster east = pausedCluster("east", null);
+        east.setSnapshotCopyDestinationRegion("us-west-2");
+        east.setSnapshotCopyGrantName("copies");
+        clusters.putForAccount(ACCOUNT, "east", east);
 
-            service(factory, config, "us-east-1").migrateRegionalRecords();
+        service("us-east-1").migrateRegionalRecords();
 
-            assertEquals(Set.of(regionalKey("us-east-1", "analytics"), regionalKey("eu-west-1", "analytics")),
-                    groups.keysForAccount(ACCOUNT));
-            assertEquals(Set.of(regionalKey("us-east-1", "private")), subnets.keysForAccount(ACCOUNT));
-            assertEquals(Set.of(regionalKey("us-east-1", "nightly"), regionalKey("eu-west-1", "nightly")),
-                    schedules.keysForAccount(ACCOUNT));
-            assertEquals(Set.of(regionalKey("us-east-1", "copies"), regionalKey("us-west-2", "copies")),
-                    grants.keysForAccount(ACCOUNT));
-            assertEquals("analytics", service(factory, config, "eu-west-1").describeClusterParameterGroups("analytics")
-                    .get(0).getParameterGroupName());
-            assertEquals("ClusterSubnetGroupNotFoundFault", assertThrows(AwsException.class,
-                    () -> service(factory, config, "eu-west-1").describeClusterSubnetGroups("private")).getErrorCode());
-        } finally {
-            factory.shutdownAll();
-        }
+        assertEquals(Set.of(regionalKey("us-east-1", "analytics"), regionalKey("eu-west-1", "analytics")),
+                groups.keysForAccount(ACCOUNT));
+        assertEquals(Set.of(regionalKey("us-east-1", "private")), subnets.keysForAccount(ACCOUNT));
+        assertEquals(Set.of(regionalKey("us-east-1", "nightly"), regionalKey("eu-west-1", "nightly")),
+                schedules.keysForAccount(ACCOUNT));
+        assertEquals(Set.of(regionalKey("us-east-1", "copies"), regionalKey("us-west-2", "copies")),
+                grants.keysForAccount(ACCOUNT));
+        assertEquals("analytics", service("eu-west-1").describeClusterParameterGroups("analytics")
+                .get(0).getParameterGroupName());
+        assertEquals("ClusterSubnetGroupNotFoundFault", assertThrows(AwsException.class,
+                () -> service("eu-west-1").describeClusterSubnetGroups("private")).getErrorCode());
     }
 
     /**
@@ -97,48 +113,36 @@ class RedshiftRegionalRecordsMigrationTest {
      */
     @Test
     void eachRegionGetsARecordOfItsOwn() {
-        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
-        StorageFactory factory = StorageFactories.open(config, "persistent");
-        try {
-            AccountAwareStorageBackend<ClusterParameterGroup> groups = factory.create("redshift", "redshift-parameter-groups.json",
-                    new TypeReference<Map<String, ClusterParameterGroup>>() { });
-            AccountAwareStorageBackend<SnapshotCopyGrant> grants = factory.create("redshift", "redshift-snapshot-copy-grants.json",
-                    new TypeReference<Map<String, SnapshotCopyGrant>>() { });
-            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
-                    new TypeReference<Map<String, Cluster>>() { });
-            groups.putForAccount(ACCOUNT, "analytics", new ClusterParameterGroup("analytics", "redshift-1.0", "d"));
-            grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", "key"));
-            Cluster west = pausedCluster("west", "eu-west-1");
-            west.setClusterParameterGroupName("analytics");
-            west.setSnapshotCopyDestinationRegion("us-west-2");
-            west.setSnapshotCopyGrantName("copies");
-            clusters.putForAccount(ACCOUNT, "west", west);
-            service(factory, config, "us-east-1").migrateRegionalRecords();
+        groups.putForAccount(ACCOUNT, "analytics", new ClusterParameterGroup("analytics", "redshift-1.0", "d"));
+        grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", "key"));
+        Cluster west = pausedCluster("west", "eu-west-1");
+        west.setClusterParameterGroupName("analytics");
+        west.setSnapshotCopyDestinationRegion("us-west-2");
+        west.setSnapshotCopyGrantName("copies");
+        clusters.putForAccount(ACCOUNT, "west", west);
+        service("us-east-1").migrateRegionalRecords();
 
-            RedshiftService westService = service(factory, config, "eu-west-1");
-            westService.modifyClusterParameterGroup("analytics",
-                    List.of(new Parameter(CURSOR_SIZE, "1000")));
-            westService.createTags("arn:aws:redshift:eu-west-1:" + ACCOUNT + ":parametergroup:analytics",
-                    Map.of("team", "west"));
-            service(factory, config, "us-west-2").createTags(
-                    "arn:aws:redshift:us-west-2:" + ACCOUNT + ":snapshotcopygrant:copies", Map.of("team", "west"));
+        RedshiftService westService = service("eu-west-1");
+        westService.modifyClusterParameterGroup("analytics",
+                List.of(new Parameter(CURSOR_SIZE, "1000")));
+        westService.createTags("arn:aws:redshift:eu-west-1:" + ACCOUNT + ":parametergroup:analytics",
+                Map.of("team", "west"));
+        service("us-west-2").createTags(
+                "arn:aws:redshift:us-west-2:" + ACCOUNT + ":snapshotcopygrant:copies", Map.of("team", "west"));
 
-            ClusterParameterGroup eastGroup = groups.getForAccount(ACCOUNT, regionalKey("us-east-1", "analytics"))
-                    .orElseThrow();
-            ClusterParameterGroup westGroup = groups.getForAccount(ACCOUNT, regionalKey("eu-west-1", "analytics"))
-                    .orElseThrow();
-            assertEquals("1000", parameterValue(westGroup, CURSOR_SIZE));
-            assertEquals(parameterValue(new ClusterParameterGroup("analytics", "redshift-1.0", "d"), CURSOR_SIZE),
-                    parameterValue(eastGroup, CURSOR_SIZE));
-            assertEquals(Map.of("team", "west"), westGroup.getTags());
-            assertEquals(Map.of(), eastGroup.getTags());
-            assertEquals(Map.of("team", "west"),
-                    grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "copies")).orElseThrow().getTags());
-            assertEquals(Map.of(),
-                    grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "copies")).orElseThrow().getTags());
-        } finally {
-            factory.shutdownAll();
-        }
+        ClusterParameterGroup eastGroup = groups.getForAccount(ACCOUNT, regionalKey("us-east-1", "analytics"))
+                .orElseThrow();
+        ClusterParameterGroup westGroup = groups.getForAccount(ACCOUNT, regionalKey("eu-west-1", "analytics"))
+                .orElseThrow();
+        assertEquals("1000", parameterValue(westGroup, CURSOR_SIZE));
+        assertEquals(parameterValue(new ClusterParameterGroup("analytics", "redshift-1.0", "d"), CURSOR_SIZE),
+                parameterValue(eastGroup, CURSOR_SIZE));
+        assertEquals(Map.of("team", "west"), westGroup.getTags());
+        assertEquals(Map.of(), eastGroup.getTags());
+        assertEquals(Map.of("team", "west"),
+                grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "copies")).orElseThrow().getTags());
+        assertEquals(Map.of(),
+                grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "copies")).orElseThrow().getTags());
     }
 
     /**
@@ -147,37 +151,27 @@ class RedshiftRegionalRecordsMigrationTest {
      */
     @Test
     void aGrantCopiedToAnotherRegionTakesThatRegionsDefaultKey() {
-        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
-        StorageFactory factory = StorageFactories.open(config, "persistent");
-        try {
-            AccountAwareStorageBackend<SnapshotCopyGrant> grants = factory.create("redshift", "redshift-snapshot-copy-grants.json",
-                    new TypeReference<Map<String, SnapshotCopyGrant>>() { });
-            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
-                    new TypeReference<Map<String, Cluster>>() { });
-            String eastDefault = "arn:aws:kms:us-east-1:" + ACCOUNT + ":alias/aws/redshift";
-            String named = "arn:aws:kms:us-east-1:" + ACCOUNT + ":key/1234abcd-12ab-34cd-56ef-1234567890ab";
-            grants.putForAccount(ACCOUNT, "defaulted", new SnapshotCopyGrant("defaulted", eastDefault));
-            grants.putForAccount(ACCOUNT, "named", new SnapshotCopyGrant("named", named));
-            Cluster first = pausedCluster("first", null);
-            first.setSnapshotCopyDestinationRegion("us-west-2");
-            first.setSnapshotCopyGrantName("defaulted");
-            clusters.putForAccount(ACCOUNT, "first", first);
-            Cluster second = pausedCluster("second", null);
-            second.setSnapshotCopyDestinationRegion("us-west-2");
-            second.setSnapshotCopyGrantName("named");
-            clusters.putForAccount(ACCOUNT, "second", second);
+        String eastDefault = "arn:aws:kms:us-east-1:" + ACCOUNT + ":alias/aws/redshift";
+        String named = "arn:aws:kms:us-east-1:" + ACCOUNT + ":key/1234abcd-12ab-34cd-56ef-1234567890ab";
+        grants.putForAccount(ACCOUNT, "defaulted", new SnapshotCopyGrant("defaulted", eastDefault));
+        grants.putForAccount(ACCOUNT, "named", new SnapshotCopyGrant("named", named));
+        Cluster first = pausedCluster("first", null);
+        first.setSnapshotCopyDestinationRegion("us-west-2");
+        first.setSnapshotCopyGrantName("defaulted");
+        clusters.putForAccount(ACCOUNT, "first", first);
+        Cluster second = pausedCluster("second", null);
+        second.setSnapshotCopyDestinationRegion("us-west-2");
+        second.setSnapshotCopyGrantName("named");
+        clusters.putForAccount(ACCOUNT, "second", second);
 
-            service(factory, config, "us-east-1").migrateRegionalRecords();
+        service("us-east-1").migrateRegionalRecords();
 
-            assertEquals("arn:aws:kms:us-west-2:" + ACCOUNT + ":alias/aws/redshift",
-                    grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "defaulted")).orElseThrow().getKmsKeyId());
-            assertEquals(eastDefault,
-                    grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "defaulted")).orElseThrow().getKmsKeyId());
-            assertEquals(named,
-                    grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "named")).orElseThrow().getKmsKeyId());
-        } finally {
-            factory.shutdownAll();
-        }
+        assertEquals("arn:aws:kms:us-west-2:" + ACCOUNT + ":alias/aws/redshift",
+                grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "defaulted")).orElseThrow().getKmsKeyId());
+        assertEquals(eastDefault,
+                grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "defaulted")).orElseThrow().getKmsKeyId());
+        assertEquals(named,
+                grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "named")).orElseThrow().getKmsKeyId());
     }
 
     /**
@@ -186,30 +180,20 @@ class RedshiftRegionalRecordsMigrationTest {
      */
     @Test
     void aGrantMovesToTheRegionOfItsKey() {
-        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
-        StorageFactory factory = StorageFactories.open(config, "persistent");
-        try {
-            AccountAwareStorageBackend<SnapshotCopyGrant> grants = factory.create("redshift", "redshift-snapshot-copy-grants.json",
-                    new TypeReference<Map<String, SnapshotCopyGrant>>() { });
-            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
-                    new TypeReference<Map<String, Cluster>>() { });
-            String westDefault = "arn:aws:kms:us-west-2:" + ACCOUNT + ":alias/aws/redshift";
-            grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", westDefault));
-            grants.putForAccount(ACCOUNT, "keyless", new SnapshotCopyGrant("keyless", "1234abcd"));
-            Cluster east = pausedCluster("east", null);
-            east.setSnapshotCopyDestinationRegion("us-west-2");
-            east.setSnapshotCopyGrantName("copies");
-            clusters.putForAccount(ACCOUNT, "east", east);
+        String westDefault = "arn:aws:kms:us-west-2:" + ACCOUNT + ":alias/aws/redshift";
+        grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", westDefault));
+        grants.putForAccount(ACCOUNT, "keyless", new SnapshotCopyGrant("keyless", "1234abcd"));
+        Cluster east = pausedCluster("east", null);
+        east.setSnapshotCopyDestinationRegion("us-west-2");
+        east.setSnapshotCopyGrantName("copies");
+        clusters.putForAccount(ACCOUNT, "east", east);
 
-            service(factory, config, "us-east-1").migrateRegionalRecords();
+        service("us-east-1").migrateRegionalRecords();
 
-            assertEquals(Set.of(regionalKey("us-west-2", "copies"), regionalKey("us-east-1", "keyless")),
-                    grants.keysForAccount(ACCOUNT));
-            assertEquals(westDefault,
-                    grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "copies")).orElseThrow().getKmsKeyId());
-        } finally {
-            factory.shutdownAll();
-        }
+        assertEquals(Set.of(regionalKey("us-west-2", "copies"), regionalKey("us-east-1", "keyless")),
+                grants.keysForAccount(ACCOUNT));
+        assertEquals(westDefault,
+                grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "copies")).orElseThrow().getKmsKeyId());
     }
 
     /**
@@ -219,35 +203,25 @@ class RedshiftRegionalRecordsMigrationTest {
      */
     @Test
     void aSubnetGroupMovesToTheRegionOfItsSubnets() {
-        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
-        StorageFactory factory = StorageFactories.open(config, "persistent");
-        try {
-            AccountAwareStorageBackend<ClusterSubnetGroup> subnets = factory.create("redshift", "redshift-subnet-groups.json",
-                    new TypeReference<Map<String, ClusterSubnetGroup>>() { });
-            ClusterSubnetGroup west = new ClusterSubnetGroup("west", "d", "vpc-1", List.of("subnet-a", "subnet-b"));
-            west.setSubnetZones(Map.of("subnet-a", "eu-west-1a", "subnet-b", "eu-west-1b"));
-            subnets.putForAccount(ACCOUNT, "west", west);
-            ClusterSubnetGroup spread = new ClusterSubnetGroup("spread", "d", "vpc-2", List.of("subnet-c", "subnet-d"));
-            spread.setSubnetZones(Map.of("subnet-c", "eu-west-1a", "subnet-d", "us-west-2a"));
-            subnets.putForAccount(ACCOUNT, "spread", spread);
-            subnets.putForAccount(ACCOUNT, "unplaced", new ClusterSubnetGroup("unplaced", "d", null, List.of("subnet-e")));
-            ClusterSubnetGroup shared = new ClusterSubnetGroup("shared", "d", "vpc-3", List.of("subnet-f"));
-            shared.setSubnetZones(Map.of("subnet-f", "eu-west-1c"));
-            subnets.putForAccount(ACCOUNT, "shared", shared);
-            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
-                    new TypeReference<Map<String, Cluster>>() { });
-            Cluster east = pausedCluster("east", null);
-            east.setClusterSubnetGroupName("shared");
-            clusters.putForAccount(ACCOUNT, "east", east);
+        ClusterSubnetGroup west = new ClusterSubnetGroup("west", "d", "vpc-1", List.of("subnet-a", "subnet-b"));
+        west.setSubnetZones(Map.of("subnet-a", "eu-west-1a", "subnet-b", "eu-west-1b"));
+        subnets.putForAccount(ACCOUNT, "west", west);
+        ClusterSubnetGroup spread = new ClusterSubnetGroup("spread", "d", "vpc-2", List.of("subnet-c", "subnet-d"));
+        spread.setSubnetZones(Map.of("subnet-c", "eu-west-1a", "subnet-d", "us-west-2a"));
+        subnets.putForAccount(ACCOUNT, "spread", spread);
+        subnets.putForAccount(ACCOUNT, "unplaced", new ClusterSubnetGroup("unplaced", "d", null, List.of("subnet-e")));
+        ClusterSubnetGroup shared = new ClusterSubnetGroup("shared", "d", "vpc-3", List.of("subnet-f"));
+        shared.setSubnetZones(Map.of("subnet-f", "eu-west-1c"));
+        subnets.putForAccount(ACCOUNT, "shared", shared);
+        Cluster east = pausedCluster("east", null);
+        east.setClusterSubnetGroupName("shared");
+        clusters.putForAccount(ACCOUNT, "east", east);
 
-            service(factory, config, "us-east-1").migrateRegionalRecords();
+        service("us-east-1").migrateRegionalRecords();
 
-            assertEquals(Set.of(regionalKey("eu-west-1", "west"), regionalKey("us-east-1", "spread"),
-                    regionalKey("us-east-1", "unplaced"), regionalKey("eu-west-1", "shared"),
-                    regionalKey("us-east-1", "shared")), subnets.keysForAccount(ACCOUNT));
-        } finally {
-            factory.shutdownAll();
-        }
+        assertEquals(Set.of(regionalKey("eu-west-1", "west"), regionalKey("us-east-1", "spread"),
+                regionalKey("us-east-1", "unplaced"), regionalKey("eu-west-1", "shared"),
+                regionalKey("us-east-1", "shared")), subnets.keysForAccount(ACCOUNT));
     }
 
     /**
@@ -256,30 +230,20 @@ class RedshiftRegionalRecordsMigrationTest {
      */
     @Test
     void aRecordWithAnInstantIsCopiedWhateverMapperTheServiceWasGiven() {
-        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
-        StorageFactory factory = StorageFactories.open(config, "persistent");
-        try {
-            AccountAwareStorageBackend<SnapshotSchedule> schedules = factory.create("redshift", "redshift-snapshot-schedules.json",
-                    new TypeReference<Map<String, SnapshotSchedule>>() { });
-            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
-                    new TypeReference<Map<String, Cluster>>() { });
-            SnapshotSchedule nightly = new SnapshotSchedule("nightly", "d", List.of("rate(12 hours)"));
-            nightly.setUpdatedAt(Instant.parse("2026-11-01T00:00:00Z"));
-            schedules.putForAccount(ACCOUNT, "nightly", nightly);
-            Cluster west = pausedCluster("west", "eu-west-1");
-            west.setSnapshotScheduleIdentifier("nightly");
-            clusters.putForAccount(ACCOUNT, "west", west);
+        SnapshotSchedule nightly = new SnapshotSchedule("nightly", "d", List.of("rate(12 hours)"));
+        nightly.setUpdatedAt(Instant.parse("2026-11-01T00:00:00Z"));
+        schedules.putForAccount(ACCOUNT, "nightly", nightly);
+        Cluster west = pausedCluster("west", "eu-west-1");
+        west.setSnapshotScheduleIdentifier("nightly");
+        clusters.putForAccount(ACCOUNT, "west", west);
 
-            new RedshiftService(factory, mock(RedshiftContainerManager.class), config,
-                    new RegionResolver("us-east-1", ACCOUNT), mock(RedshiftProxyManager.class),
-                    mock(DockerHostResolver.class), new RedshiftCredentialBroker(), null, new ObjectMapper(), null)
-                    .migrateRegionalRecords();
+        new RedshiftService(factory, mock(RedshiftContainerManager.class), config,
+                new RegionResolver("us-east-1", ACCOUNT), mock(RedshiftProxyManager.class),
+                mock(DockerHostResolver.class), new RedshiftCredentialBroker(), null, new ObjectMapper(), null)
+                .migrateRegionalRecords();
 
-            assertEquals(Instant.parse("2026-11-01T00:00:00Z"),
-                    schedules.getForAccount(ACCOUNT, regionalKey("eu-west-1", "nightly")).orElseThrow().getUpdatedAt());
-        } finally {
-            factory.shutdownAll();
-        }
+        assertEquals(Instant.parse("2026-11-01T00:00:00Z"),
+                schedules.getForAccount(ACCOUNT, regionalKey("eu-west-1", "nightly")).orElseThrow().getUpdatedAt());
     }
 
     private static final String CURSOR_SIZE = "max_cursor_result_set_size";
@@ -297,8 +261,8 @@ class RedshiftRegionalRecordsMigrationTest {
         return cluster;
     }
 
-    /** A service whose calls run in {@code region}, its default Region too, over {@code factory}'s stores. */
-    private static RedshiftService service(StorageFactory factory, EmulatorConfig config, String region) {
+    /** A service whose calls run in {@code region}, its default Region too, over the test's stores. */
+    private RedshiftService service(String region) {
         return new RedshiftService(factory, mock(RedshiftContainerManager.class), config,
                 new RegionResolver(region, ACCOUNT), mock(RedshiftProxyManager.class), mock(DockerHostResolver.class),
                 new RedshiftCredentialBroker());
