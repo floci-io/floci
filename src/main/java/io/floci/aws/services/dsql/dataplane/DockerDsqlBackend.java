@@ -91,7 +91,7 @@ public class DockerDsqlBackend implements DsqlBackend {
             LOG.infov("DSQL cluster {0} serves from {1}:{2}", cluster.getIdentifier(), backend.host(),
                     String.valueOf(backend.port()));
             return backend;
-        } catch (SQLException | IOException | RuntimeException e) {
+        } catch (SQLException | RuntimeException e) {
             // A database that never served does not keep running: its cluster is FAILED, and deleting
             // the cluster removes its data.
             try {
@@ -147,8 +147,8 @@ public class DockerDsqlBackend implements DsqlBackend {
         throw new SQLException("The database did not start within " + READY_TIMEOUT.toSeconds() + " s", last);
     }
 
-    private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException, IOException {
-        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, "admin");
+    private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException {
+        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, "admin", "", false);
         try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
             statement.execute(script);
         }

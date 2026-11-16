@@ -9,11 +9,17 @@ import java.util.regex.Pattern;
 
 /**
  * Renders the DSQL bootstrap script for the database, owner role and admin role of one cluster.
+ * The script's placeholders: {@code {{database}}}, {@code {{owner}}} and {@code {{admin}}} as
+ * identifiers, quoted when they need it; {@code {{owner_literal}}}, {@code {{admin_literal}}} and
+ * {@code {{role_prefix}}} as SQL string literals ({@code 'dabc_'}, or {@code ''} for no prefix);
+ * {@code {{external}}} as the SQL boolean {@code true} or {@code false}.
  */
 final class DsqlBootstrap {
 
     private static final String RESOURCE = "/dsql/bootstrap.sql";
     private static final Pattern PLAIN = Pattern.compile("[a-z_][a-z0-9_]*");
+    // A partial list of PostgreSQL's reserved words: enough for the names Floci gives, which are
+    // never reserved words; any other name that is one fails loudly when the script runs.
     private static final Set<String> RESERVED = Set.of(
             "user", "table", "select", "group", "order", "all", "analyse", "analyze", "and", "any",
             "as", "asc", "both", "case", "check", "column", "constraint", "create", "current_user",
@@ -25,12 +31,20 @@ final class DsqlBootstrap {
     private DsqlBootstrap() {
     }
 
-    static String render(String database, String owner, String admin) {
+    /**
+     * The script for one cluster's database. {@code rolePrefix} is what the cluster's backend role
+     * names start with (empty in Docker mode), and {@code external} says whether the database is one
+     * of many on a shared server, whose roles are not all the cluster's.
+     */
+    static String render(String database, String owner, String admin, String rolePrefix, boolean external) {
         return template()
                 .replace("{{database}}", identifier(database))
+                .replace("{{owner_literal}}", literal(owner))
                 .replace("{{owner}}", identifier(owner))
                 .replace("{{admin_literal}}", literal(admin))
-                .replace("{{admin}}", identifier(admin));
+                .replace("{{admin}}", identifier(admin))
+                .replace("{{role_prefix}}", literal(rolePrefix))
+                .replace("{{external}}", Boolean.toString(external));
     }
 
     private static String template() {
