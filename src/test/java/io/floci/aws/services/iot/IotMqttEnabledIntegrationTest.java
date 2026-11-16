@@ -818,6 +818,115 @@ class IotMqttEnabledIntegrationTest {
         }
     }
 
+    @Test
+    void persistentSessionResumesItsSubscriptionsAndReceivesTheQos1MessagesQueuedWhileOffline() throws Exception {
+        String clientId = uniqueClientId("persistent");
+        String topic = "devices/" + clientId + "/commands";
+        try (MqttTestClient device = MqttTestClient.connect(clientId, false)) {
+            assertFalse(device.sessionPresent());
+            device.subscribe(topic, 1);
+        }
+        awaitSessionsEnded(clientId, 1);
+
+        try (MqttTestClient publisher = connectMqtt("persistent-pub")) {
+            publisher.publish(topic, json("{\"seq\":0}"), 0);
+            publisher.publish(topic, json("{\"seq\":1}"), 1);
+        }
+
+        try (MqttTestClient device = MqttTestClient.connect(clientId, false)) {
+            assertTrue(device.sessionPresent());
+            MqttPublish queued = device.takePublish();
+            assertEquals(topic, queued.topic());
+            assertArrayEquals(json("{\"seq\":1}"), queued.payload());
+            assertEquals(1, queued.qos());
+            device.assertNoPublish();
+
+            try (MqttTestClient publisher = connectMqtt("persistent-live-pub")) {
+                publisher.publish(topic, json("{\"seq\":2}"), 1);
+            }
+            assertArrayEquals(json("{\"seq\":2}"), device.takePublish().payload(), "the subscription was reinstated");
+        }
+    }
+
+    @Test
+    void cleanSessionConnectDiscardsThePersistentSession() throws Exception {
+        String clientId = uniqueClientId("persistent-discarded");
+        String topic = "devices/" + clientId + "/commands";
+        try (MqttTestClient device = MqttTestClient.connect(clientId, false)) {
+            device.subscribe(topic, 1);
+        }
+        awaitSessionsEnded(clientId, 1);
+        try (MqttTestClient publisher = connectMqtt("persistent-discarded-pub")) {
+            publisher.publish(topic, json("{}"), 1);
+        }
+
+        try (MqttTestClient device = MqttTestClient.connect(clientId, true)) {
+            assertFalse(device.sessionPresent());
+            device.assertNoPublish();
+        }
+        awaitSessionsEnded(clientId, 2);
+
+        try (MqttTestClient device = MqttTestClient.connect(clientId, false)) {
+            assertFalse(device.sessionPresent());
+            try (MqttTestClient publisher = connectMqtt("persistent-discarded-pub")) {
+                publisher.publish(topic, json("{}"), 1);
+            }
+            device.assertNoPublish();
+        }
+    }
+
+    @Test
+    void mqtt5SessionWithAnExpiryIntervalResumesUntilTheIntervalElapses() throws Exception {
+        String clientId = uniqueClientId("mqtt5-persistent");
+        String topic = "devices/" + clientId + "/commands";
+        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 1L)) {
+            assertFalse(device.sessionPresent());
+            device.subscribe(topic, 1);
+        }
+        awaitSessionsEnded(clientId, 1);
+        try (MqttTestClient publisher = connectMqtt("mqtt5-persistent-pub")) {
+            publisher.publish(topic, json("{}"), 1);
+        }
+
+        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 1L)) {
+            assertTrue(device.sessionPresent());
+            MqttPublish queued = device.takePublish();
+            assertEquals(topic, queued.topic());
+            assertEquals(1, queued.qos());
+        }
+        awaitSessionsEnded(clientId, 2);
+        Thread.sleep(2_000);
+
+        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 1L)) {
+            assertFalse(device.sessionPresent(), "the session expired");
+        }
+    }
+
+    @Test
+    void mqtt5SessionWithoutAnExpiryIntervalEndsWithItsConnection() throws Exception {
+        String clientId = uniqueClientId("mqtt5-ephemeral");
+        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, null)) {
+            device.subscribe("devices/" + clientId + "/commands", 1);
+        }
+        awaitSessionsEnded(clientId, 1);
+
+        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, null)) {
+            assertFalse(device.sessionPresent());
+        }
+    }
+
+    private void awaitSessionsEnded(String clientId, int count) throws InterruptedException {
+        String topic = "$aws/events/presence/disconnected/" + clientId;
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(2));
+        while (Instant.now().isBefore(deadline)) {
+            if (eventRecorder.recentEvents().stream().filter(event -> topic.equals(event.topic())).count() >= count) {
+                return;
+            }
+            Thread.sleep(25);
+        }
+        throw new AssertionError("MQTT session of " + clientId + " did not end");
+    }
+
     private String createQueue(String queueName) {
         return given()
             .contentType("application/x-www-form-urlencoded")
@@ -997,12 +1106,17 @@ class IotMqttEnabledIntegrationTest {
     private static final class MqttTestClient implements AutoCloseable {
         private final MqttClient client;
         private final BlockingQueue<MqttPublish> publishes = new LinkedBlockingQueue<>();
+        private boolean sessionPresent;
 
         private MqttTestClient(MqttClient client) {
             this.client = client;
         }
 
         static MqttTestClient connect(String clientId) throws MqttException {
+            return connect(clientId, true);
+        }
+
+        static MqttTestClient connect(String clientId, boolean cleanSession) throws MqttException {
             MqttClient client = new MqttClient(BROKER_URI, clientId, new MemoryPersistence());
             client.setTimeToWait(10_000);
             MqttTestClient testClient = new MqttTestClient(client);
@@ -1020,12 +1134,16 @@ class IotMqttEnabledIntegrationTest {
                 public void deliveryComplete(IMqttDeliveryToken token) {
                 }
             });
-            client.connect(connectOptions());
+            testClient.sessionPresent = client.connectWithResult(connectOptions(cleanSession)).getSessionPresent();
             return testClient;
         }
 
         boolean isConnected() {
             return client.isConnected();
+        }
+
+        boolean sessionPresent() {
+            return sessionPresent;
         }
 
         void subscribe(String topic) throws MqttException {
@@ -1047,6 +1165,13 @@ class IotMqttEnabledIntegrationTest {
         MqttPublish takePublish() throws InterruptedException {
             return Optional.ofNullable(publishes.poll(2, TimeUnit.SECONDS))
                     .orElseThrow(() -> new AssertionError("No MQTT publish received"));
+        }
+
+        void assertNoPublish() throws InterruptedException {
+            MqttPublish unexpected = publishes.poll(500, TimeUnit.MILLISECONDS);
+            if (unexpected != null) {
+                throw new AssertionError("Unexpected MQTT publish on " + unexpected.topic());
+            }
         }
 
         void awaitDisconnected() throws InterruptedException {
@@ -1074,9 +1199,9 @@ class IotMqttEnabledIntegrationTest {
             client.close();
         }
 
-        private static MqttConnectOptions connectOptions() {
+        private static MqttConnectOptions connectOptions(boolean cleanSession) {
             MqttConnectOptions options = new MqttConnectOptions();
-            options.setCleanSession(true);
+            options.setCleanSession(cleanSession);
             options.setConnectionTimeout(2);
             options.setKeepAliveInterval(60);
             options.setAutomaticReconnect(false);
@@ -1087,12 +1212,18 @@ class IotMqttEnabledIntegrationTest {
     private static final class Mqtt5TestClient implements AutoCloseable {
         private final org.eclipse.paho.mqttv5.client.MqttClient client;
         private final BlockingQueue<MqttPublish> publishes = new LinkedBlockingQueue<>();
+        private boolean sessionPresent;
 
         private Mqtt5TestClient(org.eclipse.paho.mqttv5.client.MqttClient client) {
             this.client = client;
         }
 
         static Mqtt5TestClient connect(String clientId) throws org.eclipse.paho.mqttv5.common.MqttException {
+            return connect(clientId, true, null);
+        }
+
+        static Mqtt5TestClient connect(String clientId, boolean cleanStart, Long sessionExpiryInterval)
+                throws org.eclipse.paho.mqttv5.common.MqttException {
             org.eclipse.paho.mqttv5.client.MqttClient client =
                     new org.eclipse.paho.mqttv5.client.MqttClient(BROKER_URI, clientId, null);
             Mqtt5TestClient testClient = new Mqtt5TestClient(client);
@@ -1124,7 +1255,8 @@ class IotMqttEnabledIntegrationTest {
                 }
             });
             client.setTimeToWait(10_000);
-            client.connect(connectOptions());
+            testClient.sessionPresent = client.connectWithResult(connectOptions(cleanStart, sessionExpiryInterval))
+                    .getSessionPresent();
             return testClient;
         }
 
@@ -1132,8 +1264,16 @@ class IotMqttEnabledIntegrationTest {
             return client.isConnected();
         }
 
+        boolean sessionPresent() {
+            return sessionPresent;
+        }
+
         void subscribe(String topic) throws org.eclipse.paho.mqttv5.common.MqttException {
-            client.subscribe(topic, 0);
+            subscribe(topic, 0);
+        }
+
+        void subscribe(String topic, int qos) throws org.eclipse.paho.mqttv5.common.MqttException {
+            client.subscribe(topic, qos);
         }
 
         void publish(String topic, byte[] payload) throws org.eclipse.paho.mqttv5.common.MqttException {
@@ -1161,10 +1301,11 @@ class IotMqttEnabledIntegrationTest {
             client.close();
         }
 
-        private static MqttConnectionOptions connectOptions() {
+        private static MqttConnectionOptions connectOptions(boolean cleanStart, Long sessionExpiryInterval) {
             MqttConnectionOptions options =
                     new MqttConnectionOptions();
-            options.setCleanStart(true);
+            options.setCleanStart(cleanStart);
+            options.setSessionExpiryInterval(sessionExpiryInterval);
             options.setConnectionTimeout(2);
             options.setKeepAliveInterval(60);
             options.setAutomaticReconnect(false);

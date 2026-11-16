@@ -749,11 +749,40 @@ class IotMqttBrokerServiceTest {
 
         assertDoesNotThrow(() -> broker.handleEndpoint(replacement, false));
 
-        verify(replacement).accept();
+        verify(replacement).accept(anyBoolean());
         awaitPresence("connected", "closed-takeover", 2);
         List<JsonNode> events = presenceOf("closed-takeover");
         assertEquals(List.of("connected", "disconnected", "connected"), eventTypes(events), events.toString());
         assertEquals("DUPLICATE_CLIENTID", events.get(1).get("disconnectReason").asText());
+    }
+
+    @Test
+    void aConnectTakingOverALivePersistentSessionReportsTheSessionPresent() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttEndpoint first = persistentEndpoint("resumed-takeover");
+        broker.handleEndpoint(first, false);
+        MqttEndpoint second = persistentEndpoint("resumed-takeover");
+
+        broker.handleEndpoint(second, false);
+
+        verify(first).accept(false);
+        verify(second).accept(true);
+    }
+
+    @Test
+    void deleteConnectionKeepsAPersistentSessionUnlessAskedToCleanIt() throws Exception {
+        startBrokerRecordingPublishes();
+        broker.handleEndpoint(persistentEndpoint("deleted-persistent"), false);
+        assertTrue(broker.disconnectClient("deleted-persistent", false));
+        MqttEndpoint resumed = persistentEndpoint("deleted-persistent");
+        broker.handleEndpoint(resumed, false);
+        verify(resumed).accept(true);
+
+        assertTrue(broker.disconnectClient("deleted-persistent", true));
+        MqttEndpoint fresh = persistentEndpoint("deleted-persistent");
+        broker.handleEndpoint(fresh, false);
+
+        verify(fresh).accept(false);
     }
 
     /**
@@ -2041,6 +2070,15 @@ class IotMqttBrokerServiceTest {
         });
         client.subscribe(topicFilter, 0);
         return client;
+    }
+
+    private static MqttEndpoint persistentEndpoint(String clientId) {
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn(clientId);
+        when(endpoint.protocolVersion()).thenReturn(4);
+        when(endpoint.isCleanSession()).thenReturn(false);
+        when(endpoint.isConnected()).thenReturn(true);
+        return endpoint;
     }
 
     private MqttClient connectPlain(String clientId) throws MqttException {
