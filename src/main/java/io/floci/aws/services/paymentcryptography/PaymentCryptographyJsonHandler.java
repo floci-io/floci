@@ -605,16 +605,30 @@ public class PaymentCryptographyJsonHandler {
                 service.disableDefaultReplicationRegions(stringsOf(request, "ReplicationRegions")));
     }
 
-    /** The strings of a request, such as the replication regions. */
+    /**
+     * The strings of a request, such as the replication regions.
+     *
+     * <p>A member that is not a list of strings is refused, so a request that names a region
+     * that is not one is not answered as if it had named none.
+     *
+     * @param request the request the member is in
+     * @param member the member to read
+     */
     private static List<String> stringsOf(JsonNode request, String member) {
-        List<String> values = new ArrayList<>();
         JsonNode declared = request.get(member);
-        if (declared != null && declared.isArray()) {
-            for (JsonNode value : declared) {
-                if (value.isTextual()) {
-                    values.add(value.textValue());
-                }
+        if (declared == null || declared.isNull()) {
+            return new ArrayList<>();
+        }
+        if (!declared.isArray()) {
+            throw new AwsException("ValidationException", member + " is a list of names", 400);
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : declared) {
+            if (!value.isTextual()) {
+                throw new AwsException("ValidationException",
+                        member + " names a value that is not a name", 400);
             }
+            values.add(value.textValue());
         }
         return values;
     }

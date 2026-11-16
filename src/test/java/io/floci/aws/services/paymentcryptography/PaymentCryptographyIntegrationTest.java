@@ -534,6 +534,41 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aReplicationRegionThatIsNotANameIsRefused() {
+        // The replication regions are names, so a request that names something else is
+        // refused rather than answered as if it had named no region at all.
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("CreateKey", """
+                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+                 "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                 "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
+                 "Exportable":true,"ReplicationRegions":[123]}""")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+
+        call("AddKeyReplicationRegions",
+                "{\"KeyIdentifier\":\"" + arn + "\",\"ReplicationRegions\":[null]}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+    }
+
+    @Test
+    void aReplicationRegionThatIsNotAListIsRefused() {
+        call("CreateKey", """
+                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+                 "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                 "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
+                 "Exportable":true,"ReplicationRegions":"us-west-2"}""")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+    }
+
+    @Test
     void anAliasIsCreatedAndListed() {
         String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
                 .extract().path("Key.KeyArn");

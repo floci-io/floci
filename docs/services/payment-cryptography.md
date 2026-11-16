@@ -200,7 +200,11 @@
   `GetDefaultKeyReplicationRegions`. A key created while the account has default Regions
   takes them unless it names its own, and says which it did. Taking the replica Regions
   away is how the replication is turned off for a key, so a key that replicates nowhere
-  is not a multi-region key and carries no type at all.
+  is not a multi-region key and carries no type at all. The Regions a request names have
+  to be Regions the service serves and names of Regions, and the Region of the primary is
+  not one to add or to take away, so a request that cannot be carried out is refused
+  rather than answered as if it had named no Region at all. A refused request leaves no
+  key behind.
 - **Not yet emulated:** the resource policy operations, the key usage operations, the key
   restore operation, the multi-party approval operations and the certificate signing
   request.
