@@ -1588,9 +1588,8 @@ class RdsServiceTest {
                 .getVpcSecurityGroupIds());
         assertEquals(List.of(), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
 
-        when(ec2Service.defaultSecurityGroupOf("us-east-1", rdsService.getDbInstance("mydb").getVpcId()))
-                .thenReturn(Optional.of(securityGroup("sg-default", "default", "vpc-default")));
-        assertEquals(List.of("sg-default"), rdsService.defaultVpcSecurityGroupIds("us-east-1", "mydb"));
+        vpcDefaultGroup("vpc-default", "sg-default");
+        assertEquals(List.of("sg-default"), rdsService.defaultVpcSecurityGroupIds("us-east-1", "mydb", null));
     }
 
     @Test
@@ -1662,6 +1661,74 @@ class RdsServiceTest {
                 .getErrorCode());
 
         assertEquals(List.of("sg-first"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void cloudFormationChecksAndDefaultsTheGroupsForTheVpcItsUpdateLeavesTheInstanceIn() {
+        instanceBesideAnotherVpc();
+
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> rdsService.requireVpcSecurityGroupsFit("us-east-1", "mydb", "app-subnets", List.of("sg-first")))
+                .getErrorCode());
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> rdsService.requireVpcSecurityGroupsFit("us-east-1", "mydb", null, List.of("sg-app")))
+                .getErrorCode());
+        rdsService.requireVpcSecurityGroupsFit("us-east-1", "mydb", "app-subnets", List.of("sg-app"));
+        assertEquals(List.of("sg-app-default"),
+                rdsService.defaultVpcSecurityGroupIds("us-east-1", "mydb", "app-subnets"));
+
+        assertEquals("default", rdsService.getDbInstance("mydb").getDbSubnetGroupName(), "neither moves the instance");
+    }
+
+    @Test
+    void aStandaloneInstanceThatNamesNoGroupsGetsItsVpcsDefaultGroupAndAClusterMemberIsOnlyShownOnIt() {
+        // A cluster member's groups are its cluster's, which Floci does not keep.
+        vpcDefaultGroup("vpc-default", "sg-default");
+        rdsService.createDbCluster("groups-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertEquals(List.of("sg-default"), createInstanceWithGroups(null, List.of()).getVpcSecurityGroupIds());
+        DbInstance member = createMember(rdsService, "member", "db.r5.large", "groups-cluster");
+        assertEquals(List.of(), member.getVpcSecurityGroupIds());
+        assertEquals(List.of("sg-default"), rdsService.defaultVpcSecurityGroupIds(member));
+    }
+
+    @Test
+    void anInstanceStoredWithoutGroupsIsOnItsVpcsDefaultGroupWhileThatVpcIsThere() {
+        vpcDefaultGroup("vpc-default", "sg-default");
+        when(ec2Service.defaultSecurityGroupOf("us-east-1", "vpc-gone"))
+                .thenThrow(new AwsException("InvalidVpcID.NotFound", "The vpc ID 'vpc-gone' does not exist", 400));
+        DbInstance stored = persistedInstance("stored", "000000000000", "password", 5432);
+
+        assertEquals(List.of(), rdsService.defaultVpcSecurityGroupIds(stored), "no VPC recorded");
+        stored.setVpcId("vpc-default");
+        assertEquals(List.of("sg-default"), rdsService.defaultVpcSecurityGroupIds(stored));
+        stored.setVpcId("vpc-gone");
+        assertEquals(List.of(), rdsService.defaultVpcSecurityGroupIds(stored));
+    }
+
+    @Test
+    void aReplicaInAnotherVpcGetsThatVpcsDefaultGroupAndOneInTheSourcesVpcItsGroups() {
+        instanceBesideAnotherVpc();
+        String source = "arn:aws:rds:us-east-1:123456789012:db:mydb";
+
+        assertEquals(List.of("sg-app-default"), rdsService.createDbInstanceReadReplica(
+                replicaRequest("app-replica", source, "app-subnets"), null).getVpcSecurityGroupIds());
+        assertEquals(List.of("sg-first"), rdsService.createDbInstanceReadReplica(
+                replicaRequest("default-replica", source, "default"), null).getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void aMoveToAnotherVpcWithoutGroupsPutsTheInstanceOnThatVpcsDefaultGroup() {
+        instanceBesideAnotherVpc();
+
+        assertEquals(List.of("sg-app-default"), rdsService.modifyDbInstance("mydb", null, null, "app-subnets", null)
+                .getVpcSecurityGroupIds());
+
+        // A subnet group of the VPC the instance is already in keeps its groups.
+        rdsService.modifyDbInstance("mydb", null, null, null, List.of("sg-app"));
+        assertEquals(List.of("sg-app"), rdsService.modifyDbInstance("mydb", null, null, "app-subnets", null)
+                .getVpcSecurityGroupIds());
     }
 
     @Test
@@ -11361,13 +11428,20 @@ class RdsServiceTest {
         }
     }
 
+    /** Makes {@code groupId} the default security group EC2 reports for {@code vpcId} in us-east-1. */
+    private void vpcDefaultGroup(String vpcId, String groupId) {
+        when(ec2Service.defaultSecurityGroupOf("us-east-1", vpcId))
+                .thenReturn(Optional.of(securityGroup(groupId, "default", vpcId)));
+    }
+
     /**
-     * Group sg-first in the default VPC, and beside it vpc-app with DB subnet group app-subnets and the
-     * groups sg-app and sg-app-second.
+     * Group sg-first in the default VPC, and beside it vpc-app with DB subnet group app-subnets, the
+     * groups sg-app and sg-app-second, and the default group sg-app-default.
      */
     private void anotherVpc() {
         securityGroupsIn("vpc-default", "sg-first");
         securityGroupsIn("vpc-app", "sg-app", "sg-app-second");
+        vpcDefaultGroup("vpc-app", "sg-app-default");
         List<String> subnetIds = List.of("subnet-app-a", "subnet-app-b");
         when(ec2Service.describeSubnets(eq("us-east-1"), eq(subnetIds), eq(Map.of()))).thenReturn(List.of(
                 subnet("subnet-app-a", "vpc-app", "us-east-1a"), subnet("subnet-app-b", "vpc-app", "us-east-1b")));
@@ -11828,8 +11902,13 @@ class RdsServiceTest {
     }
 
     private static ReadReplicaRequest replicaRequest(String id, String source) {
+        return replicaRequest(id, source, null);
+    }
+
+    /** A replica of {@code source} on DB subnet group {@code subnetGroup}, with nothing else named. */
+    private static ReadReplicaRequest replicaRequest(String id, String source, String subnetGroup) {
         return new ReadReplicaRequest(id, source, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, Map.of());
+                subnetGroup, null, null, null, null, null, Map.of());
     }
 
     @Test
@@ -11919,9 +11998,8 @@ class RdsServiceTest {
 
         // A subnet group goes with a source named by ARN; with a plain identifier AWS refuses it.
         AwsException subnetGroup = assertThrows(AwsException.class, () ->
-                rdsService.createDbInstanceReadReplica(new ReadReplicaRequest("third", "primary",
-                        null, null, null, null, null, null, null, "some-subnet-group", null, null,
-                        null, null, null, Map.of()), null));
+                rdsService.createDbInstanceReadReplica(replicaRequest("third", "primary", "some-subnet-group"),
+                        null));
         assertEquals("DBSubnetGroupNotAllowedFault", subnetGroup.getErrorCode());
     }
 
@@ -12882,8 +12960,7 @@ class RdsServiceTest {
     void proxyEndpointTagsRoundTripAndItDefaultsToTheVpcsDefaultSecurityGroup() {
         DbProxy proxy = proxyForEndpoints("app-proxy", "POSTGRESQL");
         // Picking the group out of the VPC is Ec2Service's job, covered in Ec2ServiceTest.
-        when(ec2Service.defaultSecurityGroupOf("us-east-1", proxy.getVpcId()))
-                .thenReturn(Optional.of(securityGroup("sg-vpc-default", "default", proxy.getVpcId())));
+        vpcDefaultGroup(proxy.getVpcId(), "sg-vpc-default");
 
         DbProxyEndpoint endpoint = rdsService.createDbProxyEndpoint("us-east-1", "app-proxy", "ep",
                 PROXY_SUBNET_IDS, List.of(), null, null, Map.of("env", "dev"));

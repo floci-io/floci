@@ -11,7 +11,8 @@ import java.util.Map;
 /**
  * The checks the RDS API makes on the VPC security group ids a request names, shared with DocumentDB,
  * which serves the same API: each id names a security group of the caller's account and Region, and
- * every group sits in the resource's VPC.
+ * every group sits in the resource's VPC. When a request names none, RDS puts a DB instance on its
+ * VPC's default security group.
  */
 public final class RdsSecurityGroups {
 
@@ -47,5 +48,23 @@ public final class RdsSecurityGroups {
                                 + vpcId + " and the EC2 security group is in " + groupVpcId, 400);
             }
         }
+    }
+
+    /** {@code groupIds}, or when they name no group, the default security group of {@code vpcId}. */
+    public static List<String> orVpcDefault(Ec2Service ec2Service, String region, List<String> groupIds,
+                                            String vpcId) {
+        return groupIds == null || groupIds.isEmpty() ? vpcDefault(ec2Service, region, vpcId) : groupIds;
+    }
+
+    /**
+     * The default security group of {@code vpcId}, or no group when there is no VPC or EC2 has no
+     * default group for it.
+     */
+    public static List<String> vpcDefault(Ec2Service ec2Service, String region, String vpcId) {
+        if (vpcId == null || vpcId.isBlank()) {
+            return List.of();
+        }
+        return ec2Service.defaultSecurityGroupOf(region, vpcId).map(group -> List.of(group.getGroupId()))
+                .orElse(List.of());
     }
 }

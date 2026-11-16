@@ -15,6 +15,7 @@ import software.amazon.awssdk.services.rds.model.DBInstance;
 import java.util.List;
 
 import static io.floci.aws.testing.CfnStackWaits.output;
+import static io.floci.aws.testing.Ec2Requests.defaultSecurityGroupId;
 import static io.floci.aws.testing.RdsRequests.vpcSecurityGroupIds;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -54,7 +55,8 @@ class CloudFormationRdsDbInstanceIntegrationTest {
         // As AWS's handler does, a template that drops the groups puts the instance on its VPC's default group.
         Stack cleared = stack.update(template(null, false, false), "UPDATE_COMPLETE");
         assertEquals(id, output(cleared, "DbId"));
-        assertEquals(List.of(defaultGroupOf(instance(id).dbSubnetGroup().vpcId())), vpcSecurityGroupIds(rds(), id));
+        assertEquals(List.of(defaultSecurityGroupId(stack.client(Ec2Client.builder()),
+                instance(id).dbSubnetGroup().vpcId())), vpcSecurityGroupIds(rds(), id));
     }
 
     @Test
@@ -118,12 +120,5 @@ class CloudFormationRdsDbInstanceIntegrationTest {
         return rds().describeDBInstances().dbInstances().stream()
                 .map(DBInstance::dbInstanceIdentifier)
                 .filter(id -> id.startsWith(stack.name() + "-db-")).toList();
-    }
-
-    private String defaultGroupOf(String vpcId) {
-        return stack.client(Ec2Client.builder()).describeSecurityGroups(request -> request.filters(
-                filter -> filter.name("vpc-id").values(vpcId),
-                filter -> filter.name("group-name").values("default")))
-                .securityGroups().getFirst().groupId();
     }
 }
