@@ -3123,9 +3123,9 @@ floci populates:
   CloudFormation for its stacks, stack sets and change sets, Lambda for its functions, their versions and aliases
   (the function's tags), event source mappings, web functions, their revisions and endpoints (the web function's
   tags), MicroVM images and network connectors, Glue for its schema registries and schemas and for the jobs,
-  crawlers, triggers, workflows, connections, databases, tables and other resources it tags, and Step Functions for
-  its state machines, their versions and executions (the state machine's tags) and activities. Tag keys differing
-  only in case are one condition key holding every value.
+  crawlers, triggers, workflows, connections, databases, tables and other resources it tags, Step Functions for its
+  state machines, their versions and executions (the state machine's tags) and activities, and CodeBuild for its
+  projects and report groups. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
