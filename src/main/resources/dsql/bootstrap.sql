@@ -18,8 +18,9 @@ ALTER DATABASE {{database}} SET default_transaction_isolation TO 'repeatable rea
 CREATE SCHEMA IF NOT EXISTS sys AUTHORIZATION {{owner}};
 GRANT USAGE ON SCHEMA sys TO PUBLIC;
 
--- On a server Floci shares between clusters ({{external}} is true), the NOLOGIN role
--- {{connect_role_literal}} holds CONNECT on the cluster's database, and each role recorded as the cluster's
+-- On a server Floci shares between clusters ({{external}} is true), PUBLIC may not connect to the
+-- cluster's database, which PostgreSQL lets every role do by default. The NOLOGIN role
+-- {{connect_role_literal}} holds CONNECT on it instead, and each role recorded as the cluster's
 -- is a member of it (see sys._record_backend_roles), with no ADMIN option: no client can take a
 -- recorded role's CONNECT away, and a membership does not keep DROP ROLE from dropping a role. Its
 -- name is outside the cluster's prefix, so no name a client gives maps onto it.
@@ -29,6 +30,7 @@ BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{connect_role_literal}}) THEN
             EXECUTE format('CREATE ROLE %I NOLOGIN', {{connect_role_literal}});
         END IF;
+        EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', current_database());
         EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), {{connect_role_literal}});
     END IF;
 END

@@ -71,7 +71,6 @@ class DsqlBootstrapExternalIntegrationTest {
         try (Connection connection = connect("postgres", "postgres"); Statement statement = connection.createStatement()) {
             statement.execute("CREATE ROLE " + owner + " NOLOGIN");
             statement.execute("CREATE DATABASE " + database + " OWNER " + owner);
-            statement.execute("REVOKE CONNECT ON DATABASE " + database + " FROM PUBLIC");
         }
     }
 
@@ -197,6 +196,34 @@ class DsqlBootstrapExternalIntegrationTest {
                 statement.execute("DROP TABLE planted_in_other");
                 statement.execute("DROP ROLE " + planted);
             }
+        }
+    }
+
+    @Test
+    void theBootstrapTakesConnectFromPublic() throws SQLException {
+        String database = "dsql_fresh";
+        String owner = "dsqlowner_fresh";
+        createClusterDatabase(database, owner);
+        try (Connection connection = connect("postgres", "postgres"); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE ROLE stranger LOGIN");
+        }
+        assertEquals(List.of("true"), query(database, "postgres",
+                "SELECT has_database_privilege('public', current_database(), 'CONNECT')::text"),
+                "a database PostgreSQL creates lets PUBLIC connect");
+        try (Connection stranger = connect(database, "stranger")) {
+            assertTrue(stranger.isValid(1));
+        }
+
+        try (Connection connection = connect(database, "postgres"); Statement statement = connection.createStatement()) {
+            statement.execute(DsqlBootstrap.render(database, owner, "dfresh_admin", "dsqlconnect_fresh", "dfresh_", true));
+        }
+
+        assertEquals(List.of("false"), query(database, "postgres",
+                "SELECT has_database_privilege('public', current_database(), 'CONNECT')::text"));
+        SQLException refused = assertThrows(SQLException.class, () -> connect(database, "stranger").close());
+        assertEquals("42501", refused.getSQLState(), refused.getMessage());
+        try (Connection admin = connect(database, "dfresh_admin")) {
+            assertTrue(admin.isValid(1), "the cluster's admin, a recorded role, still connects");
         }
     }
 

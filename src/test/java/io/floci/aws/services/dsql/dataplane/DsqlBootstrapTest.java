@@ -71,6 +71,12 @@ class DsqlBootstrapTest {
     }
 
     @Test
+    void externalRenderingTakesConnectFromPublic() {
+        assertTrue(external().contains("REVOKE CONNECT ON DATABASE %I FROM PUBLIC"));
+        assertTrue(docker().contains("IF false THEN\n        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '')"));
+    }
+
+    @Test
     void externalRenderingNamesTheClustersObjects() {
         String script = external();
         assertTrue(script.contains("GRANT CREATE ON DATABASE \"dsql_abc\" TO \"dabc_admin\""));
