@@ -3102,13 +3102,17 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public ClusterParameterGroup deleteClusterParameterGroup(String parameterGroupName) {
-        Optional<ClusterParameterGroup> groupOpt = parameterGroups.get(regionalKey(parameterGroupName));
-        if (groupOpt.isEmpty()) {
-            throw new AwsException("ClusterParameterGroupNotFound", "Cluster parameter group " + parameterGroupName + " not found", 404);
-        }
-        ClusterParameterGroup group = groupOpt.get();
-        parameterGroups.delete(regionalKey(parameterGroupName));
-        parameterGroups.flush();
+        // The read and the delete under the service's lock (mutate), which modifyClusterParameterGroup and
+        // resetClusterParameterGroup hold from their read to their write, so a delete can't land in between and be
+        // undone by their write; the event is emitted after it.
+        ClusterParameterGroup group = mutate(() -> {
+            ClusterParameterGroup found = parameterGroups.get(regionalKey(parameterGroupName))
+                    .orElseThrow(() -> new AwsException("ClusterParameterGroupNotFound",
+                            "Cluster parameter group " + parameterGroupName + " not found", 404));
+            parameterGroups.delete(regionalKey(parameterGroupName));
+            parameterGroups.flush();
+            return found;
+        });
         emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_DELETED, parameterGroupName,
                 "Cluster parameter group '" + parameterGroupName + "' was deleted at " + eventTime() + ".");
         return group;
@@ -3267,11 +3271,16 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public ClusterSubnetGroup deleteClusterSubnetGroup(String name) {
-        ClusterSubnetGroup group = subnetGroups.get(regionalKey(name))
-                .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault", "Cluster subnet group " + name + " not found", 400));
-        subnetGroups.delete(regionalKey(name));
-        subnetGroups.flush();
-        return group;
+        // The read and the delete under the service's lock (mutate), which modifyClusterSubnetGroup holds from its
+        // read to its write, so a delete can't land in between and be undone by that write.
+        return mutate(() -> {
+            ClusterSubnetGroup group = subnetGroups.get(regionalKey(name))
+                    .orElseThrow(() -> new AwsException("ClusterSubnetGroupNotFoundFault",
+                            "Cluster subnet group " + name + " not found", 400));
+            subnetGroups.delete(regionalKey(name));
+            subnetGroups.flush();
+            return group;
+        });
     }
 
     // ── Snapshot Copy Grant Operations ───────────────────────────────────────

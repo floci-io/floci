@@ -4206,7 +4206,7 @@ class RedshiftServiceTest {
         assertEquals(Set.of(regionalKey("racy")), groups.keys());
     }
 
-    /** {@code backend}'s reads and writes, served by a store a test can hold inside its next write. */
+    /** {@code backend}'s reads, writes and deletes, served by a store a test can hold inside its next write. */
     private static <V> ParkingStore<V> backedByParkingStore(AccountAwareStorageBackend<V> backend) {
         ParkingStore<V> store = new ParkingStore<>();
         when(backend.get(anyString())).thenAnswer(call -> store.get(call.getArgument(0)));
@@ -4214,7 +4214,41 @@ class RedshiftServiceTest {
             store.put(call.getArgument(0), call.getArgument(1));
             return null;
         }).when(backend).put(anyString(), any());
+        doAnswer(call -> {
+            store.delete(call.getArgument(0));
+            return null;
+        }).when(backend).delete(anyString());
         return store;
+    }
+
+    /**
+     * A delete of a subnet group that a modify has read and is writing back waits for that write, then deletes it:
+     * the group stays deleted rather than being put back by the modify.
+     */
+    @Test
+    void aDeleteOfASubnetGroupWaitsForItsModifyAndTheGroupStaysDeleted() throws Exception {
+        ParkingStore<ClusterSubnetGroup> groups = backedByParkingStore(subnetGroupBackend);
+        groups.put(regionalKey("racy"), new ClusterSubnetGroup("racy", "d", "vpc-1", List.of("subnet-1")));
+        groups.parkNextWrite();
+
+        assertOperationWaitsForParkedStore(groups, () -> service.modifyClusterSubnetGroup("racy", "changed", null),
+                () -> service.deleteClusterSubnetGroup("racy"));
+
+        assertEquals(Set.of(), groups.keys());
+    }
+
+    /** As above, for a cluster parameter group. */
+    @Test
+    void aDeleteOfAParameterGroupWaitsForItsModifyAndTheGroupStaysDeleted() throws Exception {
+        ParkingStore<ClusterParameterGroup> groups = backedByParkingStore(parameterGroupBackend);
+        groups.put(regionalKey("racy"), new ClusterParameterGroup("racy", "redshift-1.0", "d"));
+        groups.parkNextWrite();
+
+        assertOperationWaitsForParkedStore(groups, () -> service.modifyClusterParameterGroup("racy",
+                List.of(new Parameter("max_cursor_result_set_size", "1000"))),
+                () -> service.deleteClusterParameterGroup("racy"));
+
+        assertEquals(Set.of(), groups.keys());
     }
 
     /**
