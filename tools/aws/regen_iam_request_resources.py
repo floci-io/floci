@@ -175,7 +175,7 @@ resource its handler uses for a member left out (Athena's `primary` workgroup, E
 `default` cluster). No service says what an operation acts on.
 
 `MEASURED` holds what AWS checks where neither botocore nor the Service Reference says it, and nothing else. It
-and `FORWARDED` are the only parts of the file stated by hand, and an entry is admitted only with evidence from AWS
+is the only part of the file stated by hand, and an entry is admitted only with evidence from AWS
 itself (a policy probe against real AWS published in a Floci pull request, AWS's AccessDenied message recorded
 verbatim, or AWS's documentation saying it in so many words, quoted), for resource types the reference does not
 list for the action, giving what the rules do not already give, and linking to its evidence; the generator refuses
@@ -188,8 +188,8 @@ operation's type holds in the member named after the action's namespace and the 
 acts on (a Redshift snapshot's `KmsKeyId`: `kms` and `key/${KeyId}`), which the reader asks the type's service for
 and then the action's service to find, with `aws:ViaAWSService` and, where the Service Reference lists the
 namespace's `ViaService` key for the action, that key naming the operation's endpoint. Which operations do this,
-neither botocore nor the Service Reference says, so `FORWARDED` states it under `MEASURED`'s rules, its evidence
-cited and the action not one the reference lists for the operation, which a rule would read instead: a Redshift or
+neither botocore nor the Service Reference says, so `MEASURED` states it, its evidence cited and the action not
+one the reference lists for the operation, which a rule would read instead: a Redshift or
 Redshift Serverless restore asks KMS to decrypt with the snapshot's key. `forwardedActions` records what the
 reference gives each such action, the type it acts on, that type's ARN format and the `ViaService` key, which
 `--verify` checks against AWS.
@@ -320,10 +320,19 @@ READ_IN_HAND_BUILT["logs:PutDestination"] = (
 #      rule, a botocore bump or a reference update makes redundant is taken out rather than kept.
 #   4. Cited. Its evidence names where the measurement is, with at least one https:// link to it.
 #
+# An entry may instead name another action AWS checks the caller for, as the request the operation's service makes
+# as the caller (`{"action", "of"}`), on what botocore's record of the operation's type `of` holds in the member
+# named after the action's namespace and the variable of the type the action acts on; everything else is read: the
+# type and ARN format the reference gives the action, that member, the operation's endpoint prefix, and the
+# namespace's `ViaService` key where the reference lists it for the action. Rules 1 and 4 hold for it as for any
+# entry; for 2, the reference does not list the action among the operation's authorized actions, and for 3, the
+# action acts on one resource type with an ARN format, `of` is a type the operation's action acts on, and botocore's
+# record of it has the member (`check_forwarded`, `forwarded_actions`, `forwarded_for`).
+#
 # The generator enforces 2 to 4 (`measured_resources`); review enforces 1. Never add an entry to make a check pass,
 # to keep Floci's existing behaviour, or because a handler acts on a resource: find what AWS does first, or leave the
 # operation to the rules. Floci services never state what an operation acts on either (`StoredResourceArns` only
-# looks up what a service holds), so this table and `FORWARDED` are the whole of the hand-stated part of the file.
+# looks up what a service holds), so this table is the whole of the hand-stated part of the file.
 # ---------------------------------------------------------------------------------------------------------------------
 _SEND_TASK_EVIDENCE = (
     "real AWS probes in https://github.com/floci-io/floci/pull/7277 (boto3 against us-east-1 on 2026-11-02, a fresh "
@@ -333,6 +342,18 @@ _SEND_TASK_EVIDENCE = (
     "<stateMachineArn>' (https://github.com/aws/aws-emulator/blob/main/issues/things-that-do-not-work/"
     "20261109T171600Z-stepfunctions-step-functions-the-accessdeniedexception-for-states-sendtasksuccess-names.md); "
     "the Service Reference lists no resource type for the action, and the token is resolved by the service (find)")
+_SNAPSHOT_KEY_EVIDENCE = (
+    "the Redshift Management Guide, 'Sharing a snapshot' "
+    "(https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-snapshot-share-snapshot.html): 'When you provide "
+    "access to an encrypted snapshot, Redshift requires that the AWS KMS customer managed key used to create the "
+    "snapshot is shared with the account or accounts performing the restore. If the key isn't shared, attempting to "
+    "restore the snapshot results in an access-denied error', the key policy naming the restoring account and "
+    "allowing 'the kms:Decrypt action'; and 'Authorizing use of an AWS KMS customer managed key with Amazon Redshift "
+    "(Provisioned) and Amazon Redshift Serverless' "
+    "(https://docs.aws.amazon.com/redshift/latest/mgmt/authorizing-kms-customer-managed-key.html): 'To create and use "
+    "an Amazon Redshift provisioned cluster or an Amazon Redshift Serverless resource that is encrypted with a "
+    "customer managed key, a user must have permission to call the following operations on the customer managed key', "
+    "kms:Decrypt among them; the Service Reference lists no KMS action for either restore")
 MEASURED: dict[str, tuple[list[dict], str]] = {
     "dynamodb:ListTables": (
         [{"type": "table", "fill": {}}],
@@ -346,40 +367,8 @@ MEASURED: dict[str, tuple[list[dict], str]] = {
     **{f"states:{operation}": ([{"type": kind, "fill": {}, "find": ["taskToken"]} for kind in ("activity", "statemachine")],
                                _SEND_TASK_EVIDENCE)
        for operation in ("SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat")},
-}
-
-# ---------------------------------------------------------------------------------------------------------------------
-# FORWARDED: what an operation's service asks another service to do as the caller, where neither botocore nor the
-# Service Reference says it.
-#
-# Each entry names the action the service sends and `of`, the operation's resource type whose record holds the
-# resource that action acts on; everything else is read: the type and ARN format the reference gives the action, the
-# member of botocore's record of `of` named after the action's namespace and that format's variable, the operation's
-# endpoint prefix, and the namespace's `ViaService` key where the reference lists it for the action. An entry is
-# admitted only under `MEASURED`'s rule 1 (evidence from AWS) and when ALL of these hold, which the generator
-# enforces (`check_forwarded`, `forwarded_actions`, `forwarded_for`):
-#
-#   - Absent from the metadata. The reference does not list the action among the operation's authorized actions,
-#     which a rule would read instead.
-#   - Read. The action acts on one resource type with an ARN format, `of` is a type the operation's action acts on,
-#     and botocore's record of it has the member.
-#   - Cited. Its evidence names where AWS says it, with at least one https:// link to it.
-# ---------------------------------------------------------------------------------------------------------------------
-_SNAPSHOT_KEY_EVIDENCE = (
-    "the Redshift Management Guide, 'Sharing a snapshot' "
-    "(https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-snapshot-share-snapshot.html): 'When you provide "
-    "access to an encrypted snapshot, Redshift requires that the AWS KMS customer managed key used to create the "
-    "snapshot is shared with the account or accounts performing the restore. If the key isn't shared, attempting to "
-    "restore the snapshot results in an access-denied error', the key policy naming the restoring account and "
-    "allowing 'the kms:Decrypt action'; and 'Authorizing use of an AWS KMS customer managed key with Amazon Redshift "
-    "(Provisioned) and Amazon Redshift Serverless' "
-    "(https://docs.aws.amazon.com/redshift/latest/mgmt/authorizing-kms-customer-managed-key.html): 'To create and use "
-    "an Amazon Redshift provisioned cluster or an Amazon Redshift Serverless resource that is encrypted with a "
-    "customer managed key, a user must have permission to call the following operations on the customer managed key', "
-    "kms:Decrypt among them; the Service Reference lists no KMS action for either restore")
-FORWARDED: dict[str, tuple[list[dict], str]] = {
-    operation: ([{"action": "kms:Decrypt", "of": "snapshot"}], _SNAPSHOT_KEY_EVIDENCE)
-    for operation in ("redshift:RestoreFromClusterSnapshot", "redshift-serverless:RestoreFromSnapshot")
+    **{operation: ([{"action": "kms:Decrypt", "of": "snapshot"}], _SNAPSHOT_KEY_EVIDENCE)
+       for operation in ("redshift:RestoreFromClusterSnapshot", "redshift-serverless:RestoreFromSnapshot")},
 }
 
 _LATER ="not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
@@ -2194,7 +2183,7 @@ def ec2_query_members(operation: str, models: dict[str, dict], named: set[str]) 
 
 def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: dict[str, dict],
               known: dict[str, str] | None = None, forwarded: dict[str, dict] | None = None) -> dict:
-    """What the file says for one operation, `forwarded` being what the file records of each action `FORWARDED`
+    """What the file says for one operation, `forwarded` being what the file records of each action a `MEASURED` entry
     names."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
@@ -2210,7 +2199,9 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     resources = by_client(operation, models, lambda read: read_resources(operation, types, formats, read), formats)
     resources = with_documented_creation(resources, operation, types, formats, models)
     resources = with_made(resources, operation, formats)
-    if operation in MEASURED:
+    uses = MEASURED.get(operation, (None, ""))[0]
+    # An entry naming only another action AWS checks gives the operation no resources of its own.
+    if uses is not None and not (uses and all("action" in use for use in uses)):
         resources = measured_resources(operation, types, formats, resources)
     entry = {"action": upstream["action"], "types": types, "resources": resources}
     creates = creates_for(operation, types, formats, members)
@@ -2229,7 +2220,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                if member in named}
     if located:
         entry["located"] = located
-    if operation in FORWARDED:
+    if operation in measured_actions():
         entry["forwarded"] = forwarded_for(operation, types, models, forwarded or {})
     return entry
 
@@ -2238,7 +2229,8 @@ def measured_resources(operation: str, types: list[str], formats: dict[str, str]
     """The resources `MEASURED` gives the operation, refused unless its admission rules hold: its evidence links to
     the measurement, the Service Reference lists none of its types for the action, each has an ARN format, and the
     rules, which gave `derived`, do not already give them."""
-    resources, evidence = MEASURED[operation]
+    resources = [resource for resource in MEASURED[operation][0] if "action" not in resource]
+    evidence = MEASURED[operation][1]
     kinds = {kind for resource in resources for kind in _kinds(resource)}
     if "https://" not in evidence:
         raise ValueError(f"MEASURED gives {operation} with no link to the measurement of AWS it rests on")
@@ -2254,22 +2246,29 @@ def measured_resources(operation: str, types: list[str], formats: dict[str, str]
     return resources
 
 
+def measured_actions() -> dict[str, tuple[list[dict], str]]:
+    """The `MEASURED` entries naming another action AWS checks the caller for, by operation, with their evidence."""
+    return {operation: ([use for use in uses if "action" in use], evidence)
+            for operation, (uses, evidence) in MEASURED.items() if any("action" in use for use in uses)}
+
+
 def forwarded_actions(documents: list[dict]) -> dict[str, dict]:
-    """For each action `FORWARDED` names, what the Service Reference gives it: the one resource type it acts on, that
-    type's ARN format, and its namespace's `ViaService` condition key where the reference lists that for the action."""
+    """For each action a `MEASURED` entry names, what the Service Reference gives it: the one resource type it acts
+    on, that type's ARN format, and its namespace's `ViaService` condition key where the reference lists that for the
+    action."""
     by_name = {document["Name"]: document for document in documents}
     found: dict[str, dict] = {}
-    for action in sorted({use["action"] for uses, _ in FORWARDED.values() for use in uses}):
+    for action in sorted({use["action"] for uses, _ in measured_actions().values() for use in uses}):
         namespace, name = action.split(":", 1)
         document = by_name.get(namespace, {})
         listed = next((entry for entry in document.get("Actions", []) if entry["Name"] == name), None)
         if listed is None:
-            raise ValueError(f"FORWARDED names {action}, which the Service Reference does not list")
+            raise ValueError(f"MEASURED names {action}, which the Service Reference does not list")
         kinds = [resource["Name"] for resource in listed.get("Resources") or []]
         formats = arn_formats([document], {namespace}).get(namespace, {})
         if len(kinds) != 1 or kinds[0] not in formats \
                 or len(set(VARIABLE_RE.findall(formats[kinds[0]])) - KNOWN_VARIABLES) != 1:
-            raise ValueError(f"FORWARDED names {action}, which acts on {kinds}, not one resource type whose ARN format "
+            raise ValueError(f"MEASURED names {action}, which acts on {kinds}, not one resource type whose ARN format "
                              f"has one variable of its own")
         entry = {"type": kinds[0], "format": formats[kinds[0]]}
         if f"{namespace}:ViaService" in (listed.get("ActionConditionKeys") or []):
@@ -2286,14 +2285,15 @@ def authorized_by(documents: list[dict]) -> dict[str, set[str]]:
 
 
 def check_forwarded(authorized: dict[str, set[str]]) -> None:
-    """`FORWARDED`'s rules that do not need botocore: each entry links to its evidence, and names no action the
+    """The rules for a `MEASURED` entry naming another action that do not need botocore: it links to its evidence,
+    and names no action the
     Service Reference lists for its operation, which a rule would read instead."""
-    for operation, (uses, evidence) in sorted(FORWARDED.items()):
+    for operation, (uses, evidence) in sorted(measured_actions().items()):
         if "https://" not in evidence:
-            raise ValueError(f"FORWARDED gives {operation} with no link to the evidence of AWS it rests on")
+            raise ValueError(f"MEASURED gives {operation} with no link to the evidence of AWS it rests on")
         listed = sorted({use["action"] for use in uses} & authorized.get(operation, set()))
         if listed:
-            raise ValueError(f"FORWARDED gives {operation} {listed}, which the Service Reference lists for it: "
+            raise ValueError(f"MEASURED gives {operation} {listed}, which the Service Reference lists for it: "
                              f"a rule reads those, so take it out")
 
 
@@ -2311,26 +2311,26 @@ def record_member(models: dict[str, dict], kind: str, word: str) -> str | None:
 
 
 def forwarded_for(operation: str, types: list[str], models: dict[str, dict], actions: dict[str, dict]) -> list[dict]:
-    """What the operation's service asks another to do as the caller (`FORWARDED`): each action, on the resource
+    """What the operation's service asks another to do as the caller (`MEASURED`): each action, on the resource
     botocore's record of `of` holds in the member named after the action's namespace and the variable of the format
     of the type it acts on (`kms` and `${KeyId}`, a snapshot's `KmsKeyId`), sent from the operation's endpoint prefix."""
-    uses, _ = FORWARDED[operation]
+    uses, _ = measured_actions()[operation]
     prefixes = {model.get("metadata", {}).get("endpointPrefix") for model in models.values()}
     if len(prefixes) != 1 or None in prefixes:
-        raise ValueError(f"FORWARDED gives {operation}, whose clients have no one endpoint prefix")
+        raise ValueError(f"MEASURED gives {operation}, whose clients have no one endpoint prefix")
     endpoint = next(iter(prefixes))
     found = []
     for use in uses:
         action = actions.get(use["action"])
         if action is None:
-            raise ValueError(f"FORWARDED gives {operation} {use['action']}, for which the file records no type")
+            raise ValueError(f"MEASURED gives {operation} {use['action']}, for which the file records no type")
         if use["of"] not in types:
-            raise ValueError(f"FORWARDED gives {operation} {use['action']} on what a {use['of']} holds, no type its "
+            raise ValueError(f"MEASURED gives {operation} {use['action']} on what a {use['of']} holds, no type its "
                              f"action acts on")
         variable = next(iter(set(VARIABLE_RE.findall(action["format"])) - KNOWN_VARIABLES))
         member = record_member(models, use["of"], namespace_of(use["action"]) + variable)
         if member is None:
-            raise ValueError(f"FORWARDED gives {operation} {use['action']} on what a {use['of']} holds, which "
+            raise ValueError(f"MEASURED gives {operation} {use['action']} on what a {use['of']} holds, which "
                              f"botocore's record of it has no {namespace_of(use['action'])}{variable} member for")
         found.append({"action": use["action"], "of": use["of"], "member": member, "endpoint": endpoint})
     return found
@@ -3264,8 +3264,6 @@ def _check_overrides(covered: dict[str, dict]) -> None:
               if operation not in covered]
     stale += [f"MEASURED gives {operation}, which READ_IN_HAND_BUILT reads by the rules" for operation in MEASURED
               if operation in READ_IN_HAND_BUILT]
-    stale += [f"FORWARDED gives {operation}, which the file does not read" for operation in FORWARDED
-              if operation not in covered]
     stale += [f"READ_IN_HAND_BUILT names {operation}, outside HAND_BUILT" for operation in READ_IN_HAND_BUILT
               if namespace_of(operation) not in HAND_BUILT]
     for left, right in (("NAMESPACES", "HAND_BUILT"), ("NAMESPACES", "NOT_COVERED"), ("HAND_BUILT", "NOT_COVERED")):
@@ -3597,9 +3595,9 @@ def derive(document: dict, data: Path) -> list[str]:
     if document.get("mintedSuffixes") != suffixes:
         problems.append(f"the file gives {json.dumps(document.get('mintedSuffixes'))} a minted suffix, botocore's "
                         f"documentation gives {json.dumps(suffixes)}")
-    named = sorted({use["action"] for uses, _ in FORWARDED.values() for use in uses})
+    named = sorted({use["action"] for uses, _ in measured_actions().values() for use in uses})
     if sorted(document["forwardedActions"]) != named:
-        problems.append(f"the file records {sorted(document['forwardedActions'])} as forwarded actions, FORWARDED "
+        problems.append(f"the file records {sorted(document['forwardedActions'])} as forwarded actions, MEASURED "
                         f"names {named}")
     prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(document["namespaces"][namespace])),
                                                  load_examples(data, set(document["namespaces"][namespace])))
@@ -3630,7 +3628,8 @@ def verify_forwarded(vendored: dict, documents: list[dict]) -> list[str]:
     for operation, entry in vendored["operations"].items():
         listed = sorted({use["action"] for use in entry.get("forwarded", [])} & authorized.get(operation, set()))
         if listed:
-            untrue.append(f"AWS now lists {listed} for {operation}: a rule reads those, so FORWARDED should not give them")
+            untrue.append(f"AWS now lists {listed} for {operation}: a rule reads those, so MEASURED should not "
+                          f"give them")
     return untrue
 
 
