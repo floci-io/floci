@@ -19,6 +19,7 @@ import java.time.Duration;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class CloudFormationSesConfigurationSetIntegrationTest {
@@ -97,11 +98,20 @@ class CloudFormationSesConfigurationSetIntegrationTest {
     }
 
     @Test
-    void addingTheExistingGeneratedNameRollsBackAfterADependentResourceFails() {
+    void addingTheExistingGeneratedNameIsRefusedAndRollsBack() {
         String generated = createUnnamedConfigurationSet();
-        updateWithDependentFailure(generated);
+        String updatedTemplate = """
+                {
+                  "Resources": {
+                    "ConfigurationSet": {"Type": "AWS::SES::ConfigurationSet", "Properties": {"Name": "%s"}}
+                  },
+                  "Outputs": {"ConfigurationSetRef": {"Value": {"Ref": "ConfigurationSet"}}}
+                }
+                """.formatted(generated);
+        cfn.updateStack(request -> request.stackName(stackName).templateBody(updatedTemplate));
 
         Stack rolledBack = CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_ROLLBACK_COMPLETE");
+        assertTrue(CfnStackWaits.failedResourceReason(stackName).contains("custom-named resource requires"));
         assertEquals(generated, rolledBack.outputs().getFirst().outputValue());
         assertEquals(generated, configurationSets.get(generated, "us-east-1").getName());
     }
