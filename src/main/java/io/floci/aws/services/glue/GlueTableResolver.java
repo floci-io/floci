@@ -278,6 +278,7 @@ public final class GlueTableResolver {
         PartitionProjection.LocationTemplate template = locationTemplate(table);
         Map<String, Column> templatedKeys = templatedKeys(table, template);
         Map<String, Column> textColumns = readsDelimitedText(table) ? columnsByName(declared) : Map.of();
+        Map<String, Column> hiveKeys = hivePartitionKeys(table, template);
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < names.size(); i++) {
             if (i > 0) {
@@ -285,8 +286,10 @@ public final class GlueTableResolver {
             }
             String name = names.get(i);
             Column key = templatedKeys.get(name.toLowerCase(Locale.ROOT));
+            Column hiveKey = hiveKeys.get(name.toLowerCase(Locale.ROOT));
             Column text = textColumns.get(name.toLowerCase(Locale.ROOT));
-            String value = key != null ? partitionValue(template, key)
+            String value = key != null ? partitionValue(table, template, key)
+                    : hiveKey != null ? typedKey(table, hiveKey, quote(name))
                     : text != null ? typedText(quote(name), text.getType())
                     : quote(name);
             sb.append(value).append(" AS ").append(quote(name));
@@ -503,7 +506,7 @@ public final class GlueTableResolver {
     public static String pathFilter(Table table) {
         PartitionProjection.LocationTemplate template = locationTemplate(table);
         if (template == null) {
-            return null;
+            return hiveValueFilter(table);
         }
         List<String> terms = new ArrayList<>();
         terms.add("regexp_matches(" + quote(OBJECT_PATH_COLUMN) + ", '" + escape(template.regex()) + "')");
@@ -514,10 +517,47 @@ public final class GlueTableResolver {
                         + pathSegment(template, groups.get(occurrence)));
             }
             if (!"VARCHAR".equals(scalarType(key.getType()))) {
-                terms.add(partitionValue(template, key) + " IS NOT NULL");
+                terms.add(partitionValue(table, template, key) + " IS NOT NULL");
             }
         }
         return String.join(" AND ", terms);
+    }
+
+    /**
+     * The condition a projecting table in the default {@code column=value} layout keeps rows by: that each typed
+     * key's value parses as its type. Athena builds each path from values its projection generates, so a folder whose
+     * value the type cannot hold ({@code dt=latest} for a date) is one no query addresses. Null when no key is typed.
+     */
+    private static String hiveValueFilter(Table table) {
+        if (isIcebergTable(table) || !PartitionProjection.enabled(table)) {
+            return null;
+        }
+        List<String> terms = new ArrayList<>();
+        for (Column key : hivePartitionKeys(table, null).values()) {
+            if (!"VARCHAR".equals(scalarType(key.getType()))) {
+                terms.add(typedKey(table, key, quote(key.getName())) + " IS NOT NULL");
+            }
+        }
+        return terms.isEmpty() ? null : String.join(" AND ", terms);
+    }
+
+    /**
+     * The partition keys whose values DuckDB's Hive partitioning reads from {@code column=value} folders, by
+     * lowercased name: a Hive table's keys when it has no location template (an Iceberg table reads its own typed
+     * values). They are read as text and take their declared type, as Athena types a partition value, rather than the
+     * type DuckDB would guess from the folder name.
+     */
+    private static Map<String, Column> hivePartitionKeys(Table table, PartitionProjection.LocationTemplate template) {
+        Map<String, Column> keys = new LinkedHashMap<>();
+        if (template != null || isIcebergTable(table) || table.getPartitionKeys() == null) {
+            return keys;
+        }
+        for (Column key : table.getPartitionKeys()) {
+            if (key != null && key.getName() != null) {
+                keys.putIfAbsent(key.getName().toLowerCase(Locale.ROOT), key);
+            }
+        }
+        return keys;
     }
 
     /**
@@ -569,18 +609,104 @@ public final class GlueTableResolver {
      * is a {@code TRY_CAST} so that an object whose path holds no such value is dropped by
      * {@link #pathFilter} rather than failing the whole query.
      */
-    private static String partitionValue(PartitionProjection.LocationTemplate template, Column key) {
+    private static String partitionValue(Table table, PartitionProjection.LocationTemplate template, Column key) {
         String text = pathSegment(template, template.groups().get(key.getName().toLowerCase(Locale.ROOT)).getFirst());
+        return typedKey(table, key, text);
+    }
+
+    /**
+     * A projected partition key's text as its declared type. A {@code date} or {@code timestamp} key whose date
+     * projection sets a {@code projection.<key>.format} is parsed with that format, as Athena reads the value it
+     * generated ({@code dt=20261116} for {@code yyyyMMdd}); any other key, or a format {@link #strptimeFormat} cannot
+     * translate, is cast as {@link #typedText} casts it.
+     */
+    private static String typedKey(Table table, Column key, String text) {
+        String type = scalarType(key.getType());
+        String projection = "projection." + key.getName() + ".";
+        if (("DATE".equals(type) || "TIMESTAMP".equals(type)) && PartitionProjection.enabled(table)
+                && "date".equalsIgnoreCase(PartitionProjection.parameter(table, projection + "type"))) {
+            String format = strptimeFormat(PartitionProjection.parameter(table, projection + "format"));
+            if (format != null) {
+                return "TRY_CAST(try_strptime(" + text + ", '" + escape(format) + "') AS " + type + ")";
+            }
+        }
         return typedText(text, key.getType());
+    }
+
+    /**
+     * A Java date pattern ({@code projection.<key>.format}) as a {@code strptime} format: {@code yyyy}, {@code yy},
+     * {@code MM}, {@code dd}, {@code HH}, {@code mm} and {@code ss}, quoted and other literal text kept. Null for a
+     * blank pattern or one with any other pattern letter.
+     */
+    static String strptimeFormat(String pattern) {
+        if (pattern == null || pattern.isBlank()) {
+            return null;
+        }
+        StringBuilder format = new StringBuilder();
+        int i = 0;
+        while (i < pattern.length()) {
+            char c = pattern.charAt(i);
+            if (c == '\'') {
+                // A quoted section is literal text, '' inside it standing for one quote; '' outside is a quote too.
+                int j = i + 1;
+                if (j < pattern.length() && pattern.charAt(j) == '\'') {
+                    format.append('\'');
+                    i = j + 1;
+                    continue;
+                }
+                StringBuilder literal = new StringBuilder();
+                while (true) {
+                    if (j >= pattern.length()) {
+                        return null;
+                    }
+                    if (pattern.charAt(j) == '\'') {
+                        if (j + 1 < pattern.length() && pattern.charAt(j + 1) == '\'') {
+                            literal.append('\'');
+                            j += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    literal.append(pattern.charAt(j++));
+                }
+                format.append(literal.toString().replace("%", "%%"));
+                i = j + 1;
+                continue;
+            }
+            if (Character.isLetter(c)) {
+                int j = i;
+                while (j < pattern.length() && pattern.charAt(j) == c) {
+                    j++;
+                }
+                String specifier = switch (pattern.substring(i, j)) {
+                    case "yyyy" -> "%Y";
+                    case "yy" -> "%y";
+                    case "MM" -> "%m";
+                    case "dd" -> "%d";
+                    case "HH" -> "%H";
+                    case "mm" -> "%M";
+                    case "ss" -> "%S";
+                    default -> null;
+                };
+                if (specifier == null) {
+                    return null;
+                }
+                format.append(specifier);
+                i = j;
+                continue;
+            }
+            format.append(c == '%' ? "%%" : String.valueOf(c));
+            i++;
+        }
+        return format.toString();
     }
 
     /**
      * The DuckDB type a partition value is cast to: the scalar Hive types a partition key can take,
      * and {@code VARCHAR} for the string types and anything else.
      *
-     * <p>TODO: a {@code date} or {@code timestamp} key projected with a {@code projection.<key>.format}
-     * other than ISO ({@code yyyy-MM-dd}, {@code yyyy-MM-dd HH:mm:ss}) needs {@code strptime} with the
-     * Java pattern translated; until then its values do not parse and its objects are not read.
+     * <p>A {@code date} or {@code timestamp} key projected with a {@code projection.<key>.format} is parsed with that
+     * format instead ({@link #typedKey}).
      */
     private static String scalarType(String glueType) {
         String type = glueType == null ? "" : glueType.trim().toLowerCase(Locale.ROOT);
@@ -649,12 +775,15 @@ public final class GlueTableResolver {
      * also reads each row's object path, which {@link #buildProjection} takes its partition values
      * from. Hive partitioning is switched off for it: the template is the only source of those
      * values, and a {@code col=value} segment it happens to contain would otherwise be read as a
-     * second, untyped column. A table that declares CSV options (a delimiter, header lines) is read
-     * with them and its declared column names, as {@link #hasCsvOptions} explains.
+     * second, untyped column. Any other partitioned table reads its Hive partition values as text, which
+     * {@link #buildProjection} gives their declared types. A table that declares CSV options (a delimiter, header
+     * lines) is read with them and its declared column names, as {@link #hasCsvOptions} explains.
      */
     public static String readExpression(Table table, String readFn, String normalizedLocation) {
         boolean templated = locationTemplate(table) != null;
-        String options = templated ? ", hive_partitioning = false, filename = '" + escape(OBJECT_PATH_COLUMN) + "'" : "";
+        boolean partitioned = !hivePartitionKeys(table, null).isEmpty();
+        String options = templated ? ", hive_partitioning = false, filename = '" + escape(OBJECT_PATH_COLUMN) + "'"
+                : partitioned ? ", hive_types_autocast = false" : "";
         if ("read_csv_auto".equals(readFn) && hasCsvOptions(table)) {
             // Hive partition values stay text too, so they take their declared type like the data columns.
             return csvReadExpressionForInput(table, "'" + escape(normalizedLocation) + "/**'",
