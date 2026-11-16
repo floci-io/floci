@@ -35,10 +35,12 @@ class DsqlBootstrapExternalIntegrationTest {
     private static final String OWNER = "dsqlowner_abc";
     private static final String ADMIN = "dabc_admin";
     private static final String PREFIX = "dabc_";
+    private static final String CONNECT = "dsqlconnect_abc";
     private static final String OTHER_DATABASE = "dsql_xyz";
     private static final String OTHER_OWNER = "dsqlowner_xyz";
     private static final String OTHER_ADMIN = "dxyz_admin";
     private static final String OTHER_PREFIX = "dxyz_";
+    private static final String OTHER_CONNECT = "dsqlconnect_xyz";
     private static final String ARN = "arn:aws:iam::123456789012:role/app";
 
     private ExternalPostgresServer server;
@@ -53,14 +55,15 @@ class DsqlBootstrapExternalIntegrationTest {
 
         createClusterDatabase(DATABASE, OWNER);
         createClusterDatabase(OTHER_DATABASE, OTHER_OWNER);
-        String script = DsqlBootstrap.render(DATABASE, OWNER, ADMIN, PREFIX, true);
+        String script = DsqlBootstrap.render(DATABASE, OWNER, ADMIN, CONNECT, PREFIX, true);
         for (int run = 0; run < 2; run++) {
             try (Connection connection = connect(DATABASE, "postgres"); Statement statement = connection.createStatement()) {
                 statement.execute(script);
             }
         }
         try (Connection connection = connect(OTHER_DATABASE, "postgres"); Statement statement = connection.createStatement()) {
-            statement.execute(DsqlBootstrap.render(OTHER_DATABASE, OTHER_OWNER, OTHER_ADMIN, OTHER_PREFIX, true));
+            statement.execute(DsqlBootstrap.render(OTHER_DATABASE, OTHER_OWNER, OTHER_ADMIN, OTHER_CONNECT,
+                    OTHER_PREFIX, true));
         }
     }
 
@@ -93,6 +96,7 @@ class DsqlBootstrapExternalIntegrationTest {
         assertEquals(PREFIX + "c", recorded.get("c"));
         assertEquals(ADMIN, recorded.get("admin"));
         assertEquals(OWNER, recorded.get(OWNER));
+        assertEquals(CONNECT, recorded.get(CONNECT), "the role holding the cluster's CONNECT is recorded");
         assertTrue(hasConnect(PREFIX + "c"), "a recorded role may connect to its cluster's database");
 
         List<String> visible = query(ADMIN, "SELECT rolname FROM sys.roles ORDER BY rolname");
@@ -147,7 +151,7 @@ class DsqlBootstrapExternalIntegrationTest {
             // A role recorded before the prefix was required is forgotten, and loses its CONNECT.
             statement.execute("INSERT INTO sys.backend_roles SELECT oid, rolname, rolname FROM pg_roles WHERE rolname = '"
                     + PREFIX + "x'");
-            statement.execute("GRANT CONNECT ON DATABASE " + OTHER_DATABASE + " TO " + PREFIX + "x");
+            statement.execute("GRANT " + OTHER_CONNECT + " TO " + PREFIX + "x");
             statement.execute("CALL sys._record_backend_roles()");
             assertFalse(backendRoles(OTHER_DATABASE).containsValue(PREFIX + "x"));
             assertEquals(List.of("false"), query(OTHER_DATABASE, "postgres",
@@ -186,15 +190,45 @@ class DsqlBootstrapExternalIntegrationTest {
                 statement.execute("CALL sys.drop_roles(ARRAY['" + PREFIX + "own']::text[], false)");
             }
             try (Connection superuser = connect(DATABASE, "postgres"); Statement statement = superuser.createStatement()) {
-                // Undoes what a recording of the planted role would have done, so the role can go.
+                // Undoes what a recording of the planted role would have done.
                 statement.execute("DELETE FROM sys.backend_roles WHERE backend_name = '" + planted + "'");
-                statement.execute("REVOKE CONNECT ON DATABASE " + DATABASE + " FROM " + planted);
             }
             try (Connection other = connect(OTHER_DATABASE, OTHER_ADMIN); Statement statement = other.createStatement()) {
                 statement.execute("DROP TABLE planted_in_other");
                 statement.execute("DROP ROLE " + planted);
             }
         }
+    }
+
+    @Test
+    void noRoleOfTheClusterCanTakeAwayARecordedRolesConnect() throws SQLException {
+        try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+            statement.execute("CALL sys.run_role_ddl($$CREATE ROLE " + PREFIX + "held WITH LOGIN NOINHERIT$$)");
+        }
+        try {
+            assertTrue(hasConnect(PREFIX + "held"), "a NOINHERIT role connects through its membership all the same");
+            try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+                // The admin holds the ADMIN option on the role it created, and none on the connect role.
+                SQLException revoke = assertThrows(SQLException.class,
+                        () -> statement.execute("REVOKE " + CONNECT + " FROM " + PREFIX + "held"));
+                assertEquals("42501", revoke.getSQLState(), revoke.getMessage());
+                statement.execute("REVOKE CONNECT ON DATABASE " + DATABASE + " FROM " + PREFIX + "held");
+                SQLException release = assertThrows(SQLException.class,
+                        () -> statement.execute("CALL sys._release_backend_roles(ARRAY['" + PREFIX + "held'])"));
+                assertEquals("42883", release.getSQLState(), release.getMessage());
+            }
+            assertTrue(hasConnect(PREFIX + "held"));
+            try (Connection held = connect(DATABASE, PREFIX + "held"); Statement statement = held.createStatement()) {
+                statement.execute("SELECT 1");
+            }
+            assertEquals(List.of("false"), query("postgres", "SELECT pg_has_role('" + ADMIN + "', '" + CONNECT
+                    + "', 'MEMBER WITH ADMIN OPTION')::text"), "the cluster's admin cannot grant the connect role");
+        } finally {
+            try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+                statement.execute("CALL sys.drop_roles(ARRAY['" + PREFIX + "held']::text[], false)");
+            }
+        }
+        assertFalse(backendRoles().containsKey("held"));
     }
 
     @Test

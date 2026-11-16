@@ -3,23 +3,24 @@ package io.floci.aws.services.dsql.dataplane;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DsqlBootstrapTest {
 
     private static String docker() {
-        return DsqlBootstrap.render("postgres", "dbowner", "admin", "", false);
+        return DsqlBootstrap.render("postgres", "dbowner", "admin", "", "", false);
     }
 
     private static String external() {
-        return DsqlBootstrap.render("dsql_abc", "dsqlowner_abc", "dabc_admin", "dabc_", true);
+        return DsqlBootstrap.render("dsql_abc", "dsqlowner_abc", "dabc_admin", "dsqlconnect_abc", "dabc_", true);
     }
 
     @Test
     void noRenderingLeavesAPlaceholderBehind() {
         assertFalse(docker().contains("{{"));
         assertFalse(external().contains("{{"));
-        assertFalse(DsqlBootstrap.render("My-Db", "o\"w", "it's", "p'x_", true).contains("{{"));
+        assertFalse(DsqlBootstrap.render("My-Db", "o\"w", "it's", "c'n", "p'x_", true).contains("{{"));
     }
 
     @Test
@@ -51,6 +52,22 @@ class DsqlBootstrapTest {
         assertTrue(script.contains("IF true THEN"));
         assertTrue(script.contains("NOT true OR"));
         assertTrue(script.contains("rolname = 'dsqlowner_abc'"));
+        assertTrue(script.contains("rolname = 'dsqlconnect_abc'"));
+        assertTrue(script.contains("GRANT %I TO %I WITH INHERIT TRUE, SET FALSE"));
+    }
+
+    @Test
+    void externalRenderingNeedsAConnectRoleOutsideThePrefix() {
+        assertThrows(IllegalArgumentException.class,
+                () -> DsqlBootstrap.render("dsql_abc", "dsqlowner_abc", "dabc_admin", "", "dabc_", true));
+        assertThrows(IllegalArgumentException.class,
+                () -> DsqlBootstrap.render("dsql_abc", "dsqlowner_abc", "dabc_admin", "dabc_connect", "dabc_", true));
+    }
+
+    @Test
+    void noClientCallableProcedureRevokesARolesConnect() {
+        assertFalse(external().contains("_release_backend_roles"));
+        assertFalse(external().contains("REVOKE CONNECT ON DATABASE %I FROM %I"));
     }
 
     @Test
@@ -64,13 +81,14 @@ class DsqlBootstrapTest {
 
     @Test
     void everyIdentifierIsQuotedAndLiteralsEscaped() {
-        String script = DsqlBootstrap.render("My-Db", "o\"w", "it's", "p'x_", true);
+        String script = DsqlBootstrap.render("My-Db", "o\"w", "it's", "c'n", "p'x_", true);
         assertTrue(script.contains("GRANT CREATE ON DATABASE \"My-Db\" TO \"it's\""));
         assertTrue(script.contains("AUTHORIZATION \"o\"\"w\""));
         assertTrue(script.contains("rolname = 'it''s'"));
         assertTrue(script.contains("rolname = 'o\"w'"));
         assertTrue(script.contains("prefix constant text := 'p''x_';"));
-        assertTrue(DsqlBootstrap.render("user", "table", "select", "", false)
+        assertTrue(script.contains("rolname = 'c''n'"));
+        assertTrue(DsqlBootstrap.render("user", "table", "select", "", "", false)
                 .contains("GRANT CREATE ON DATABASE \"user\" TO \"select\""));
     }
 }

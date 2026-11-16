@@ -18,6 +18,22 @@ ALTER DATABASE {{database}} SET default_transaction_isolation TO 'repeatable rea
 CREATE SCHEMA IF NOT EXISTS sys AUTHORIZATION {{owner}};
 GRANT USAGE ON SCHEMA sys TO PUBLIC;
 
+-- On a server Floci shares between clusters ({{external}} is true), the NOLOGIN role
+-- {{connect_role_literal}} holds CONNECT on the cluster's database, and each role recorded as the cluster's
+-- is a member of it (see sys._record_backend_roles), with no ADMIN option: no client can take a
+-- recorded role's CONNECT away, and a membership does not keep DROP ROLE from dropping a role. Its
+-- name is outside the cluster's prefix, so no name a client gives maps onto it.
+DO $$
+BEGIN
+    IF {{external}} THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{connect_role_literal}}) THEN
+            EXECUTE format('CREATE ROLE %I NOLOGIN', {{connect_role_literal}});
+        END IF;
+        EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), {{connect_role_literal}});
+    END IF;
+END
+$$;
+
 -- ── Identifiers: a UUID as 26 characters of lowercase base32 ──────────────────
 
 CREATE OR REPLACE FUNCTION sys.uuid_to_base32_str(u uuid) RETURNS text
@@ -110,7 +126,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 -- a recorded role holds the ADMIN option on, which PostgreSQL gives a role's creator. On a server
 -- Floci shares between clusters ({{external}} is true) each backend name is the client's name after
 -- the prefix {{role_prefix}}, and only a role with that prefix is recorded through the ADMIN option;
--- in a cluster's own container the prefix is empty. Deleting the cluster drops what is recorded here.
+-- in a cluster's own container the prefix is empty. On a shared server the role holding the cluster's
+-- CONNECT, {{connect_role_literal}}, is recorded too, like the owner, and like it is no client's role.
+-- Deleting the cluster drops what is recorded here.
 CREATE TABLE IF NOT EXISTS sys.backend_roles (
     role_oid oid PRIMARY KEY,
     backend_name name NOT NULL,
@@ -147,8 +165,10 @@ $$;
 -- or one this cluster's admin or recorded roles granted: a role another cluster's admin creates under
 -- this cluster's prefix and grants to this cluster's roles is not taken for this cluster's. A recorded
 -- role that is no longer one of them, or no longer exists, is forgotten; a renamed one is followed. On a
--- shared server each role recorded may connect to the cluster's database, which PUBLIC may not, and a
--- role forgotten no longer may.
+-- shared server each role recorded, but the owner and {{connect_role_literal}} itself, is made a member of
+-- {{connect_role_literal}}, so it may connect to the cluster's database, and a role forgotten is no longer
+-- one. The memberships are granted by this procedure's owner, so the cluster's roles hold no ADMIN
+-- option on {{connect_role_literal}} and cannot revoke them.
 CREATE OR REPLACE PROCEDURE sys._record_backend_roles()
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -170,13 +190,17 @@ BEGIN
                         OR m.grantor IN (SELECT b.role_oid FROM sys.backend_roles b))))
     )
     SELECT coalesce(array_agg(a.oid), '{}') INTO cluster_roles FROM pg_authid a
-    WHERE (a.oid IN (SELECT oid FROM owned) OR a.rolname = {{owner_literal}}) AND NOT a.rolsuper;
+    WHERE (a.oid IN (SELECT oid FROM owned) OR a.rolname = {{owner_literal}}
+           OR ({{external}} AND a.rolname = {{connect_role_literal}}))
+      AND NOT a.rolsuper;
 
     FOR entry IN SELECT b.role_oid, a.rolname FROM sys.backend_roles b LEFT JOIN pg_authid a ON a.oid = b.role_oid
                  WHERE NOT (b.role_oid = ANY (cluster_roles)) LOOP
         DELETE FROM sys.backend_roles WHERE role_oid = entry.role_oid;
-        IF {{external}} AND entry.rolname IS NOT NULL THEN
-            EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), entry.rolname);
+        IF {{external}} AND entry.rolname IS NOT NULL
+           AND EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_authid g ON g.oid = m.roleid
+                       WHERE g.rolname = {{connect_role_literal}} AND m.member = entry.role_oid) THEN
+            EXECUTE format('REVOKE %I FROM %I', {{connect_role_literal}}, entry.rolname);
         END IF;
     END LOOP;
     UPDATE sys.backend_roles b SET backend_name = a.rolname, logical_name = sys._strip_role_prefix(a.rolname)
@@ -186,33 +210,23 @@ BEGIN
                    AND NOT EXISTS (SELECT 1 FROM sys.backend_roles b WHERE b.role_oid = a.oid)
                  ORDER BY a.oid LOOP
         INSERT INTO sys.backend_roles VALUES (entry.oid, entry.rolname, sys._strip_role_prefix(entry.rolname));
-        IF {{external}} THEN
-            EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), entry.rolname);
-        END IF;
     END LOOP;
-END
-$$;
-
--- On a shared server, the roles about to be dropped give up connecting to the cluster's database, a
--- privilege that would otherwise keep DROP ROLE from dropping them. Only roles of this cluster on which
--- the caller holds the ADMIN option, as DROP ROLE requires; a DROP ROLE that fails takes this back.
-CREATE OR REPLACE PROCEDURE sys._release_backend_roles(role_names text[])
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-DECLARE
-    released name;
-BEGIN
     IF {{external}} THEN
-        FOR released IN SELECT a.rolname FROM pg_authid a JOIN sys.backend_roles b ON b.role_oid = a.oid
-                        WHERE a.rolname = ANY (role_names)
-                          AND pg_has_role(session_user, a.oid, 'MEMBER WITH ADMIN OPTION') LOOP
-            EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), released);
+        -- WITH INHERIT TRUE, so a role created NOINHERIT holds the CONNECT all the same.
+        FOR entry IN SELECT a.rolname FROM sys.backend_roles b JOIN pg_authid a ON a.oid = b.role_oid
+                     WHERE a.rolname NOT IN ({{owner_literal}}, {{connect_role_literal}})
+                       AND NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_authid g ON g.oid = m.roleid
+                                       WHERE g.rolname = {{connect_role_literal}} AND m.member = a.oid
+                                         AND m.inherit_option)
+                     ORDER BY a.oid LOOP
+            EXECUTE format('GRANT %I TO %I WITH INHERIT TRUE, SET FALSE', {{connect_role_literal}}, entry.rolname);
         END LOOP;
     END IF;
 END
 $$;
 
--- On a shared server, only the cluster's roles, by the names its clients know, and not its owner,
--- which is Floci's own.
+-- On a shared server, only the cluster's roles, by the names its clients know, and not its owner or
+-- the role holding its CONNECT, which are Floci's own.
 CREATE OR REPLACE VIEW sys.roles AS
 SELECT sys._logical_role(rolname)::name AS rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,
        rolcanlogin, rolreplication, rolconnlimit, '********'::text AS rolpassword, rolvaliduntil, rolbypassrls,
@@ -221,7 +235,7 @@ FROM pg_authid
 LEFT JOIN pg_db_role_setting s ON pg_authid.oid = s.setrole AND s.setdatabase = 0::oid
 WHERE pg_authid.rolname !~~ 'pg_%'
   AND (NOT {{external}} OR (pg_authid.oid IN (SELECT role_oid FROM sys.backend_roles)
-                            AND pg_authid.rolname <> {{owner_literal}}));
+                            AND pg_authid.rolname NOT IN ({{owner_literal}}, {{connect_role_literal}})));
 GRANT SELECT ON sys.roles TO PUBLIC;
 
 -- ── A transaction's limits: one DDL statement, no DDL with DML, 3,000 rows ────
@@ -729,7 +743,6 @@ BEGIN
                 DETAIL = trust;
         END IF;
     END LOOP;
-    CALL sys._release_backend_roles(role_names);
     EXECUTE format('DROP ROLE %s%s', CASE WHEN missing_ok THEN 'IF EXISTS ' ELSE '' END,
                    (SELECT string_agg(quote_ident(name), ', ') FROM unnest(role_names) AS name));
     CALL sys._record_backend_roles();
@@ -753,6 +766,7 @@ BEGIN
 END
 $$;
 
--- The admin, the owner and the roles they made, recorded as the cluster's.
+-- The admin, the owner, the role holding the cluster's CONNECT and the roles the admin made, recorded
+-- as the cluster's.
 CALL sys._record_backend_roles();
 RESET session_replication_role;
