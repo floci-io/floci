@@ -507,7 +507,8 @@ public class IotMqttBrokerService implements Resettable {
                 admit(endpoint, null, sourceIp, sourcePort, connectNanos);
                 return;
             }
-            LOG.debugv("IoT MQTT client {0} refused by custom authorizer {1}: {2}", clientId, authorizerName,
+            LOG.debugv("IoT MQTT client {0} refused by custom authorizer {1}: {2}", clientId,
+                    authorizerName == null ? "(default)" : authorizerName,
                     decision.failed() ? decision.cause().getMessage() : "iot:Connect is not allowed");
             if (endpoint.protocolVersion() != 5) {
                 endpoint.close();
