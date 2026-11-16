@@ -396,6 +396,50 @@ class PaymentCryptographyServiceTest {
                 "the key is in the store again after it was deleted");
     }
 
+
+    /** The cross-account grant the reference's own page shows. */
+    private static final String CROSS_ACCOUNT_POLICY = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+             "Principal":{"AWS":"arn:aws:iam::111122223333:role/ExampleRole"},
+             "Action":["payment-cryptography:GenerateCardValidationData",
+              "payment-cryptography:VerifyCardValidationData"],"Resource":"*"}]}""";
+
+    /** The policy that grants different permissions to different accounts. */
+    private static final String TWO_ACCOUNTS_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+             {"Sid":"Allow3DSACSToGenerate","Effect":"Allow",
+              "Principal":{"AWS":"arn:aws:iam::111122223333:role/3dsAcsRole"},
+              "Action":["payment-cryptography:GenerateCardValidationData"],"Resource":"*"},
+             {"Sid":"AllowPaymentAuthToVerify","Effect":"Allow",
+              "Principal":{"AWS":"arn:aws:iam::444455556666:role/PaymentAuthRole"},
+              "Action":["payment-cryptography:VerifyAuthRequestCryptogram"],"Resource":"*"}]}""";
+
+    @Test
+    void thePolicyOfTheReferenceIsAttachedAndReadBack() {
+        // The reference's own page shows these two policies, and the service keeps the
+        // document as it was given.
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        assertEquals(CROSS_ACCOUNT_POLICY,
+                service.putResourcePolicy(key, CROSS_ACCOUNT_POLICY).getResourcePolicy());
+        assertEquals(CROSS_ACCOUNT_POLICY,
+                service.resourcePolicy(key).getResourcePolicy());
+        assertEquals(TWO_ACCOUNTS_POLICY,
+                service.putResourcePolicy(key, TWO_ACCOUNTS_POLICY).getResourcePolicy());
+    }
+
+    @Test
+    void aPolicyThatNamesTheKeyItIsOnIsAttached() {
+        // The resource may be the key's own ARN as well as every resource.
+        PaymentCryptographyKey key = createKey("us-east-1");
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"" + key.getArn() + "\"}]}";
+
+        assertEquals(policy, service.putResourcePolicy(key, policy).getResourcePolicy());
+    }
+
     @Test
     void aResourcePolicyIsPutReadAndDeleted() {
         PaymentCryptographyKey key = createKey("us-east-1");

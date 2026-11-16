@@ -673,6 +673,46 @@ class PaymentCryptographyIntegrationTest {
                     .body("__type", containsString("ResourceNotFoundException"));
     }
 
+
+    @Test
+    void thePolicyOfTheReferenceIsAttachedAndReadBack() {
+        // The reference's own page shows this policy, and the service keeps the document as
+        // it was given.
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\","
+                + "\"payment-cryptography:VerifyCardValidationData\"],\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", """
+                {"ResourceArn":"%s","Policy":"%s"}""".formatted(arn, policy.replace("\"", "\\\"")))
+                .then().statusCode(200)
+                    .body("ResourceArn", equalTo(arn))
+                    .body("Policy", equalTo(policy));
+
+        call("GetResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyThatNamesAnotherKeyIsRefused() {
+        // The reference says the resource of a policy must be every resource or the ARN of
+        // the key the policy is on.
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"arn:aws:payment-cryptography:us-east-1:000000000000:"
+                + "key/1234abcd1234abcd\"}]}";
+
+        call("PutResourcePolicy", """
+                {"ResourceArn":"%s","Policy":"%s"}""".formatted(arn, policy.replace("\"", "\\\"")))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
     @Test
     void aPolicyThatGrantsPublicAccessIsRefused() {
         String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)

@@ -237,7 +237,10 @@
   key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
   a policy is answered with `ResourceNotFoundException` by both reads. A policy that names
   every principal without a condition that bounds it is refused with
-  `PublicPolicyException`, as the reference refuses one.
+  `PublicPolicyException`, as the reference refuses one. The resource a policy names must be
+  every resource or the ARN of the key the policy is on, so a policy that names another key
+  is refused. The reference attaches a policy to the primary key alone, so a replica takes
+  none; that follows the multi-region replication, which is not in this branch yet.
 - **Not yet emulated:** the multi-region replication operations, the key usage
   operations, the key restore operation, the multi-party approval operations and the
   certificate signing request.

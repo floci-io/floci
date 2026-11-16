@@ -308,6 +308,10 @@ public class PaymentCryptographyJsonHandler {
             throw new AwsException("PublicPolicyException",
                     "The resource policy grants public access to the key", 400);
         }
+        if (!namesTheKey(document, key.getArn())) {
+            throw new AwsException("ValidationException",
+                    "The resource policy names a resource that is not the key it is attached to", 400);
+        }
         PaymentCryptographyKey updated = service.putResourcePolicy(key, policy);
         return policyAnswer(updated);
     }
@@ -327,6 +331,50 @@ public class PaymentCryptographyJsonHandler {
 
     private static Map<String, Object> policyAnswer(PaymentCryptographyKey key) {
         return Map.of("ResourceArn", key.getArn(), "Policy", key.getResourcePolicy());
+    }
+
+
+    /**
+     * Whether every statement of a policy names the key the policy is attached to.
+     *
+     * <p>The reference says the resource of a policy must be every resource or the ARN of
+     * the key the policy is on, so a policy that names another key is refused.
+     *
+     * @param policy the policy document
+     * @param arn the ARN of the key the policy is attached to
+     * @return whether the policy names the key
+     */
+    private static boolean namesTheKey(JsonNode policy, String arn) {
+        JsonNode statements = policy.path("Statement");
+        if (statements.isObject()) {
+            return statementNamesTheKey(statements, arn);
+        }
+        if (!statements.isArray()) {
+            return false;
+        }
+        for (JsonNode statement : statements) {
+            if (!statementNamesTheKey(statement, arn)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether a statement names the key, either alone or in a list of resources. */
+    private static boolean statementNamesTheKey(JsonNode statement, String arn) {
+        JsonNode resource = statement.path("Resource");
+        if (resource.isTextual()) {
+            return "*".equals(resource.asText()) || arn.equals(resource.asText());
+        }
+        if (resource.isArray()) {
+            for (JsonNode entry : resource) {
+                if (!"*".equals(entry.asText()) && !arn.equals(entry.asText())) {
+                    return false;
+                }
+            }
+            return resource.size() > 0;
+        }
+        return false;
     }
 
     /**

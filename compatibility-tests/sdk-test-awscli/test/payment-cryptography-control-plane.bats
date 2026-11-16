@@ -75,20 +75,48 @@ create_key() {
     KEY_ARN=$(create_key AES_256)
     [ -n "$KEY_ARN" ]
 
+    # The cross-account grant the reference's own page shows.
+    local policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:role/ExampleRole"},"Action":["payment-cryptography:GenerateCardValidationData","payment-cryptography:VerifyCardValidationData"],"Resource":"*"}]}'
+
     run aws_cmd payment-cryptography put-resource-policy \
         --resource-arn "$KEY_ARN" \
-        --policy '{"Version":"2012-10-17","Statement":[]}'
+        --policy "$policy"
     assert_success
+    [ "$(json_get "$output" '.Policy')" = "$policy" ]
 
     run aws_cmd payment-cryptography get-resource-policy --resource-arn "$KEY_ARN"
     assert_success
-    [ "$(json_get "$output" '.Policy')" = '{"Version":"2012-10-17","Statement":[]}' ]
+    [ "$(json_get "$output" '.Policy')" = "$policy" ]
 
     run aws_cmd payment-cryptography delete-resource-policy --resource-arn "$KEY_ARN"
     assert_success
 
     run aws_cmd payment-cryptography get-resource-policy --resource-arn "$KEY_ARN"
     assert_failure
+}
+
+@test "Payment Cryptography control plane: a policy that grants public access is refused" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography put-resource-policy \
+        --resource-arn "$KEY_ARN" \
+        --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["payment-cryptography:EncryptData"],"Resource":"*"}]}'
+    assert_failure
+    [[ "$output" == *"PublicPolicyException"* ]]
+}
+
+@test "Payment Cryptography control plane: a policy that names another key is refused" {
+    # The reference says the resource of a policy must be every resource or the ARN of the
+    # key the policy is on.
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography put-resource-policy \
+        --resource-arn "$KEY_ARN" \
+        --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:role/ExampleRole"},"Action":["payment-cryptography:GenerateCardValidationData"],"Resource":"arn:aws:payment-cryptography:us-east-1:000000000000:key/1234abcd1234abcd"}]}'
+    assert_failure
+    [[ "$output" == *"ValidationException"* ]]
 }
 
 @test "Payment Cryptography control plane: a key pair is created with the usage its derived keys have" {
