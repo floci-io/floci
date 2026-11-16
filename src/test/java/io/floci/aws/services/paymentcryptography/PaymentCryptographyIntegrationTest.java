@@ -536,7 +536,8 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void aReplicationRegionThatIsNotANameIsRefused() {
         // The replication regions are names, so a request that names something else is
-        // refused rather than answered as if it had named no region at all.
+        // refused rather than answered as if it had named no region at all. The shape check
+        // settles that the member is a list of names, so the refusal is the model's own.
         String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
                 .extract().path("Key.KeyArn");
 
