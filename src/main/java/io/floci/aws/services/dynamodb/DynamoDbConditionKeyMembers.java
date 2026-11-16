@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.VendoredResources;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -48,6 +49,24 @@ final class DynamoDbConditionKeyMembers {
             }
         }
         return values;
+    }
+
+    /**
+     * Every element of the list that holds {@code member} under {@code key}'s recorded paths
+     * ({@code Statements.*.Statement} yields each {@code Statements} element), malformed ones included
+     * so the caller can still refuse them.
+     */
+    static List<JsonNode> listElements(String operation, String key, String member, JsonNode body) {
+        List<JsonNode> lists = new ArrayList<>();
+        for (JsonNode path : TABLE.path("members").path(operation).path(key)) {
+            String[] steps = path.asText().split("\\.");
+            if (steps.length > 2 && member.equals(steps[steps.length - 1]) && "*".equals(steps[steps.length - 2])) {
+                collect(body, Arrays.copyOf(steps, steps.length - 2), 0, lists);
+            }
+        }
+        List<JsonNode> elements = new ArrayList<>();
+        lists.stream().filter(JsonNode::isArray).forEach(list -> list.forEach(elements::add));
+        return elements;
     }
 
     static JsonNode itemBody(String operation, String prefix, JsonNode body) {
