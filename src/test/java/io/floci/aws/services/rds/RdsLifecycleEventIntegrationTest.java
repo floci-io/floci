@@ -2,11 +2,16 @@ package io.floci.aws.services.rds;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.EventRuleQueue;
 import io.floci.aws.testing.RdsMockProfile;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.RdsException;
 
 import java.time.Instant;
@@ -24,60 +29,72 @@ class RdsLifecycleEventIntegrationTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
     @Test
     void standaloneStopAndStartEmitNativeEventsAndRejectedCallsDoNot() throws Exception {
-        try (RdsLifecycleEventFixture fixture = capture("111122223333", Region.US_WEST_2)) {
-            String id = fixture.name;
-            String arn = fixture.rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres")
+        String account = "111122223333";
+        Region region = Region.US_WEST_2;
+        String id = "rds-events-" + Long.toUnsignedString(System.nanoTime(), 36);
+        try (RdsClient rds = AwsTestClients.create(RdsClient.builder(), account, region);
+             EventRuleQueue queue = EventRuleQueue.route(account, region.id(), id, "{\"source\":[\"aws.rds\"]}")) {
+            String arn = rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres")
                     .masterUsername("admin").masterUserPassword("password123")
                     .dbInstanceClass("db.t3.micro").allocatedStorage(5)).dbInstance().dbInstanceArn();
             try {
-                assertThrows(RdsException.class, () -> fixture.rds.startDBInstance(r -> r.dbInstanceIdentifier(id)));
-                assertTrue(fixture.receive().isEmpty());
-                assertEquals("stopping", fixture.rds.stopDBInstance(r -> r.dbInstanceIdentifier(id))
+                assertThrows(RdsException.class, () -> rds.startDBInstance(r -> r.dbInstanceIdentifier(id)));
+                assertTrue(queue.drain().isEmpty());
+                assertEquals("stopping", rds.stopDBInstance(r -> r.dbInstanceIdentifier(id))
                         .dbInstance().dbInstanceStatus());
-                assertEquals("starting", fixture.rds.startDBInstance(r -> r.dbInstanceIdentifier(id))
+                assertEquals("starting", rds.startDBInstance(r -> r.dbInstanceIdentifier(id))
                         .dbInstance().dbInstanceStatus());
-                List<JsonNode> events = fixture.receive();
+                List<JsonNode> events = queue.drain();
                 assertEquals(2, events.size());
-                assertEvent(events.get(0), fixture, arn, id, false, false);
-                assertEvent(events.get(1), fixture, arn, id, false, true);
-                assertTrue(fixture.receive().isEmpty());
+                assertEvent(events.get(0), account, region, arn, id, false, false);
+                assertEvent(events.get(1), account, region, arn, id, false, true);
+                assertTrue(queue.drain().isEmpty());
             } finally {
-                fixture.rds.deleteDBInstance(r -> r.dbInstanceIdentifier(id).skipFinalSnapshot(true));
+                rds.deleteDBInstance(r -> r.dbInstanceIdentifier(id).skipFinalSnapshot(true));
             }
         }
     }
 
     @Test
     void clusterTransitionsNotifyTheClusterAndItsMemberInTheirOwnScope() throws Exception {
-        try (RdsLifecycleEventFixture fixture = capture("444455556666", Region.CN_NORTH_1);
-             RdsLifecycleEventFixture foreignAccount = capture("777788889999", Region.CN_NORTH_1);
-             RdsLifecycleEventFixture foreignRegion = capture("444455556666", Region.CN_NORTHWEST_1)) {
-            String cluster = fixture.name;
-            String member = cluster + "-member";
-            String clusterArn = fixture.rds.createDBCluster(r -> r.dbClusterIdentifier(cluster)
+        String account = "444455556666";
+        Region region = Region.CN_NORTH_1;
+        String cluster = "rds-events-" + Long.toUnsignedString(System.nanoTime(), 36);
+        String member = cluster + "-member";
+        String pattern = "{\"source\":[\"aws.rds\"]}";
+        try (RdsClient rds = AwsTestClients.create(RdsClient.builder(), account, region);
+             EventRuleQueue queue = EventRuleQueue.route(account, region.id(), cluster, pattern);
+             EventRuleQueue foreignAccount = EventRuleQueue.route("777788889999", region.id(), cluster, pattern);
+             EventRuleQueue foreignRegion = EventRuleQueue.route(account, Region.CN_NORTHWEST_1.id(), cluster, pattern)) {
+            String clusterArn = rds.createDBCluster(r -> r.dbClusterIdentifier(cluster)
                     .engine("aurora-postgresql").masterUsername("admin").masterUserPassword("password123"))
                     .dbCluster().dbClusterArn();
-            String memberArn = fixture.rds.createDBInstance(r -> r.dbInstanceIdentifier(member)
+            String memberArn = rds.createDBInstance(r -> r.dbInstanceIdentifier(member)
                     .dbClusterIdentifier(cluster).engine("aurora-postgresql").dbInstanceClass("db.r6g.large"))
                     .dbInstance().dbInstanceArn();
             try {
-                fixture.rds.stopDBCluster(r -> r.dbClusterIdentifier(cluster));
-                fixture.rds.startDBCluster(r -> r.dbClusterIdentifier(cluster));
-                List<JsonNode> events = fixture.receive();
+                rds.stopDBCluster(r -> r.dbClusterIdentifier(cluster));
+                rds.startDBCluster(r -> r.dbClusterIdentifier(cluster));
+                List<JsonNode> events = queue.drain();
                 assertEquals(4, events.size());
                 for (boolean started : List.of(false, true)) {
                     String instanceEvent = started ? "RDS-EVENT-0088" : "RDS-EVENT-0087";
                     String clusterEvent = started ? "RDS-EVENT-0151" : "RDS-EVENT-0150";
-                    assertEvent(find(events, instanceEvent), fixture, memberArn, member, false, started);
-                    assertEvent(find(events, clusterEvent), fixture, clusterArn, cluster, true, started);
+                    assertEvent(find(events, instanceEvent), account, region, memberArn, member, false, started);
+                    assertEvent(find(events, clusterEvent), account, region, clusterArn, cluster, true, started);
                 }
-                assertTrue(foreignAccount.receive().isEmpty());
-                assertTrue(foreignRegion.receive().isEmpty());
+                assertTrue(foreignAccount.drain().isEmpty());
+                assertTrue(foreignRegion.drain().isEmpty());
             } finally {
-                fixture.rds.deleteDBInstance(r -> r.dbInstanceIdentifier(member).skipFinalSnapshot(true));
-                fixture.rds.deleteDBCluster(r -> r.dbClusterIdentifier(cluster).skipFinalSnapshot(true));
+                rds.deleteDBInstance(r -> r.dbInstanceIdentifier(member).skipFinalSnapshot(true));
+                rds.deleteDBCluster(r -> r.dbClusterIdentifier(cluster).skipFinalSnapshot(true));
             }
         }
     }
@@ -89,27 +106,24 @@ class RdsLifecycleEventIntegrationTest {
                 {"source":["aws.rds"],"detail-type":["RDS DB Cluster Event"],
                  "detail":{"SourceType":["CLUSTER"]}}
                 """;
-        try (RdsLifecycleEventFixture fixture = new RdsLifecycleEventFixture(
-                "222233334444", Region.EU_WEST_2, name, pattern)) {
-            String arn = fixture.rds.createDBCluster(r -> r.dbClusterIdentifier(name)
+        String account = "222233334444";
+        Region region = Region.EU_WEST_2;
+        try (RdsClient rds = AwsTestClients.create(RdsClient.builder(), account, region);
+             EventRuleQueue queue = EventRuleQueue.route(account, region.id(), name, pattern)) {
+            String arn = rds.createDBCluster(r -> r.dbClusterIdentifier(name)
                     .engine("aurora-postgresql").masterUsername("admin").masterUserPassword("password123"))
                     .dbCluster().dbClusterArn();
             try {
-                fixture.rds.stopDBCluster(r -> r.dbClusterIdentifier(name));
-                fixture.rds.startDBCluster(r -> r.dbClusterIdentifier(name));
-                List<JsonNode> events = fixture.receive();
+                rds.stopDBCluster(r -> r.dbClusterIdentifier(name));
+                rds.startDBCluster(r -> r.dbClusterIdentifier(name));
+                List<JsonNode> events = queue.drain();
                 assertEquals(2, events.size());
-                assertEvent(find(events, "RDS-EVENT-0150"), fixture, arn, name, true, false);
-                assertEvent(find(events, "RDS-EVENT-0151"), fixture, arn, name, true, true);
+                assertEvent(find(events, "RDS-EVENT-0150"), account, region, arn, name, true, false);
+                assertEvent(find(events, "RDS-EVENT-0151"), account, region, arn, name, true, true);
             } finally {
-                fixture.rds.deleteDBCluster(r -> r.dbClusterIdentifier(name).skipFinalSnapshot(true));
+                rds.deleteDBCluster(r -> r.dbClusterIdentifier(name).skipFinalSnapshot(true));
             }
         }
-    }
-
-    private RdsLifecycleEventFixture capture(String account, Region region) {
-        String name = "rds-events-" + Long.toUnsignedString(System.nanoTime(), 36);
-        return new RdsLifecycleEventFixture(account, region, name, "{\"source\":[\"aws.rds\"]}");
     }
 
     private JsonNode find(List<JsonNode> events, String eventId) {
@@ -117,13 +131,13 @@ class RdsLifecycleEventIntegrationTest {
                 .findFirst().orElseThrow();
     }
 
-    private void assertEvent(JsonNode event, RdsLifecycleEventFixture fixture, String arn, String id,
+    private void assertEvent(JsonNode event, String account, Region region, String arn, String id,
                              boolean cluster, boolean started) {
         assertEquals("aws.rds", event.path("source").asText());
         assertEquals(cluster ? "RDS DB Cluster Event" : "RDS DB Instance Event",
                 event.path("detail-type").asText());
-        assertEquals(fixture.account, event.path("account").asText());
-        assertEquals(fixture.region.id(), event.path("region").asText());
+        assertEquals(account, event.path("account").asText());
+        assertEquals(region.id(), event.path("region").asText());
         assertEquals(mapper.valueToTree(List.of(arn)), event.path("resources"));
         JsonNode detail = event.path("detail");
         assertEquals(mapper.valueToTree(List.of("notification")), detail.path("EventCategories"));
