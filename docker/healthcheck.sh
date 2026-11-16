@@ -1,6 +1,18 @@
 #!/bin/bash
 # Container health probe. Bash only, because ubi9-micro has no curl.
-exec 3<>/dev/tcp/127.0.0.1/4566 || exit 1
+# Probe the configured listener. Wildcard binds are reached over loopback.
+host=${QUARKUS_HTTP_HOST:-127.0.0.1}
+case "$host" in
+    0.0.0.0) host=127.0.0.1 ;;
+    ::|\[::\]) host=::1 ;;
+esac
+port=${QUARKUS_HTTP_PORT:-${FLOCI_PORT:-4566}}
+# Floci TLS serves HTTP and HTTPS on its public multiplexed port. Its private
+# Quarkus HTTP backend requires a PROXY preface, so do not probe that directly.
+if [[ ${FLOCI_TLS_ENABLED,,} == true ]]; then
+    port=${FLOCI_PORT:-4566}
+fi
+exec 3<>"/dev/tcp/$host/$port" || exit 1
 printf 'GET /_floci/init HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3
 IFS= read -r -d '' response <&3
 [[ $response == "HTTP/1."?" 200"* ]] || exit 1
