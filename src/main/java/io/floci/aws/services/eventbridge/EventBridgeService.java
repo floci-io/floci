@@ -656,9 +656,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             Target.KinesisParameters kinesisParameters = target.getKinesisParameters();
             if (kinesisParameters != null) {
                 String path = kinesisParameters.partitionKeyPath();
-                if (path == null || path.codePointCount(0, path.length()) > 256) {
+                if (path == null || path.isEmpty() || path.codePointCount(0, path.length()) > 256) {
                     throw SmithyValidationErrors.validationException("Value at 'targets." + (i + 1)
-                            + ".member.kinesisParameters.partitionKeyPath' must be present and at most 256 characters");
+                            + ".member.kinesisParameters.partitionKeyPath' must be non-empty and at most 256 characters");
                 }
             }
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;

@@ -136,6 +136,19 @@ class EventBridgeKinesisTargetIntegrationTest {
     }
 
     @Test
+    void emptyPartitionKeyPathIsRejectedBeforeReplacingTheExistingTarget() {
+        Target original = Target.builder().id("stream").arn(streamArn).build();
+        assertEquals(0, events.putTargets(request -> request.rule(rule).targets(original)).failedEntryCount());
+
+        EventBridgeException error = assertThrows(EventBridgeException.class,
+                () -> events.putTargets(request -> request.rule(rule).targets(original.toBuilder()
+                        .kinesisParameters(parameters -> parameters.partitionKeyPath(""))
+                        .build())));
+        assertEquals("ValidationException", error.awsErrorDetails().errorCode());
+        assertEquals(List.of(original), events.listTargetsByRule(request -> request.rule(rule)).targets());
+    }
+
+    @Test
     void targetArnAccountSelectsTheDestinationStream() {
         String destinationAccount = "725018800077";
         try (KinesisClient destination = AwsTestClients.create(KinesisClient.builder(),
