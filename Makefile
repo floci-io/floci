@@ -612,7 +612,7 @@ REQUEST_CONDITION_KEYS_PATHS := src/main/resources/aws/request-condition-keys.js
 	tools/aws/regen_request_condition_keys.py tools/aws/test_regen_request_condition_keys.py \
 	tools/aws/regen_dynamodb_condition_keys.py tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
 DOCUMENTED_ROUTES_PATHS := src/main/resources/aws/rest-routes.json tools/aws/regen_rest_routes.py \
-	tools/aws/test_regen_rest_routes.py
+	tools/aws/test_regen_rest_routes.py tools/aws/regen_partitions.py tools/aws/regen_query_services.py
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py
