@@ -1659,6 +1659,18 @@ class PaymentCryptographyServiceTest {
             "arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha";
 
     @Test
+    void theTeamOfTheReferenceIsAssociated() {
+        // The reference associates a team with the import of a root public key
+        // certificate, and the model names that operation.
+        PaymentCryptographyMpaTeamAssociation association = service.associateMpaTeam("us-east-1",
+                "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", MPA_TEAM);
+
+        assertEquals("IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", association.getAction());
+        assertEquals(MPA_TEAM, association.getMpaTeamArn());
+        assertEquals("ACTIVE", association.getAssociationState());
+    }
+
+    @Test
     void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
         PaymentCryptographyMpaTeamAssociation association = service.associateMpaTeam("us-east-1",
                 "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", MPA_TEAM);

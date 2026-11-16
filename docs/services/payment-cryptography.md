@@ -93,6 +93,19 @@
 - **The members a request may name that the service does not read:** `ImportKey`,
   `AssociateMpaTeam` and `DisassociateMpaTeam` take `RequesterComment`, and the service
   reads none of it.
+- **The Multi-Party Approval team of a protected operation:** a protected operation has one
+  team, so a second association replaces the first. The association answers with the
+  operation, the team and the state of the association, and removing it answers with the
+  association as it was, its state now `DELETE_PENDING`. An operation with no team is
+  refused as the resource the reference cannot find. The team's ARN is kept as the request
+  names it: the emulator has no Multi-Party Approval service to check it against. The
+  requester's comment is read by nobody, so no approval session is recorded.
+- **The approval session itself is not made:** the reference holds the import of a root
+  certificate pending until the team approves it, and answers with a key whose state is
+  `CREATE_IN_PROGRESS` and whose `MpaStatus` carries the session. The emulator has no
+  Multi-Party Approval service to ask, so the import is not held pending and the key is
+  imported at once. The protected operation is the one the reference names, the import of
+  a root public key certificate.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
   that names none removes the key the alias names and leaves the alias. `CreateAlias`
   refuses an alias without a key, as the reference does, though its model requires
