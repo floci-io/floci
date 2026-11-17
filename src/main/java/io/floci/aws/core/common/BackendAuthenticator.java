@@ -27,6 +27,13 @@ public final class BackendAuthenticator {
     private static final int NONCE_BYTES = 18;
     /** PostgreSQL stores 4096; a server asking for far more would only make Floci burn CPU. */
     static final int MAX_ITERATIONS = 1_000_000;
+    /**
+     * The largest server-first or server-final SCRAM message read, in bytes. PostgreSQL's are under
+     * 200; the limit keeps a peer from making Floci copy and split megabytes before it logs in.
+     */
+    static final int MAX_SCRAM_MESSAGE = 4096;
+    /** The largest decoded salt taken, in bytes. PostgreSQL's are 16. */
+    static final int MAX_SALT_BYTES = 1024;
 
     private final String user;
     private final String password;
@@ -175,7 +182,7 @@ public final class BackendAuthenticator {
         if (clientFirstBare == null || serverSignature != null) {
             throw new IOException("unexpected SASL continue from the backend");
         }
-        String serverFirst = new String(body, 4, body.length - 4, StandardCharsets.UTF_8);
+        String serverFirst = scramMessage(body);
         String nonce = null;
         byte[] salt = null;
         Integer iterations = null;
@@ -190,7 +197,7 @@ public final class BackendAuthenticator {
                     nonce = attribute.substring(2);
                 } else if (attribute.startsWith("s=")) {
                     requireFirst(salt);
-                    salt = Base64.getDecoder().decode(attribute.substring(2));
+                    salt = decodeSalt(attribute.substring(2));
                 } else if (attribute.startsWith("i=")) {
                     requireFirst(iterations);
                     iterations = Integer.parseInt(attribute.substring(2));
@@ -235,6 +242,30 @@ public final class BackendAuthenticator {
         }
     }
 
+    /** The SCRAM message of a SASL continue or final, refused when larger than {@link #MAX_SCRAM_MESSAGE}. */
+    private static String scramMessage(byte[] body) throws IOException {
+        int length = body.length - 4;
+        if (length > MAX_SCRAM_MESSAGE) {
+            throw new IOException("backend SCRAM message is " + length + " bytes, more than " + MAX_SCRAM_MESSAGE);
+        }
+        return new String(body, 4, length, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * The salt, refused when longer than {@link #MAX_SALT_BYTES}: by its encoded length before it
+     * is decoded, then exactly, as padding lets two lengths share one encoded length.
+     */
+    private static byte[] decodeSalt(String encoded) throws IOException {
+        if (encoded.length() > (MAX_SALT_BYTES + 2) / 3 * 4) {
+            throw new IOException("backend SCRAM salt is longer than " + MAX_SALT_BYTES + " bytes");
+        }
+        byte[] salt = Base64.getDecoder().decode(encoded);
+        if (salt.length > MAX_SALT_BYTES) {
+            throw new IOException("backend SCRAM salt is longer than " + MAX_SALT_BYTES + " bytes");
+        }
+        return salt;
+    }
+
     /** A server-first attribute given twice makes the message malformed. */
     private static void requireFirst(Object earlier) throws IOException {
         if (earlier != null) {
@@ -243,7 +274,7 @@ public final class BackendAuthenticator {
     }
 
     private void saslFinal(byte[] body) throws IOException {
-        String serverFinal = new String(body, 4, body.length - 4, StandardCharsets.UTF_8);
+        String serverFinal = scramMessage(body);
         if (scramVerified) {
             throw new IOException("unexpected SASL final from the backend");
         }

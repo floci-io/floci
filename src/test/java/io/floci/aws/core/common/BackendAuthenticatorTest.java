@@ -8,6 +8,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Base64;
 import java.util.HexFormat;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -171,6 +172,57 @@ class BackendAuthenticatorTest {
         authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
 
         assertTrue(authenticator.answer(auth(11, text(SERVER_FIRST + ",x=future"))).isPresent());
+    }
+
+    @Test
+    void anOversizedServerFirstMessageIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        String padded = SERVER_FIRST + ",x=" + "a".repeat(BackendAuthenticator.MAX_SCRAM_MESSAGE);
+
+        IOException refused = assertThrows(IOException.class, () -> authenticator.answer(auth(11, text(padded))));
+        assertEquals("backend SCRAM message is " + padded.length() + " bytes, more than 4096", refused.getMessage());
+    }
+
+    @Test
+    void aServerFirstMessageAtTheLimitIsAnswered() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        String prefix = SERVER_FIRST + ",x=";
+        String padded = prefix + "a".repeat(BackendAuthenticator.MAX_SCRAM_MESSAGE - prefix.length());
+
+        assertTrue(authenticator.answer(auth(11, text(padded))).isPresent());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {BackendAuthenticator.MAX_SALT_BYTES + 1, BackendAuthenticator.MAX_SALT_BYTES * 2})
+    void anOversizedSaltIsRefused(int bytes) throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        String salt = Base64.getEncoder().encodeToString(new byte[bytes]);
+
+        IOException refused = assertThrows(IOException.class,
+                () -> authenticator.answer(auth(11, text("r=" + NONCE + "x,s=" + salt + ",i=4096"))));
+        assertEquals("backend SCRAM salt is longer than 1024 bytes", refused.getMessage());
+    }
+
+    @Test
+    void aSaltAtTheLimitIsTaken() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        String salt = Base64.getEncoder().encodeToString(new byte[BackendAuthenticator.MAX_SALT_BYTES]);
+
+        assertTrue(authenticator.answer(auth(11, text("r=" + NONCE + "x,s=" + salt + ",i=1"))).isPresent());
+    }
+
+    @Test
+    void anOversizedServerFinalMessageIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        authenticator.answer(auth(11, text(SERVER_FIRST)));
+
+        assertThrows(IOException.class, () -> authenticator.answer(auth(12,
+                text(SERVER_FINAL + "a".repeat(BackendAuthenticator.MAX_SCRAM_MESSAGE)))));
     }
 
     @Test
