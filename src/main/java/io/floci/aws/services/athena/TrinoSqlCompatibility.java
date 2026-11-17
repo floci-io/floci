@@ -31,6 +31,9 @@ import java.util.regex.Pattern;
  *   <li>a multi-argument {@code UNNEST} source, which DuckDB's one-argument {@code unnest} rejects, into a
  *       lateral subquery holding one {@code unnest} per array (see {@link #multiArgumentUnnest}).</li>
  * </ul>
+ *
+ * <p>It also reads a query string's statement, by the same lexical rules, for
+ * {@code StartQueryExecution}: where it ends ({@link #holdsSeveralStatements} and {@link #recordedForm}).
  */
 final class TrinoSqlCompatibility {
 
@@ -98,6 +101,83 @@ final class TrinoSqlCompatibility {
             i = close + 1;
         }
         return out.toString();
+    }
+
+    // ---- the statement a query string holds ----
+
+    /**
+     * Whether {@code sql} holds more than one statement: anything but whitespace on both sides of a
+     * semicolon, a comment included. Athena (engine v3) rejects such a query at submission, so
+     * {@code SELECT 1; -- done} fails as {@code SELECT 1; SELECT 2} does, while {@code SELECT 1;;} and
+     * {@code ;SELECT 1} run. A semicolon in a literal, a quoted identifier (backticks included, as in
+     * Hive DDL) or a comment separates nothing. Athena reads Hive DDL by the same rules here, so a
+     * semicolon after a Hive {@code \'} escape in a literal separates statements on Athena too.
+     *
+     * <p>Trino ends a block comment at its first {@code *}{@code /}, but DuckDB, which runs the statement,
+     * nests them. A query is taken for several statements when either reading finds a second one, so text
+     * DuckDB would run as a second statement cannot pass for a comment or a literal here. Athena rejects such a
+     * query too, as a syntax error.
+     */
+    static boolean holdsSeveralStatements(String sql) {
+        return sql != null && (bounds(sql, false).several() || bounds(sql, true).several());
+    }
+
+    /**
+     * {@code sql} as Athena (engine v3) records, returns and runs it: without the whitespace and semicolons
+     * around it. {@code SELECT 1 ;\n} and {@code ;SELECT 1} become {@code SELECT 1}, for DDL and DML as for
+     * queries. A comment at either end stays, as does a semicolon in a literal. A query holding nothing else
+     * is returned as given.
+     */
+    static String recordedForm(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        StatementBounds bounds = bounds(sql, false);
+        return bounds.start() >= 0 ? sql.substring(bounds.start(), bounds.end()) : sql;
+    }
+
+    /**
+     * Where the statement of a query string lies. {@code start} is its first character that is neither
+     * whitespace nor a semicolon, -1 when there is none, and {@code end} is just past its last such token: a
+     * trailing comment included, the line break that ends a line comment not. {@code several} is whether such
+     * a token follows a semicolon that follows one. With {@code nestedComments}, block comments are read as
+     * DuckDB reads them (see {@link #skipLiteralOrComment(String, int, boolean)}).
+     */
+    private record StatementBounds(int start, int end, boolean several) {
+    }
+
+    private static StatementBounds bounds(String sql, boolean nestedComments) {
+        int start = -1;
+        int end = 0;
+        boolean semicolonAfterStatement = false;
+        boolean several = false;
+        int i = 0;
+        while (i < sql.length()) {
+            char c = sql.charAt(i);
+            if (Character.isWhitespace(c)) {
+                i++;
+                continue;
+            }
+            if (c == ';') {
+                semicolonAfterStatement |= start >= 0;
+                i++;
+                continue;
+            }
+            several |= semicolonAfterStatement;
+            start = start < 0 ? i : start;
+            int next = skipLiteralOrComment(sql, i, nestedComments);
+            boolean comment = sql.startsWith("--", i) || sql.startsWith("/*", i);
+            if (next == i) {
+                next = i + 1;
+            }
+            // A line comment runs to its line break, which is whitespace after the statement, not part of it.
+            end = next;
+            while (comment && end > i && Character.isWhitespace(sql.charAt(end - 1))) {
+                end--;
+            }
+            i = next;
+        }
+        return new StatementBounds(start, end, several);
     }
 
     private static String translateCast(String inner) {
@@ -474,17 +554,50 @@ final class TrinoSqlCompatibility {
     }
 
     private static int skipLiteralOrComment(String sql, int i) {
+        return skipLiteralOrComment(sql, i, false);
+    }
+
+    /**
+     * Index just past the literal, quoted identifier or comment starting at {@code i}, or {@code i} when none
+     * starts there. A backtick-quoted identifier is skipped like a double-quoted one: Trino's lexer reads it as
+     * one token (and rejects it in a query), and Hive DDL names columns with it. A block comment ends at its
+     * first {@code *}{@code /}, as in Trino, or, with {@code nestedComments}, at the one matching its opening,
+     * as in DuckDB.
+     */
+    private static int skipLiteralOrComment(String sql, int i, boolean nestedComments) {
         char c = sql.charAt(i);
-        if (c == '\'' || c == '"') {
+        if (c == '\'' || c == '"' || c == '`') {
             return skipQuoted(sql, i);
         }
         if (sql.startsWith("--", i)) {
-            int end = sql.indexOf('\n', i);
-            return end < 0 ? sql.length() : end + 1;
+            // A line comment ends at a carriage return as at a line feed, in Trino as in DuckDB.
+            int end = i + 2;
+            while (end < sql.length() && sql.charAt(end) != '\n' && sql.charAt(end) != '\r') {
+                end++;
+            }
+            return end < sql.length() ? end + 1 : sql.length();
         }
-        if (sql.startsWith("/*", i)) {
+        if (sql.startsWith("/*", i) && !nestedComments) {
             int end = sql.indexOf("*/", i + 2);
             return end < 0 ? sql.length() : end + 2;
+        }
+        if (sql.startsWith("/*", i)) {
+            int depth = 0;
+            int j = i;
+            while (j < sql.length()) {
+                if (sql.startsWith("/*", j)) {
+                    depth++;
+                    j += 2;
+                } else if (sql.startsWith("*/", j)) {
+                    j += 2;
+                    if (--depth == 0) {
+                        return j;
+                    }
+                } else {
+                    j++;
+                }
+            }
+            return sql.length();
         }
         return i;
     }

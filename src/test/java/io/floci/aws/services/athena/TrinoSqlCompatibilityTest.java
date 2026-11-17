@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TrinoSqlCompatibilityTest {
 
@@ -189,5 +191,72 @@ class TrinoSqlCompatibilityTest {
     @Test
     void anUnbalancedCastIsReturnedAsWritten() {
         assertEquals("SELECT CAST(x AS ARRAY<JSON>", TrinoSqlCompatibility.translate("SELECT CAST(x AS ARRAY<JSON>"));
+    }
+
+    @Test
+    void theRecordedFormDropsTrailingSemicolonsAndTheWhitespaceAroundTheStatement() {
+        assertEquals("SELECT 1", TrinoSqlCompatibility.recordedForm("SELECT 1;"));
+        assertEquals("SELECT 1", TrinoSqlCompatibility.recordedForm("SELECT 1 ;"));
+        assertEquals("SELECT 1", TrinoSqlCompatibility.recordedForm("\n  SELECT 1;; ;\n"));
+        assertEquals("DROP TABLE t", TrinoSqlCompatibility.recordedForm("DROP TABLE t;;"));
+        assertEquals("SELECT 1", TrinoSqlCompatibility.recordedForm(";SELECT 1"));
+        assertEquals("SELECT 1", TrinoSqlCompatibility.recordedForm("SELECT 1"));
+    }
+
+    @Test
+    void aQueryHoldingNoStatementIsRecordedAsGiven() {
+        for (String sql : List.of("", "   \n", ";", "; ;")) {
+            assertEquals(sql, TrinoSqlCompatibility.recordedForm(sql));
+            assertFalse(TrinoSqlCompatibility.holdsSeveralStatements(sql));
+        }
+        assertEquals("-- only a comment", TrinoSqlCompatibility.recordedForm(" -- only a comment\n;"));
+    }
+
+    @Test
+    void theRecordedFormKeepsCommentsAtEitherEndAndSemicolonsInsideTheStatement() {
+        assertEquals("SELECT 1 -- done", TrinoSqlCompatibility.recordedForm("SELECT 1 -- done\r\n"));
+        assertEquals("SELECT 1 -- done", TrinoSqlCompatibility.recordedForm("SELECT 1 -- done\r;"));
+        assertEquals("SELECT 1 /* c */", TrinoSqlCompatibility.recordedForm("SELECT 1 /* c */;"));
+        assertEquals("-- lead\nSELECT 1", TrinoSqlCompatibility.recordedForm("\n-- lead\nSELECT 1;"));
+        assertEquals("SELECT 'a;b' AS \"c;\"", TrinoSqlCompatibility.recordedForm("SELECT 'a;b' AS \"c;\";"));
+    }
+
+    @Test
+    void aSemicolonWithAStatementOnBothSidesSeparatesTwo() {
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements("SELECT 1; SELECT 2"));
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements("SELECT 1; -- done"));
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements("SELECT 1; /* done */"));
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements("-- lead\n; SELECT 1"));
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements("INSERT INTO t VALUES (3);INSERT INTO t VALUES (4)"));
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements("SELECT 1 -- a carriage return ends me\r; SELECT 2"));
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements("SELECT 1;; ;\n"));
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements(";SELECT 1"));
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements(
+                "SELECT 'a; b' AS s, \"c;d\" AS q -- e; f\n/* g; h */"));
+    }
+
+    /** Athena (engine v3) runs this: a backtick-quoted name is one token, as in Trino's lexer. */
+    @Test
+    void aSemicolonInABacktickQuotedNameSeparatesNothing() {
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements(
+                "CREATE EXTERNAL TABLE t (`a;b` int, `c``;d` int) LOCATION 's3://bucket/t/'"));
+    }
+
+    /**
+     * Trino ends the comment at its first close, leaving a literal holding the semicolon; DuckDB nests it, leaving a
+     * second INSERT. Either reading's second statement counts, and Athena (engine v3) rejects the query too.
+     */
+    @Test
+    void aSecondStatementEitherTrinoOrDuckDbWouldReadCounts() {
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements(
+                "INSERT INTO t VALUES (1) /* outer /* inner */ ' */; INSERT INTO t VALUES (2) -- '"));
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements("SELECT /* a /* b */ 1 AS a"));
+    }
+
+    /** Athena (engine v3) splits Hive DDL by the same rules, so it rejects this as two statements too. */
+    @Test
+    void aSemicolonAfterAHiveBackslashEscapeSeparatesStatementsAsOnAthena() {
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements(
+                "CREATE EXTERNAL TABLE t (id string COMMENT 'a\\'; b') LOCATION 's3://bucket/t/'"));
     }
 }

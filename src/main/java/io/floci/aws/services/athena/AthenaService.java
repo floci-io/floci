@@ -154,10 +154,20 @@ public class AthenaService {
         this.hiveDdlExecutor = new AthenaHiveDdlExecutor(glueService, s3Service, icebergStatements);
     }
 
-    public String startQueryExecution(String query,
+    public String startQueryExecution(String submitted,
                                       String workGroup,
                                       QueryExecutionContext context,
                                       ResultConfiguration resultConfiguration) {
+        // Athena takes one statement per query and rejects any other before an execution exists, with the
+        // AthenaErrorCode its InvalidRequestException carries for malformed SQL. The engine would otherwise run
+        // every statement of one that returns no rows, so a query that failed could still have written a table.
+        if (TrinoSqlCompatibility.holdsSeveralStatements(submitted)) {
+            throw new AwsException("InvalidRequestException", "Only one sql statement is allowed. Got: " + submitted,
+                    400, Map.of("AthenaErrorCode", "MALFORMED_QUERY"));
+        }
+        // Athena records, returns and runs the statement without the semicolons around it, so everything below,
+        // the execution's record included, reads that form.
+        String query = TrinoSqlCompatibility.recordedForm(submitted);
         String id = UUID.randomUUID().toString();
         String database = context != null && context.getDatabase() != null ? context.getDatabase() : "default";
         QueryExecutionContext resolvedContext = context != null ? context : new QueryExecutionContext();
@@ -282,7 +292,9 @@ public class AthenaService {
                         if (outputLocation != null) {
                             ensureOutputBucket(outputLocation);
                         }
-                        duckClient.execute(duckQuery, setupDdl, outputLocation, accountId);
+                        // floci-duck runs a query that returns rows as COPY (<query>) TO ... on one line, so a line
+                        // comment ending the query would comment out the ) TO ... after it; a line break ends it.
+                        duckClient.execute(duckQuery + "\n", setupDdl, outputLocation, accountId);
                         if (outputLocation != null) {
                             resultColumnTypeStore.put(id, describeColumnTypes(duckQuery, setupDdl, accountId));
                         }
