@@ -1,8 +1,8 @@
 package io.floci.aws.services.servicecatalog;
 
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.ServiceCatalogRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
@@ -13,7 +13,6 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
@@ -170,11 +169,6 @@ class ServiceCatalogRegionScopingIntegrationTest {
     }
 
     private ValidatableResponse call(String region, String action, String body) {
-        return given().contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "AWS242ServiceCatalogService." + action)
-                .header("Authorization", EnforcementFixtures.auth(account, "20260918", region, "servicecatalog"))
-                .body(body)
-        .when().post("/")
-        .then();
+        return ServiceCatalogRequests.call(action, account, region, body);
     }
 }

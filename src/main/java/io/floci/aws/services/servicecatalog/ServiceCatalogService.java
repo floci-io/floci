@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
@@ -723,8 +722,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         if (AwsArnUtils.isArn(sourceArn)) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(sourceArn);
             String partition = regionResolver.getPartition();
-            if (AwsArnUtils.isForeignPartition(arn, partition) || AwsPartitions.forRegion(arn.region())
-                    .map(regionPartition -> !regionPartition.id().equals(partition)).orElse(false)) {
+            if (AwsArnUtils.isForeignPartition(arn, partition)
+                    || !arn.region().isEmpty() && !regionResolver.partitionForRegion(arn.region()).equals(partition)) {
                 throw notFound("product", sourceId);
             }
             if (!arn.region().isEmpty()) {
