@@ -45,10 +45,10 @@ import java.util.Optional;
  * key value store a name names and the tags of any resource it tags; ECS, for the revision a task definition
  * reference resolves to, its default cluster and the tags of a cluster, a task definition, a service, a capacity
  * provider, a task or a container instance; ACM, for the tags of a certificate; Firehose, for the tags of a delivery
- * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain); looked up
- * lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through
- * {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on that
- * service directly.</p>
+ * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain; Signer, for
+ * the tags of a signing profile); looked up lazily by {@code ResourceArnBuilder} and
+ * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
+ * ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone
