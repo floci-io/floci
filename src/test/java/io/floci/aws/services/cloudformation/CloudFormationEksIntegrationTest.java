@@ -1,11 +1,20 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.executeAndAwaitUpdate;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.subjectStack;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * End-to-end check that CloudFormation provisions EKS resources for real (into EksService) rather
@@ -94,5 +103,35 @@ class CloudFormationEksIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString(nodegroupName));
+    }
+
+    @Test
+    void anUnnamedClusterIsUpdatedInPlaceAndReplacedOnlyWhenItsRoleChanges() {
+        String stack = "cfn-eks-upd-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, cluster("role-a", "one"), "CREATE_COMPLETE");
+            String first = physicalId(client, stack, "Subject");
+            int count = given().get("/clusters").jsonPath().getList("clusters").size();
+
+            createUpdateChangeSet(client, stack, "tags", cluster("role-a", "two"));
+            executeAndAwaitUpdate(client, stack, "tags");
+            assertEquals(first, physicalId(client, stack, "Subject"));
+            assertEquals(count, given().get("/clusters").jsonPath().getList("clusters").size());
+            assertEquals("two", given().get("/clusters/" + first).jsonPath().getString("cluster.tags.team"));
+
+            createUpdateChangeSet(client, stack, "role", cluster("role-b", "two"));
+            executeAndAwaitUpdate(client, stack, "role");
+            assertNotEquals(first, physicalId(client, stack, "Subject"));
+            given().get("/clusters/" + first).then().statusCode(404);
+            assertEquals(count, given().get("/clusters").jsonPath().getList("clusters").size());
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static String cluster(String role, String team) {
+        return subjectStack("", "", "AWS::EKS::Cluster", "\"RoleArn\": \"arn:aws:iam::000000000000:role/" + role
+                + "\", \"Tags\": [{\"Key\": \"team\", \"Value\": \"" + team + "\"}]");
     }
 }

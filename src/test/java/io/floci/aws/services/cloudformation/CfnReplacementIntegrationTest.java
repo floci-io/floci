@@ -113,6 +113,7 @@ class CfnReplacementIntegrationTest {
             CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
             "True", true, "repl-sng-b");
 
+    private static final String EKS_CLUSTER = "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks\", ";
     private static final String SQS_TYPE = "AWS::SQS::Queue";
     private static final String S3_TYPE = "AWS::S3::Bucket";
     private static final String DDB_KEYS = "\"BillingMode\": \"PAY_PER_REQUEST\","
@@ -242,6 +243,14 @@ class CfnReplacementIntegrationTest {
                                 + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
                         "\"TopicArn\": {\"Ref\": \"TopicB\"}, \"Protocol\": \"sqs\","
                                 + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "True", false, null),
+                createOnlyRow("EKS cluster Tags", "", "", "AWS::EKS::Cluster",
+                        EKS_CLUSTER + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        EKS_CLUSTER + "\"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        "False", false, null),
+                createOnlyRow("EKS cluster RoleArn", "", "", "AWS::EKS::Cluster",
+                        "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
+                        "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
                         "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
