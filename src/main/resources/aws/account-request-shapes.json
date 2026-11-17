@@ -5,8 +5,10 @@
   },
   "operations": {
     "DeleteAlternateContact": "DeleteAlternateContactRequest",
+    "GetAccountInformation": "GetAccountInformationRequest",
     "GetAlternateContact": "GetAlternateContactRequest",
     "GetContactInformation": "GetContactInformationRequest",
+    "PutAccountName": "PutAccountNameRequest",
     "PutAlternateContact": "PutAlternateContactRequest",
     "PutContactInformation": "PutContactInformationRequest"
   },
@@ -14,6 +16,12 @@
     "AccountId": {
       "type": "string",
       "pattern": "\\d{12}"
+    },
+    "AccountName": {
+      "type": "string",
+      "min": 1,
+      "max": 50,
+      "pattern": "[ -;=?-~]+"
     },
     "AddressLine": {
       "type": "string",
@@ -100,6 +108,12 @@
       "min": 1,
       "max": 50
     },
+    "GetAccountInformationRequest": {
+      "type": "structure",
+      "members": {
+        "AccountId": "AccountId"
+      }
+    },
     "GetAlternateContactRequest": {
       "type": "structure",
       "required": [
@@ -131,6 +145,16 @@
       "type": "string",
       "min": 1,
       "max": 20
+    },
+    "PutAccountNameRequest": {
+      "type": "structure",
+      "required": [
+        "AccountName"
+      ],
+      "members": {
+        "AccountName": "AccountName",
+        "AccountId": "AccountId"
+      }
     },
     "PutAlternateContactRequest": {
       "type": "structure",

@@ -694,6 +694,24 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         return requireAccount(requireOrganizationForCaller(callerAccountId), accountId);
     }
 
+    /** The record of an account in the organization that holds it, empty for an account in no organization. */
+    public Optional<OrganizationAccount> findAccount(String accountId) {
+        return findOrganizationForAccount(accountId).flatMap(organization -> accountIn(organization, accountId));
+    }
+
+    /**
+     * Renames an account in the organization that holds it, as Account Management's {@code PutAccountName} does,
+     * so {@code DescribeAccount} and {@code ListAccounts} answer the new name. Does nothing for an account in no
+     * organization.
+     */
+    public void renameAccount(String accountId, String name) {
+        findOrganizationForAccount(accountId).ifPresent(organization -> accountIn(organization, accountId)
+                .ifPresent(account -> {
+                    account.setName(name);
+                    accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
+                }));
+    }
+
     public Optional<OrganizationAccount> findAccountForPortal(String accountId) {
         if (accountId == null || !ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
             return Optional.empty();
@@ -1593,6 +1611,12 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
                 .toList();
     }
 
+    private Optional<OrganizationAccount> accountIn(Organization organization, String accountId) {
+        return accountsIn(organization).stream()
+                .filter(account -> accountId.equals(account.getId()))
+                .findFirst();
+    }
+
     private List<OrganizationalUnit> organizationalUnitsIn(Organization organization) {
         return organizationalUnits.scanAllAccounts().stream()
                 .filter(ou -> organization.getId().equals(ou.getOrganizationId()))
@@ -1623,9 +1647,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         if (accountId == null || !ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
             throw invalidInput("Account id must be 12 digits.");
         }
-        return accountsIn(organization).stream()
-                .filter(account -> accountId.equals(account.getId()))
-                .findFirst()
+        return accountIn(organization, accountId)
                 .orElseThrow(() -> new AwsException("AccountNotFoundException",
                         "We can't find an AWS account with the AccountId " + accountId + ".", 400));
     }

@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.account.model.AccountInformation;
 import io.floci.aws.services.account.model.AlternateContact;
 import io.floci.aws.services.account.model.ContactInformation;
 import io.floci.aws.services.organizations.OrganizationsService;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.floci.aws.services.account.AccountNameRequests.accountNameRequest;
 import static io.floci.aws.services.account.AlternateContactRequests.alternateContactRequest;
 import static io.floci.aws.services.account.ContactInformationRequests.contactInformationRequest;
 import static io.floci.aws.services.account.ContactInformationRequests.contactOf;
@@ -35,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AccountServiceTest {
@@ -54,6 +57,9 @@ class AccountServiceTest {
         AccountAwareStorageBackend<ContactInformation> primaryStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         when(storageFactory.create(eq("account"), eq("account-contact-information.json"), any(TypeReference.class)))
                 .thenReturn((AccountAwareStorageBackend) primaryStore);
+        AccountAwareStorageBackend<String> nameStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        when(storageFactory.create(eq("account"), eq("account-names.json"), any(TypeReference.class)))
+                .thenReturn((AccountAwareStorageBackend) nameStore);
         organizations = mock(OrganizationsService.class);
         service = new AccountService(storageFactory, organizations);
     }
@@ -105,7 +111,7 @@ class AccountServiceTest {
     void putAlternateContactRejectsAMissingRequiredMember(String member) {
         ObjectNode request = alternateContactRequest();
         request.remove(member);
-        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
+        assertInvalidParameter(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
     }
 
     @ParameterizedTest
@@ -135,7 +141,7 @@ class AccountServiceTest {
         service.putAlternateContact(ACCOUNT_ID, request);
 
         request.put(member, "1".repeat(maximum + 1));
-        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
+        assertInvalidParameter(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
     }
 
     @Test
@@ -145,7 +151,7 @@ class AccountServiceTest {
         service.putAlternateContact(ACCOUNT_ID, request);
 
         request.put("EmailAddress", "a".repeat(243) + "@example.com");
-        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), "EmailAddress");
+        assertInvalidParameter(() -> service.putAlternateContact(ACCOUNT_ID, request), "EmailAddress");
     }
 
     @ParameterizedTest
@@ -154,7 +160,7 @@ class AccountServiceTest {
     void putAlternateContactRejectsAMemberOutsideItsConstraints(String member, String value) {
         ObjectNode request = alternateContactRequest();
         request.put(member, value);
-        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
+        assertInvalidParameter(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
     }
 
     @Test
@@ -173,8 +179,8 @@ class AccountServiceTest {
     void getAndDeleteAlternateContactRequireAKnownContactType(String type) {
         ObjectNode request = mapper.createObjectNode().put("AlternateContactType", type);
 
-        assertAlternateContactRejected(() -> service.getAlternateContact(ACCOUNT_ID, request), "AlternateContactType");
-        assertAlternateContactRejected(() -> service.deleteAlternateContact(ACCOUNT_ID, request),
+        assertInvalidParameter(() -> service.getAlternateContact(ACCOUNT_ID, request), "AlternateContactType");
+        assertInvalidParameter(() -> service.deleteAlternateContact(ACCOUNT_ID, request),
                 "AlternateContactType");
     }
 
@@ -186,7 +192,7 @@ class AccountServiceTest {
         request.put("AccountId", "111122223333");
         request.put("AlternateContactType", "OTHER");
 
-        assertAlternateContactRejected(() -> service.getAlternateContact(ACCOUNT_ID, request), "AlternateContactType");
+        assertInvalidParameter(() -> service.getAlternateContact(ACCOUNT_ID, request), "AlternateContactType");
     }
 
     @Test
@@ -194,9 +200,9 @@ class AccountServiceTest {
         ObjectNode request = alternateContactRequest();
         request.put("AccountId", "1234");
 
-        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), "AccountId");
-        assertAlternateContactRejected(() -> service.getAlternateContact(ACCOUNT_ID, request), "AccountId");
-        assertAlternateContactRejected(() -> service.deleteAlternateContact(ACCOUNT_ID, request), "AccountId");
+        assertInvalidParameter(() -> service.putAlternateContact(ACCOUNT_ID, request), "AccountId");
+        assertInvalidParameter(() -> service.getAlternateContact(ACCOUNT_ID, request), "AccountId");
+        assertInvalidParameter(() -> service.deleteAlternateContact(ACCOUNT_ID, request), "AccountId");
     }
 
     @Test
@@ -450,6 +456,10 @@ class AccountServiceTest {
         assertManagementAccountRefused(() -> service.deleteAlternateContact(ACCOUNT_ID, alternateContact));
         assertManagementAccountRefused(() -> service.putContactInformation(ACCOUNT_ID, contactInformation));
         assertManagementAccountRefused(() -> service.getContactInformation(ACCOUNT_ID, contactInformation));
+        assertManagementAccountRefused(() -> service.putAccountName(ACCOUNT_ID,
+                accountNameRequest(MANAGEMENT_ACCOUNT_ID, "Management")));
+        assertManagementAccountRefused(() -> service.getAccountInformation(ACCOUNT_ID,
+                mapper.createObjectNode().put("AccountId", MANAGEMENT_ACCOUNT_ID)));
     }
 
     @Test
@@ -482,6 +492,142 @@ class AccountServiceTest {
         assertEquals("ResourceNotFoundException", error.getErrorCode());
     }
 
+    @Test
+    void accountOutsideAnOrganizationIsActiveAndUnnamedUntilPutAccountName() {
+        assertEquals(new AccountInformation(ACCOUNT_ID, null, null, "ACTIVE"),
+                service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()));
+
+        service.putAccountName(ACCOUNT_ID, accountNameRequest("Dev Sandbox"));
+        service.putAccountName(ACCOUNT_ID, accountNameRequest("Dev Sandbox 2"));
+
+        assertEquals(new AccountInformation(ACCOUNT_ID, "Dev Sandbox 2", null, "ACTIVE"),
+                service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()));
+        assertNull(service.getAccountInformation("111122223333", mapper.createObjectNode()).accountName());
+    }
+
+    @Test
+    void accountInAnOrganizationIsDescribedByItsOrganizationRecord() {
+        Instant joined = Instant.parse("2026-11-17T08:00:00Z");
+        when(organizations.findAccount(ACCOUNT_ID))
+                .thenReturn(Optional.of(organizationAccount("CREATED", "ACTIVE", joined)));
+
+        assertEquals(new AccountInformation(ACCOUNT_ID, "Team Account", joined, "ACTIVE"),
+                service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()));
+    }
+
+    @Test
+    void invitedAccountHasNoCreationDate() {
+        when(organizations.findAccount(ACCOUNT_ID))
+                .thenReturn(Optional.of(organizationAccount("INVITED", "ACTIVE", Instant.EPOCH)));
+
+        assertNull(service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountCreatedDate());
+    }
+
+    @Test
+    void accountPendingClosureIsStillActive() {
+        when(organizations.findAccount(ACCOUNT_ID))
+                .thenReturn(Optional.of(organizationAccount("CREATED", "PENDING_CLOSURE", Instant.EPOCH)));
+
+        assertEquals("ACTIVE", service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountState());
+    }
+
+    @Test
+    void putAccountNameRenamesTheOrganizationRecordAndKeepsTheNameForTheAccount() {
+        service.putAccountName(ACCOUNT_ID, accountNameRequest("Team Account"));
+
+        verify(organizations).renameAccount(ACCOUNT_ID, "Team Account");
+        // Once no organization holds the account, the name kept for it answers.
+        assertEquals("Team Account",
+                service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountName());
+    }
+
+    @Test
+    void managementAccountRenamesAMemberAccount() {
+        String member = "111122223333";
+        callerIsInAnOrganizationManagedBy(ACCOUNT_ID, new OrganizationAccount());
+
+        service.putAccountName(ACCOUNT_ID, accountNameRequest(member, "Member"));
+
+        verify(organizations).renameAccount(member, "Member");
+    }
+
+    @Test
+    void accountInformationForAnotherAccountNeedsAnOrganization() {
+        when(organizations.describeOrganization(ACCOUNT_ID))
+                .thenThrow(new AwsException("AWSOrganizationsNotInUseException", "no organization", 400));
+
+        AwsException putError = assertThrows(AwsException.class,
+                () -> service.putAccountName(ACCOUNT_ID, accountNameRequest("111122223333", "Member")));
+        assertEquals("AccessDeniedException", putError.getErrorCode());
+        AwsException getError = assertThrows(AwsException.class, () -> service.getAccountInformation(ACCOUNT_ID,
+                mapper.createObjectNode().put("AccountId", "111122223333")));
+        assertEquals("AccessDeniedException", getError.getErrorCode());
+    }
+
+    @Test
+    void accountInformationRejectsAMalformedAccountId() {
+        assertInvalidParameter(() -> service.putAccountName(ACCOUNT_ID, accountNameRequest("1234", "Member")),
+                "AccountId");
+        assertInvalidParameter(() -> service.getAccountInformation(ACCOUNT_ID,
+                mapper.createObjectNode().put("AccountId", "1234")), "AccountId");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"A", "Dev Sandbox", "a!\"#$%&'()*+,-./0:;=?@[\\]^_`{|}~"})
+    void putAccountNameAcceptsPrintableAsciiOtherThanAngleBrackets(String name) {
+        service.putAccountName(ACCOUNT_ID, accountNameRequest(name));
+
+        assertEquals(name, service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountName());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "<script>", "a>b", "Caf\u00e9", "tab\there"})
+    void putAccountNameRejectsANameOutsideTheModel(String name) {
+        assertInvalidParameter(() -> service.putAccountName(ACCOUNT_ID, accountNameRequest(name)), "AccountName");
+    }
+
+    @Test
+    void putAccountNameLimitsTheNameToFiftyCharacters() {
+        service.putAccountName(ACCOUNT_ID, accountNameRequest("a".repeat(50)));
+
+        assertInvalidParameter(() -> service.putAccountName(ACCOUNT_ID, accountNameRequest("a".repeat(51))),
+                "AccountName");
+    }
+
+    @Test
+    void putAccountNameRequiresAName() {
+        assertInvalidParameter(() -> service.putAccountName(ACCOUNT_ID, mapper.createObjectNode()),
+                "AccountName");
+    }
+
+    @Test
+    void putAccountNameWithANonStringNameThrowsSerialization() {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("AccountName", 42);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.putAccountName(ACCOUNT_ID, request));
+        assertEquals("SerializationException", error.getErrorCode());
+        assertEquals("AccountName must be a string.", error.getMessage());
+    }
+
+    @Test
+    void clearRemovesAccountNames() {
+        service.putAccountName(ACCOUNT_ID, accountNameRequest("Dev Sandbox"));
+        service.clear();
+
+        assertNull(service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountName());
+    }
+
+    private static OrganizationAccount organizationAccount(String joinedMethod, String status, Instant joined) {
+        OrganizationAccount account = new OrganizationAccount();
+        account.setId(ACCOUNT_ID);
+        account.setName("Team Account");
+        account.setJoinedMethod(joinedMethod);
+        account.setStatus(status);
+        account.setJoinedTimestamp(joined);
+        return account;
+    }
+
     private void assertContactInformationRejected(String member, String value) {
         ObjectNode request = contactInformationRequest();
         contactOf(request).put(member, value);
@@ -492,7 +638,7 @@ class AccountServiceTest {
         assertTrue(error.getMessage().contains(member), error.getMessage());
     }
 
-    private static void assertAlternateContactRejected(Executable call, String member) {
+    private static void assertInvalidParameter(Executable call, String member) {
         AwsException error = assertThrows(AwsException.class, call, member);
         assertEquals("ValidationException", error.getErrorCode());
         assertTrue(error.getMessage().startsWith("Invalid parameter at '" + member + "'"), error.getMessage());
