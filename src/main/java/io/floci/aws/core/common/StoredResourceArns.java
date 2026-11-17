@@ -47,9 +47,10 @@ import java.util.Optional;
  * provider, a task or a container instance; ACM, for the tags of a certificate; Firehose, for the tags of a delivery
  * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain; Signer, for
  * the tags of a signing profile; Access Analyzer, for the tags of an analyzer; Managed Service for Apache Flink, for
- * the tags of an application; S3 Vectors, for the tags of a vector bucket or an index); looked up lazily by
- * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
- * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
+ * the tags of an application; S3 Vectors, for the tags of a vector bucket or an index; Timestream for InfluxDB, for the
+ * tags of a DB instance, a DB cluster, a parameter group or a backup); looked up lazily by {@code ResourceArnBuilder}
+ * and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or
+ * an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

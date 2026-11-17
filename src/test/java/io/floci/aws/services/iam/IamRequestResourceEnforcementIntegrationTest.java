@@ -1584,10 +1584,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     /** A Timestream for InfluxDB parameter group is checked on {@code db-parameter-group/<id>}, the id it was given. */
     @Test
     void aParameterGroupIsCheckedOnTheArnItsIdGives() {
-        String id = adminJson("timestream-influxdb", "AmazonTimestreamInfluxDB.CreateDbParameterGroup", "1.0")
-                .body("{\"name\":\"res-group-" + suffix() + "\"}").post("/").then().statusCode(200).extract()
-                .path("id");
-        String arn = "arn:aws:timestream-influxdb:" + REGION + ":" + ACCOUNT + ":db-parameter-group/" + id;
+        String id = influxParameterGroup(null);
+        String arn = influxParameterGroupArn(id);
 
         User user = user("res-group");
         user.policy(allowOn("timestream-influxdb:GetDbParameterGroup", arn));
@@ -1595,6 +1593,39 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"identifier\":\"" + id + "\"}").statusCode(200).body("arn", equalTo(arn));
         refusedJson(send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
                 "{\"identifier\":\"res" + suffix() + "\"}"), "timestream-influxdb:GetDbParameterGroup");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Timestream for InfluxDB holds on the resource a request
+     * names, as TagResource leaves them, so an allow on one team's tag lets the caller read that team's parameter group
+     * and not another's.
+     */
+    @Test
+    void aTimestreamInfluxDbResourceTagConditionReadsTheTagsOfTheParameterGroup() {
+        String tagged = influxParameterGroup("{\"team\":\"web\"}");
+        String other = influxParameterGroup("{\"team\":\"web\"}");
+        adminJson("timestream-influxdb", "AmazonTimestreamInfluxDB.TagResource", "1.0")
+                .body("{\"resourceArn\":\"" + influxParameterGroupArn(tagged) + "\",\"tags\":{\"team\":\"data\"}}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-group-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"timestream-influxdb:GetDbParameterGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
+                "{\"identifier\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
+                "{\"identifier\":\"" + other + "\"}"), "timestream-influxdb:GetDbParameterGroup");
+    }
+
+    /** The id of a parameter group an administrator creates, with the {@code tags} object if any. */
+    private static String influxParameterGroup(String tags) {
+        return adminJson("timestream-influxdb", "AmazonTimestreamInfluxDB.CreateDbParameterGroup", "1.0")
+                .body("{\"name\":\"res-group-" + suffix() + "\"" + (tags == null ? "" : ",\"tags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("id");
+    }
+
+    private static String influxParameterGroupArn(String id) {
+        return "arn:aws:timestream-influxdb:" + REGION + ":" + ACCOUNT + ":db-parameter-group/" + id;
     }
 
     /** A Timestream for InfluxDB cluster reboot is checked on each member instance its {@code instanceIds} names. */
