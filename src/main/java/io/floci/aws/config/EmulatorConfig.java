@@ -2022,6 +2022,11 @@ public interface EmulatorConfig {
         @WithDefault("7099")
         int proxyMaxPort();
 
+        /** When true, Describe* reports the Port a client requested instead of the proxy port.
+         *  The proxy still listens in the proxy port range; connect there. */
+        @WithDefault("false")
+        boolean advertiseRequestedPort();
+
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
 

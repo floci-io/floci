@@ -42,6 +42,7 @@ public class DbCluster {
     private String masterUserSecretKmsKeyId;
     private Instant createdAt;
     private int proxyPort;
+    private Integer requestedPort;
     private Map<String, String> tags = new LinkedHashMap<>();
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
@@ -188,6 +189,9 @@ public class DbCluster {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
+    public Integer getRequestedPort() { return requestedPort; }
+    public void setRequestedPort(Integer requestedPort) { this.requestedPort = requestedPort; }
 
     public List<DbRoleAssociation> getAssociatedRoles() { return associatedRoles; }
     public void setAssociatedRoles(List<DbRoleAssociation> associatedRoles) {

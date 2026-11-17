@@ -302,6 +302,7 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_MOCK` | `false` | `true` = metadata only (no Docker container or auth proxy) |
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
+| `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT` | `false` | `true` = `Describe*` reports the requested `Port` instead of the proxy port; connect via the proxy port |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
@@ -327,6 +328,13 @@ rejected. This differs from AWS because Floci's local proxy must use a published
 host port; for example, requesting `5432` with the default
 `7001`-`7099` range returns a port in that range. Ports outside AWS's valid
 `1150`-`65535` interval are rejected.
+
+Set `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT=true` to make `Describe*` report the requested `Port`
+instead (for example so Terraform's `port` does not show a diff). The proxy still listens in the proxy
+range, so connect to that port; a restore without `Port` reports the proxy port. With the flag on, IAM
+authentication tokens bind to the advertised port, while the managed master-user secret carries the
+connectable (proxy) port. A cluster member created without its own `Port` reports its cluster's
+requested port, as AWS does.
 
 When Docker publishes RDS proxy ports dynamically, set `FLOCI_SERVICES_RDS_ENDPOINT_HOST` to the
 hostname used by clients. Floci inspects its own container through the Docker socket and returns the
