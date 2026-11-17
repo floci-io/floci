@@ -22,6 +22,7 @@ import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.allow;
 import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -186,11 +187,6 @@ class S3VectorsIamIntegrationTest {
 
     private static String index(String bucket, String index) {
         return "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"" + index + "\"}";
-    }
-
-    private static String allow(String actions, String resource) {
-        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":" + actions
-                + ",\"Resource\":\"" + resource + "\"}]}";
     }
 
     private String createBucket(String name) throws Exception {
