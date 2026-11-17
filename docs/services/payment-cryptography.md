@@ -230,9 +230,14 @@
   where the reference answers `IN_PROGRESS` until the replication has finished.
 - **Resource policies:** `PutResourcePolicy` attaches or replaces the policy stored on the
   key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
-  a policy is answered with `ResourceNotFoundException` by both reads. An `Allow` statement
-  that names every principal and carries no condition is refused with
-  `PublicPolicyException`, as the reference refuses one. A statement that carries a
+  a policy is answered with `ResourceNotFoundException` by both reads. The policy is a JSON
+  document, and one that does not parse, or that carries anything after the document, is
+  refused with `ValidationException`. A grant names an effect, a principal, an action and
+  a resource, and a policy that carries no statement, or a statement that names none of
+  them, is refused with `ValidationException`. An `Allow` statement that reaches every
+  principal and carries no condition is refused with `PublicPolicyException`, as the
+  reference refuses one: a principal that is everyone, and a grant that excludes a
+  principal and so reaches everyone else, both reach everyone. A statement that carries a
   condition is taken to be narrowed by it, so a condition that narrows nothing is not read.
   The resource a policy names must be every resource or the ARN of the key the policy is
   on, so a policy that names another key is refused. The reference attaches a policy to the
