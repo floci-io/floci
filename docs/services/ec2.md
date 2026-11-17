@@ -85,6 +85,20 @@ The catalog stores these values explicitly; architecture alone
 cannot distinguish Intel from AMD. See the AWS
 [ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
 
+### AMD and Intel instance-type metadata
+
+The catalog includes virtual sizes of M7a, M8a, M7i, M8i, C7a and C7i,
+including 24xlarge and 48xlarge. CPU, memory, x86_64 architecture, AMD/Intel
+manufacturer and network metadata were captured from AWS `DescribeInstanceTypes`
+in us-east-1 on 2026-11-17. The AWS SDK regression fixture is
+`src/test/resources/ec2/x86-instance-types.csv`. Only sizes present in that
+capture are included; for example, there is no `m7i.medium`.
+
+These entries support architecture-compatible AMI selection and the existing
+synthetic offerings. They do not establish vendor-specific hardware performance,
+real AWS capacity or regional availability. The Docker host supplies actual CPU
+execution; a catalog entry does not turn an ARM guest into an x86 guest.
+
 ### Graviton instance-type metadata
 
 The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
