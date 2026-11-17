@@ -1,5 +1,6 @@
 package io.floci.aws.services.elbv2;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.AlbFixtures;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testutil.FreePorts;
@@ -114,6 +115,42 @@ class ElbV2ForwardConfigIntegrationTest {
                 .rules().getFirst().actions().getFirst());
     }
 
+    @Test
+    void gatewayShortFormForwardOmitsWeightAndStickiness() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String gatewayArn = elb.createLoadBalancer(request -> request.name("forward-gwy-" + suffix)
+                .type("gateway").subnets(Ec2Service.defaultSubnetId("us-east-1", "a")))
+                .loadBalancers().getFirst().loadBalancerArn();
+        String gatewayGroupArn = null;
+        try {
+            gatewayGroupArn = elb.createTargetGroup(request -> request.name("forward-gwy-" + suffix)
+                    .protocol("GENEVE").port(6081).targetType("ip")
+                    .vpcId(Ec2Service.defaultVpcId("us-east-1")))
+                    .targetGroups().getFirst().targetGroupArn();
+            String groupArn = gatewayGroupArn;
+            Listener listener = elb.createListener(request -> request.loadBalancerArn(gatewayArn)
+                    .defaultActions(action -> action.type("forward").targetGroupArn(groupArn)))
+                    .listeners().getFirst();
+            assertEquals("GENEVE", listener.protocolAsString());
+            assertGatewayShortForm(listener.defaultActions().getFirst(), groupArn);
+            assertGatewayShortForm(elb.describeListeners(request -> request.listenerArns(listener.listenerArn()))
+                    .listeners().getFirst().defaultActions().getFirst(), groupArn);
+            assertGatewayShortForm(elb.describeRules(request -> request.listenerArn(listener.listenerArn()))
+                    .rules().getFirst().actions().getFirst(), groupArn);
+            assertGatewayShortForm(elb.modifyListener(request -> request.listenerArn(listener.listenerArn())
+                    .defaultActions(action -> action.type("forward").targetGroupArn(groupArn)))
+                    .listeners().getFirst().defaultActions().getFirst(), groupArn);
+        } finally {
+            try {
+                AlbFixtures.deleteLoadBalancer(ACCOUNT, gatewayArn);
+            } finally {
+                if (gatewayGroupArn != null) {
+                    AlbFixtures.deleteTargetGroup(ACCOUNT, gatewayGroupArn);
+                }
+            }
+        }
+    }
+
     private void assertShortForm(Action action) {
         assertEquals(targetGroupArn, action.targetGroupArn());
         assertNotNull(action.forwardConfig());
@@ -134,5 +171,15 @@ class ElbV2ForwardConfigIntegrationTest {
         assertEquals(7, group.weight());
         assertEquals(true, action.forwardConfig().targetGroupStickinessConfig().enabled());
         assertEquals(120, action.forwardConfig().targetGroupStickinessConfig().durationSeconds());
+    }
+
+    private void assertGatewayShortForm(Action action, String groupArn) {
+        assertEquals(groupArn, action.targetGroupArn());
+        assertNotNull(action.forwardConfig());
+        assertEquals(1, action.forwardConfig().targetGroups().size());
+        TargetGroupTuple group = action.forwardConfig().targetGroups().getFirst();
+        assertEquals(groupArn, group.targetGroupArn());
+        assertNull(group.weight());
+        assertNull(action.forwardConfig().targetGroupStickinessConfig());
     }
 }

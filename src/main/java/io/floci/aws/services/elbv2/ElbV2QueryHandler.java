@@ -550,7 +550,7 @@ public class ElbV2QueryHandler {
                 .start("CreateRuleResponse", AwsNamespaces.ELB_V2)
                 .start("CreateRuleResult")
                   .start("Rules")
-                    .start("member").raw(ruleXml(rule)).end("member")
+                    .start("member").raw(ruleXml(rule, region)).end("member")
                   .end("Rules")
                 .end("CreateRuleResult")
                 .raw(AwsQueryResponse.responseMetadata())
@@ -570,7 +570,7 @@ public class ElbV2QueryHandler {
                 .start("DescribeRulesResult")
                   .start("Rules");
         for (Rule r : result) {
-            xml.start("member").raw(ruleXml(r)).end("member");
+            xml.start("member").raw(ruleXml(r, region)).end("member");
         }
         xml.end("Rules")
            .end("DescribeRulesResult")
@@ -601,7 +601,7 @@ public class ElbV2QueryHandler {
                 .start("ModifyRuleResponse", AwsNamespaces.ELB_V2)
                 .start("ModifyRuleResult")
                   .start("Rules")
-                    .start("member").raw(ruleXml(rule)).end("member")
+                    .start("member").raw(ruleXml(rule, region)).end("member")
                   .end("Rules")
                 .end("ModifyRuleResult")
                 .raw(AwsQueryResponse.responseMetadata())
@@ -630,7 +630,7 @@ public class ElbV2QueryHandler {
                 .start("SetRulePrioritiesResult")
                   .start("Rules");
         for (Rule r : updated) {
-            xml.start("member").raw(ruleXml(r)).end("member");
+            xml.start("member").raw(ruleXml(r, region)).end("member");
         }
         xml.end("Rules")
            .end("SetRulePrioritiesResult")
@@ -893,7 +893,7 @@ public class ElbV2QueryHandler {
                 : List.of(l.getDefaultCertificate()));
         xml.start("DefaultActions");
         for (Action a : l.getDefaultActions()) {
-            xml.start("member").raw(actionXml(a)).end("member");
+            xml.start("member").raw(actionXml(a, "GENEVE".equals(l.getProtocol()))).end("member");
         }
         xml.end("DefaultActions");
         xml.start("AlpnPolicy");
@@ -915,8 +915,10 @@ public class ElbV2QueryHandler {
         }
     }
 
-    private String ruleXml(Rule r) {
+    private String ruleXml(Rule r, String region) {
         XmlBuilder xml = new XmlBuilder();
+        Listener listener = service.getListener(region, r.getListenerArn());
+        boolean gatewayListener = listener != null && "GENEVE".equals(listener.getProtocol());
         xml.elem("RuleArn", r.getRuleArn());
         xml.elem("Priority", r.getPriority());
         xml.start("Conditions");
@@ -926,14 +928,14 @@ public class ElbV2QueryHandler {
         xml.end("Conditions");
         xml.start("Actions");
         for (Action a : r.getActions()) {
-            xml.start("member").raw(actionXml(a)).end("member");
+            xml.start("member").raw(actionXml(a, gatewayListener)).end("member");
         }
         xml.end("Actions");
         xml.elem("IsDefault", String.valueOf(r.isDefault()));
         return xml.build();
     }
 
-    private String actionXml(Action a) {
+    private String actionXml(Action a, boolean gatewayListener) {
         XmlBuilder xml = new XmlBuilder();
         xml.elem("Type", safe(a.getType()));
         if (a.getOrder() != null) xml.elem("Order", String.valueOf(a.getOrder()));
@@ -944,10 +946,9 @@ public class ElbV2QueryHandler {
             xml.start("ForwardConfig");
             xml.start("TargetGroups");
             if (shortFormForward) {
-                xml.start("member")
-                        .elem("TargetGroupArn", a.getTargetGroupArn())
-                        .elem("Weight", "1")
-                        .end("member");
+                xml.start("member").elem("TargetGroupArn", a.getTargetGroupArn());
+                if (!gatewayListener) xml.elem("Weight", "1");
+                xml.end("member");
             }
             for (Action.TargetGroupTuple t : a.getTargetGroups()) {
                 xml.start("member");
@@ -956,7 +957,7 @@ public class ElbV2QueryHandler {
                 xml.end("member");
             }
             xml.end("TargetGroups");
-            if (a.getStickinessEnabled() != null || shortFormForward) {
+            if (a.getStickinessEnabled() != null || (shortFormForward && !gatewayListener)) {
                 xml.start("TargetGroupStickinessConfig")
                    .elem("Enabled", String.valueOf(Boolean.TRUE.equals(a.getStickinessEnabled())));
                 if (a.getStickinessDurationSeconds() != null) {
