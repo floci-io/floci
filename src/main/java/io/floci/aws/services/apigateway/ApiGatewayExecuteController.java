@@ -71,6 +71,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -3094,8 +3095,7 @@ public class ApiGatewayExecuteController {
                 ? integration.getTimeoutInMillis() : 29_000L;
         boolean insecure = integration.getTlsConfig() != null
                 && integration.getTlsConfig().isInsecureSkipVerification();
-        return new HttpProxyInvoker.ProxyOptions(
-                java.time.Duration.ofMillis(timeoutMillis), insecure);
+        return new HttpProxyInvoker.ProxyOptions(Duration.ofMillis(timeoutMillis), insecure);
     }
 
     private Response dispatchHttpProxyV2(io.floci.aws.services.apigatewayv2.model.Integration integration,
