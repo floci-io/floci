@@ -115,6 +115,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final int SESSION_PASSWORD_BYTES = 24;
     // No source gives how long GetClusterSessionCredentials' credentials last; Floci's expire in an hour.
     private static final Duration SESSION_CREDENTIALS_VALIDITY = Duration.ofHours(1);
+    /**
+     * How long a cluster's history is kept after it ends: "The logs are available for 30 days after the application
+     * ends".
+     */
+    static final Duration HISTORY_KEPT = Duration.ofDays(30);
+    // How long after its 30 days a cluster's kept history is looked at again, to remove it.
+    private static final Duration HISTORY_SWEEP_MARGIN = Duration.ofMinutes(1);
     // How long the command that starts a cluster's primary node for its application UIs may run: it runs nothing.
     private static final Duration PRIMARY_NODE_START = Duration.ofMinutes(5);
     // AWS's answer to a change on a terminated cluster, for AddJobFlowSteps and ModifyInstanceFleet; Floci
@@ -403,11 +410,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 clustersUp.add(cluster.getId());
             }
         }
+        Set<String> histories = historiesKept();
         if (bootstrapRunner != null && config.services().emr().reconcileContainersOnStartup()) {
             bootstrapRunner.removeImages(imagesInUse);
         }
         if (clusterStorage != null && config.services().emr().reconcileContainersOnStartup()) {
             clusterStorage.removeAllBut(clustersUp);
+            clusterStorage.removeHistoriesBut(histories);
         }
         wakeAtStart.forEach(Runnable::run);
     }
@@ -466,6 +475,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
         if (clusterStorage != null) {
             clusterStorage.removeAllBut(Set.of());
+            clusterStorage.removeHistoriesBut(Set.of());
         }
     }
 
@@ -1039,6 +1049,91 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         return false;
                     }
                 });
+    }
+
+    /**
+     * Whether a cluster that has ended still has its kept history, which its history interfaces show for
+     * {@link #HISTORY_KEPT} after its end, once its storage has gone: until then its primary node may still hold the
+     * timeline server's store, and its event logs are not yet copied.
+     */
+    public boolean historyKept(EmrCluster cluster) {
+        return clusterStorage != null && releaseImages != null && EmrClusterLifecycle.isTerminated(cluster.getState())
+                && !cluster.isStorageCreated() && cluster.getEndDateTime() != null
+                && now().isBefore(cluster.getEndDateTime().plus(HISTORY_KEPT))
+                && clusterStorage.historyKept(cluster.getId());
+    }
+
+    /**
+     * Whether a cluster that is ending, or has ended with its storage not yet gone, will have its kept history once
+     * the storage has gone, as {@link #historyKept} has it then.
+     */
+    public boolean historyComing(EmrCluster cluster) {
+        return clusterStorage != null && releaseImages != null && cluster.isStorageCreated()
+                && (EmrClusterLifecycle.TERMINATING.equals(cluster.getState())
+                        || EmrClusterLifecycle.isTerminated(cluster.getState()))
+                && (cluster.getEndDateTime() == null || now().isBefore(cluster.getEndDateTime().plus(HISTORY_KEPT)))
+                && clusterStorage.historyKept(cluster.getId());
+    }
+
+    /**
+     * The history interfaces of a cluster that has ended, as its primary node ran them: its Spark History Server on a
+     * cluster with Spark, its YARN timeline server on one with Hadoop, and its Tez UI on one with Tez.
+     */
+    public WebInterfaces historyInterfaces(EmrCluster cluster) {
+        ClusterStorage.Yarn yarn = yarnOf(cluster);
+        Set<Integer> ports = new LinkedHashSet<>();
+        if (yarn.sparkHistory()) {
+            ports.add(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT);
+        }
+        if (yarn.timelineServer()) {
+            ports.add(EmrClusterStorage.TIMELINE_WEB_PORT);
+        }
+        if (yarn.tezUi()) {
+            ports.add(EmrClusterStorage.TEZ_UI_PORT);
+        }
+        return new WebInterfaces(masterPrivateDnsName(cluster), Set.copyOf(ports));
+    }
+
+    /**
+     * Where Floci reaches one of the history interfaces of a cluster that has ended, its kept history served by a
+     * container started in the image its steps ran in when it is not running; empty until it answers.
+     */
+    public Optional<ContainerLifecycleManager.EndpointInfo> historyInterface(EmrCluster cluster, int port) {
+        Supplier<String> image = releaseImage(cluster);
+        if (clusterStorage == null || image == null) {
+            return Optional.empty();
+        }
+        return clusterStorage.historyInterface(cluster.getId(), regionResolver.getAccountId(), regionOf(cluster),
+                image, releaseImages::released, masterPrivateDnsName(cluster), yarnOf(cluster), port);
+    }
+
+    /** Stops the container serving a cluster's kept history, which a later link starts again. */
+    public void stopHistory(String clusterId) {
+        if (clusterStorage != null) {
+            clusterStorage.stopHistory(clusterId);
+        }
+    }
+
+    /** Removes the kept histories of the clusters that are gone, or ended more than {@link #HISTORY_KEPT} ago. */
+    public void removeExpiredHistories() {
+        if (clusterStorage != null) {
+            clusterStorage.removeHistoriesBut(historiesKept());
+        }
+    }
+
+    // The clusters, of every account, whose history is kept: those up, and those that ended within HISTORY_KEPT.
+    private Set<String> historiesKept() {
+        Instant cutoff = now().minus(HISTORY_KEPT);
+        Set<String> kept = new HashSet<>();
+        for (AccountAwareStorageBackend.AccountEntry<EmrCluster> entry
+                : clusterStore.scanAllAccountEntries(k -> true)) {
+            EmrCluster cluster = entry.value();
+            if (!EmrClusterLifecycle.isTerminated(cluster.getState())
+                    || cluster.getEndDateTime() == null || cluster.getEndDateTime().isAfter(cutoff)) {
+                kept.add(cluster.getId());
+            }
+        }
+        return kept;
     }
 
     /** Stops a command {@link #runOnCluster} runs, which then ends as stopped. */
@@ -2398,8 +2493,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
         String clusterId = cluster.getId();
         String region = regionOf(cluster);
+        // Its kept history goes once its 30 days have passed, whether or not a link ever asked for it.
+        Instant ended = cluster.getEndDateTime() != null ? cluster.getEndDateTime() : now();
+        wakeups.at(ended.plus(HISTORY_KEPT).plus(HISTORY_SWEEP_MARGIN), this::removeExpiredHistories);
         stepExecutor.execute(() -> {
-            boolean gone = clusterStorage.remove(clusterId);
+            // What its history interfaces show goes into its kept history first, which outlives the rest; a copy that
+            // failed keeps the storage that holds it, which the cluster's next release, or a restart, tries again.
+            boolean gone = clusterStorage.keepHistory(clusterId) && clusterStorage.remove(clusterId);
             RequestScopes.runAs(accountId, region, () -> run(() -> storageRemoved(clusterId, key, gone)));
         });
     }

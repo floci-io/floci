@@ -3,6 +3,7 @@ package io.floci.aws.services.emr;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListVolumesResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.HostConfig;
@@ -50,6 +51,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -159,6 +161,20 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     private static final String TEZ_UI_CONFIG = "/etc/tez-ui/conf/configs.js";
     // The Tez UI's files, which an image with Tez has, one with Hive or Floci's Pig.
     private static final String TEZ_UI_FILES = "/usr/lib/tez/tez-ui";
+    // A cluster's kept history: a volume of its primary node's, mounted here, which holds the YARN timeline server's
+    // store and, once the cluster has ended, its Spark applications' event logs, and which a container of its own
+    // serves after the cluster's other storage has gone; set where the node runs either.
+    static final String HISTORY_PATH = "/var/lib/floci-history";
+    private static final String HISTORY_COMPONENT = "emr-history";
+    private static final String HISTORY_VARIABLE = "FLOCI_HISTORY";
+    private static final String HISTORY_READY = "/tmp/floci-history-ready";
+    private static final String HISTORY_CONF = "/tmp/floci-history-conf";
+    private static final String HISTORY_EVENT_LOGS = HISTORY_PATH + "/spark-events";
+    private static final String HISTORY_TIMELINE = HISTORY_PATH + "/timeline";
+    // How long the timeline server keeps an entity, 7 days by default: "The logs are available for 30 days after the
+    // application ends".
+    private static final long TIMELINE_TTL_MS = 30L * 24 * 60 * 60 * 1000;
+    private static final int HISTORY_COPY_SECONDS = 120;
     // Set on a primary node that runs a Spark History Server, as on a cluster with Spark; its version on its web port
     // says it has started.
     private static final String SPARK_HISTORY_VARIABLE = "FLOCI_SPARK_HISTORY";
@@ -233,11 +249,18 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " \"<property><name>dfs.datanode.ipc.address</name>"
                     + "<value>$FLOCI_HDFS_BIND:9867</value></property>\""
                     + " '</configuration>' > " + HDFS_CONF + "/hdfs-site.xml",
+            "timeline_store=/mnt/yarn/timeline",
+            "if [ -n \"$" + HISTORY_VARIABLE + "\" ]; then",
+            "  mkdir -p " + HISTORY_EVENT_LOGS + " " + HISTORY_TIMELINE + " && chown -R hadoop:hadoop " + HISTORY_PATH
+                    + " || exit",
+            "  timeline_store=" + HISTORY_TIMELINE,
+            "fi",
             "timeline=; [ -z \"$" + TIMELINE_VARIABLE + "\" ] || timeline=\"" + String.join("", List.of(
                     property("yarn.timeline-service.enabled", "true"),
                     property("yarn.timeline-service.hostname", "$FLOCI_HDFS_HOST"),
                     property("yarn.timeline-service.bind-host", "$FLOCI_HDFS_BIND"),
-                    property("yarn.timeline-service.leveldb-timeline-store.path", "/mnt/yarn/timeline"),
+                    property("yarn.timeline-service.leveldb-timeline-store.path", "$timeline_store"),
+                    property("yarn.timeline-service.ttl-ms", String.valueOf(TIMELINE_TTL_MS)),
                     property("yarn.timeline-service.http-cross-origin.enabled", "true"),
                     property("yarn.resourcemanager.webapp.cross-origin.enabled", "true"),
                     // The ResourceManager publishes its applications there: Hadoop 3.4 reads the first, which
@@ -437,6 +460,77 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + "touch " + HDFS_READY + "; "
                     + "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done; rm -f " + HDFS_READY
                     + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
+
+    // What serves a cluster's kept history once it has ended, started as root: the Spark History Server, reading the
+    // event logs kept beside the timeline server's store, the YARN timeline server, on that store, and the Tez UI, as
+    // the primary node ran them (SPARK_HISTORY_VARIABLE, TIMELINE_VARIABLE and TEZ_UI_VARIABLE), on their ports, with
+    // a configuration of their own, as the cluster's HDFS has gone; the Tez UI's naming the timeline server and the
+    // ResourceManager by the primary node's name, FLOCI_HDFS_HOST, as on the node, whose links Floci makes the
+    // browser's; with no ResourceManager there, the Tez UI's asks for it go to the timeline server, which answers them
+    // that it has nothing, rather than to the node that has gone. HISTORY_READY says it is ready once each answers; a
+    // daemon that exits ends the container, which the next link starts again.
+    private static final String HISTORY_SCRIPT = String.join("\n",
+            "mkdir -p " + HISTORY_CONF + " || exit",
+            "printf '%s\\n' '<configuration>' '" + property("fs.defaultFS", "file:///") + "' '</configuration>'"
+                    + " > " + HISTORY_CONF + "/core-site.xml || exit",
+            "printf '%s\\n' '<configuration>' '" + String.join("", List.of(
+                    property("yarn.timeline-service.enabled", "true"),
+                    property("yarn.timeline-service.hostname", "localhost"),
+                    property("yarn.timeline-service.bind-host", "0.0.0.0"),
+                    property("yarn.timeline-service.leveldb-timeline-store.path", HISTORY_TIMELINE),
+                    property("yarn.timeline-service.ttl-ms", String.valueOf(TIMELINE_TTL_MS)),
+                    property("yarn.timeline-service.http-cross-origin.enabled", "true")))
+                    + "' '</configuration>' > " + HISTORY_CONF + "/yarn-site.xml || exit",
+            "printf '%s\\n' 'log4j.rootLogger=WARN,console' 'log4j.appender.console=org.apache.log4j.ConsoleAppender'"
+                    + " 'log4j.appender.console.layout=org.apache.log4j.PatternLayout'"
+                    + " 'log4j.appender.console.layout.ConversionPattern=%d %p %c: %m%n'"
+                    + " > " + HISTORY_CONF + "/log4j.properties || exit",
+            "if [ -n \"$" + TEZ_UI_VARIABLE + "\" ]; then",
+            "  mkdir -p " + TEZ_UI_CONFIG.substring(0, TEZ_UI_CONFIG.lastIndexOf('/')) + " && printf '%s\\n' 'ENV = {'"
+                    + " '  hosts: {' \"    timeline: 'http://$FLOCI_HDFS_HOST:" + TIMELINE_WEB_PORT + "',\""
+                    + " \"    rm: 'http://$FLOCI_HDFS_HOST:" + TIMELINE_WEB_PORT + "',\" '  },' '};'"
+                    + " > " + TEZ_UI_CONFIG + " || exit",
+            "fi",
+            HADOOP_FOLDER_SETUP,
+            "exec setpriv --reuid=hadoop --regid=hadoop --clear-groups bash -c '"
+                    + "n=0; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + "SPARK_HISTORY_OPTS=\"-Dspark.history.fs.logDirectory=file://" + HISTORY_EVENT_LOGS
+                    + " -Dspark.history.ui.port=" + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT + "\""
+                    + " /usr/lib/spark/bin/spark-class org.apache.spark.deploy.history.HistoryServer & n=$((n + 1)); "
+                    + "fi; "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + "HADOOP_CONF_DIR=" + HISTORY_CONF + " JDK_JAVA_OPTIONS=\"" + yarnOpens()
+                    + "\" yarn timelineserver & n=$((n + 1)); fi; "
+                    + "tez_ui=; [ -z \"$" + TEZ_UI_VARIABLE + "\" ] || [ ! -d " + TEZ_UI_FILES + " ] || tez_ui=1; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + "python3 -m http.server " + TEZ_UI_PORT + " --bind 0.0.0.0 --directory /usr/lib/tez"
+                    + " > /dev/null 2>&1 & n=$((n + 1)); fi; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 http://127.0.0.1:" + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT
+                            + "/api/v1/version > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 http://127.0.0.1:" + TIMELINE_WEB_PORT + "/ws/v1/timeline > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + untilReady("curl -sf -m 5 http://127.0.0.1:" + TEZ_UI_PORT + TEZ_UI_PATH + " > /dev/null")
+                    + "fi; "
+                    + "touch " + HISTORY_READY + "; "
+                    + "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done; rm -f " + HISTORY_READY
+                    + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
+    // Copies the Spark applications' event logs, where there are any, out of the cluster's HDFS into its kept history,
+    // as the image's user, the node's daemons' (see keepHistory).
+    private static final String KEEP_EVENT_LOGS = String.join("\n",
+            HADOOP_FOLDER_SETUP,
+            "[ -d " + HISTORY_EVENT_LOGS + " ] || exit 0",
+            "hdfs dfs -test -d " + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + " || exit 0",
+            "[ -n \"$(hdfs dfs -ls -C " + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + ")\" ] || exit 0",
+            "exec hdfs dfs -get -f '" + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + "/*' " + HISTORY_EVENT_LOGS + "/");
+    // The clusters whose history container is being started, and the history containers this process has started or
+    // found, by name, which a reset or a shutdown removes.
+    private final Set<String> historyStarts = ConcurrentHashMap.newKeySet();
+    private final Set<String> historyContainers = ConcurrentHashMap.newKeySet();
 
     // One start at a time in a namespace the steps share, whatever the cluster, as it holds one HDFS.
     private final Object sharedNamespaceStarts = new Object();
@@ -1398,6 +1492,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (yarn.tezUi()) {
                 spec.withLoopbackPortBinding(TEZ_UI_PORT, 0);
             }
+            if (yarn.sparkHistory() || yarn.timelineServer()) {
+                // Its history, in a volume of its own, which outlives the cluster's other storage (see keepHistory).
+                String history = historyName(clusterId);
+                lifecycleManager.ensureVolume(history, labels(clusterId, accountId, region, HISTORY_COMPONENT));
+                spec.withNamedVolume(history, HISTORY_PATH).withEnv(HISTORY_VARIABLE, "1");
+            }
         }
         if (yarn != null) {
             spec.withEnv(YARN_MEMORY_VARIABLE, String.valueOf(yarn.memoryMb()))
@@ -1567,6 +1667,210 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         }
     }
 
+    @Override
+    public boolean keepHistory(String clusterId) {
+        try {
+            if (!historyKept(clusterId)) {
+                return true;
+            }
+            if (lifecycleManager.probeContainer(hdfsName(clusterId)) != ContainerLiveness.RUNNING) {
+                // Its HDFS, which holds them, is read only through its NameNode.
+                LOG.warnv("The Spark event logs of EMR cluster {0} since its primary node last stopped are not kept, as"
+                        + " the node is not running", clusterId);
+                return true;
+            }
+            return copyEventLogs(hdfsName(clusterId));
+        } catch (RuntimeException e) {
+            // Docker did not answer, so its storage stays for a later try.
+            LOG.warnv(e, "Could not keep the Spark event logs of EMR cluster {0}: {1}", clusterId, e.getMessage());
+            return false;
+        }
+    }
+
+    // Copies a running primary node's Spark event logs into its kept history, where it has one (KEEP_EVENT_LOGS): as
+    // its cluster's storage goes, and before a teardown or a sweep at start removes the node, which neither can put
+    // off; whether they were kept.
+    private boolean copyEventLogs(String name) {
+        try {
+            ContainerExec.Result copied = ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                    new String[]{"setpriv", "--reuid=hadoop", "--regid=hadoop", "--clear-groups", "bash", "-c",
+                            KEEP_EVENT_LOGS}, HISTORY_COPY_SECONDS);
+            if (copied.exitCode() != 0) {
+                LOG.warnv("Could not keep the Spark event logs of {0}: {1}", name, copied.stderr());
+                return false;
+            }
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not keep the Spark event logs of {0}: {1}", name, e.getMessage());
+            return false;
+        }
+    }
+
+    // Whether the cluster's kept history's volume is there; a failure to tell is thrown, rather than taken for none.
+    @Override
+    public boolean historyKept(String clusterId) {
+        try {
+            lifecycleManager.getDockerClient().inspectVolumeCmd(historyName(clusterId)).exec();
+            return true;
+        } catch (NotFoundException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Where Floci reaches a port of the container serving a cluster's kept history, once it is ready: on the host's
+     * loopback interface, where it is published, or, Floci in a container, on the history's own network, which Floci's
+     * container joins, so no step's container reaches it. One not running is started on a thread of its own, as its
+     * image may need making first.
+     */
+    @Override
+    public Optional<ContainerLifecycleManager.EndpointInfo> historyInterface(String clusterId, String accountId,
+                                                                             String region, Supplier<String> image,
+                                                                             Consumer<String> released,
+                                                                             String primaryHost, Yarn yarn,
+                                                                             int port) {
+        String name = historyUiName(clusterId);
+        try {
+            ContainerLiveness liveness = lifecycleManager.probeContainer(name);
+            if (liveness == ContainerLiveness.RUNNING) {
+                if (ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                        new String[]{"test", "-f", HISTORY_READY}, 10).exitCode() != 0) {
+                    return Optional.empty();
+                }
+                String network = historyName(clusterId);
+                if (currentContainer.resolveContainerId().isPresent() && !attachFloci(network)) {
+                    return Optional.empty();
+                }
+                return Optional.of(lifecycleManager.resolveEndpoint(name, port, network));
+            }
+            if (liveness == ContainerLiveness.NOT_RUNNING && historyStarts.add(clusterId)) {
+                long teardown = teardowns.get();
+                decommissions.execute(() -> {
+                    try {
+                        startHistory(clusterId, accountId, region, image, released, primaryHost, yarn, teardown);
+                    } catch (RuntimeException e) {
+                        LOG.warnv(e, "Could not start the history of EMR cluster {0}: {1}", clusterId,
+                                e.getMessage());
+                    } finally {
+                        historyStarts.remove(clusterId);
+                    }
+                });
+            }
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "The history of EMR cluster {0} is not reachable: {1}", clusterId, e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    // The container serving a cluster's kept history, on a network of its own, its ports published as the primary
+    // node's were, made from the image the cluster ran; none once a teardown has run since it was asked for, or the
+    // history has gone, whose volume the container would make again, empty.
+    private void startHistory(String clusterId, String accountId, String region, Supplier<String> image,
+                              Consumer<String> released, String primaryHost, Yarn yarn, long teardown) {
+        String imageId = image.get();
+        try {
+            if (teardowns.get() != teardown || !historyKept(clusterId)) {
+                return;
+            }
+            String name = historyUiName(clusterId);
+            String network = historyName(clusterId);
+            lifecycleManager.removeIfExistsStrict(name);
+            lifecycleManager.ensureNetwork(network, labels(clusterId, accountId, region, HISTORY_COMPONENT));
+            // Known before it starts, so a teardown while it starts removes it.
+            historyContainers.add(name);
+            ContainerBuilder.Builder spec = containerBuilder.newContainer(imageId)
+                    .withName(name)
+                    .withUser("root")
+                    .withEntrypoint(List.of("/bin/bash", "-c", HISTORY_SCRIPT))
+                    .withEnv("FLOCI_HDFS_HOST", primaryHost)
+                    .withEnv("HADOOP_LOG_DIR", "/tmp/floci-history-logs")
+                    .withNamedVolume(historyName(clusterId), HISTORY_PATH)
+                    .withDockerNetwork(Optional.of(network))
+                    .withLogRotation()
+                    .withLabels(labels(clusterId, accountId, region, HISTORY_COMPONENT));
+            if (yarn.sparkHistory()) {
+                spec.withEnv(SPARK_HISTORY_VARIABLE, "1")
+                        .withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+            }
+            if (yarn.timelineServer()) {
+                spec.withEnv(TIMELINE_VARIABLE, "1").withLoopbackPortBinding(TIMELINE_WEB_PORT, 0);
+            }
+            if (yarn.tezUi()) {
+                spec.withEnv(TEZ_UI_VARIABLE, "1").withLoopbackPortBinding(TEZ_UI_PORT, 0);
+            }
+            if (yarn.hadoopFolder() != null) {
+                spec.withEnv(HADOOP_FOLDER_VARIABLE, yarn.hadoopFolder());
+            }
+            lifecycleManager.createAndStart(spec.build());
+            if (teardowns.get() != teardown) {
+                // A teardown ran while it started, and may have missed it.
+                lifecycleManager.removeIfExistsStrict(name);
+                historyContainers.remove(name);
+                return;
+            }
+            LOG.infov("Started the history of EMR cluster {0}", clusterId);
+        } finally {
+            released.accept(imageId);
+        }
+    }
+
+    @Override
+    public void stopHistory(String clusterId) {
+        try {
+            lifecycleManager.removeIfExistsStrict(historyUiName(clusterId));
+            historyContainers.remove(historyUiName(clusterId));
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not stop the history of EMR cluster {0}: {1}", clusterId, e.getMessage());
+        }
+    }
+
+    /** Removes the kept histories of the clusters not in {@code kept}, their containers first, as each holds one. */
+    @Override
+    public void removeHistoriesBut(Set<String> kept) {
+        removeHistoryContainers(kept);
+        try {
+            ListVolumesResponse response = lifecycleManager.getDockerClient().listVolumesCmd()
+                    .withFilter("label", historyLabels()).exec();
+            List<InspectVolumeResponse> volumes = response != null && response.getVolumes() != null
+                    ? response.getVolumes() : List.of();
+            for (InspectVolumeResponse volume : volumes) {
+                Map<String, String> labels = volume.getLabels() != null ? volume.getLabels() : Map.of();
+                if (!kept.contains(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))) {
+                    lifecycleManager.removeVolume(volume.getName());
+                    // Its network, named as it is, with Floci's container off it first.
+                    detachFloci(volume.getName());
+                    lifecycleManager.removeNetwork(volume.getName());
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the kept histories of EMR clusters: {0}", e.getMessage());
+        }
+    }
+
+    // Removes the containers serving the kept histories of the clusters not in kept; those of the clusters kept, which
+    // an earlier process may have left, are known from now, so a reset or a shutdown removes them.
+    private void removeHistoryContainers(Set<String> kept) {
+        try {
+            for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
+                    .withLabelFilter(historyLabels()).exec()) {
+                Map<String, String> labels = container.getLabels() != null ? container.getLabels() : Map.of();
+                String clusterId = labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL);
+                if (!kept.contains(clusterId)) {
+                    lifecycleManager.removeIfExistsStrict(container.getId());
+                } else {
+                    historyContainers.add(historyUiName(clusterId));
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the containers of EMR clusters' kept histories: {0}", e.getMessage());
+        }
+    }
+
+    private List<String> historyLabels() {
+        return List.of(ContainerStorageHelper.COMPONENT_LABEL + "=" + HISTORY_COMPONENT,
+                ContainerStorageHelper.OWNER_LABEL + "=" + ContainerStorageHelper.ownerIdentity(config));
+    }
+
     // Whether the container became ready by the deadline, false when it stopped first, or the step did, or a teardown
     // has run since it asked; a failure to become ready in time is thrown.
     private boolean awaitReady(String clusterId, String containerId, long deadline, long teardown,
@@ -1634,6 +1938,15 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-hdfs");
     }
 
+    // A cluster's kept history's volume, and the container serving it.
+    private String historyName(String clusterId) {
+        return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-history");
+    }
+
+    private String historyUiName(String clusterId) {
+        return ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-history-ui");
+    }
+
     private Map<String, String> labels(String clusterId, String accountId, String region, String component) {
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(SERVICE,
                 clusterId, accountId, region));
@@ -1696,7 +2009,20 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             removeNode(name, false);
         }
         for (String name : List.copyOf(running)) {
+            // What its history interfaces show goes into its kept history first, as nothing reads its HDFS after.
+            if (lifecycleManager.probeContainer(name) == ContainerLiveness.RUNNING) {
+                copyEventLogs(name);
+            }
             removeKnown(name);
+        }
+        // The containers serving kept histories, which a later link starts again; the histories stay.
+        for (String name : List.copyOf(historyContainers)) {
+            try {
+                lifecycleManager.removeIfExistsStrict(name);
+                historyContainers.remove(name);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not remove the history container {0}: {1}", name, e.getMessage());
+            }
         }
     }
 
@@ -1754,6 +2080,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     // Known first, so one Docker refuses to remove stays for the next reset or shutdown to remove.
                     String name = clusterId != null ? hdfsName(clusterId) : container.getId();
                     running.add(name);
+                    if ("running".equals(container.getState())) {
+                        copyEventLogs(name);
+                    }
                     removeKnown(name);
                 } else {
                     // A cluster still up keeps the HDFS an earlier process left, which a reset or a shutdown removes.
