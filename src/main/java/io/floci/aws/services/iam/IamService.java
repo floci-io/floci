@@ -5074,9 +5074,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return currentSession(accessKeyId).map(SessionCredential::getExpiration);
     }
 
-    /** Whether an access key ID identifies Floci's documented public deployer credential. */
-    public boolean isSeededDeployerAccessKey(String accessKeyId) {
-        return seededDeployerAccessKeyId.equals(accessKeyId);
+    /**
+     * Whether a secret access key is the seeded deployer's, which Floci's documentation publishes.
+     * The secret is what makes that credential public, whatever ID the key was seeded under, and
+     * only seeding creates a key with it: CreateAccessKey generates a secret of its own.
+     */
+    public boolean isSeededDeployerSecret(String secretAccessKey) {
+        return DEFAULT_DEPLOYER_SECRET_ACCESS_KEY.equals(secretAccessKey);
     }
 
     /**
