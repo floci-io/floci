@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -213,6 +214,37 @@ class OpenSearchServiceTest {
                 west.getArn());
         assertEquals(US_EAST_1, service.describeDomain("dual-region", US_EAST_1).getRegion());
         assertEquals(EU_WEST_1, service.describeDomain("dual-region", EU_WEST_1).getRegion());
+    }
+
+    /**
+     * IAM's tag lookup reads the tags of the domain whose ARN it is given, as tag calls leave them, a tag call giving
+     * the domain a new map rather than changing the one a reader holds, and those of one stored under its name from
+     * before keys named the Region, in place, without migrating it; nothing for an ARN of another account or Region, or
+     * of no domain.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheDomainTheArnNamesAndTaggingPutsANewMap() {
+        when(domainManager.tryStartDomain(any())).thenReturn(false);
+        String arn = service.createDomain("tagged", "OpenSearch_2.11", null, null, Map.of("env", "dev"), US_EAST_1)
+                .getArn();
+        Map<String, String> held = service.listTags(arn);
+        service.addTags(arn, Map.of("team", "data"));
+        service.removeTags(arn, List.of("env"));
+        String legacyArn = AwsArnUtils.Arn.of("es", US_EAST_1, ACCOUNT, "domain/legacy").toString();
+        Domain legacy = new Domain();
+        legacy.setDomainName("legacy");
+        legacy.setArn(legacyArn);
+        legacy.setTags(Map.of("tier", "web"));
+        domainStore.putForAccount(ACCOUNT, "legacy", legacy);
+
+        assertEquals(Map.of("env", "dev"), held);
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Map.of("tier", "web"), service.storedTags(legacyArn));
+        assertTrue(domainStore.getForAccount(ACCOUNT, "legacy").isPresent());
+        assertEquals(Map.of(), service.storedTags(arn.replace(":" + ACCOUNT + ":", ":111122223333:")));
+        assertEquals(Map.of(), service.storedTags(arn.replace(":" + US_EAST_1 + ":", ":" + EU_WEST_1 + ":")));
+        assertEquals(Map.of(), service.storedTags(arn + "0"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::tagged"));
     }
 
     @Test
