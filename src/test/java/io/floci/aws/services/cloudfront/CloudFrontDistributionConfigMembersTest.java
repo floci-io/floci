@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -36,6 +37,8 @@ class CloudFrontDistributionConfigMembersTest {
             "//*[local-name()='Logging']/*[local-name()='Bucket']";
     private static final String LOGGING_PREFIX =
             "//*[local-name()='Logging']/*[local-name()='Prefix']";
+    private static final String WEB_ACL_ID =
+            "//*[local-name()='WebACLId']";
 
     private final CloudFrontService cloudFrontService;
 
@@ -141,10 +144,10 @@ class CloudFrontDistributionConfigMembersTest {
 
     /**
      * A DistributionConfig request body, which is what an SDK or the Terraform provider
-     * actually sends. {@code loggingBlock} goes in verbatim so a caller that omits Logging
-     * and a caller that supplies it share one shape.
+     * actually sends. {@code additionalMembers} goes in verbatim so optional config
+     * members can be tested through the same request shape.
      */
-    private static String distributionConfigBody(String originId, String loggingBlock) {
+    private static String distributionConfigBody(String originId, String additionalMembers) {
         return """
                 <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
                   <CallerReference>%s</CallerReference>
@@ -161,7 +164,7 @@ class CloudFrontDistributionConfigMembersTest {
                     <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
                   </DefaultCacheBehavior>
                 </DistributionConfig>
-                """.formatted(originId, loggingBlock, originId, originId);
+                """.formatted(originId, additionalMembers, originId, originId);
     }
 
     /** POSTs a config body and returns the id of the distribution it created. */
@@ -247,5 +250,122 @@ class CloudFrontDistributionConfigMembersTest {
             .body(hasXPath(LOGGING_INCLUDE_COOKIES, equalTo("false")))
             .body(hasXPath(LOGGING_BUCKET, equalTo("update-logs.s3.amazonaws.com")))
             .body(hasXPath(LOGGING_PREFIX, equalTo("update/")));
+    }
+
+    @Test
+    void webAclIdRoundTripsThroughCreateUpdateAndDistributionReads() {
+        String originId = "origin-web-acl-" + UUID.randomUUID();
+        String firstAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/first";
+        String secondAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/second";
+        String created = given()
+                .contentType(ContentType.XML)
+                .body(distributionConfigBody(originId,
+                        "<WebACLId>" + firstAcl + "</WebACLId>"))
+        .when()
+            .post(DISTRIBUTIONS)
+        .then()
+            .statusCode(201)
+            .body(hasXPath(WEB_ACL_ID, equalTo(firstAcl)))
+            .extract().asString();
+        String id = XmlParser.extractFirst(created, "Id", null);
+        String summaryAcl = "//*[local-name()='DistributionSummary']"
+                + "[*[local-name()='Id' and text()='" + id + "']]"
+                + "/*[local-name()='WebACLId']";
+
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo(firstAcl)));
+        given().when().get(API + id).then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo(firstAcl)));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath(summaryAcl, equalTo(firstAcl)));
+
+        String etag = given().when().get(API + id + "/config").then()
+                .statusCode(200).extract().header("ETag");
+        given().contentType(ContentType.XML).header("If-Match", etag)
+                .body(distributionConfigBody(originId,
+                        "<WebACLId>" + secondAcl + "</WebACLId>"))
+        .when()
+            .put(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(WEB_ACL_ID, equalTo(secondAcl)));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath(summaryAcl, equalTo(secondAcl)));
+
+        etag = given().when().get(API + id + "/config").then()
+                .statusCode(200).extract().header("ETag");
+        given().contentType(ContentType.XML).header("If-Match", etag)
+                .body(distributionConfigBody(originId, "<WebACLId></WebACLId>"))
+        .when()
+            .put(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(WEB_ACL_ID, equalTo("")));
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo("")));
+        given().when().get(API + id).then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo("")));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath(summaryAcl, equalTo("")));
+    }
+
+    @Test
+    void webAclIdDefaultsToEmptyWhenOmitted() {
+        String id = postDistribution(distributionConfigBody(
+                "origin-no-web-acl-" + UUID.randomUUID(), ""));
+        String summaryAcl = "//*[local-name()='DistributionSummary']"
+                + "[*[local-name()='Id' and text()='" + id + "']]"
+                + "/*[local-name()='WebACLId']";
+
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo("")));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath(summaryAcl, equalTo("")));
+    }
+
+    @Test
+    void legacyWebAclIdUpdateRetainsAssociationAndCanonicalValueTakesPrecedence() {
+        String originId = "origin-legacy-web-acl-" + UUID.randomUUID();
+        String firstAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/first";
+        String legacyAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/legacy";
+        String id = postDistribution(distributionConfigBody(originId,
+                "<WebACLId>" + firstAcl + "</WebACLId>"));
+        String etag = given().when().get(API + id + "/config").then()
+                .statusCode(200).extract().header("ETag");
+
+        given().contentType(ContentType.XML).header("If-Match", etag)
+                .body(distributionConfigBody(originId,
+                        "<WebAclId>" + legacyAcl + "</WebAclId>"))
+        .when()
+            .put(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(WEB_ACL_ID, equalTo(legacyAcl)));
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo(legacyAcl)));
+
+        etag = given().when().get(API + id + "/config").then()
+                .statusCode(200).extract().header("ETag");
+        given().contentType(ContentType.XML).header("If-Match", etag)
+                .body(distributionConfigBody(originId,
+                        "<WebACLId></WebACLId><WebAclId>" + legacyAcl + "</WebAclId>"))
+        .when()
+            .put(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(WEB_ACL_ID, equalTo("")));
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo("")));
     }
 }
