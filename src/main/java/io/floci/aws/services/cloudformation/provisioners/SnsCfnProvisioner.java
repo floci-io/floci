@@ -29,6 +29,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final String SUBSCRIPTION = "AWS::SNS::Subscription";
     private static final String TOPIC_POLICY = "AWS::SNS::TopicPolicy";
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
+    private static final int DISPLAY_NAME_MAX_LENGTH = 100;
     private static final String FIFO_SUFFIX = ".fifo";
     private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
     private static final String PRIOR_INLINE_ATTR = CfnRollback.SNS_PRIOR_INLINE_SUBSCRIPTIONS_ATTR;
@@ -121,6 +122,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         String throughputScope = ctx.resolveOptional(props, "FifoThroughputScope");
         String maximumMessageSize = ctx.resolveOptional(props, "MaximumMessageSize");
+        String displayName = ctx.resolveOptional(props, "DisplayName");
         // The .fifo suffix is what makes SnsService treat a topic as FIFO, so an explicitly named
         // one is FIFO with or without the flag, which only has to steer a generated name.
         boolean fifo = "true".equalsIgnoreCase(ctx.resolveOptional(props, "FifoTopic"))
@@ -162,6 +164,13 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         if (maximumMessageSize != null && !maximumMessageSize.isBlank()) {
             attributes.put("MaximumMessageSize", maximumMessageSize);
         }
+        if (displayName != null) {
+            if (displayName.length() > DISPLAY_NAME_MAX_LENGTH) {
+                throw new AwsException("ValidationError",
+                        "DisplayName must be at most " + DISPLAY_NAME_MAX_LENGTH + " characters.", 400);
+            }
+            attributes.put("DisplayName", displayName);
+        }
 
         JsonNode subscriptions = props == null ? null
                 : ctx.engine().resolveNodeOmittingNoValue(props.path("Subscription"));
@@ -197,6 +206,11 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                     && topic.getAttributes().containsKey("MaximumMessageSize")) {
                 desired.put("MaximumMessageSize",
                         String.valueOf(SnsService.DEFAULT_MAX_MESSAGE_SIZE));
+            }
+            // A DisplayName the template dropped goes back to the empty default GetTopicAttributes
+            // reports; one the template never declared may be managed outside the stack.
+            if (ctx.changes(TOPIC, props).dropped().contains("DisplayName")) {
+                desired.put("DisplayName", "");
             }
         }
         // A replacing update that adopted an existing topic changes something the stack did not
