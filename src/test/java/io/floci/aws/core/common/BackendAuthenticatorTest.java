@@ -1,6 +1,8 @@
 package io.floci.aws.core.common;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -86,24 +88,27 @@ class BackendAuthenticatorTest {
                 () -> authenticator.answer(auth(11, text("r=other,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"))));
     }
 
-    @Test
-    void authenticationOkBeforeTheServerSignatureIsRefused() throws Exception {
-        BackendAuthenticator afterInitial = new BackendAuthenticator("user", "pencil", NONCE, "user");
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void authenticationOkBeforeTheServerSignatureIsRefused(boolean scramOnly) throws Exception {
+        BackendAuthenticator afterInitial = new BackendAuthenticator("user", "pencil", NONCE, "user", scramOnly);
         afterInitial.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
         assertThrows(IOException.class, () -> afterInitial.answer(auth(0)));
 
-        BackendAuthenticator afterContinue = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        BackendAuthenticator afterContinue = new BackendAuthenticator("user", "pencil", NONCE, "user", scramOnly);
         afterContinue.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
         afterContinue.answer(auth(11, text(SERVER_FIRST)));
         IOException refused = assertThrows(IOException.class, () -> afterContinue.answer(auth(0)));
         assertEquals("backend accepted the login before proving its SCRAM signature", refused.getMessage());
     }
 
-    @Test
-    void authenticationOkAfterAVerifiedServerSignatureIsAccepted() throws Exception {
-        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void authenticationOkAfterAVerifiedServerSignatureIsAccepted(boolean scramOnly) throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user", scramOnly);
         authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
-        authenticator.answer(auth(11, text(SERVER_FIRST)));
+        PostgresWire.Message response = authenticator.answer(auth(11, text(SERVER_FIRST))).orElseThrow();
+        assertEquals(CLIENT_FINAL, new String(response.body(), StandardCharsets.UTF_8));
         authenticator.answer(auth(12, text(SERVER_FINAL)));
 
         assertTrue(authenticator.answer(auth(0)).isEmpty());
@@ -191,30 +196,6 @@ class BackendAuthenticatorTest {
     @Test
     void scramOnlyAcceptsATrustingServerThatAsksForNothing() throws Exception {
         assertTrue(new BackendAuthenticator("u", "p", true).answer(auth(0)).isEmpty());
-    }
-
-    @Test
-    void scramOnlyRefusesALoginAcceptedAfterSaslStartedButBeforeItsSignature() throws Exception {
-        BackendAuthenticator afterInitial = new BackendAuthenticator("user", "pencil", NONCE, "user", true);
-        afterInitial.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
-        assertThrows(IOException.class, () -> afterInitial.answer(auth(0)));
-
-        BackendAuthenticator afterContinue = new BackendAuthenticator("user", "pencil", NONCE, "user", true);
-        afterContinue.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
-        afterContinue.answer(auth(11, text(SERVER_FIRST)));
-        IOException refused = assertThrows(IOException.class, () -> afterContinue.answer(auth(0)));
-        assertEquals("backend accepted the login before proving its SCRAM signature", refused.getMessage());
-    }
-
-    @Test
-    void scramOnlyAcceptsAVerifiedScramExchange() throws Exception {
-        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user", true);
-        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
-        PostgresWire.Message response = authenticator.answer(auth(11, text(SERVER_FIRST))).orElseThrow();
-        assertEquals(CLIENT_FINAL, new String(response.body(), StandardCharsets.UTF_8));
-        authenticator.answer(auth(12, text(SERVER_FINAL)));
-
-        assertTrue(authenticator.answer(auth(0)).isEmpty());
     }
 
     @Test
