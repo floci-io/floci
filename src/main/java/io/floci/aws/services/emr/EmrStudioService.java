@@ -162,8 +162,10 @@ public class EmrStudioService {
         List<EmrStudio> studios = store.scan(key -> true).stream()
                 .filter(studio -> regionResolver.getRegion().equals(studio.getRegion()))
                 .toList();
+        // A marker resumes only the listing of its account and Region.
         PaginatedResult<EmrStudio> page = Pagination.paginate(studios,
-                studio -> String.format("%020d", studio.getSequence()), PAGE_SIZE, marker, "ListStudios",
+                studio -> String.format("%020d", studio.getSequence()), PAGE_SIZE, marker,
+                EmrService.listingNamespace("ListStudios", regionResolver.getAccountId(), regionResolver.getRegion()),
                 token -> EmrService.invalid("Invalid Marker."));
         return new PaginatedResult<>(page.items().stream().map(EmrStudioService::copy).toList(), page.nextToken());
     }
@@ -341,8 +343,10 @@ public class EmrStudioService {
                 }
             }
         }
-        String namespace = String.join("|", "ListStudioSessionMappings", String.valueOf(studioId),
-                String.valueOf(identityType));
+        // A marker resumes only the listing of its account, Region, Studio and identity type, an absent filter told
+        // apart from the text "null".
+        String namespace = EmrService.listingNamespace("ListStudioSessionMappings", regionResolver.getAccountId(),
+                regionResolver.getRegion(), studioId, identityType);
         PaginatedResult<StudioMapping> page = Pagination.paginate(mappings, StudioMapping::cursor, PAGE_SIZE, marker,
                 namespace, token -> EmrService.invalid("Invalid Marker."));
         return new PaginatedResult<>(page.items().stream()

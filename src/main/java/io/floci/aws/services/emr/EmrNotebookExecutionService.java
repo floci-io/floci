@@ -1,6 +1,5 @@
 package io.floci.aws.services.emr;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -21,7 +20,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -274,19 +272,11 @@ public class EmrNotebookExecutionService {
         return execution;
     }
 
-    /**
-     * What a marker resumes only: the account, the Region and each filter, an absent one told apart from any value, as
-     * a JSON list.
-     */
+    // What a marker resumes only: the account, the Region and each filter, EmrService.listingNamespace.
     private String listingNamespace(String editorId, String status, Instant from, Instant to, String engineId) {
-        List<String> parts = Arrays.asList("ListNotebookExecutions", regionResolver.getAccountId(),
+        return EmrService.listingNamespace("ListNotebookExecutions", regionResolver.getAccountId(),
                 regionResolver.getRegion(), editorId, status, from != null ? from.toString() : null,
                 to != null ? to.toString() : null, engineId);
-        try {
-            return EmrService.SNAPSHOT_MAPPER.writeValueAsString(parts);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot write a listing's namespace", e);
-        }
     }
 
     // The execution's cluster as it now stands, or null once it is gone; any other failure is the caller's.
