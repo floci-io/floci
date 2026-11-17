@@ -99,6 +99,14 @@ each destination and the SQS queue or SNS topic SAM creates when a destination g
 Asynchronous invocations apply its retry, event age, destination settings, and dead-letter queue
 configurations (`DeadLetterConfig`).
 
+### Deployment package storage
+
+New Lambda deployment buckets are service-owned and do not appear in S3 `ListBuckets`,
+including paginated results. Deleting a function removes its package objects while
+retaining the shared regional bucket for other functions. Customer buckets with similar
+names remain visible. Existing persisted buckets without service-ownership metadata are
+not migrated or reclassified by name.
+
 ### Function policies under IAM enforcement
 
 With [IAM enforcement](iam.md#resource-based-policies) on, the statements `AddPermission` adds take

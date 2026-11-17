@@ -2518,7 +2518,6 @@ class LambdaServiceTest {
         LambdaFunction first = backed.createFunction(REGION, firstRequest);
         LambdaFunction second = backed.createFunction(REGION, secondRequest);
         String bucket = LambdaService.tasksBucketName(REGION);
-        assertTrue(s3.isServiceOwnedBucket(bucket));
         assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
         assertArrayEquals(Base64.getDecoder().decode(zip),
                 s3.getObject(bucket, LambdaService.codeObjectKey(first)).getData());
@@ -2528,7 +2527,6 @@ class LambdaServiceTest {
                 s3.getObject(bucket, LambdaService.codeObjectKey(second)).getData());
         backed.deleteFunction(REGION, second.getFunctionName());
         assertTrue(s3.listObjects(bucket, "", null, 100).isEmpty());
-        assertTrue(s3.isServiceOwnedBucket(bucket));
         assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
     }
 

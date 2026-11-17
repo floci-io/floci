@@ -210,7 +210,7 @@ class S3ServiceTest {
     void serviceOwnedBucketsStayHiddenWithoutHidingCustomerNames() throws Exception {
         s3Service.createBucket("awslambda-eu-west-1-tasks", "eu-west-1");
         Bucket internal = s3Service.createServiceOwnedBucket("awslambda-us-east-1-tasks", "us-east-1");
-        assertTrue(s3Service.isServiceOwnedBucket(internal.getName()));
+        assertTrue(internal.isServiceOwned());
         assertEquals(List.of("awslambda-eu-west-1-tasks"),
                 s3Service.listBuckets().stream().map(Bucket::getName).toList());
 

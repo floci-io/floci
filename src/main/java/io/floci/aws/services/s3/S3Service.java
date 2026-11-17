@@ -564,10 +564,6 @@ public class S3Service implements Resettable, ResourceProvider {
         return createBucket(bucketName, region, null, null, null, null, null, null, null, true, true);
     }
 
-    public boolean isServiceOwnedBucket(String bucketName) {
-        return bucketStore.get(bucketName).map(Bucket::isServiceOwned).orElse(false);
-    }
-
     private Bucket createBucket(String bucketName, String region, String requestedOwnership,
                                 String cannedAcl, String grantRead, String grantWrite,
                                 String grantFullControl, String grantReadAcp, String grantWriteAcp,
