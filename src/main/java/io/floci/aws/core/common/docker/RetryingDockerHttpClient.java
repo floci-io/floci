@@ -6,6 +6,7 @@ import com.github.dockerjava.transport.DockerHttpClient;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.util.function.Predicate;
 
 /**
  * Decorates a {@link DockerHttpClient} with the {@link DockerRetry} policy so every docker call
@@ -65,20 +66,43 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
     private final DockerHttpClient delegate;
     private final int maxAttempts;
     private final long backoffMillis;
+    private final Predicate<Request> replayable;
 
     public RetryingDockerHttpClient(DockerHttpClient delegate) {
         this(delegate, MAX_ATTEMPTS, BACKOFF_MS);
     }
 
     RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis) {
+        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable);
+    }
+
+    private RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis,
+                                     Predicate<Request> replayable) {
         this.delegate = delegate;
         this.maxAttempts = maxAttempts;
         this.backoffMillis = backoffMillis;
+        this.replayable = replayable;
+    }
+
+    /**
+     * A decorator that replays only container waits, for the streaming transport. A wait that fails
+     * before the daemon answers is replayed as it is on the control-plane transport, while the
+     * streaming transport's other requests, exec starts and log and attach streams, are never
+     * replayed.
+     */
+    static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate) {
+        return forContainerWaits(delegate, MAX_ATTEMPTS, BACKOFF_MS);
+    }
+
+    static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate, int maxAttempts,
+                                                      long backoffMillis) {
+        return new RetryingDockerHttpClient(delegate, maxAttempts, backoffMillis,
+                request -> isReplayable(request) && isContainerWait(request));
     }
 
     @Override
     public Response execute(Request request) {
-        if (!isReplayable(request)) {
+        if (!replayable.test(request)) {
             return delegate.execute(request);
         }
         return DockerRetry.call(maxAttempts, backoffMillis, () -> delegate.execute(request));
@@ -110,10 +134,9 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
     /** The {@code POST} routes whose replay after a lost response leaves the same outcome. */
     private static boolean isReplayablePost(Request request) {
         String path = request.path();
-        int queryStart = path.indexOf('?');
-        String route = queryStart < 0 ? path : path.substring(0, queryStart);
+        String route = route(path);
         if (route.endsWith("/containers/create")) {
-            String query = queryStart < 0 ? "" : path.substring(queryStart + 1);
+            String query = route.length() < path.length() ? path.substring(route.length() + 1) : "";
             for (String param : query.split("&")) {
                 if (param.startsWith("name=")) {
                     return true;
@@ -126,6 +149,16 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         }
         return route.endsWith("/start") || route.endsWith("/stop") || route.endsWith("/wait")
                 || route.endsWith("/images/create");
+    }
+
+    private static boolean isContainerWait(Request request) {
+        return "POST".equals(request.method()) && route(request.path()).endsWith("/wait");
+    }
+
+    /** A request path without its query string. */
+    private static String route(String path) {
+        int queryStart = path.indexOf('?');
+        return queryStart < 0 ? path : path.substring(0, queryStart);
     }
 
     /**

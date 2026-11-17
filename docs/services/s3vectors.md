@@ -78,6 +78,11 @@ stores it with the bucket; `GetVectorBucketPolicy` returns `NotFoundException` w
 policy is attached. Bucket policies are stored and returned, but Floci does not evaluate
 or enforce them on requests.
 
+A bucket ARN or an index ARN must be of the request's partition, Region and account, as S3
+Vectors requires: one of another partition or Region is refused with a `ValidationException`
+("Unexpected value for ARN partition component" or "Unexpected value for ARN region
+component"), and one of another account with an `AccessDeniedException`.
+
 Encryption settings are stored and returned; Floci does not perform KMS encryption.
 Standalone S3 Vectors tagging APIs are not implemented.
 

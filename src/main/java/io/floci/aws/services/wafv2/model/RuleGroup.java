@@ -11,7 +11,7 @@ import java.util.Map;
  * caller-declared WCU budget for the group.
  */
 @RegisterForReflection
-public class RuleGroup {
+public class RuleGroup implements WafV2Resource {
 
     private String id;
     private String name;

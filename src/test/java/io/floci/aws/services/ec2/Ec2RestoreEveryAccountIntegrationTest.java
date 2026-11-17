@@ -3,8 +3,10 @@ package io.floci.aws.services.ec2;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
+import io.floci.aws.services.ec2.model.PublishedPortFamily;
 import io.floci.aws.services.ec2.model.Reservation;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
+import io.floci.aws.testing.IpPermissions;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -23,6 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -104,6 +108,22 @@ class Ec2RestoreEveryAccountIntegrationTest {
                 () -> describe(instance.getInstanceId()).stream().map(Instance::getInstanceId).toList()));
         assertFalse(RequestScopes.callAs("000000000000", () -> describe(null).stream()
                 .anyMatch(listed -> listed.getInstanceId().equals(instance.getInstanceId()))));
+    }
+
+    // Catches: a restart bringing back a forward the instance's current rules would not publish, one kept from a run
+    // with enforcement off or from rules changed while Floci was down, and never publishing one they open.
+    @Test
+    void restoreBringsForwardsToTheInstancesCurrentRules() throws Throwable {
+        Instance instance = runningInstanceOf(OTHER_ACCOUNT);
+        String group = instance.getSecurityGroups().getFirst().getGroupId();
+        RequestScopes.callAs(OTHER_ACCOUNT, () -> service.authorizeSecurityGroupIngress(REGION, group,
+                List.of(IpPermissions.tcp(80, "0.0.0.0/0"), IpPermissions.tcp(8080, "10.0.0.0/8"))));
+        clearInvocations(portForwardManager);
+
+        restoreOutsideAnyRequest();
+
+        verify(portForwardManager).reconcile(argThat(restored -> isSame(restored, instance)),
+                eq(new Ec2PortForwardManager.DesiredPorts(Map.of(80, PublishedPortFamily.IPV4))));
     }
 
     @Test

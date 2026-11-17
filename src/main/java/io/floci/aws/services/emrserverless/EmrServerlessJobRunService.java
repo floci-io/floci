@@ -1,6 +1,5 @@
 package io.floci.aws.services.emrserverless;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -19,6 +18,8 @@ import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
+import io.floci.aws.services.emrserverless.model.DriverLogDestinations;
+import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.JobDriver;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
@@ -26,6 +27,7 @@ import io.floci.aws.services.emrserverless.model.JobRunRecord;
 import io.floci.aws.services.emrserverless.model.JobRunSummary;
 import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
+import io.floci.aws.services.emrserverless.model.Session;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
 import io.floci.aws.services.iam.IamService;
@@ -42,7 +44,6 @@ import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -86,8 +87,15 @@ public class EmrServerlessJobRunService implements Resettable {
     private static final String MODE_STREAMING = "STREAMING";
     private static final String RUNNER_DOCKER = "docker";
     // The service a container run's driver belongs to, which names it and labels it.
-    private static final String SERVICE = "emr-serverless";
+    static final String SERVICE = "emr-serverless";
     private static final String SPARK_DEFAULTS = "spark-defaults";
+    private static final String SPARK_CONNECT_SERVER = "org.apache.spark.sql.connect.service.SparkConnectServer";
+    // Where an emr- release's image keeps the Spark Connect server, as emr-7.13.0's does.
+    static final String SPARK_CONNECT_JAR = "/usr/lib/spark/connector/lib/spark-connect.jar";
+    // spark-submit's application for a class among Spark's own jars.
+    private static final String SPARK_INTERNAL = "spark-internal";
+    private static final String SPARK_CONNECT_PORT = "spark.connect.grpc.binding.port";
+    private static final String SPARK_CONNECT_ADDRESS = "spark.connect.grpc.binding.address";
     private static final String S3_MONITORING = "s3MonitoringConfiguration";
     private static final String CLOUD_WATCH_LOGGING = "cloudWatchLoggingConfiguration";
     // "If you don't specify the optional values, then CloudWatch publishes the logs to a default log group".
@@ -132,7 +140,7 @@ public class EmrServerlessJobRunService implements Resettable {
     // The EMR Serverless 7.11.0 release notes: for BATCH job runs the maximum "is 7 days from this release
     // onwards", and the timeout "can no longer be set to 0".
     private static final long MAX_BATCH_EXECUTION_TIMEOUT_MINUTES = 10_080;
-    private static final Pattern RELEASE_LABEL = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})(?:\\..*)?");
+    static final Pattern RELEASE_LABEL = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})(?:\\..*)?");
     // The AWS runtime for Apache Spark, emr-spark-8.0.0 on (and emr-spark-8.0-preview).
     private static final Pattern SPARK_RUNTIME_RELEASE_LABEL =
             Pattern.compile("emr-spark-(\\d{1,6})\\.(\\d{1,6})(?:[.-].*)?");
@@ -172,6 +180,8 @@ public class EmrServerlessJobRunService implements Resettable {
     private final Set<String> executing = new HashSet<>();
     // Raised by each reset, so a run's thread from before it writes nothing back after the wipe.
     private long generation;
+    // The latest sequence a run was given, nextSequence.
+    private long lastSequence;
 
     @Inject
     public EmrServerlessJobRunService(StorageFactory storageFactory, EmrServerlessService applications,
@@ -271,10 +281,11 @@ public class EmrServerlessJobRunService implements Resettable {
         StartJobRunRequest body = request != null ? request : new StartJobRunRequest();
         validate(body);
         applications.getApplication(applicationId);
-        JsonNode original = requestOf(applicationId, body);
-        JobRunRecord existing = runWithClientToken(body.getClientToken());
+        JsonNode original = EmrServerlessService.retriedRequest(objectMapper, applicationId, body);
+        JobRunRecord existing = EmrServerlessService.startedWithClientToken(store.scan(key -> true),
+                body.getClientToken(), JobRunRecord::getClientToken, record -> inRequestRegion(record.getJobRun()));
         if (existing != null) {
-            if (!original.equals(existing.getRequest())) {
+            if (!sameRun(existing.getRequest(), applicationId, body)) {
                 throw new AwsException("ConflictException", "Request did not match the original", 409);
             }
             return settle(existing).getJobRun();
@@ -283,7 +294,8 @@ public class EmrServerlessJobRunService implements Resettable {
         if (body.getTags() != null) {
             EmrServerlessService.validateTags(body.getTags());
         }
-        JobRunRecord record = applications.admitJobRun(applicationId, app -> checkBatchTimeout(app, body), app -> {
+        JobRunRecord record = applications.admit(applicationId, "a job run is submitted",
+                app -> checkBatchTimeout(app, body), app -> {
             JobRunRecord admitted = newRun(app, body, original);
             if (sparkRunner != null) {
                 launch(admitted, app);
@@ -324,6 +336,24 @@ public class EmrServerlessJobRunService implements Resettable {
         return objectMapper.convertValue(run, JobRun.class);
     }
 
+    /**
+     * What a run's dashboard page shows of one attempt, which must still be there: the attempt, as GetJobRun gives
+     * it, and where its driver's logs go.
+     */
+    public synchronized DashboardView dashboard(String applicationId, String jobRunId, int attempt) {
+        JobRun run = getJobRun(applicationId, jobRunId, attempt);
+        DriverLogDestinations logs = findRun(applicationId, jobRunId).getDriverLogs().get(attempt);
+        if (logs == null) {
+            // A run stored before Floci kept its attempts' destinations: where its application now sends them.
+            logs = driverLogDestinations(applications.getApplication(applicationId), run);
+        }
+        return new DashboardView(run, logs);
+    }
+
+    /** An attempt of a run, and where its driver's logs go, as the attempt was admitted. */
+    public record DashboardView(JobRun run, DriverLogDestinations logs) {
+    }
+
     /** A run's attempts, oldest first: "information about all attempts related to a job run". */
     public synchronized PaginatedResult<JobRunAttemptSummary> listJobRunAttempts(String applicationId,
                                                                                String jobRunId,
@@ -356,14 +386,8 @@ public class EmrServerlessJobRunService implements Resettable {
     public synchronized PaginatedResult<JobRunSummary> listJobRuns(String applicationId, List<String> states,
                                                                    Instant createdAtAfter, Instant createdAtBefore,
                                                                    String mode, Integer maxResults, String nextToken) {
-        List<String> violations = new ArrayList<>();
-        if (maxResults != null) {
-            String violation = SmithyValidationErrors.outOfRange("maxResults", maxResults, 1, MAX_LIST_RESULTS);
-            if (violation != null) {
-                violations.add(violation);
-            }
-        }
-        violations.addAll(EmrServerlessService.statesViolations(states, STATES, MAX_FILTER_STATES));
+        List<String> violations = EmrServerlessService.listViolations(maxResults, MAX_LIST_RESULTS, states, STATES,
+                MAX_FILTER_STATES);
         if (mode != null && !MODES.contains(mode)) {
             violations.add(SmithyValidationErrors.notInEnum(mode, "mode", MODES));
         }
@@ -371,7 +395,6 @@ public class EmrServerlessJobRunService implements Resettable {
             throw SmithyValidationErrors.validationException(violations);
         }
         List<JobRunRecord> matching = new ArrayList<>();
-        Map<String, String> cursors = new HashMap<>();
         for (JobRunRecord record : store.scan(key -> true)) {
             JobRun run = record.getJobRun();
             if (!applicationId.equals(run.getApplicationId()) || !inRequestRegion(run)) {
@@ -384,18 +407,15 @@ public class EmrServerlessJobRunService implements Resettable {
                     || (mode != null && !mode.equals(run.getMode() != null ? run.getMode() : MODE_BATCH))) {
                 continue;
             }
-            int group = states == null || states.isEmpty() ? 0 : states.indexOf(run.getState());
-            cursors.put(run.getJobRunId(), String.format("%02d%020d%s", group,
-                    Long.MAX_VALUE - run.getCreatedAt().toEpochMilli(), run.getJobRunId()));
             matching.add(record);
         }
         String namespace = String.join("|", "ListJobRuns", applicationId,
                 String.valueOf(states != null ? states : List.of()), String.valueOf(createdAtAfter),
                 String.valueOf(createdAtBefore), String.valueOf(mode));
-        PaginatedResult<JobRunRecord> page = Pagination.paginate(matching,
-                record -> cursors.get(record.getJobRun().getJobRunId()),
-                maxResults != null ? maxResults : MAX_LIST_RESULTS, nextToken, namespace,
-                token -> new AwsException("ValidationException", "Invalid nextToken.", 400));
+        PaginatedResult<JobRunRecord> page = EmrServerlessService.pageByState(matching,
+                record -> record.getJobRun().getJobRunId(), record -> record.getJobRun().getState(),
+                record -> record.getJobRun().getCreatedAt(), JobRunRecord::getSequence, states, maxResults,
+                MAX_LIST_RESULTS, nextToken, namespace);
         return new PaginatedResult<>(page.items().stream().map(EmrServerlessJobRunService::toSummary).toList(),
                 page.nextToken());
     }
@@ -491,6 +511,50 @@ public class EmrServerlessJobRunService implements Resettable {
         }
     }
 
+    /**
+     * Sets on {@code run} what a run takes from the request that starts it, as it holds it: its name, role, policy,
+     * configuration overrides, driver, tags (none where the request gives none), execution timeout
+     * ({@value #DEFAULT_EXECUTION_TIMEOUT_MINUTES} minutes where it gives none), mode and retry policy.
+     */
+    private static void requested(JobRun run, StartJobRunRequest request) {
+        run.setName(request.getName());
+        run.setExecutionRole(request.getExecutionRoleArn());
+        run.setExecutionIamPolicy(request.getExecutionIamPolicy());
+        run.setConfigurationOverrides(request.getConfigurationOverrides());
+        run.setJobDriver(request.getJobDriver());
+        run.setTags(request.getTags() != null ? new LinkedHashMap<>(request.getTags()) : new LinkedHashMap<>());
+        run.setExecutionTimeoutMinutes(request.getExecutionTimeoutMinutes() != null
+                ? request.getExecutionTimeoutMinutes() : DEFAULT_EXECUTION_TIMEOUT_MINUTES);
+        run.setMode(request.getMode());
+        run.setRetryPolicy(request.getRetryPolicy());
+    }
+
+    /**
+     * Whether a retry asks for the run its original started: on the same application, with what the two would have
+     * the run hold alike, {@link #requested}. A member the run holds the same way whether it is left out or given,
+     * the execution timeout at its default or the tags empty, is alike; one the run would hold otherwise, such as a
+     * mode given where the original left it out, is not.
+     */
+    private boolean sameRun(JsonNode original, String applicationId, StartJobRunRequest retried) {
+        ObjectNode first = ((ObjectNode) original).deepCopy();
+        String firstApplication = first.path("applicationId").asText(null);
+        first.remove("applicationId");
+        return applicationId.equals(firstApplication)
+                && held(objectMapper.convertValue(first, StartJobRunRequest.class)).equals(held(retried));
+    }
+
+    private JsonNode held(StartJobRunRequest request) {
+        JobRun run = new JobRun();
+        requested(run, request);
+        return objectMapper.valueToTree(run);
+    }
+
+    // The sequence of a run created at now, after the last this service gave.
+    private long nextSequence(Instant now) {
+        lastSequence = EmrServerlessService.nextSequence(lastSequence, now);
+        return lastSequence;
+    }
+
     private JobRunRecord newRun(Application app, StartJobRunRequest request, JsonNode original) {
         AwsArnUtils.Arn applicationArn = AwsArnUtils.parse(app.getArn());
         String jobRunId = EmrServerlessService.newId();
@@ -499,40 +563,63 @@ public class EmrServerlessJobRunService implements Resettable {
         JobRun run = new JobRun();
         run.setApplicationId(app.getApplicationId());
         run.setJobRunId(jobRunId);
-        run.setName(request.getName());
         run.setArn(AwsArnUtils.Arn.of("emr-serverless", applicationArn.region(), applicationArn.accountId(),
                 applicationArn.resource() + "/jobruns/" + jobRunId).toString());
-        run.setCreatedBy(createdBy(applicationArn.accountId()));
+        run.setCreatedBy(EmrServerlessService.createdBy(iamService, requestContext, regionResolver,
+                applicationArn.accountId()));
         run.setCreatedAt(now);
         run.setUpdatedAt(now);
-        run.setExecutionRole(request.getExecutionRoleArn());
-        run.setExecutionIamPolicy(request.getExecutionIamPolicy());
+        requested(run, request);
         run.setState(sparkRunner != null ? STATE_SCHEDULED : STATE_RUNNING);
         run.setStateDetails("");
         run.setReleaseLabel(app.getReleaseLabel());
-        run.setConfigurationOverrides(request.getConfigurationOverrides());
-        run.setJobDriver(request.getJobDriver());
-        run.setTags(request.getTags() != null ? new LinkedHashMap<>(request.getTags()) : new LinkedHashMap<>());
         run.setNetworkConfiguration(app.getNetworkConfiguration());
-        run.setExecutionTimeoutMinutes(request.getExecutionTimeoutMinutes() != null
-                ? request.getExecutionTimeoutMinutes() : DEFAULT_EXECUTION_TIMEOUT_MINUTES);
-        run.setMode(request.getMode());
-        run.setRetryPolicy(request.getRetryPolicy());
         run.setAttempt(FIRST_ATTEMPT);
         run.setAttemptCreatedAt(now);
         run.setAttemptUpdatedAt(now);
+        applyImages(run, app);
         if (sparkRunner == null) {
             run.setStartedAt(now);
         }
 
         JobRunRecord record = new JobRunRecord();
         record.setJobRun(run);
+        record.setSequence(nextSequence(now));
         record.setClientToken(request.getClientToken());
         record.setRequest(original);
         record.setApplicationType(app.getType());
         record.setContainerRun(sparkRunner != null);
+        keepDriverLogs(record, app);
         store.put(jobRunId, record);
         return record;
+    }
+
+    /**
+     * Keeps where the run's latest attempt sends its driver's logs, from the configuration it is admitted with, so that
+     * a later change to its application's monitoring configuration moves neither the logs nor what its dashboard says
+     * of them.
+     */
+    private static void keepDriverLogs(JobRunRecord record, Application app) {
+        JobRun run = record.getJobRun();
+        record.getDriverLogs().put(run.getAttempt(), driverLogDestinations(app, run));
+    }
+
+    private static DriverLogDestinations driverLogDestinations(Application app, JobRun run) {
+        SparkJobRunner.CloudWatchLogs cloudWatch = driverCloudWatchLogs(app, run);
+        return new DriverLogDestinations(driverLogFolder(app, run), cloudWatch != null ? cloudWatch.logGroup() : null,
+                cloudWatch != null ? cloudWatch.stdoutStream() : null,
+                cloudWatch != null ? cloudWatch.stderrStream() : null);
+    }
+
+    // Where the run's latest attempt sends its driver's logs, as it was admitted.
+    private static DriverLogDestinations keptDriverLogs(JobRunRecord record, Application app) {
+        DriverLogDestinations logs = record.getDriverLogs().get(record.getJobRun().getAttempt());
+        return logs != null ? logs : driverLogDestinations(app, record.getJobRun());
+    }
+
+    private static SparkJobRunner.CloudWatchLogs cloudWatchLogs(DriverLogDestinations logs) {
+        return logs.logGroup() != null
+                ? new SparkJobRunner.CloudWatchLogs(logs.logGroup(), logs.stdoutStream(), logs.stderrStream()) : null;
     }
 
     /**
@@ -554,12 +641,13 @@ public class EmrServerlessJobRunService implements Resettable {
         Long minutes = run.getExecutionTimeoutMinutes();
         Duration timeout = MODE_STREAMING.equals(run.getMode()) || minutes == null || minutes == 0
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
+        DriverLogDestinations logs = keptDriverLogs(record, app);
         SparkJobRunner.Job job;
         if (hive != null) {
             job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
                     run.getReleaseLabel(), SparkJobRunner.Engine.HIVE, hiveImageTemplate, customImage(app),
                     dockerNetwork, run.getExecutionRole(), Map.of(), hiveArguments(app, run, hive), null, timeout,
-                    driverLogFolder(app, run), driverCloudWatchLogs(app, run), Map.of(), List.of(), null, Map.of(),
+                    logs.s3Folder(), cloudWatchLogs(logs), Map.of(), List.of(), null, Map.of(),
                     Map.of(), Map.of(), Map.of(), Map.of(), null);
         } else {
             JobDriver.SparkSubmit sparkSubmit = run.getJobDriver().getSparkSubmit();
@@ -568,7 +656,7 @@ public class EmrServerlessJobRunService implements Resettable {
             job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
                     run.getReleaseLabel(), SparkJobRunner.Engine.SPARK, imageTemplate, customImage(app),
                     dockerNetwork, run.getExecutionRole(), sparkDefaults, application(sparkSubmit), null, timeout,
-                    driverLogFolder(app, run), driverCloudWatchLogs(app, run), driverEnvironment(sparkProperties),
+                    logs.s3Folder(), cloudWatchLogs(logs), driverEnvironment(sparkProperties),
                     archives(sparkProperties), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
                     executors(app, executorContainers));
         }
@@ -579,6 +667,48 @@ public class EmrServerlessJobRunService implements Resettable {
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(onPlatform, launchedIn));
+    }
+
+    /** The runner of the docker runner mode, or null in the immediate one. */
+    SparkJobRunner containerRunner() {
+        return sparkRunner;
+    }
+
+    /**
+     * What runs a session's Spark Connect server in a container, as a run's driver runs: in the application's image,
+     * on its network, with the session's execution role and its executors as a run's are, for {@code limit} at most.
+     * Its {@code spark-defaults} are the application's, then the session's {@code runtimeConfiguration}, merged as a
+     * run's {@code applicationConfiguration} is, with the server's port {@code port}; a
+     * {@code spark.connect.grpc.binding.address} is dropped, as "The Spark configuration
+     * spark.connect.grpc.binding.address is reserved by EMR Serverless and cannot be overridden by users" (EMR
+     * Serverless user guide, "Run interactive sessions with Amazon EMR Serverless through Spark Connect").
+     */
+    SparkJobRunner.Job sessionJob(Application app, Session session, Duration limit, int port) {
+        Object overrides = session.getConfigurationOverrides() != null
+                ? session.getConfigurationOverrides().get("runtimeConfiguration") : null;
+        Map<String, String> sparkDefaults = classificationProperties(app, overrides, session.getReleaseLabel(),
+                SPARK_DEFAULTS);
+        sparkDefaults.remove(SPARK_CONNECT_ADDRESS);
+        sparkDefaults.put(SPARK_CONNECT_PORT, String.valueOf(port));
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(session.getArn());
+        SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, session.getSessionId(), arn.accountId(),
+                arn.region(), session.getReleaseLabel(), SparkJobRunner.Engine.SPARK, imageTemplate, customImage(app),
+                dockerNetwork, session.getExecutionRoleArn(), sparkDefaults,
+                sparkConnectServer(session.getReleaseLabel()), null, limit, null, null,
+                driverEnvironment(sparkDefaults), archives(sparkDefaults), null, Map.of(), Map.of(), Map.of(),
+                Map.of(), Map.of(), executors(app, executorContainers));
+        return job.withPlatform(honourArchitectures ? DockerPlatforms.forArchitecture(app.getArchitecture()) : null)
+                .listeningOn(port);
+    }
+
+    /**
+     * What starts the Spark Connect server on {@code spark-submit}'s command line: its class, and, on an emr- release,
+     * whose Spark 3.5 keeps the server in {@value #SPARK_CONNECT_JAR}, that jar as the application; the AWS runtime
+     * for Apache Spark's Spark 4 carries the server among its own jars.
+     */
+    static List<String> sparkConnectServer(String releaseLabel) {
+        return List.of("--class", SPARK_CONNECT_SERVER,
+                sparkRuntime(releaseLabel) ? SPARK_INTERNAL : SPARK_CONNECT_JAR);
     }
 
     private void execute(SparkJobRunner.Job job, long launchedIn) {
@@ -600,16 +730,102 @@ public class EmrServerlessJobRunService implements Resettable {
      * {@code TezTask} image is not used; a Spark run's executors have their own, {@link #executors}.
      */
     static String customImage(Application app) {
-        return workerImage(app, HIVE_TYPE.equalsIgnoreCase(app.getType()) ? HIVE_DRIVER_WORKER_TYPE : DRIVER_WORKER_TYPE);
+        return workerImage(app, driverWorkerType(app.getType()));
     }
 
-    // A worker type's custom image, else the application's, else null for the release's.
+    private static String driverWorkerType(String applicationType) {
+        return HIVE_TYPE.equalsIgnoreCase(applicationType) ? HIVE_DRIVER_WORKER_TYPE : DRIVER_WORKER_TYPE;
+    }
+
+    /**
+     * The image configurations an attempt of a run applies: its application's, and its worker types', as they stand
+     * when the attempt is made. Floci resolves a custom image for each attempt, as "EMR 7.14 and later" do ("New
+     * custom images take effect for new workloads immediately") and "New job attempts will pick new images", so the
+     * run's {@code workerTypeSpecifications} hold the attempt's own, as AWS's do "when the
+     * applicationLevelDigestResolution is false for the application". Each is a copy holding the image's URI, with no
+     * digest until the attempt's runner resolves that image, {@link #imageDigestResolved}.
+     */
+    private static void applyImages(JobRun run, Application app) {
+        run.setImageConfiguration(pinned(app, "") != null ? copyOf(pinned(app, ""))
+                : appliedImage(app.getImageConfiguration()));
+        Map<String, WorkerTypeSpecification> workerTypes = new LinkedHashMap<>();
+        Map<String, WorkerTypeSpecification> specifications = new LinkedHashMap<>();
+        if (app.getWorkerTypeSpecifications() != null) {
+            specifications.putAll(app.getWorkerTypeSpecifications());
+        }
+        if (app.getPinnedImages() != null) {
+            app.getPinnedImages().keySet().stream().filter(key -> !key.isEmpty())
+                    .forEach(key -> specifications.putIfAbsent(key, null));
+        }
+        if (!specifications.isEmpty()) {
+            specifications.forEach((workerType, specification) -> {
+                ImageConfiguration image = pinned(app, workerType) != null ? copyOf(pinned(app, workerType))
+                        : specification != null ? appliedImage(specification.getImageConfiguration()) : null;
+                if (image != null) {
+                    WorkerTypeSpecification applied = new WorkerTypeSpecification();
+                    applied.setImageConfiguration(image);
+                    workerTypes.put(workerType, applied);
+                }
+            });
+        }
+        run.setWorkerTypeSpecifications(workerTypes.isEmpty() ? null : workerTypes);
+    }
+
+    private static ImageConfiguration appliedImage(ImageConfiguration image) {
+        if (image == null || image.getImageUri() == null) {
+            return null;
+        }
+        ImageConfiguration applied = new ImageConfiguration();
+        applied.setImageUri(image.getImageUri());
+        return applied;
+    }
+
+    // The image the application resolved for a worker type ("" its own) as it started, which its runs take until it
+    // starts again (EmrServerlessService.pinImages); null where it resolved none.
+    private static ImageConfiguration pinned(Application app, String key) {
+        return app.getPinnedImages() != null ? app.getPinnedImages().get(key) : null;
+    }
+
+    private static ImageConfiguration copyOf(ImageConfiguration image) {
+        ImageConfiguration copy = new ImageConfiguration();
+        copy.setImageUri(image.getImageUri());
+        copy.setResolvedImageDigest(image.getResolvedImageDigest());
+        return copy;
+    }
+
+    // The image a run pulls for a resolved one: its repository by its digest, as its tag may since name another.
+    private static String byDigest(ImageConfiguration image) {
+        String uri = image.getImageUri();
+        if (uri.contains("@")) {
+            return uri;
+        }
+        int colon = uri.lastIndexOf(':');
+        String repository = colon > uri.lastIndexOf('/') ? uri.substring(0, colon) : uri;
+        return repository + "@" + image.getResolvedImageDigest();
+    }
+
+    // The image configuration an attempt applies to a worker type: the worker type's own, else the run's, as
+    // workerImage chose its image.
+    private static ImageConfiguration appliedImage(JobRun run, String workerType) {
+        WorkerTypeSpecification worker = run.getWorkerTypeSpecifications() != null
+                ? run.getWorkerTypeSpecifications().get(workerType) : null;
+        return worker != null ? worker.getImageConfiguration() : run.getImageConfiguration();
+    }
+
+    // A worker type's custom image, else the application's, else null for the release's: the one the application
+    // resolved as it started where it resolved it then, by its digest, else the one it names now.
     private static String workerImage(Application app, String workerType) {
+        if (pinned(app, workerType) != null) {
+            return byDigest(pinned(app, workerType));
+        }
         WorkerTypeSpecification worker = app.getWorkerTypeSpecifications() != null
                 ? app.getWorkerTypeSpecifications().get(workerType) : null;
         if (worker != null && worker.getImageConfiguration() != null
                 && worker.getImageConfiguration().getImageUri() != null) {
             return worker.getImageConfiguration().getImageUri();
+        }
+        if (pinned(app, "") != null) {
+            return byDigest(pinned(app, ""));
         }
         return app.getImageConfiguration() != null ? app.getImageConfiguration().getImageUri() : null;
     }
@@ -780,6 +996,32 @@ public class EmrServerlessJobRunService implements Resettable {
                 });
     }
 
+    /**
+     * The run's latest attempt resolved its {@code workerType}'s custom image to the image whose manifest digest is
+     * {@code digest}: the image configuration that worker type took its image from, its own or the run's, both copied
+     * from the application the attempt's job was made from, gets it as its {@code resolvedImageDigest}. Another naming
+     * the same image does not: its image may not run, as an {@code Executor} image while the executors run in the
+     * driver's container, or was pulled apart, maybe after a push. One the driver and the executors both take their
+     * image from holds the driver's.
+     */
+    private synchronized void imageDigestResolved(String jobRunId, SparkJobRunner.WorkerType workerType, String digest,
+                                                  long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        store.get(jobRunId).ifPresent(record -> {
+            JobRun run = record.getJobRun();
+            ImageConfiguration driver = appliedImage(run, driverWorkerType(record.getApplicationType()));
+            ImageConfiguration applied = workerType == SparkJobRunner.WorkerType.DRIVER
+                    ? driver : appliedImage(run, EXECUTOR_WORKER_TYPE);
+            if (applied == null || (workerType == SparkJobRunner.WorkerType.EXECUTOR && applied == driver)) {
+                return;
+            }
+            applied.setResolvedImageDigest(digest);
+            store.put(jobRunId, record);
+        });
+    }
+
     // A run past its timeout is CANCELLING while its driver is stopped: "the job run has timed out".
     private synchronized void driverTimedOut(String jobRunId, long launchedIn) {
         if (launchedIn != generation) {
@@ -884,6 +1126,8 @@ public class EmrServerlessJobRunService implements Resettable {
         run.setStartedAt(null);
         run.setEndedAt(null);
         run.setTotalExecutionDurationSeconds(null);
+        applyImages(run, app);
+        keepDriverLogs(record, app);
         store.put(run.getJobRunId(), record);
         LOG.infov("EMR Serverless job run {0} failed its attempt {1}; attempt {2} starts", run.getJobRunId(),
                 failed.getAttempt(), run.getAttempt());
@@ -902,16 +1146,26 @@ public class EmrServerlessJobRunService implements Resettable {
      * considered for this classification." From emr-spark-8.1.0 they merge by property, the run's winning.
      */
     private static Map<String, String> classificationProperties(Application app, JobRun run, String classification) {
+        Object overrides = run.getConfigurationOverrides() != null
+                ? run.getConfigurationOverrides().get("applicationConfiguration") : null;
+        return classificationProperties(app, overrides, run.getReleaseLabel(), classification);
+    }
+
+    /**
+     * A {@code classification}'s properties: the application's runtime configuration, then {@code overrides}, a
+     * workload's own configuration list on {@code releaseLabel}, merged as {@link #classificationProperties} merges a
+     * run's.
+     */
+    private static Map<String, String> classificationProperties(Application app, Object overrides,
+                                                                String releaseLabel, String classification) {
         Map<String, String> properties = new LinkedHashMap<>();
         if (app.getRuntimeConfiguration() != null) {
             for (RuntimeConfiguration configuration : app.getRuntimeConfiguration()) {
                 addProperties(properties, configuration.getMembers(), classification);
             }
         }
-        Object overrides = run.getConfigurationOverrides() != null
-                ? run.getConfigurationOverrides().get("applicationConfiguration") : null;
         if (overrides instanceof List<?> configurations) {
-            boolean replaces = !releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, run.getReleaseLabel(), 8, 1);
+            boolean replaces = !releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 1);
             for (Object configuration : configurations) {
                 if (configuration instanceof Map<?, ?> members
                         && classification.equals(members.get("classification"))) {
@@ -1010,8 +1264,7 @@ public class EmrServerlessJobRunService implements Resettable {
 
     // "EMR Serverless releases 7.1.0 and higher support retry attempts for streaming jobs and batch jobs."
     private static boolean retriesAttempts(String releaseLabel) {
-        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 1)
-                || SPARK_RUNTIME_RELEASE_LABEL.matcher(releaseLabel != null ? releaseLabel : "").matches();
+        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 1) || sparkRuntime(releaseLabel);
     }
 
     private static void addProperties(Map<String, String> properties, Map<?, ?> configuration, String classification) {
@@ -1094,39 +1347,6 @@ public class EmrServerlessJobRunService implements Resettable {
                 .orElseThrow(() -> EmrServerlessService.resourceNotFound(resource.arn()));
     }
 
-    private JobRunRecord runWithClientToken(String clientToken) {
-        for (JobRunRecord record : store.scan(key -> true)) {
-            if (clientToken.equals(record.getClientToken()) && inRequestRegion(record.getJobRun())) {
-                return record;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * What a retry must repeat: the application and every member of the body but the token itself.
-     * Read back from its JSON text, so that its numbers compare equal to those of a stored request
-     * once storage has written and read it.
-     */
-    private JsonNode requestOf(String applicationId, StartJobRunRequest request) {
-        ObjectNode node;
-        try {
-            node = (ObjectNode) objectMapper.readTree(objectMapper.writeValueAsString(request));
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot serialize a StartJobRun request", e);
-        }
-        node.remove("clientToken");
-        node.put("applicationId", applicationId);
-        return node;
-    }
-
-    // The caller, as GetCallerIdentity reports it; the account root for a key IAM does not know.
-    private String createdBy(String accountId) {
-        String accessKeyId = requestContext != null ? requestContext.getAccessKeyId() : null;
-        return iamService.resolveCallerArn(accessKeyId)
-                .orElseGet(() -> regionResolver.buildGlobalArn("iam", accountId, "root"));
-    }
-
     private boolean inRequestRegion(JobRun run) {
         return regionResolver.getRegion().equals(AwsArnUtils.parse(run.getArn()).region());
     }
@@ -1141,11 +1361,9 @@ public class EmrServerlessJobRunService implements Resettable {
         if (request.getClientToken() == null) {
             violations.add(SmithyValidationErrors.notNull("clientToken"));
         }
-        if (request.getExecutionRoleArn() == null) {
-            violations.add(SmithyValidationErrors.notNull("executionRoleArn"));
-        } else if (!ROLE_ARN.matcher(request.getExecutionRoleArn()).matches()) {
-            violations.add("Value at 'executionRoleArn' failed to satisfy constraint: "
-                    + "Member must satisfy regular expression pattern: " + ROLE_ARN_PATTERN);
+        String roleViolation = executionRoleViolation(request.getExecutionRoleArn());
+        if (roleViolation != null) {
+            violations.add(roleViolation);
         }
         if (request.getMode() != null && !MODES.contains(request.getMode())) {
             violations.add(SmithyValidationErrors.notInEnum(request.getMode(), "mode", MODES));
@@ -1182,6 +1400,16 @@ public class EmrServerlessJobRunService implements Resettable {
         }
     }
 
+    /** What is wrong with a request's {@code executionRoleArn}, which the model requires: null when nothing is. */
+    static String executionRoleViolation(String executionRoleArn) {
+        if (executionRoleArn == null) {
+            return SmithyValidationErrors.notNull("executionRoleArn");
+        }
+        return ROLE_ARN.matcher(executionRoleArn).matches() ? null
+                : "Value at 'executionRoleArn' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: " + ROLE_ARN_PATTERN;
+    }
+
     /**
      * The members of a run's {@code retryPolicy} it gives, each an integer in the model. A restJson1 service
      * refuses a body member of another type, a string, a boolean or a fraction where an integer goes, with
@@ -1202,9 +1430,10 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     /**
-     * From Amazon EMR release 7.11.0 a BATCH run's timeout is 1 to 10080 minutes; an earlier release, or
-     * a STREAMING run, keeps the model's 0 to 1,000,000, 0 meaning none. No source gives AWS's error, so
-     * the wording is Floci's.
+     * From Amazon EMR release 7.11.0 a BATCH run's timeout is 1 to 10080 minutes, on the AWS runtime for Apache
+     * Spark's releases too, as the 7.11.0 release notes' "from this release onwards" reads and the release list puts
+     * them after EMR Serverless 7.14.0; an earlier release, or a STREAMING run, keeps the model's 0 to 1,000,000, 0
+     * meaning none. No source gives AWS's error, so the wording is Floci's.
      */
     private static void checkBatchTimeout(Application app, StartJobRunRequest request) {
         Long minutes = request.getExecutionTimeoutMinutes();
@@ -1220,11 +1449,19 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     private static boolean boundsBatchTimeouts(String releaseLabel) {
-        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 11);
+        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 11) || sparkRuntime(releaseLabel);
+    }
+
+    /**
+     * Whether {@code releaseLabel} is a release of the AWS runtime for Apache Spark, emr-spark-8.0 or later, which
+     * starts at emr-spark-8.0-preview and comes after EMR Serverless 7.14.0 in the release list.
+     */
+    public static boolean sparkRuntime(String releaseLabel) {
+        return releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 0);
     }
 
     // Whether releaseLabel is of the family labelPattern matches, at major.minor or later.
-    private static boolean releaseAtLeast(Pattern labelPattern, String releaseLabel, int major, int minor) {
+    static boolean releaseAtLeast(Pattern labelPattern, String releaseLabel, int major, int minor) {
         Matcher matcher = labelPattern.matcher(releaseLabel != null ? releaseLabel : "");
         if (!matcher.matches()) {
             return false;
@@ -1291,6 +1528,12 @@ public class EmrServerlessJobRunService implements Resettable {
         @Override
         public void started() {
             RequestScopes.runAs(job.accountId(), job.region(), () -> driverStarted(job.runId(), launchedIn));
+        }
+
+        @Override
+        public void imageResolved(SparkJobRunner.WorkerType workerType, String digest) {
+            RequestScopes.runAs(job.accountId(), job.region(),
+                    () -> imageDigestResolved(job.runId(), workerType, digest, launchedIn));
         }
 
         @Override

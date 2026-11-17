@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.lambda.LambdaService;
@@ -36,7 +37,7 @@ class ApiGatewayProxyMatchTest {
         ctrl = new ApiGatewayExecuteController(apiGatewayService, null, apiGatewayV2Service, lambdaService,
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(), vtlEngine, serviceRouter, webSocketConnectionManager, elbV2Service, null,
-                new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
+                new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null, new HttpProxyInvoker());
     }
 
     private ApiGatewayResource resource(String id, String parentId, String pathPart, String path) {

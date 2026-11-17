@@ -337,6 +337,48 @@ class RetryingDockerHttpClientTest {
         }
     }
 
+    // Catches: a container wait on the streaming transport losing the replay the control-plane
+    // transport gives it, so each stale socket spends one of the Lambda exit watcher's few re-arms.
+    @Test
+    void containerWaitRetrierReplaysAWaitThroughRepeatedBrokenPipes() {
+        Response ok = mock(Response.class);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            if (attempt < 3) {
+                throw brokenPipe();
+            }
+            return ok;
+        });
+        RetryingDockerHttpClient client = RetryingDockerHttpClient.forContainerWaits(delegate, MAX_ATTEMPTS, 0L);
+        Request wait = Request.builder()
+                .method(Request.Method.POST)
+                .path("/containers/abc/wait?condition=not-running")
+                .build();
+
+        assertSame(ok, client.execute(wait));
+        assertEquals(3, delegate.calls.get());
+    }
+
+    // Catches: the wait-only decorator replaying anything else the streaming transport sends: an exec
+    // start would re-run its command, and log or attach streams are never replayed there.
+    @Test
+    void containerWaitRetrierReplaysNothingElse() {
+        for (Request request : List.of(
+                Request.builder().method(Request.Method.POST).path("/exec/abc/start")
+                        .bodyBytes("{}".getBytes(StandardCharsets.UTF_8)).build(),
+                Request.builder().method(Request.Method.GET).path("/containers/abc/logs?follow=1").build(),
+                Request.builder().method(Request.Method.POST).path("/containers/abc/attach?stream=1").build(),
+                Request.builder().method(Request.Method.GET).path("/_ping").build())) {
+            FakeTransport delegate = new FakeTransport(attempt -> {
+                throw brokenPipe();
+            });
+            RetryingDockerHttpClient client =
+                    RetryingDockerHttpClient.forContainerWaits(delegate, MAX_ATTEMPTS, 0L);
+
+            assertThrows(RuntimeException.class, () -> client.execute(request), request.path());
+            assertEquals(1, delegate.calls.get(), request.path());
+        }
+    }
+
     @Test
     void retriesOnlyANamedVolumeCreate() {
         // Catches: replaying an unnamed volume create, which makes a second volume and orphans the
@@ -512,17 +554,26 @@ class RetryingDockerHttpClientTest {
         }
     }
 
+    // Catches: the control-plane transport losing its retries, the streaming transport losing the
+    // container-wait replay, or the streaming transport replaying a log stream.
     @Test
-    void producerWrapsControlPlaneTransportOnly() {
+    void producerWrapsEachTransportInItsOwnReplayPolicy() {
         DockerHttpClient raw = new FakeTransport(attempt -> null);
-
         DockerHttpClient controlPlane = DockerClientProducer.wrapForRole(raw, "control-plane");
-        DockerHttpClient streaming = DockerClientProducer.wrapForRole(raw, "streaming");
 
         assertSame(RetryingDockerHttpClient.class, controlPlane.getClass(),
                 "the control-plane transport must be wrapped in the retry decorator");
         assertNotSame(raw, controlPlane);
-        assertSame(raw, streaming,
-                "the streaming transport (log-follow, exec output) must stay unwrapped");
+
+        FakeTransport failing = new FakeTransport(attempt -> {
+            throw brokenPipe();
+        });
+        DockerHttpClient streaming = DockerClientProducer.wrapForRole(failing, "streaming");
+        Request logs = Request.builder().method(Request.Method.GET).path("/containers/abc/logs?follow=1").build();
+
+        assertInstanceOf(RetryingDockerHttpClient.class, streaming,
+                "the streaming transport must replay container waits");
+        assertThrows(RuntimeException.class, () -> streaming.execute(logs));
+        assertEquals(1, failing.calls.get(), "the streaming transport must never replay a log stream");
     }
 }

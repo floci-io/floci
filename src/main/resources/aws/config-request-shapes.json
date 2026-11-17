@@ -1,0 +1,3149 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_config_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "AssociateResourceTypes": "AssociateResourceTypesRequest",
+    "BatchGetAggregateResourceConfig": "BatchGetAggregateResourceConfigRequest",
+    "BatchGetResourceConfig": "BatchGetResourceConfigRequest",
+    "DeleteAggregationAuthorization": "DeleteAggregationAuthorizationRequest",
+    "DeleteConfigRule": "DeleteConfigRuleRequest",
+    "DeleteConfigurationAggregator": "DeleteConfigurationAggregatorRequest",
+    "DeleteConfigurationRecorder": "DeleteConfigurationRecorderRequest",
+    "DeleteConformancePack": "DeleteConformancePackRequest",
+    "DeleteConnector": "DeleteConnectorRequest",
+    "DeleteDeliveryChannel": "DeleteDeliveryChannelRequest",
+    "DeleteEvaluationResults": "DeleteEvaluationResultsRequest",
+    "DeleteOrganizationConfigRule": "DeleteOrganizationConfigRuleRequest",
+    "DeleteOrganizationConformancePack": "DeleteOrganizationConformancePackRequest",
+    "DeletePendingAggregationRequest": "DeletePendingAggregationRequestRequest",
+    "DeleteRemediationConfiguration": "DeleteRemediationConfigurationRequest",
+    "DeleteRemediationExceptions": "DeleteRemediationExceptionsRequest",
+    "DeleteResourceConfig": "DeleteResourceConfigRequest",
+    "DeleteRetentionConfiguration": "DeleteRetentionConfigurationRequest",
+    "DeleteServiceLinkedConfigurationRecorder": "DeleteServiceLinkedConfigurationRecorderRequest",
+    "DeleteStoredQuery": "DeleteStoredQueryRequest",
+    "DeliverConfigSnapshot": "DeliverConfigSnapshotRequest",
+    "DescribeAggregateComplianceByConfigRules": "DescribeAggregateComplianceByConfigRulesRequest",
+    "DescribeAggregateComplianceByConformancePacks": "DescribeAggregateComplianceByConformancePacksRequest",
+    "DescribeAggregationAuthorizations": "DescribeAggregationAuthorizationsRequest",
+    "DescribeComplianceByConfigRule": "DescribeComplianceByConfigRuleRequest",
+    "DescribeComplianceByResource": "DescribeComplianceByResourceRequest",
+    "DescribeConfigRuleEvaluationStatus": "DescribeConfigRuleEvaluationStatusRequest",
+    "DescribeConfigRules": "DescribeConfigRulesRequest",
+    "DescribeConfigurationAggregatorSourcesStatus": "DescribeConfigurationAggregatorSourcesStatusRequest",
+    "DescribeConfigurationAggregators": "DescribeConfigurationAggregatorsRequest",
+    "DescribeConfigurationRecorderStatus": "DescribeConfigurationRecorderStatusRequest",
+    "DescribeConfigurationRecorders": "DescribeConfigurationRecordersRequest",
+    "DescribeConformancePackCompliance": "DescribeConformancePackComplianceRequest",
+    "DescribeConformancePackStatus": "DescribeConformancePackStatusRequest",
+    "DescribeConformancePacks": "DescribeConformancePacksRequest",
+    "DescribeDeliveryChannelStatus": "DescribeDeliveryChannelStatusRequest",
+    "DescribeDeliveryChannels": "DescribeDeliveryChannelsRequest",
+    "DescribeOrganizationConfigRuleStatuses": "DescribeOrganizationConfigRuleStatusesRequest",
+    "DescribeOrganizationConfigRules": "DescribeOrganizationConfigRulesRequest",
+    "DescribeOrganizationConformancePackStatuses": "DescribeOrganizationConformancePackStatusesRequest",
+    "DescribeOrganizationConformancePacks": "DescribeOrganizationConformancePacksRequest",
+    "DescribePendingAggregationRequests": "DescribePendingAggregationRequestsRequest",
+    "DescribeRemediationConfigurations": "DescribeRemediationConfigurationsRequest",
+    "DescribeRemediationExceptions": "DescribeRemediationExceptionsRequest",
+    "DescribeRemediationExecutionStatus": "DescribeRemediationExecutionStatusRequest",
+    "DescribeRetentionConfigurations": "DescribeRetentionConfigurationsRequest",
+    "DisassociateResourceTypes": "DisassociateResourceTypesRequest",
+    "GetAggregateComplianceDetailsByConfigRule": "GetAggregateComplianceDetailsByConfigRuleRequest",
+    "GetAggregateConfigRuleComplianceSummary": "GetAggregateConfigRuleComplianceSummaryRequest",
+    "GetAggregateConformancePackComplianceSummary": "GetAggregateConformancePackComplianceSummaryRequest",
+    "GetAggregateDiscoveredResourceCounts": "GetAggregateDiscoveredResourceCountsRequest",
+    "GetAggregateResourceConfig": "GetAggregateResourceConfigRequest",
+    "GetComplianceDetailsByConfigRule": "GetComplianceDetailsByConfigRuleRequest",
+    "GetComplianceDetailsByResource": "GetComplianceDetailsByResourceRequest",
+    "GetComplianceSummaryByResourceType": "GetComplianceSummaryByResourceTypeRequest",
+    "GetConformancePackComplianceDetails": "GetConformancePackComplianceDetailsRequest",
+    "GetConformancePackComplianceSummary": "GetConformancePackComplianceSummaryRequest",
+    "GetConnector": "GetConnectorRequest",
+    "GetCustomRulePolicy": "GetCustomRulePolicyRequest",
+    "GetDiscoveredResourceCounts": "GetDiscoveredResourceCountsRequest",
+    "GetOrganizationConfigRuleDetailedStatus": "GetOrganizationConfigRuleDetailedStatusRequest",
+    "GetOrganizationConformancePackDetailedStatus": "GetOrganizationConformancePackDetailedStatusRequest",
+    "GetOrganizationCustomRulePolicy": "GetOrganizationCustomRulePolicyRequest",
+    "GetResourceConfigHistory": "GetResourceConfigHistoryRequest",
+    "GetResourceEvaluationSummary": "GetResourceEvaluationSummaryRequest",
+    "GetStoredQuery": "GetStoredQueryRequest",
+    "ListAggregateDiscoveredResources": "ListAggregateDiscoveredResourcesRequest",
+    "ListConfigurationRecorders": "ListConfigurationRecordersRequest",
+    "ListConformancePackComplianceScores": "ListConformancePackComplianceScoresRequest",
+    "ListConnectors": "ListConnectorsRequest",
+    "ListDiscoveredResources": "ListDiscoveredResourcesRequest",
+    "ListResourceEvaluations": "ListResourceEvaluationsRequest",
+    "ListStoredQueries": "ListStoredQueriesRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "PutAggregationAuthorization": "PutAggregationAuthorizationRequest",
+    "PutConfigRule": "PutConfigRuleRequest",
+    "PutConfigurationAggregator": "PutConfigurationAggregatorRequest",
+    "PutConfigurationRecorder": "PutConfigurationRecorderRequest",
+    "PutConformancePack": "PutConformancePackRequest",
+    "PutConnector": "PutConnectorRequest",
+    "PutDeliveryChannel": "PutDeliveryChannelRequest",
+    "PutEvaluations": "PutEvaluationsRequest",
+    "PutExternalEvaluation": "PutExternalEvaluationRequest",
+    "PutOrganizationConfigRule": "PutOrganizationConfigRuleRequest",
+    "PutOrganizationConformancePack": "PutOrganizationConformancePackRequest",
+    "PutRemediationConfigurations": "PutRemediationConfigurationsRequest",
+    "PutRemediationExceptions": "PutRemediationExceptionsRequest",
+    "PutResourceConfig": "PutResourceConfigRequest",
+    "PutRetentionConfiguration": "PutRetentionConfigurationRequest",
+    "PutServiceLinkedConfigurationRecorder": "PutServiceLinkedConfigurationRecorderRequest",
+    "PutStoredQuery": "PutStoredQueryRequest",
+    "PutThirdPartyServiceLinkedConfigurationRecorder": "PutThirdPartyServiceLinkedConfigurationRecorderRequest",
+    "SelectAggregateResourceConfig": "SelectAggregateResourceConfigRequest",
+    "SelectResourceConfig": "SelectResourceConfigRequest",
+    "StartConfigRulesEvaluation": "StartConfigRulesEvaluationRequest",
+    "StartConfigurationRecorder": "StartConfigurationRecorderRequest",
+    "StartRemediationExecution": "StartRemediationExecutionRequest",
+    "StartResourceEvaluation": "StartResourceEvaluationRequest",
+    "StopConfigurationRecorder": "StopConfigurationRecorderRequest",
+    "TagResource": "TagResourceRequest",
+    "UntagResource": "UntagResourceRequest"
+  },
+  "shapes": {
+    "AccountAggregationSource": {
+      "type": "structure",
+      "required": [
+        "AccountIds"
+      ],
+      "members": {
+        "AccountIds": "AccountAggregationSourceAccountList",
+        "AllAwsRegions": "Boolean",
+        "AwsRegions": "AggregatorRegionList"
+      }
+    },
+    "AccountAggregationSourceAccountList": {
+      "type": "list",
+      "min": 1,
+      "member": "AccountId"
+    },
+    "AccountAggregationSourceList": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "AccountAggregationSource"
+    },
+    "AccountId": {
+      "type": "string",
+      "pattern": "\\d{12}"
+    },
+    "AggregateConformancePackComplianceFilters": {
+      "type": "structure",
+      "members": {
+        "ConformancePackName": "ConformancePackName",
+        "ComplianceType": "ConformancePackComplianceType",
+        "AccountId": "AccountId",
+        "AwsRegion": "AwsRegion"
+      }
+    },
+    "AggregateConformancePackComplianceSummaryFilters": {
+      "type": "structure",
+      "members": {
+        "AccountId": "AccountId",
+        "AwsRegion": "AwsRegion"
+      }
+    },
+    "AggregateConformancePackComplianceSummaryGroupKey": {
+      "type": "string",
+      "enum": [
+        "ACCOUNT_ID",
+        "AWS_REGION"
+      ]
+    },
+    "AggregateResourceIdentifier": {
+      "type": "structure",
+      "required": [
+        "SourceAccountId",
+        "SourceRegion",
+        "ResourceId",
+        "ResourceType"
+      ],
+      "members": {
+        "SourceAccountId": "AccountId",
+        "SourceRegion": "AwsRegion",
+        "ResourceId": "ResourceId",
+        "ResourceType": "ResourceType",
+        "ResourceName": "ResourceName"
+      }
+    },
+    "AggregatedSourceStatusType": {
+      "type": "string",
+      "enum": [
+        "FAILED",
+        "SUCCEEDED",
+        "OUTDATED"
+      ]
+    },
+    "AggregatedSourceStatusTypeList": {
+      "type": "list",
+      "min": 1,
+      "member": "AggregatedSourceStatusType"
+    },
+    "AggregatorFilterResourceType": {
+      "type": "structure",
+      "members": {
+        "Type": "AggregatorFilterType",
+        "Value": "ResourceTypeValueList"
+      }
+    },
+    "AggregatorFilterServicePrincipal": {
+      "type": "structure",
+      "members": {
+        "Type": "AggregatorFilterType",
+        "Value": "ServicePrincipalValueList"
+      }
+    },
+    "AggregatorFilterType": {
+      "type": "string",
+      "enum": [
+        "INCLUDE"
+      ]
+    },
+    "AggregatorFilters": {
+      "type": "structure",
+      "members": {
+        "ResourceType": "AggregatorFilterResourceType",
+        "ServicePrincipal": "AggregatorFilterServicePrincipal"
+      }
+    },
+    "AggregatorRegionList": {
+      "type": "list",
+      "min": 1,
+      "member": "String"
+    },
+    "AllSupported": {
+      "type": "boolean"
+    },
+    "AmazonResourceName": {
+      "type": "string",
+      "min": 1,
+      "max": 1000
+    },
+    "AssociateResourceTypesRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationRecorderArn",
+        "ResourceTypes"
+      ],
+      "members": {
+        "ConfigurationRecorderArn": "AmazonResourceName",
+        "ResourceTypes": "ResourceTypeList"
+      }
+    },
+    "AutoRemediationAttemptSeconds": {
+      "type": "long",
+      "min": 1,
+      "max": 2678000
+    },
+    "AutoRemediationAttempts": {
+      "type": "integer",
+      "min": 1,
+      "max": 25
+    },
+    "AwsRegion": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "AzureClientIdentifier": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "AzureConnectorConfiguration": {
+      "type": "structure",
+      "required": [
+        "tenantIdentifier",
+        "clientIdentifier"
+      ],
+      "members": {
+        "tenantIdentifier": "AzureTenantIdentifier",
+        "clientIdentifier": "AzureClientIdentifier"
+      }
+    },
+    "AzureTenantIdentifier": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "BaseResourceId": {
+      "type": "string",
+      "min": 1,
+      "max": 768
+    },
+    "BatchGetAggregateResourceConfigRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName",
+        "ResourceIdentifiers"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "ResourceIdentifiers": "ResourceIdentifiersList"
+      }
+    },
+    "BatchGetResourceConfigRequest": {
+      "type": "structure",
+      "required": [
+        "resourceKeys"
+      ],
+      "members": {
+        "resourceKeys": "ResourceKeys"
+      }
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "ChannelName": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "ChronologicalOrder": {
+      "type": "string",
+      "enum": [
+        "Reverse",
+        "Forward"
+      ]
+    },
+    "ClientToken": {
+      "type": "string",
+      "min": 64,
+      "max": 256
+    },
+    "ComplianceResourceTypes": {
+      "type": "list",
+      "min": 0,
+      "max": 100,
+      "member": "StringWithCharLimit256"
+    },
+    "ComplianceType": {
+      "type": "string",
+      "enum": [
+        "COMPLIANT",
+        "NON_COMPLIANT",
+        "NOT_APPLICABLE",
+        "INSUFFICIENT_DATA"
+      ]
+    },
+    "ComplianceTypes": {
+      "type": "list",
+      "min": 0,
+      "max": 3,
+      "member": "ComplianceType"
+    },
+    "ConfigRule": {
+      "type": "structure",
+      "required": [
+        "Source"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ConfigRuleArn": "StringWithCharLimit256",
+        "ConfigRuleId": "StringWithCharLimit64",
+        "Description": "EmptiableStringWithCharLimit256",
+        "Scope": "Scope",
+        "Source": "Source",
+        "InputParameters": "StringWithCharLimit1024",
+        "MaximumExecutionFrequency": "MaximumExecutionFrequency",
+        "ConfigRuleState": "ConfigRuleState",
+        "CreatedBy": "StringWithCharLimit256",
+        "EvaluationModes": "EvaluationModes",
+        "RuleEvaluationVisibility": "RuleEvaluationVisibility"
+      }
+    },
+    "ConfigRuleComplianceFilters": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ComplianceType": "ComplianceType",
+        "AccountId": "AccountId",
+        "AwsRegion": "AwsRegion"
+      }
+    },
+    "ConfigRuleComplianceSummaryFilters": {
+      "type": "structure",
+      "members": {
+        "AccountId": "AccountId",
+        "AwsRegion": "AwsRegion"
+      }
+    },
+    "ConfigRuleComplianceSummaryGroupKey": {
+      "type": "string",
+      "enum": [
+        "ACCOUNT_ID",
+        "AWS_REGION"
+      ]
+    },
+    "ConfigRuleName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": ".*\\S.*"
+    },
+    "ConfigRuleNames": {
+      "type": "list",
+      "min": 0,
+      "max": 25,
+      "member": "ConfigRuleName"
+    },
+    "ConfigRuleState": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "DELETING",
+        "DELETING_RESULTS",
+        "EVALUATING"
+      ]
+    },
+    "ConfigSnapshotDeliveryProperties": {
+      "type": "structure",
+      "members": {
+        "deliveryFrequency": "MaximumExecutionFrequency"
+      }
+    },
+    "Configuration": {
+      "type": "string"
+    },
+    "ConfigurationAggregatorName": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[\\w\\-]+"
+    },
+    "ConfigurationAggregatorNameList": {
+      "type": "list",
+      "min": 0,
+      "max": 10,
+      "member": "ConfigurationAggregatorName"
+    },
+    "ConfigurationRecorder": {
+      "type": "structure",
+      "members": {
+        "arn": "AmazonResourceName",
+        "name": "RecorderName",
+        "roleARN": "String",
+        "recordingGroup": "RecordingGroup",
+        "recordingMode": "RecordingMode",
+        "recordingScope": "RecordingScope",
+        "servicePrincipal": "ServicePrincipal",
+        "connectorArn": "AmazonResourceName",
+        "scopeConfiguration": "ScopeConfiguration"
+      }
+    },
+    "ConfigurationRecorderFilter": {
+      "type": "structure",
+      "members": {
+        "filterName": "ConfigurationRecorderFilterName",
+        "filterValue": "ConfigurationRecorderFilterValues"
+      }
+    },
+    "ConfigurationRecorderFilterList": {
+      "type": "list",
+      "member": "ConfigurationRecorderFilter"
+    },
+    "ConfigurationRecorderFilterName": {
+      "type": "string",
+      "enum": [
+        "recordingScope"
+      ]
+    },
+    "ConfigurationRecorderFilterValue": {
+      "type": "string",
+      "pattern": "^[0-9a-zA-Z\\\\*\\\\.\\\\\\/\\\\?-]*$"
+    },
+    "ConfigurationRecorderFilterValues": {
+      "type": "list",
+      "member": "ConfigurationRecorderFilterValue"
+    },
+    "ConfigurationRecorderNameList": {
+      "type": "list",
+      "member": "RecorderName"
+    },
+    "ConformancePackComplianceFilters": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleNames": "ConformancePackConfigRuleNames",
+        "ComplianceType": "ConformancePackComplianceType"
+      }
+    },
+    "ConformancePackComplianceResourceIds": {
+      "type": "list",
+      "min": 0,
+      "max": 5,
+      "member": "StringWithCharLimit256"
+    },
+    "ConformancePackComplianceScoresFilters": {
+      "type": "structure",
+      "required": [
+        "ConformancePackNames"
+      ],
+      "members": {
+        "ConformancePackNames": "ConformancePackNameFilter"
+      }
+    },
+    "ConformancePackComplianceType": {
+      "type": "string",
+      "enum": [
+        "COMPLIANT",
+        "NON_COMPLIANT",
+        "INSUFFICIENT_DATA"
+      ]
+    },
+    "ConformancePackConfigRuleNames": {
+      "type": "list",
+      "min": 0,
+      "max": 10,
+      "member": "StringWithCharLimit64"
+    },
+    "ConformancePackEvaluationFilters": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleNames": "ConformancePackConfigRuleNames",
+        "ComplianceType": "ConformancePackComplianceType",
+        "ResourceType": "StringWithCharLimit256",
+        "ResourceIds": "ConformancePackComplianceResourceIds"
+      }
+    },
+    "ConformancePackInputParameter": {
+      "type": "structure",
+      "required": [
+        "ParameterName",
+        "ParameterValue"
+      ],
+      "members": {
+        "ParameterName": "ParameterName",
+        "ParameterValue": "ParameterValue"
+      }
+    },
+    "ConformancePackInputParameters": {
+      "type": "list",
+      "min": 0,
+      "max": 60,
+      "member": "ConformancePackInputParameter"
+    },
+    "ConformancePackName": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[a-zA-Z][-a-zA-Z0-9]*"
+    },
+    "ConformancePackNameFilter": {
+      "type": "list",
+      "min": 1,
+      "max": 25,
+      "member": "ConformancePackName"
+    },
+    "ConformancePackNamesList": {
+      "type": "list",
+      "min": 0,
+      "max": 25,
+      "member": "ConformancePackName"
+    },
+    "ConformancePackNamesToSummarizeList": {
+      "type": "list",
+      "min": 1,
+      "max": 5,
+      "member": "ConformancePackName"
+    },
+    "ConnectorConfiguration": {
+      "type": "structure",
+      "members": {
+        "azure": "AzureConnectorConfiguration"
+      }
+    },
+    "ConnectorFilter": {
+      "type": "structure",
+      "members": {
+        "filterName": "ConnectorFilterName",
+        "filterValues": "FilterValueList"
+      }
+    },
+    "ConnectorFilterList": {
+      "type": "list",
+      "min": 0,
+      "max": 5,
+      "member": "ConnectorFilter"
+    },
+    "ConnectorFilterName": {
+      "type": "string",
+      "enum": [
+        "provider"
+      ]
+    },
+    "CosmosPageLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 100
+    },
+    "CustomPolicyDetails": {
+      "type": "structure",
+      "required": [
+        "PolicyRuntime",
+        "PolicyText"
+      ],
+      "members": {
+        "PolicyRuntime": "PolicyRuntime",
+        "PolicyText": "PolicyText",
+        "EnableDebugLogDelivery": "Boolean"
+      }
+    },
+    "DebugLogDeliveryAccounts": {
+      "type": "list",
+      "min": 0,
+      "max": 1000,
+      "member": "AccountId"
+    },
+    "DeleteAggregationAuthorizationRequest": {
+      "type": "structure",
+      "required": [
+        "AuthorizedAccountId",
+        "AuthorizedAwsRegion"
+      ],
+      "members": {
+        "AuthorizedAccountId": "AccountId",
+        "AuthorizedAwsRegion": "AwsRegion"
+      }
+    },
+    "DeleteConfigRuleRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName"
+      }
+    },
+    "DeleteConfigurationAggregatorRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName"
+      }
+    },
+    "DeleteConfigurationRecorderRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationRecorderName"
+      ],
+      "members": {
+        "ConfigurationRecorderName": "RecorderName"
+      }
+    },
+    "DeleteConformancePackRequest": {
+      "type": "structure",
+      "required": [
+        "ConformancePackName"
+      ],
+      "members": {
+        "ConformancePackName": "ConformancePackName"
+      }
+    },
+    "DeleteConnectorRequest": {
+      "type": "structure",
+      "required": [
+        "Arn"
+      ],
+      "members": {
+        "Arn": "AmazonResourceName"
+      }
+    },
+    "DeleteDeliveryChannelRequest": {
+      "type": "structure",
+      "required": [
+        "DeliveryChannelName"
+      ],
+      "members": {
+        "DeliveryChannelName": "ChannelName"
+      }
+    },
+    "DeleteEvaluationResultsRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName"
+      ],
+      "members": {
+        "ConfigRuleName": "StringWithCharLimit64"
+      }
+    },
+    "DeleteOrganizationConfigRuleRequest": {
+      "type": "structure",
+      "required": [
+        "OrganizationConfigRuleName"
+      ],
+      "members": {
+        "OrganizationConfigRuleName": "OrganizationConfigRuleName"
+      }
+    },
+    "DeleteOrganizationConformancePackRequest": {
+      "type": "structure",
+      "required": [
+        "OrganizationConformancePackName"
+      ],
+      "members": {
+        "OrganizationConformancePackName": "OrganizationConformancePackName"
+      }
+    },
+    "DeletePendingAggregationRequestRequest": {
+      "type": "structure",
+      "required": [
+        "RequesterAccountId",
+        "RequesterAwsRegion"
+      ],
+      "members": {
+        "RequesterAccountId": "AccountId",
+        "RequesterAwsRegion": "AwsRegion"
+      }
+    },
+    "DeleteRemediationConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ResourceType": "String"
+      }
+    },
+    "DeleteRemediationExceptionsRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName",
+        "ResourceKeys"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ResourceKeys": "RemediationExceptionResourceKeys"
+      }
+    },
+    "DeleteResourceConfigRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceType",
+        "ResourceId"
+      ],
+      "members": {
+        "ResourceType": "ResourceTypeString",
+        "ResourceId": "ResourceId"
+      }
+    },
+    "DeleteRetentionConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "RetentionConfigurationName"
+      ],
+      "members": {
+        "RetentionConfigurationName": "RetentionConfigurationName"
+      }
+    },
+    "DeleteServiceLinkedConfigurationRecorderRequest": {
+      "type": "structure",
+      "members": {
+        "ServicePrincipal": "ServicePrincipal",
+        "Arn": "AmazonResourceName"
+      }
+    },
+    "DeleteStoredQueryRequest": {
+      "type": "structure",
+      "required": [
+        "QueryName"
+      ],
+      "members": {
+        "QueryName": "QueryName"
+      }
+    },
+    "DeliverConfigSnapshotRequest": {
+      "type": "structure",
+      "required": [
+        "deliveryChannelName"
+      ],
+      "members": {
+        "deliveryChannelName": "ChannelName"
+      }
+    },
+    "DeliveryChannel": {
+      "type": "structure",
+      "members": {
+        "name": "ChannelName",
+        "s3BucketName": "String",
+        "s3KeyPrefix": "String",
+        "s3KmsKeyArn": "String",
+        "snsTopicARN": "String",
+        "configSnapshotDeliveryProperties": "ConfigSnapshotDeliveryProperties"
+      }
+    },
+    "DeliveryChannelNameList": {
+      "type": "list",
+      "member": "ChannelName"
+    },
+    "DeliveryS3Bucket": {
+      "type": "string",
+      "min": 0,
+      "max": 63
+    },
+    "DeliveryS3KeyPrefix": {
+      "type": "string",
+      "min": 0,
+      "max": 1024
+    },
+    "DescribeAggregateComplianceByConfigRulesRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "Filters": "ConfigRuleComplianceFilters",
+        "Limit": "GroupByAPILimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "DescribeAggregateComplianceByConformancePacksRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "Filters": "AggregateConformancePackComplianceFilters",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "DescribeAggregationAuthorizationsRequest": {
+      "type": "structure",
+      "members": {
+        "Limit": "Limit",
+        "NextToken": "String"
+      }
+    },
+    "DescribeComplianceByConfigRuleRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleNames": "ConfigRuleNames",
+        "ComplianceTypes": "ComplianceTypes",
+        "NextToken": "String"
+      }
+    },
+    "DescribeComplianceByResourceRequest": {
+      "type": "structure",
+      "members": {
+        "ResourceType": "StringWithCharLimit256",
+        "ResourceId": "BaseResourceId",
+        "ComplianceTypes": "ComplianceTypes",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "DescribeConfigRuleEvaluationStatusRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleNames": "ConfigRuleNames",
+        "NextToken": "String",
+        "Limit": "RuleLimit"
+      }
+    },
+    "DescribeConfigRulesFilters": {
+      "type": "structure",
+      "members": {
+        "EvaluationMode": "EvaluationMode",
+        "RuleEvaluationVisibility": "RuleEvaluationVisibility"
+      }
+    },
+    "DescribeConfigRulesRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleNames": "ConfigRuleNames",
+        "Filters": "DescribeConfigRulesFilters",
+        "NextToken": "String"
+      }
+    },
+    "DescribeConfigurationAggregatorSourcesStatusRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "UpdateStatus": "AggregatedSourceStatusTypeList",
+        "NextToken": "String",
+        "Limit": "Limit"
+      }
+    },
+    "DescribeConfigurationAggregatorsRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigurationAggregatorNames": "ConfigurationAggregatorNameList",
+        "NextToken": "String",
+        "Limit": "Limit"
+      }
+    },
+    "DescribeConfigurationRecorderStatusRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigurationRecorderNames": "ConfigurationRecorderNameList",
+        "ServicePrincipal": "ServicePrincipal",
+        "Arn": "AmazonResourceName"
+      }
+    },
+    "DescribeConfigurationRecordersRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigurationRecorderNames": "ConfigurationRecorderNameList",
+        "ServicePrincipal": "ServicePrincipal",
+        "Arn": "AmazonResourceName"
+      }
+    },
+    "DescribeConformancePackComplianceLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 1000
+    },
+    "DescribeConformancePackComplianceRequest": {
+      "type": "structure",
+      "required": [
+        "ConformancePackName"
+      ],
+      "members": {
+        "ConformancePackName": "ConformancePackName",
+        "Filters": "ConformancePackComplianceFilters",
+        "Limit": "DescribeConformancePackComplianceLimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "DescribeConformancePackStatusRequest": {
+      "type": "structure",
+      "members": {
+        "ConformancePackNames": "ConformancePackNamesList",
+        "Limit": "PageSizeLimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "DescribeConformancePacksRequest": {
+      "type": "structure",
+      "members": {
+        "ConformancePackNames": "ConformancePackNamesList",
+        "Limit": "PageSizeLimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "DescribeDeliveryChannelStatusRequest": {
+      "type": "structure",
+      "members": {
+        "DeliveryChannelNames": "DeliveryChannelNameList"
+      }
+    },
+    "DescribeDeliveryChannelsRequest": {
+      "type": "structure",
+      "members": {
+        "DeliveryChannelNames": "DeliveryChannelNameList"
+      }
+    },
+    "DescribeOrganizationConfigRuleStatusesRequest": {
+      "type": "structure",
+      "members": {
+        "OrganizationConfigRuleNames": "OrganizationConfigRuleNames",
+        "Limit": "CosmosPageLimit",
+        "NextToken": "String"
+      }
+    },
+    "DescribeOrganizationConfigRulesRequest": {
+      "type": "structure",
+      "members": {
+        "OrganizationConfigRuleNames": "OrganizationConfigRuleNames",
+        "Limit": "CosmosPageLimit",
+        "NextToken": "String"
+      }
+    },
+    "DescribeOrganizationConformancePackStatusesRequest": {
+      "type": "structure",
+      "members": {
+        "OrganizationConformancePackNames": "OrganizationConformancePackNames",
+        "Limit": "CosmosPageLimit",
+        "NextToken": "String"
+      }
+    },
+    "DescribeOrganizationConformancePacksRequest": {
+      "type": "structure",
+      "members": {
+        "OrganizationConformancePackNames": "OrganizationConformancePackNames",
+        "Limit": "CosmosPageLimit",
+        "NextToken": "String"
+      }
+    },
+    "DescribePendingAggregationRequestsLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 20
+    },
+    "DescribePendingAggregationRequestsRequest": {
+      "type": "structure",
+      "members": {
+        "Limit": "DescribePendingAggregationRequestsLimit",
+        "NextToken": "String"
+      }
+    },
+    "DescribeRemediationConfigurationsRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleNames"
+      ],
+      "members": {
+        "ConfigRuleNames": "ConfigRuleNames"
+      }
+    },
+    "DescribeRemediationExceptionsRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ResourceKeys": "RemediationExceptionResourceKeys",
+        "Limit": "Limit",
+        "NextToken": "String"
+      }
+    },
+    "DescribeRemediationExecutionStatusRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ResourceKeys": "ResourceKeys",
+        "Limit": "Limit",
+        "NextToken": "String"
+      }
+    },
+    "DescribeRetentionConfigurationsRequest": {
+      "type": "structure",
+      "members": {
+        "RetentionConfigurationNames": "RetentionConfigurationNameList",
+        "NextToken": "NextToken"
+      }
+    },
+    "Description": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "DisassociateResourceTypesRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationRecorderArn",
+        "ResourceTypes"
+      ],
+      "members": {
+        "ConfigurationRecorderArn": "AmazonResourceName",
+        "ResourceTypes": "ResourceTypeList"
+      }
+    },
+    "EmptiableStringWithCharLimit256": {
+      "type": "string",
+      "min": 0,
+      "max": 256
+    },
+    "Evaluation": {
+      "type": "structure",
+      "required": [
+        "ComplianceResourceType",
+        "ComplianceResourceId",
+        "ComplianceType",
+        "OrderingTimestamp"
+      ],
+      "members": {
+        "ComplianceResourceType": "StringWithCharLimit256",
+        "ComplianceResourceId": "BaseResourceId",
+        "ComplianceType": "ComplianceType",
+        "Annotation": "StringWithCharLimit256"
+      }
+    },
+    "EvaluationContext": {
+      "type": "structure",
+      "members": {
+        "EvaluationContextIdentifier": "EvaluationContextIdentifier"
+      }
+    },
+    "EvaluationContextIdentifier": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "EvaluationMode": {
+      "type": "string",
+      "enum": [
+        "DETECTIVE",
+        "PROACTIVE"
+      ]
+    },
+    "EvaluationModeConfiguration": {
+      "type": "structure",
+      "members": {
+        "Mode": "EvaluationMode"
+      }
+    },
+    "EvaluationModes": {
+      "type": "list",
+      "member": "EvaluationModeConfiguration"
+    },
+    "EvaluationTimeout": {
+      "type": "integer",
+      "min": 0,
+      "max": 3600
+    },
+    "Evaluations": {
+      "type": "list",
+      "min": 0,
+      "max": 100,
+      "member": "Evaluation"
+    },
+    "EventSource": {
+      "type": "string",
+      "enum": [
+        "aws.config"
+      ]
+    },
+    "ExcludedAccounts": {
+      "type": "list",
+      "min": 0,
+      "max": 1000,
+      "member": "AccountId"
+    },
+    "ExclusionByResourceTypes": {
+      "type": "structure",
+      "members": {
+        "resourceTypes": "ResourceTypeList"
+      }
+    },
+    "ExecutionControls": {
+      "type": "structure",
+      "members": {
+        "SsmControls": "SsmControls"
+      }
+    },
+    "Expression": {
+      "type": "string",
+      "min": 1,
+      "max": 4096
+    },
+    "ExternalEvaluation": {
+      "type": "structure",
+      "required": [
+        "ComplianceResourceType",
+        "ComplianceResourceId",
+        "ComplianceType",
+        "OrderingTimestamp"
+      ],
+      "members": {
+        "ComplianceResourceType": "StringWithCharLimit256",
+        "ComplianceResourceId": "BaseResourceId",
+        "ComplianceType": "ComplianceType",
+        "Annotation": "StringWithCharLimit256"
+      }
+    },
+    "FilterValueList": {
+      "type": "list",
+      "min": 0,
+      "max": 10,
+      "member": "String"
+    },
+    "GetAggregateComplianceDetailsByConfigRuleRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName",
+        "ConfigRuleName",
+        "AccountId",
+        "AwsRegion"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "ConfigRuleName": "ConfigRuleName",
+        "AccountId": "AccountId",
+        "AwsRegion": "AwsRegion",
+        "ComplianceType": "ComplianceType",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "GetAggregateConfigRuleComplianceSummaryRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "Filters": "ConfigRuleComplianceSummaryFilters",
+        "GroupByKey": "ConfigRuleComplianceSummaryGroupKey",
+        "Limit": "GroupByAPILimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "GetAggregateConformancePackComplianceSummaryRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "Filters": "AggregateConformancePackComplianceSummaryFilters",
+        "GroupByKey": "AggregateConformancePackComplianceSummaryGroupKey",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "GetAggregateDiscoveredResourceCountsRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "Filters": "ResourceCountFilters",
+        "GroupByKey": "ResourceCountGroupKey",
+        "Limit": "GroupByAPILimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "GetAggregateResourceConfigRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName",
+        "ResourceIdentifier"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "ResourceIdentifier": "AggregateResourceIdentifier"
+      }
+    },
+    "GetComplianceDetailsByConfigRuleRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName"
+      ],
+      "members": {
+        "ConfigRuleName": "StringWithCharLimit64",
+        "ComplianceTypes": "ComplianceTypes",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "GetComplianceDetailsByResourceRequest": {
+      "type": "structure",
+      "members": {
+        "ResourceType": "StringWithCharLimit256",
+        "ResourceId": "BaseResourceId",
+        "ComplianceTypes": "ComplianceTypes",
+        "NextToken": "String",
+        "ResourceEvaluationId": "ResourceEvaluationId"
+      }
+    },
+    "GetComplianceSummaryByResourceTypeRequest": {
+      "type": "structure",
+      "members": {
+        "ResourceTypes": "ResourceTypes"
+      }
+    },
+    "GetConformancePackComplianceDetailsLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 100
+    },
+    "GetConformancePackComplianceDetailsRequest": {
+      "type": "structure",
+      "required": [
+        "ConformancePackName"
+      ],
+      "members": {
+        "ConformancePackName": "ConformancePackName",
+        "Filters": "ConformancePackEvaluationFilters",
+        "Limit": "GetConformancePackComplianceDetailsLimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "GetConformancePackComplianceSummaryRequest": {
+      "type": "structure",
+      "required": [
+        "ConformancePackNames"
+      ],
+      "members": {
+        "ConformancePackNames": "ConformancePackNamesToSummarizeList",
+        "Limit": "PageSizeLimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "GetConnectorRequest": {
+      "type": "structure",
+      "required": [
+        "Arn"
+      ],
+      "members": {
+        "Arn": "AmazonResourceName"
+      }
+    },
+    "GetCustomRulePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleName": "ConfigRuleName"
+      }
+    },
+    "GetDiscoveredResourceCountsRequest": {
+      "type": "structure",
+      "members": {
+        "resourceTypes": "ResourceTypes",
+        "limit": "Limit",
+        "nextToken": "NextToken"
+      }
+    },
+    "GetOrganizationConfigRuleDetailedStatusRequest": {
+      "type": "structure",
+      "required": [
+        "OrganizationConfigRuleName"
+      ],
+      "members": {
+        "OrganizationConfigRuleName": "OrganizationConfigRuleName",
+        "Filters": "StatusDetailFilters",
+        "Limit": "CosmosPageLimit",
+        "NextToken": "String"
+      }
+    },
+    "GetOrganizationConformancePackDetailedStatusRequest": {
+      "type": "structure",
+      "required": [
+        "OrganizationConformancePackName"
+      ],
+      "members": {
+        "OrganizationConformancePackName": "OrganizationConformancePackName",
+        "Filters": "OrganizationResourceDetailedStatusFilters",
+        "Limit": "CosmosPageLimit",
+        "NextToken": "String"
+      }
+    },
+    "GetOrganizationCustomRulePolicyRequest": {
+      "type": "structure",
+      "required": [
+        "OrganizationConfigRuleName"
+      ],
+      "members": {
+        "OrganizationConfigRuleName": "OrganizationConfigRuleName"
+      }
+    },
+    "GetResourceConfigHistoryRequest": {
+      "type": "structure",
+      "required": [
+        "resourceType",
+        "resourceId"
+      ],
+      "members": {
+        "resourceType": "ResourceType",
+        "resourceId": "ResourceId",
+        "chronologicalOrder": "ChronologicalOrder",
+        "limit": "Limit",
+        "nextToken": "NextToken"
+      }
+    },
+    "GetResourceEvaluationSummaryRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceEvaluationId"
+      ],
+      "members": {
+        "ResourceEvaluationId": "ResourceEvaluationId"
+      }
+    },
+    "GetStoredQueryRequest": {
+      "type": "structure",
+      "required": [
+        "QueryName"
+      ],
+      "members": {
+        "QueryName": "QueryName"
+      }
+    },
+    "GroupByAPILimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 1000
+    },
+    "IncludeGlobalResourceTypes": {
+      "type": "boolean"
+    },
+    "IncludedRegions": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "ThirdPartyCloudRegion"
+    },
+    "Limit": {
+      "type": "integer",
+      "min": 0,
+      "max": 100
+    },
+    "ListAggregateDiscoveredResourcesRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName",
+        "ResourceType"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "ResourceType": "ResourceType",
+        "Filters": "ResourceFilters",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListConfigurationRecordersRequest": {
+      "type": "structure",
+      "members": {
+        "Filters": "ConfigurationRecorderFilterList",
+        "MaxResults": "MaxResults",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListConformancePackComplianceScoresRequest": {
+      "type": "structure",
+      "members": {
+        "Filters": "ConformancePackComplianceScoresFilters",
+        "SortOrder": "SortOrder",
+        "SortBy": "SortBy",
+        "Limit": "PageSizeLimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListConnectorsMaxResults": {
+      "type": "integer",
+      "min": 0,
+      "max": 100
+    },
+    "ListConnectorsRequest": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "ListConnectorsMaxResults",
+        "NextToken": "String",
+        "Filters": "ConnectorFilterList"
+      }
+    },
+    "ListDiscoveredResourcesRequest": {
+      "type": "structure",
+      "required": [
+        "resourceType"
+      ],
+      "members": {
+        "resourceType": "ResourceType",
+        "resourceIds": "ResourceIdList",
+        "resourceName": "ResourceName",
+        "limit": "Limit",
+        "includeDeletedResources": "Boolean",
+        "nextToken": "NextToken"
+      }
+    },
+    "ListResourceEvaluationsPageItemLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 100
+    },
+    "ListResourceEvaluationsRequest": {
+      "type": "structure",
+      "members": {
+        "Filters": "ResourceEvaluationFilters",
+        "Limit": "ListResourceEvaluationsPageItemLimit",
+        "NextToken": "String"
+      }
+    },
+    "ListStoredQueriesRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": "String",
+        "MaxResults": "Limit"
+      }
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceArn"
+      ],
+      "members": {
+        "ResourceArn": "AmazonResourceName",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 0,
+      "max": 20
+    },
+    "MaximumExecutionFrequency": {
+      "type": "string",
+      "enum": [
+        "One_Hour",
+        "Three_Hours",
+        "Six_Hours",
+        "Twelve_Hours",
+        "TwentyFour_Hours"
+      ]
+    },
+    "MemberAccountRuleStatus": {
+      "type": "string",
+      "enum": [
+        "CREATE_SUCCESSFUL",
+        "CREATE_IN_PROGRESS",
+        "CREATE_FAILED",
+        "DELETE_SUCCESSFUL",
+        "DELETE_FAILED",
+        "DELETE_IN_PROGRESS",
+        "UPDATE_SUCCESSFUL",
+        "UPDATE_IN_PROGRESS",
+        "UPDATE_FAILED"
+      ]
+    },
+    "MessageType": {
+      "type": "string",
+      "enum": [
+        "ConfigurationItemChangeNotification",
+        "ConfigurationSnapshotDeliveryCompleted",
+        "ScheduledNotification",
+        "OversizedConfigurationItemChangeNotification"
+      ]
+    },
+    "Name": {
+      "type": "string"
+    },
+    "NextToken": {
+      "type": "string"
+    },
+    "OrganizationAggregationSource": {
+      "type": "structure",
+      "required": [
+        "RoleArn"
+      ],
+      "members": {
+        "RoleArn": "String",
+        "AwsRegions": "AggregatorRegionList",
+        "AllAwsRegions": "Boolean"
+      }
+    },
+    "OrganizationConfigRuleName": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[A-Za-z0-9-_]+"
+    },
+    "OrganizationConfigRuleNames": {
+      "type": "list",
+      "min": 0,
+      "max": 25,
+      "member": "StringWithCharLimit64"
+    },
+    "OrganizationConfigRuleTriggerType": {
+      "type": "string",
+      "enum": [
+        "ConfigurationItemChangeNotification",
+        "OversizedConfigurationItemChangeNotification",
+        "ScheduledNotification"
+      ]
+    },
+    "OrganizationConfigRuleTriggerTypeNoSN": {
+      "type": "string",
+      "enum": [
+        "ConfigurationItemChangeNotification",
+        "OversizedConfigurationItemChangeNotification"
+      ]
+    },
+    "OrganizationConfigRuleTriggerTypeNoSNs": {
+      "type": "list",
+      "member": "OrganizationConfigRuleTriggerTypeNoSN"
+    },
+    "OrganizationConfigRuleTriggerTypes": {
+      "type": "list",
+      "member": "OrganizationConfigRuleTriggerType"
+    },
+    "OrganizationConformancePackName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z][-a-zA-Z0-9]*"
+    },
+    "OrganizationConformancePackNames": {
+      "type": "list",
+      "min": 0,
+      "max": 25,
+      "member": "OrganizationConformancePackName"
+    },
+    "OrganizationCustomPolicyRuleMetadata": {
+      "type": "structure",
+      "required": [
+        "PolicyRuntime",
+        "PolicyText"
+      ],
+      "members": {
+        "Description": "StringWithCharLimit256Min0",
+        "OrganizationConfigRuleTriggerTypes": "OrganizationConfigRuleTriggerTypeNoSNs",
+        "InputParameters": "StringWithCharLimit1024",
+        "MaximumExecutionFrequency": "MaximumExecutionFrequency",
+        "ResourceTypesScope": "ResourceTypesScope",
+        "ResourceIdScope": "StringWithCharLimit768",
+        "TagKeyScope": "StringWithCharLimit128",
+        "TagValueScope": "StringWithCharLimit256",
+        "PolicyRuntime": "PolicyRuntime",
+        "PolicyText": "PolicyText",
+        "DebugLogDeliveryAccounts": "DebugLogDeliveryAccounts"
+      }
+    },
+    "OrganizationCustomRuleMetadata": {
+      "type": "structure",
+      "required": [
+        "LambdaFunctionArn",
+        "OrganizationConfigRuleTriggerTypes"
+      ],
+      "members": {
+        "Description": "StringWithCharLimit256Min0",
+        "LambdaFunctionArn": "StringWithCharLimit256",
+        "OrganizationConfigRuleTriggerTypes": "OrganizationConfigRuleTriggerTypes",
+        "InputParameters": "StringWithCharLimit1024",
+        "MaximumExecutionFrequency": "MaximumExecutionFrequency",
+        "ResourceTypesScope": "ResourceTypesScope",
+        "ResourceIdScope": "StringWithCharLimit768",
+        "TagKeyScope": "StringWithCharLimit128",
+        "TagValueScope": "StringWithCharLimit256"
+      }
+    },
+    "OrganizationManagedRuleMetadata": {
+      "type": "structure",
+      "required": [
+        "RuleIdentifier"
+      ],
+      "members": {
+        "Description": "StringWithCharLimit256Min0",
+        "RuleIdentifier": "StringWithCharLimit256",
+        "InputParameters": "StringWithCharLimit1024",
+        "MaximumExecutionFrequency": "MaximumExecutionFrequency",
+        "ResourceTypesScope": "ResourceTypesScope",
+        "ResourceIdScope": "StringWithCharLimit768",
+        "TagKeyScope": "StringWithCharLimit128",
+        "TagValueScope": "StringWithCharLimit256"
+      }
+    },
+    "OrganizationResourceDetailedStatus": {
+      "type": "string",
+      "enum": [
+        "CREATE_SUCCESSFUL",
+        "CREATE_IN_PROGRESS",
+        "CREATE_FAILED",
+        "DELETE_SUCCESSFUL",
+        "DELETE_FAILED",
+        "DELETE_IN_PROGRESS",
+        "UPDATE_SUCCESSFUL",
+        "UPDATE_IN_PROGRESS",
+        "UPDATE_FAILED"
+      ]
+    },
+    "OrganizationResourceDetailedStatusFilters": {
+      "type": "structure",
+      "members": {
+        "AccountId": "AccountId",
+        "Status": "OrganizationResourceDetailedStatus"
+      }
+    },
+    "Owner": {
+      "type": "string",
+      "enum": [
+        "CUSTOM_LAMBDA",
+        "AWS",
+        "CUSTOM_POLICY"
+      ]
+    },
+    "PageSizeLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 20
+    },
+    "ParameterName": {
+      "type": "string",
+      "min": 0,
+      "max": 255
+    },
+    "ParameterValue": {
+      "type": "string",
+      "min": 0,
+      "max": 4096
+    },
+    "Percentage": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "PolicyRuntime": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "guard\\-2\\.x\\.x"
+    },
+    "PolicyText": {
+      "type": "string",
+      "min": 0,
+      "max": 10000
+    },
+    "PutAggregationAuthorizationRequest": {
+      "type": "structure",
+      "required": [
+        "AuthorizedAccountId",
+        "AuthorizedAwsRegion"
+      ],
+      "members": {
+        "AuthorizedAccountId": "AccountId",
+        "AuthorizedAwsRegion": "AwsRegion",
+        "Tags": "TagsList"
+      }
+    },
+    "PutConfigRuleRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRule"
+      ],
+      "members": {
+        "ConfigRule": "ConfigRule",
+        "Tags": "TagsList"
+      }
+    },
+    "PutConfigurationAggregatorRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "AccountAggregationSources": "AccountAggregationSourceList",
+        "OrganizationAggregationSource": "OrganizationAggregationSource",
+        "Tags": "TagsList",
+        "AggregatorFilters": "AggregatorFilters"
+      }
+    },
+    "PutConfigurationRecorderRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationRecorder"
+      ],
+      "members": {
+        "ConfigurationRecorder": "ConfigurationRecorder",
+        "Tags": "TagsList"
+      }
+    },
+    "PutConformancePackRequest": {
+      "type": "structure",
+      "required": [
+        "ConformancePackName"
+      ],
+      "members": {
+        "ConformancePackName": "ConformancePackName",
+        "TemplateS3Uri": "TemplateS3Uri",
+        "TemplateBody": "TemplateBody",
+        "DeliveryS3Bucket": "DeliveryS3Bucket",
+        "DeliveryS3KeyPrefix": "DeliveryS3KeyPrefix",
+        "ConformancePackInputParameters": "ConformancePackInputParameters",
+        "TemplateSSMDocumentDetails": "TemplateSSMDocumentDetails",
+        "Tags": "TagsList"
+      }
+    },
+    "PutConnectorRequest": {
+      "type": "structure",
+      "required": [
+        "ConnectorConfiguration"
+      ],
+      "members": {
+        "ConnectorConfiguration": "ConnectorConfiguration",
+        "Tags": "TagsList"
+      }
+    },
+    "PutDeliveryChannelRequest": {
+      "type": "structure",
+      "required": [
+        "DeliveryChannel"
+      ],
+      "members": {
+        "DeliveryChannel": "DeliveryChannel"
+      }
+    },
+    "PutEvaluationsRequest": {
+      "type": "structure",
+      "required": [
+        "ResultToken"
+      ],
+      "members": {
+        "Evaluations": "Evaluations",
+        "ResultToken": "String",
+        "TestMode": "Boolean"
+      }
+    },
+    "PutExternalEvaluationRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName",
+        "ExternalEvaluation"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ExternalEvaluation": "ExternalEvaluation"
+      }
+    },
+    "PutOrganizationConfigRuleRequest": {
+      "type": "structure",
+      "required": [
+        "OrganizationConfigRuleName"
+      ],
+      "members": {
+        "OrganizationConfigRuleName": "OrganizationConfigRuleName",
+        "OrganizationManagedRuleMetadata": "OrganizationManagedRuleMetadata",
+        "OrganizationCustomRuleMetadata": "OrganizationCustomRuleMetadata",
+        "ExcludedAccounts": "ExcludedAccounts",
+        "OrganizationCustomPolicyRuleMetadata": "OrganizationCustomPolicyRuleMetadata",
+        "Tags": "TagsList"
+      }
+    },
+    "PutOrganizationConformancePackRequest": {
+      "type": "structure",
+      "required": [
+        "OrganizationConformancePackName"
+      ],
+      "members": {
+        "OrganizationConformancePackName": "OrganizationConformancePackName",
+        "TemplateS3Uri": "TemplateS3Uri",
+        "TemplateBody": "TemplateBody",
+        "DeliveryS3Bucket": "DeliveryS3Bucket",
+        "DeliveryS3KeyPrefix": "DeliveryS3KeyPrefix",
+        "ConformancePackInputParameters": "ConformancePackInputParameters",
+        "ExcludedAccounts": "ExcludedAccounts",
+        "Tags": "TagsList"
+      }
+    },
+    "PutRemediationConfigurationsRequest": {
+      "type": "structure",
+      "required": [
+        "RemediationConfigurations"
+      ],
+      "members": {
+        "RemediationConfigurations": "RemediationConfigurations"
+      }
+    },
+    "PutRemediationExceptionsRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName",
+        "ResourceKeys"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ResourceKeys": "RemediationExceptionResourceKeys",
+        "Message": "StringWithCharLimit1024"
+      }
+    },
+    "PutResourceConfigRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceType",
+        "SchemaVersionId",
+        "ResourceId",
+        "Configuration"
+      ],
+      "members": {
+        "ResourceType": "ResourceTypeString",
+        "SchemaVersionId": "SchemaVersionId",
+        "ResourceId": "ResourceId",
+        "ResourceName": "ResourceName",
+        "Configuration": "Configuration",
+        "Tags": "Tags"
+      }
+    },
+    "PutRetentionConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "RetentionPeriodInDays"
+      ],
+      "members": {
+        "RetentionPeriodInDays": "RetentionPeriodInDays"
+      }
+    },
+    "PutServiceLinkedConfigurationRecorderRequest": {
+      "type": "structure",
+      "required": [
+        "ServicePrincipal"
+      ],
+      "members": {
+        "ServicePrincipal": "ServicePrincipal",
+        "Tags": "TagsList"
+      }
+    },
+    "PutStoredQueryRequest": {
+      "type": "structure",
+      "required": [
+        "StoredQuery"
+      ],
+      "members": {
+        "StoredQuery": "StoredQuery",
+        "Tags": "TagsList"
+      }
+    },
+    "PutThirdPartyServiceLinkedConfigurationRecorderRequest": {
+      "type": "structure",
+      "required": [
+        "ServicePrincipal",
+        "ConnectorArn",
+        "ScopeConfiguration"
+      ],
+      "members": {
+        "ServicePrincipal": "ServicePrincipal",
+        "ConnectorArn": "AmazonResourceName",
+        "ScopeConfiguration": "ScopeConfiguration",
+        "Tags": "TagsList"
+      }
+    },
+    "QueryArn": {
+      "type": "string",
+      "min": 1,
+      "max": 500,
+      "pattern": "^arn:aws[a-z\\-]*:config:[a-z\\-\\d]+:\\d+:stored-query/[a-zA-Z0-9-_]+/query-[a-zA-Z\\d-_/]+$"
+    },
+    "QueryDescription": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "[\\s\\S]*"
+    },
+    "QueryExpression": {
+      "type": "string",
+      "min": 1,
+      "max": 4096,
+      "pattern": "[\\s\\S]*"
+    },
+    "QueryId": {
+      "type": "string",
+      "min": 1,
+      "max": 36,
+      "pattern": "^\\S+$"
+    },
+    "QueryName": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^[a-zA-Z0-9-_]+$"
+    },
+    "RecorderName": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "RecordingFrequency": {
+      "type": "string",
+      "enum": [
+        "CONTINUOUS",
+        "DAILY"
+      ]
+    },
+    "RecordingGroup": {
+      "type": "structure",
+      "members": {
+        "allSupported": "AllSupported",
+        "includeGlobalResourceTypes": "IncludeGlobalResourceTypes",
+        "resourceTypes": "ResourceTypeList",
+        "exclusionByResourceTypes": "ExclusionByResourceTypes",
+        "recordingStrategy": "RecordingStrategy"
+      }
+    },
+    "RecordingMode": {
+      "type": "structure",
+      "required": [
+        "recordingFrequency"
+      ],
+      "members": {
+        "recordingFrequency": "RecordingFrequency",
+        "recordingModeOverrides": "RecordingModeOverrides"
+      }
+    },
+    "RecordingModeOverride": {
+      "type": "structure",
+      "required": [
+        "resourceTypes",
+        "recordingFrequency"
+      ],
+      "members": {
+        "description": "Description",
+        "resourceTypes": "RecordingModeResourceTypesList",
+        "recordingFrequency": "RecordingFrequency"
+      }
+    },
+    "RecordingModeOverrides": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "RecordingModeOverride"
+    },
+    "RecordingModeResourceTypesList": {
+      "type": "list",
+      "member": "ResourceType"
+    },
+    "RecordingScope": {
+      "type": "string",
+      "enum": [
+        "INTERNAL",
+        "PAID"
+      ]
+    },
+    "RecordingStrategy": {
+      "type": "structure",
+      "members": {
+        "useOnly": "RecordingStrategyType"
+      }
+    },
+    "RecordingStrategyType": {
+      "type": "string",
+      "enum": [
+        "ALL_SUPPORTED_RESOURCE_TYPES",
+        "INCLUSION_BY_RESOURCE_TYPES",
+        "EXCLUSION_BY_RESOURCE_TYPES"
+      ]
+    },
+    "ReevaluateConfigRuleNames": {
+      "type": "list",
+      "min": 1,
+      "max": 25,
+      "member": "ConfigRuleName"
+    },
+    "RemediationConfiguration": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName",
+        "TargetType",
+        "TargetId"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "TargetType": "RemediationTargetType",
+        "TargetId": "StringWithCharLimit256",
+        "TargetVersion": "String",
+        "Parameters": "RemediationParameters",
+        "ResourceType": "String",
+        "Automatic": "Boolean",
+        "ExecutionControls": "ExecutionControls",
+        "MaximumAutomaticAttempts": "AutoRemediationAttempts",
+        "RetryAttemptSeconds": "AutoRemediationAttemptSeconds",
+        "Arn": "StringWithCharLimit1024",
+        "CreatedByService": "StringWithCharLimit1024"
+      }
+    },
+    "RemediationConfigurations": {
+      "type": "list",
+      "min": 0,
+      "max": 25,
+      "member": "RemediationConfiguration"
+    },
+    "RemediationExceptionResourceKey": {
+      "type": "structure",
+      "members": {
+        "ResourceType": "StringWithCharLimit256",
+        "ResourceId": "StringWithCharLimit1024"
+      }
+    },
+    "RemediationExceptionResourceKeys": {
+      "type": "list",
+      "min": 1,
+      "max": 100,
+      "member": "RemediationExceptionResourceKey"
+    },
+    "RemediationParameterValue": {
+      "type": "structure",
+      "members": {
+        "ResourceValue": "ResourceValue",
+        "StaticValue": "StaticValue"
+      }
+    },
+    "RemediationParameters": {
+      "type": "map",
+      "min": 0,
+      "max": 25,
+      "key": "StringWithCharLimit256",
+      "value": "RemediationParameterValue"
+    },
+    "RemediationTargetType": {
+      "type": "string",
+      "enum": [
+        "SSM_DOCUMENT"
+      ]
+    },
+    "ResourceConfiguration": {
+      "type": "string",
+      "min": 1,
+      "max": 51200
+    },
+    "ResourceConfigurationSchemaType": {
+      "type": "string",
+      "enum": [
+        "CFN_RESOURCE_SCHEMA"
+      ]
+    },
+    "ResourceCountFilters": {
+      "type": "structure",
+      "members": {
+        "ResourceType": "ResourceType",
+        "AccountId": "AccountId",
+        "Region": "AwsRegion"
+      }
+    },
+    "ResourceCountGroupKey": {
+      "type": "string",
+      "enum": [
+        "RESOURCE_TYPE",
+        "ACCOUNT_ID",
+        "AWS_REGION"
+      ]
+    },
+    "ResourceDetails": {
+      "type": "structure",
+      "required": [
+        "ResourceId",
+        "ResourceType",
+        "ResourceConfiguration"
+      ],
+      "members": {
+        "ResourceId": "BaseResourceId",
+        "ResourceType": "StringWithCharLimit256",
+        "ResourceConfiguration": "ResourceConfiguration",
+        "ResourceConfigurationSchemaType": "ResourceConfigurationSchemaType"
+      }
+    },
+    "ResourceEvaluationFilters": {
+      "type": "structure",
+      "members": {
+        "EvaluationMode": "EvaluationMode",
+        "TimeWindow": "TimeWindow",
+        "EvaluationContextIdentifier": "EvaluationContextIdentifier"
+      }
+    },
+    "ResourceEvaluationId": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "ResourceFilters": {
+      "type": "structure",
+      "members": {
+        "AccountId": "AccountId",
+        "ResourceId": "ResourceId",
+        "ResourceName": "ResourceName",
+        "Region": "AwsRegion"
+      }
+    },
+    "ResourceId": {
+      "type": "string",
+      "min": 1,
+      "max": 768
+    },
+    "ResourceIdList": {
+      "type": "list",
+      "member": "ResourceId"
+    },
+    "ResourceIdentifiersList": {
+      "type": "list",
+      "min": 1,
+      "max": 100,
+      "member": "AggregateResourceIdentifier"
+    },
+    "ResourceKey": {
+      "type": "structure",
+      "required": [
+        "resourceType",
+        "resourceId"
+      ],
+      "members": {
+        "resourceType": "ResourceType",
+        "resourceId": "ResourceId"
+      }
+    },
+    "ResourceKeys": {
+      "type": "list",
+      "min": 1,
+      "max": 100,
+      "member": "ResourceKey"
+    },
+    "ResourceName": {
+      "type": "string"
+    },
+    "ResourceType": {
+      "type": "string",
+      "enum": [
+        "AWS::EC2::CustomerGateway",
+        "AWS::EC2::EIP",
+        "AWS::EC2::Host",
+        "AWS::EC2::Instance",
+        "AWS::EC2::InternetGateway",
+        "AWS::EC2::NetworkAcl",
+        "AWS::EC2::NetworkInterface",
+        "AWS::EC2::RouteTable",
+        "AWS::EC2::SecurityGroup",
+        "AWS::EC2::Subnet",
+        "AWS::CloudTrail::Trail",
+        "AWS::EC2::Volume",
+        "AWS::EC2::VPC",
+        "AWS::EC2::VPNConnection",
+        "AWS::EC2::VPNGateway",
+        "AWS::EC2::RegisteredHAInstance",
+        "AWS::EC2::NatGateway",
+        "AWS::EC2::EgressOnlyInternetGateway",
+        "AWS::EC2::VPCEndpoint",
+        "AWS::EC2::VPCEndpointService",
+        "AWS::EC2::FlowLog",
+        "AWS::EC2::VPCPeeringConnection",
+        "AWS::Elasticsearch::Domain",
+        "AWS::IAM::Group",
+        "AWS::IAM::Policy",
+        "AWS::IAM::Role",
+        "AWS::IAM::User",
+        "AWS::ElasticLoadBalancingV2::LoadBalancer",
+        "AWS::ACM::Certificate",
+        "AWS::RDS::DBInstance",
+        "AWS::RDS::DBSubnetGroup",
+        "AWS::RDS::DBSecurityGroup",
+        "AWS::RDS::DBSnapshot",
+        "AWS::RDS::DBCluster",
+        "AWS::RDS::DBClusterSnapshot",
+        "AWS::RDS::EventSubscription",
+        "AWS::S3::Bucket",
+        "AWS::S3::AccountPublicAccessBlock",
+        "AWS::Redshift::Cluster",
+        "AWS::Redshift::ClusterSnapshot",
+        "AWS::Redshift::ClusterParameterGroup",
+        "AWS::Redshift::ClusterSecurityGroup",
+        "AWS::Redshift::ClusterSubnetGroup",
+        "AWS::Redshift::EventSubscription",
+        "AWS::SSM::ManagedInstanceInventory",
+        "AWS::CloudWatch::Alarm",
+        "AWS::CloudFormation::Stack",
+        "AWS::ElasticLoadBalancing::LoadBalancer",
+        "AWS::AutoScaling::AutoScalingGroup",
+        "AWS::AutoScaling::LaunchConfiguration",
+        "AWS::AutoScaling::ScalingPolicy",
+        "AWS::AutoScaling::ScheduledAction",
+        "AWS::DynamoDB::Table",
+        "AWS::CodeBuild::Project",
+        "AWS::WAF::RateBasedRule",
+        "AWS::WAF::Rule",
+        "AWS::WAF::RuleGroup",
+        "AWS::WAF::WebACL",
+        "AWS::WAFRegional::RateBasedRule",
+        "AWS::WAFRegional::Rule",
+        "AWS::WAFRegional::RuleGroup",
+        "AWS::WAFRegional::WebACL",
+        "AWS::CloudFront::Distribution",
+        "AWS::CloudFront::StreamingDistribution",
+        "AWS::Lambda::Function",
+        "AWS::NetworkFirewall::Firewall",
+        "AWS::NetworkFirewall::FirewallPolicy",
+        "AWS::NetworkFirewall::RuleGroup",
+        "AWS::ElasticBeanstalk::Application",
+        "AWS::ElasticBeanstalk::ApplicationVersion",
+        "AWS::ElasticBeanstalk::Environment",
+        "AWS::WAFv2::WebACL",
+        "AWS::WAFv2::RuleGroup",
+        "AWS::WAFv2::IPSet",
+        "AWS::WAFv2::RegexPatternSet",
+        "AWS::WAFv2::ManagedRuleSet",
+        "AWS::XRay::EncryptionConfig",
+        "AWS::SSM::AssociationCompliance",
+        "AWS::SSM::PatchCompliance",
+        "AWS::Shield::Protection",
+        "AWS::ShieldRegional::Protection",
+        "AWS::Config::ConformancePackCompliance",
+        "AWS::Config::ResourceCompliance",
+        "AWS::ApiGateway::Stage",
+        "AWS::ApiGateway::RestApi",
+        "AWS::ApiGatewayV2::Stage",
+        "AWS::ApiGatewayV2::Api",
+        "AWS::CodePipeline::Pipeline",
+        "AWS::ServiceCatalog::CloudFormationProvisionedProduct",
+        "AWS::ServiceCatalog::CloudFormationProduct",
+        "AWS::ServiceCatalog::Portfolio",
+        "AWS::SQS::Queue",
+        "AWS::KMS::Key",
+        "AWS::QLDB::Ledger",
+        "AWS::SecretsManager::Secret",
+        "AWS::SNS::Topic",
+        "AWS::SSM::FileData",
+        "AWS::Backup::BackupPlan",
+        "AWS::Backup::BackupSelection",
+        "AWS::Backup::BackupVault",
+        "AWS::Backup::RecoveryPoint",
+        "AWS::ECR::Repository",
+        "AWS::ECS::Cluster",
+        "AWS::ECS::Service",
+        "AWS::ECS::TaskDefinition",
+        "AWS::EFS::AccessPoint",
+        "AWS::EFS::FileSystem",
+        "AWS::EKS::Cluster",
+        "AWS::OpenSearch::Domain",
+        "AWS::EC2::TransitGateway",
+        "AWS::Kinesis::Stream",
+        "AWS::Kinesis::StreamConsumer",
+        "AWS::CodeDeploy::Application",
+        "AWS::CodeDeploy::DeploymentConfig",
+        "AWS::CodeDeploy::DeploymentGroup",
+        "AWS::EC2::LaunchTemplate",
+        "AWS::ECR::PublicRepository",
+        "AWS::GuardDuty::Detector",
+        "AWS::EMR::SecurityConfiguration",
+        "AWS::SageMaker::CodeRepository",
+        "AWS::Route53Resolver::ResolverEndpoint",
+        "AWS::Route53Resolver::ResolverRule",
+        "AWS::Route53Resolver::ResolverRuleAssociation",
+        "AWS::DMS::ReplicationSubnetGroup",
+        "AWS::DMS::EventSubscription",
+        "AWS::MSK::Cluster",
+        "AWS::StepFunctions::Activity",
+        "AWS::WorkSpaces::Workspace",
+        "AWS::WorkSpaces::ConnectionAlias",
+        "AWS::SageMaker::Model",
+        "AWS::ElasticLoadBalancingV2::Listener",
+        "AWS::StepFunctions::StateMachine",
+        "AWS::Batch::JobQueue",
+        "AWS::Batch::ComputeEnvironment",
+        "AWS::AccessAnalyzer::Analyzer",
+        "AWS::Athena::WorkGroup",
+        "AWS::Athena::DataCatalog",
+        "AWS::Detective::Graph",
+        "AWS::GlobalAccelerator::Accelerator",
+        "AWS::GlobalAccelerator::EndpointGroup",
+        "AWS::GlobalAccelerator::Listener",
+        "AWS::EC2::TransitGatewayAttachment",
+        "AWS::EC2::TransitGatewayRouteTable",
+        "AWS::DMS::Certificate",
+        "AWS::AppConfig::Application",
+        "AWS::AppSync::GraphQLApi",
+        "AWS::DataSync::LocationSMB",
+        "AWS::DataSync::LocationFSxLustre",
+        "AWS::DataSync::LocationS3",
+        "AWS::DataSync::LocationEFS",
+        "AWS::DataSync::Task",
+        "AWS::DataSync::LocationNFS",
+        "AWS::EC2::NetworkInsightsAccessScopeAnalysis",
+        "AWS::EKS::FargateProfile",
+        "AWS::Glue::Job",
+        "AWS::GuardDuty::ThreatIntelSet",
+        "AWS::GuardDuty::IPSet",
+        "AWS::SageMaker::Workteam",
+        "AWS::SageMaker::NotebookInstanceLifecycleConfig",
+        "AWS::ServiceDiscovery::Service",
+        "AWS::ServiceDiscovery::PublicDnsNamespace",
+        "AWS::SES::ContactList",
+        "AWS::SES::ConfigurationSet",
+        "AWS::Route53::HostedZone",
+        "AWS::IoTEvents::Input",
+        "AWS::IoTEvents::DetectorModel",
+        "AWS::IoTEvents::AlarmModel",
+        "AWS::ServiceDiscovery::HttpNamespace",
+        "AWS::Events::EventBus",
+        "AWS::ImageBuilder::ContainerRecipe",
+        "AWS::ImageBuilder::DistributionConfiguration",
+        "AWS::ImageBuilder::InfrastructureConfiguration",
+        "AWS::DataSync::LocationObjectStorage",
+        "AWS::DataSync::LocationHDFS",
+        "AWS::Glue::Classifier",
+        "AWS::Route53RecoveryReadiness::Cell",
+        "AWS::Route53RecoveryReadiness::ReadinessCheck",
+        "AWS::ECR::RegistryPolicy",
+        "AWS::Backup::ReportPlan",
+        "AWS::Lightsail::Certificate",
+        "AWS::RUM::AppMonitor",
+        "AWS::Events::Endpoint",
+        "AWS::SES::ReceiptRuleSet",
+        "AWS::Events::Archive",
+        "AWS::Events::ApiDestination",
+        "AWS::Lightsail::Disk",
+        "AWS::FIS::ExperimentTemplate",
+        "AWS::DataSync::LocationFSxWindows",
+        "AWS::SES::ReceiptFilter",
+        "AWS::GuardDuty::Filter",
+        "AWS::SES::Template",
+        "AWS::AmazonMQ::Broker",
+        "AWS::AppConfig::Environment",
+        "AWS::AppConfig::ConfigurationProfile",
+        "AWS::Cloud9::EnvironmentEC2",
+        "AWS::EventSchemas::Registry",
+        "AWS::EventSchemas::RegistryPolicy",
+        "AWS::EventSchemas::Discoverer",
+        "AWS::FraudDetector::Label",
+        "AWS::FraudDetector::EntityType",
+        "AWS::FraudDetector::Variable",
+        "AWS::FraudDetector::Outcome",
+        "AWS::IoT::Authorizer",
+        "AWS::IoT::SecurityProfile",
+        "AWS::IoT::RoleAlias",
+        "AWS::IoT::Dimension",
+        "AWS::IoTAnalytics::Datastore",
+        "AWS::Lightsail::Bucket",
+        "AWS::Lightsail::StaticIp",
+        "AWS::MediaPackage::PackagingGroup",
+        "AWS::Route53RecoveryReadiness::RecoveryGroup",
+        "AWS::ResilienceHub::ResiliencyPolicy",
+        "AWS::Transfer::Workflow",
+        "AWS::EKS::IdentityProviderConfig",
+        "AWS::EKS::Addon",
+        "AWS::Glue::MLTransform",
+        "AWS::IoT::Policy",
+        "AWS::IoT::MitigationAction",
+        "AWS::IoTTwinMaker::Workspace",
+        "AWS::IoTTwinMaker::Entity",
+        "AWS::IoTAnalytics::Dataset",
+        "AWS::IoTAnalytics::Pipeline",
+        "AWS::IoTAnalytics::Channel",
+        "AWS::IoTSiteWise::Dashboard",
+        "AWS::IoTSiteWise::Project",
+        "AWS::IoTSiteWise::Portal",
+        "AWS::IoTSiteWise::AssetModel",
+        "AWS::IVS::Channel",
+        "AWS::IVS::RecordingConfiguration",
+        "AWS::IVS::PlaybackKeyPair",
+        "AWS::KinesisAnalyticsV2::Application",
+        "AWS::RDS::GlobalCluster",
+        "AWS::S3::MultiRegionAccessPoint",
+        "AWS::DeviceFarm::TestGridProject",
+        "AWS::Budgets::BudgetsAction",
+        "AWS::Lex::Bot",
+        "AWS::CodeGuruReviewer::RepositoryAssociation",
+        "AWS::IoT::CustomMetric",
+        "AWS::Route53Resolver::FirewallDomainList",
+        "AWS::RoboMaker::RobotApplicationVersion",
+        "AWS::EC2::TrafficMirrorSession",
+        "AWS::IoTSiteWise::Gateway",
+        "AWS::Lex::BotAlias",
+        "AWS::LookoutMetrics::Alert",
+        "AWS::IoT::AccountAuditConfiguration",
+        "AWS::EC2::TrafficMirrorTarget",
+        "AWS::S3::StorageLens",
+        "AWS::IoT::ScheduledAudit",
+        "AWS::Events::Connection",
+        "AWS::EventSchemas::Schema",
+        "AWS::MediaPackage::PackagingConfiguration",
+        "AWS::KinesisVideo::SignalingChannel",
+        "AWS::AppStream::DirectoryConfig",
+        "AWS::LookoutVision::Project",
+        "AWS::Route53RecoveryControl::Cluster",
+        "AWS::Route53RecoveryControl::SafetyRule",
+        "AWS::Route53RecoveryControl::ControlPanel",
+        "AWS::Route53RecoveryControl::RoutingControl",
+        "AWS::Route53RecoveryReadiness::ResourceSet",
+        "AWS::RoboMaker::SimulationApplication",
+        "AWS::RoboMaker::RobotApplication",
+        "AWS::HealthLake::FHIRDatastore",
+        "AWS::Pinpoint::Segment",
+        "AWS::Pinpoint::ApplicationSettings",
+        "AWS::Events::Rule",
+        "AWS::EC2::DHCPOptions",
+        "AWS::EC2::NetworkInsightsPath",
+        "AWS::EC2::TrafficMirrorFilter",
+        "AWS::EC2::IPAM",
+        "AWS::IoTTwinMaker::Scene",
+        "AWS::NetworkManager::TransitGatewayRegistration",
+        "AWS::CustomerProfiles::Domain",
+        "AWS::AutoScaling::WarmPool",
+        "AWS::Connect::PhoneNumber",
+        "AWS::AppConfig::DeploymentStrategy",
+        "AWS::AppFlow::Flow",
+        "AWS::AuditManager::Assessment",
+        "AWS::CloudWatch::MetricStream",
+        "AWS::DeviceFarm::InstanceProfile",
+        "AWS::DeviceFarm::Project",
+        "AWS::EC2::EC2Fleet",
+        "AWS::EC2::SubnetRouteTableAssociation",
+        "AWS::ECR::PullThroughCacheRule",
+        "AWS::GroundStation::Config",
+        "AWS::ImageBuilder::ImagePipeline",
+        "AWS::IoT::FleetMetric",
+        "AWS::IoTWireless::ServiceProfile",
+        "AWS::NetworkManager::Device",
+        "AWS::NetworkManager::GlobalNetwork",
+        "AWS::NetworkManager::Link",
+        "AWS::NetworkManager::Site",
+        "AWS::Panorama::Package",
+        "AWS::Pinpoint::App",
+        "AWS::Redshift::ScheduledAction",
+        "AWS::Route53Resolver::FirewallRuleGroupAssociation",
+        "AWS::SageMaker::AppImageConfig",
+        "AWS::SageMaker::Image",
+        "AWS::ECS::TaskSet",
+        "AWS::Cassandra::Keyspace",
+        "AWS::Signer::SigningProfile",
+        "AWS::Amplify::App",
+        "AWS::AppMesh::VirtualNode",
+        "AWS::AppMesh::VirtualService",
+        "AWS::AppRunner::VpcConnector",
+        "AWS::AppStream::Application",
+        "AWS::CodeArtifact::Repository",
+        "AWS::EC2::PrefixList",
+        "AWS::EC2::SpotFleet",
+        "AWS::Evidently::Project",
+        "AWS::Forecast::Dataset",
+        "AWS::IAM::SAMLProvider",
+        "AWS::IAM::ServerCertificate",
+        "AWS::Pinpoint::Campaign",
+        "AWS::Pinpoint::InAppTemplate",
+        "AWS::SageMaker::Domain",
+        "AWS::Transfer::Agreement",
+        "AWS::Transfer::Connector",
+        "AWS::KinesisFirehose::DeliveryStream",
+        "AWS::Amplify::Branch",
+        "AWS::AppIntegrations::EventIntegration",
+        "AWS::AppMesh::Route",
+        "AWS::Athena::PreparedStatement",
+        "AWS::EC2::IPAMScope",
+        "AWS::Evidently::Launch",
+        "AWS::Forecast::DatasetGroup",
+        "AWS::GreengrassV2::ComponentVersion",
+        "AWS::GroundStation::MissionProfile",
+        "AWS::MediaConnect::FlowEntitlement",
+        "AWS::MediaConnect::FlowVpcInterface",
+        "AWS::MediaTailor::PlaybackConfiguration",
+        "AWS::MSK::Configuration",
+        "AWS::Personalize::Dataset",
+        "AWS::Personalize::Schema",
+        "AWS::Personalize::Solution",
+        "AWS::Pinpoint::EmailTemplate",
+        "AWS::Pinpoint::EventStream",
+        "AWS::ResilienceHub::App",
+        "AWS::ACMPCA::CertificateAuthority",
+        "AWS::AppConfig::HostedConfigurationVersion",
+        "AWS::AppMesh::VirtualGateway",
+        "AWS::AppMesh::VirtualRouter",
+        "AWS::AppRunner::Service",
+        "AWS::CustomerProfiles::ObjectType",
+        "AWS::DMS::Endpoint",
+        "AWS::EC2::CapacityReservation",
+        "AWS::EC2::ClientVpnEndpoint",
+        "AWS::Kendra::Index",
+        "AWS::KinesisVideo::Stream",
+        "AWS::Logs::Destination",
+        "AWS::Pinpoint::EmailChannel",
+        "AWS::S3::AccessPoint",
+        "AWS::NetworkManager::CustomerGatewayAssociation",
+        "AWS::NetworkManager::LinkAssociation",
+        "AWS::IoTWireless::MulticastGroup",
+        "AWS::Personalize::DatasetGroup",
+        "AWS::IoTTwinMaker::ComponentType",
+        "AWS::CodeBuild::ReportGroup",
+        "AWS::SageMaker::FeatureGroup",
+        "AWS::MSK::BatchScramSecret",
+        "AWS::AppStream::Stack",
+        "AWS::IoT::JobTemplate",
+        "AWS::IoTWireless::FuotaTask",
+        "AWS::IoT::ProvisioningTemplate",
+        "AWS::InspectorV2::Filter",
+        "AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation",
+        "AWS::ServiceDiscovery::Instance",
+        "AWS::Transfer::Certificate",
+        "AWS::MediaConnect::FlowSource",
+        "AWS::APS::RuleGroupsNamespace",
+        "AWS::CodeGuruProfiler::ProfilingGroup",
+        "AWS::Route53Resolver::ResolverQueryLoggingConfig",
+        "AWS::Batch::SchedulingPolicy",
+        "AWS::ACMPCA::CertificateAuthorityActivation",
+        "AWS::AppMesh::GatewayRoute",
+        "AWS::AppMesh::Mesh",
+        "AWS::Connect::Instance",
+        "AWS::Connect::QuickConnect",
+        "AWS::EC2::CarrierGateway",
+        "AWS::EC2::IPAMPool",
+        "AWS::EC2::TransitGatewayConnect",
+        "AWS::EC2::TransitGatewayMulticastDomain",
+        "AWS::ECS::CapacityProvider",
+        "AWS::IAM::InstanceProfile",
+        "AWS::IoT::CACertificate",
+        "AWS::IoTTwinMaker::SyncJob",
+        "AWS::KafkaConnect::Connector",
+        "AWS::Lambda::CodeSigningConfig",
+        "AWS::NetworkManager::ConnectPeer",
+        "AWS::ResourceExplorer2::Index",
+        "AWS::AppStream::Fleet",
+        "AWS::Cognito::UserPool",
+        "AWS::Cognito::UserPoolClient",
+        "AWS::Cognito::UserPoolGroup",
+        "AWS::EC2::NetworkInsightsAccessScope",
+        "AWS::EC2::NetworkInsightsAnalysis",
+        "AWS::Grafana::Workspace",
+        "AWS::GroundStation::DataflowEndpointGroup",
+        "AWS::ImageBuilder::ImageRecipe",
+        "AWS::KMS::Alias",
+        "AWS::M2::Environment",
+        "AWS::QuickSight::DataSource",
+        "AWS::QuickSight::Template",
+        "AWS::QuickSight::Theme",
+        "AWS::RDS::OptionGroup",
+        "AWS::Redshift::EndpointAccess",
+        "AWS::Route53Resolver::FirewallRuleGroup",
+        "AWS::SSM::Document",
+        "AWS::AppConfig::ExtensionAssociation",
+        "AWS::AppIntegrations::Application",
+        "AWS::AppSync::ApiCache",
+        "AWS::Bedrock::Guardrail",
+        "AWS::Bedrock::KnowledgeBase",
+        "AWS::Cognito::IdentityPool",
+        "AWS::Connect::Rule",
+        "AWS::Connect::User",
+        "AWS::EC2::ClientVpnTargetNetworkAssociation",
+        "AWS::EC2::EIPAssociation",
+        "AWS::EC2::IPAMResourceDiscovery",
+        "AWS::EC2::IPAMResourceDiscoveryAssociation",
+        "AWS::EC2::InstanceConnectEndpoint",
+        "AWS::EC2::SnapshotBlockPublicAccess",
+        "AWS::EC2::VPCBlockPublicAccessExclusion",
+        "AWS::EC2::VPCBlockPublicAccessOptions",
+        "AWS::EC2::VPCEndpointConnectionNotification",
+        "AWS::EC2::VPNConnectionRoute",
+        "AWS::Evidently::Segment",
+        "AWS::IAM::OIDCProvider",
+        "AWS::InspectorV2::Activation",
+        "AWS::MSK::ClusterPolicy",
+        "AWS::MSK::VpcConnection",
+        "AWS::MediaConnect::Gateway",
+        "AWS::MemoryDB::SubnetGroup",
+        "AWS::OpenSearchServerless::Collection",
+        "AWS::OpenSearchServerless::VpcEndpoint",
+        "AWS::Redshift::EndpointAuthorization",
+        "AWS::Route53Profiles::Profile",
+        "AWS::S3::StorageLensGroup",
+        "AWS::S3Express::BucketPolicy",
+        "AWS::S3Express::DirectoryBucket",
+        "AWS::SageMaker::InferenceExperiment",
+        "AWS::SecurityHub::Standard",
+        "AWS::Transfer::Profile",
+        "AWS::CloudFormation::StackSet",
+        "AWS::MediaPackageV2::Channel",
+        "AWS::S3::AccessGrantsLocation",
+        "AWS::S3::AccessGrant",
+        "AWS::S3::AccessGrantsInstance",
+        "AWS::EMRServerless::Application",
+        "AWS::Config::AggregationAuthorization",
+        "AWS::Bedrock::ApplicationInferenceProfile",
+        "AWS::ApiGatewayV2::Integration",
+        "AWS::SageMaker::MlflowTrackingServer",
+        "AWS::SageMaker::ModelBiasJobDefinition",
+        "AWS::SecretsManager::RotationSchedule",
+        "AWS::Deadline::QueueFleetAssociation",
+        "AWS::ECR::RepositoryCreationTemplate",
+        "AWS::CloudFormation::LambdaHook",
+        "AWS::EC2::SubnetNetworkAclAssociation",
+        "AWS::ApiGateway::UsagePlan",
+        "AWS::AppConfig::Extension",
+        "AWS::Deadline::Fleet",
+        "AWS::EMR::Studio",
+        "AWS::S3Tables::TableBucket",
+        "AWS::CloudFront::RealtimeLogConfig",
+        "AWS::BackupGateway::Hypervisor",
+        "AWS::BCMDataExports::Export",
+        "AWS::CloudFormation::GuardHook",
+        "AWS::CloudFront::PublicKey",
+        "AWS::CloudTrail::EventDataStore",
+        "AWS::EntityResolution::IdMappingWorkflow",
+        "AWS::EntityResolution::SchemaMapping",
+        "AWS::IoT::DomainConfiguration",
+        "AWS::PCAConnectorAD::DirectoryRegistration",
+        "AWS::RDS::Integration",
+        "AWS::Config::ConformancePack",
+        "AWS::RolesAnywhere::Profile",
+        "AWS::CodeArtifact::Domain",
+        "AWS::Backup::RestoreTestingPlan",
+        "AWS::Config::StoredQuery",
+        "AWS::SageMaker::DataQualityJobDefinition",
+        "AWS::SageMaker::ModelExplainabilityJobDefinition",
+        "AWS::SageMaker::ModelQualityJobDefinition",
+        "AWS::SageMaker::StudioLifecycleConfig",
+        "AWS::SES::DedicatedIpPool",
+        "AWS::SES::MailManagerTrafficPolicy",
+        "AWS::SSM::ResourceDataSync",
+        "AWS::BedrockAgentCore::Runtime",
+        "AWS::BedrockAgentCore::BrowserCustom",
+        "AWS::ElasticLoadBalancingV2::TargetGroup",
+        "AWS::EMRContainers::VirtualCluster",
+        "AWS::EntityResolution::MatchingWorkflow",
+        "AWS::IoTCoreDeviceAdvisor::SuiteDefinition",
+        "AWS::EC2::SecurityGroupVpcAssociation",
+        "AWS::EC2::VerifiedAccessInstance",
+        "AWS::KafkaConnect::CustomPlugin",
+        "AWS::NetworkManager::TransitGatewayPeering",
+        "AWS::OpenSearchServerless::SecurityConfig",
+        "AWS::Redshift::Integration",
+        "AWS::RolesAnywhere::TrustAnchor",
+        "AWS::Route53Profiles::ProfileAssociation",
+        "AWS::SSMIncidents::ResponsePlan",
+        "AWS::Transfer::Server",
+        "AWS::Glue::Database",
+        "AWS::Organizations::OrganizationalUnit",
+        "AWS::EC2::IPAMPoolCidr",
+        "AWS::EC2::VPCGatewayAttachment",
+        "AWS::Bedrock::Prompt",
+        "AWS::Comprehend::Flywheel",
+        "AWS::DataSync::Agent",
+        "AWS::MediaTailor::LiveSource",
+        "AWS::MSK::ServerlessCluster",
+        "AWS::IoTSiteWise::Asset",
+        "AWS::B2BI::Capability",
+        "AWS::CloudFront::KeyValueStore",
+        "AWS::Deadline::Monitor",
+        "AWS::GuardDuty::MalwareProtectionPlan",
+        "AWS::Location::APIKey",
+        "AWS::MediaPackageV2::OriginEndpoint",
+        "AWS::PCAConnectorAD::Connector",
+        "AWS::S3Tables::TableBucketPolicy",
+        "AWS::SecretsManager::ResourcePolicy",
+        "AWS::SSMContacts::Contact",
+        "AWS::IoT::ThingGroup",
+        "AWS::ImageBuilder::LifecyclePolicy",
+        "AWS::GameLift::Build",
+        "AWS::ECR::ReplicationConfiguration",
+        "AWS::EC2::SubnetCidrBlock",
+        "AWS::Connect::SecurityProfile",
+        "AWS::CleanRoomsML::TrainingDataset",
+        "AWS::AppStream::AppBlockBuilder",
+        "AWS::Route53::DNSSEC",
+        "AWS::SageMaker::UserProfile",
+        "AWS::ApiGateway::Method"
+      ]
+    },
+    "ResourceTypeList": {
+      "type": "list",
+      "member": "ResourceType"
+    },
+    "ResourceTypeString": {
+      "type": "string",
+      "min": 1,
+      "max": 196
+    },
+    "ResourceTypeValue": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[a-zA-Z0-9]{2,64}::[a-zA-Z0-9]{2,64}::[a-zA-Z0-9]{2,64}"
+    },
+    "ResourceTypeValueList": {
+      "type": "list",
+      "member": "ResourceTypeValue"
+    },
+    "ResourceTypes": {
+      "type": "list",
+      "min": 0,
+      "max": 20,
+      "member": "StringWithCharLimit256"
+    },
+    "ResourceTypesScope": {
+      "type": "list",
+      "min": 0,
+      "max": 100,
+      "member": "StringWithCharLimit256"
+    },
+    "ResourceValue": {
+      "type": "structure",
+      "required": [
+        "Value"
+      ],
+      "members": {
+        "Value": "ResourceValueType"
+      }
+    },
+    "ResourceValueType": {
+      "type": "string",
+      "enum": [
+        "RESOURCE_ID"
+      ]
+    },
+    "RetentionConfigurationName": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[\\w\\-]+"
+    },
+    "RetentionConfigurationNameList": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "RetentionConfigurationName"
+    },
+    "RetentionPeriodInDays": {
+      "type": "integer",
+      "min": 30,
+      "max": 2557
+    },
+    "RuleEvaluationVisibility": {
+      "type": "string",
+      "enum": [
+        "EXTERNAL",
+        "INTERNAL"
+      ]
+    },
+    "RuleLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 50
+    },
+    "SSMDocumentName": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_\\-.:/]{3,200}$"
+    },
+    "SSMDocumentVersion": {
+      "type": "string",
+      "pattern": "([$]LATEST|[$]DEFAULT|^[1-9][0-9]*$)"
+    },
+    "SchemaVersionId": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[A-Za-z0-9-]+"
+    },
+    "Scope": {
+      "type": "structure",
+      "members": {
+        "ComplianceResourceTypes": "ComplianceResourceTypes",
+        "TagKey": "StringWithCharLimit128",
+        "TagValue": "StringWithCharLimit256",
+        "ComplianceResourceId": "BaseResourceId",
+        "ServicePrincipals": "ServicePrincipals"
+      }
+    },
+    "ScopeConfiguration": {
+      "type": "structure",
+      "required": [
+        "scopeType",
+        "allRegions"
+      ],
+      "members": {
+        "scopeType": "ScopeType",
+        "scopeValues": "ScopeValues",
+        "allRegions": "Boolean",
+        "includedRegions": "IncludedRegions"
+      }
+    },
+    "ScopeType": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "ScopeValue": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "ScopeValues": {
+      "type": "list",
+      "member": "ScopeValue"
+    },
+    "SelectAggregateResourceConfigRequest": {
+      "type": "structure",
+      "required": [
+        "Expression",
+        "ConfigurationAggregatorName"
+      ],
+      "members": {
+        "Expression": "Expression",
+        "ConfigurationAggregatorName": "ConfigurationAggregatorName",
+        "Limit": "Limit",
+        "MaxResults": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "SelectResourceConfigRequest": {
+      "type": "structure",
+      "required": [
+        "Expression"
+      ],
+      "members": {
+        "Expression": "Expression",
+        "Limit": "Limit",
+        "NextToken": "NextToken"
+      }
+    },
+    "ServicePrincipal": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w+=,.@-]+"
+    },
+    "ServicePrincipalValue": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w+=,.@-]+"
+    },
+    "ServicePrincipalValueList": {
+      "type": "list",
+      "member": "ServicePrincipalValue"
+    },
+    "ServicePrincipals": {
+      "type": "list",
+      "min": 0,
+      "max": 100,
+      "member": "StringWithCharLimit128"
+    },
+    "SortBy": {
+      "type": "string",
+      "enum": [
+        "SCORE"
+      ]
+    },
+    "SortOrder": {
+      "type": "string",
+      "enum": [
+        "ASCENDING",
+        "DESCENDING"
+      ]
+    },
+    "Source": {
+      "type": "structure",
+      "required": [
+        "Owner"
+      ],
+      "members": {
+        "Owner": "Owner",
+        "SourceIdentifier": "StringWithCharLimit256",
+        "SourceDetails": "SourceDetails",
+        "CustomPolicyDetails": "CustomPolicyDetails"
+      }
+    },
+    "SourceDetail": {
+      "type": "structure",
+      "members": {
+        "EventSource": "EventSource",
+        "MessageType": "MessageType",
+        "MaximumExecutionFrequency": "MaximumExecutionFrequency"
+      }
+    },
+    "SourceDetails": {
+      "type": "list",
+      "min": 0,
+      "max": 25,
+      "member": "SourceDetail"
+    },
+    "SsmControls": {
+      "type": "structure",
+      "members": {
+        "ConcurrentExecutionRatePercentage": "Percentage",
+        "ErrorPercentage": "Percentage"
+      }
+    },
+    "StartConfigRulesEvaluationRequest": {
+      "type": "structure",
+      "members": {
+        "ConfigRuleNames": "ReevaluateConfigRuleNames"
+      }
+    },
+    "StartConfigurationRecorderRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationRecorderName"
+      ],
+      "members": {
+        "ConfigurationRecorderName": "RecorderName"
+      }
+    },
+    "StartRemediationExecutionRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigRuleName",
+        "ResourceKeys"
+      ],
+      "members": {
+        "ConfigRuleName": "ConfigRuleName",
+        "ResourceKeys": "ResourceKeys"
+      }
+    },
+    "StartResourceEvaluationRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceDetails",
+        "EvaluationMode"
+      ],
+      "members": {
+        "ResourceDetails": "ResourceDetails",
+        "EvaluationContext": "EvaluationContext",
+        "EvaluationMode": "EvaluationMode",
+        "EvaluationTimeout": "EvaluationTimeout",
+        "ClientToken": "ClientToken"
+      }
+    },
+    "StaticParameterValues": {
+      "type": "list",
+      "min": 0,
+      "max": 25,
+      "member": "StringWithCharLimit256"
+    },
+    "StaticValue": {
+      "type": "structure",
+      "required": [
+        "Values"
+      ],
+      "members": {
+        "Values": "StaticParameterValues"
+      }
+    },
+    "StatusDetailFilters": {
+      "type": "structure",
+      "members": {
+        "AccountId": "AccountId",
+        "MemberAccountRuleStatus": "MemberAccountRuleStatus"
+      }
+    },
+    "StopConfigurationRecorderRequest": {
+      "type": "structure",
+      "required": [
+        "ConfigurationRecorderName"
+      ],
+      "members": {
+        "ConfigurationRecorderName": "RecorderName"
+      }
+    },
+    "StoredQuery": {
+      "type": "structure",
+      "required": [
+        "QueryName"
+      ],
+      "members": {
+        "QueryId": "QueryId",
+        "QueryArn": "QueryArn",
+        "QueryName": "QueryName",
+        "Description": "QueryDescription",
+        "Expression": "QueryExpression"
+      }
+    },
+    "String": {
+      "type": "string"
+    },
+    "StringWithCharLimit1024": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "StringWithCharLimit128": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "StringWithCharLimit256": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "StringWithCharLimit256Min0": {
+      "type": "string",
+      "min": 0,
+      "max": 256
+    },
+    "StringWithCharLimit64": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "StringWithCharLimit768": {
+      "type": "string",
+      "min": 1,
+      "max": 768
+    },
+    "Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "TagKey",
+        "Value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "TagKeyList": {
+      "type": "list",
+      "min": 1,
+      "max": 50,
+      "member": "TagKey"
+    },
+    "TagList": {
+      "type": "list",
+      "min": 1,
+      "max": 50,
+      "member": "Tag"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceArn",
+        "Tags"
+      ],
+      "members": {
+        "ResourceArn": "AmazonResourceName",
+        "Tags": "TagList"
+      }
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256
+    },
+    "Tags": {
+      "type": "map",
+      "key": "Name",
+      "value": "Value"
+    },
+    "TagsList": {
+      "type": "list",
+      "min": 0,
+      "max": 50,
+      "member": "Tag"
+    },
+    "TemplateBody": {
+      "type": "string",
+      "min": 1,
+      "max": 51200
+    },
+    "TemplateS3Uri": {
+      "type": "string",
+      "min": 1,
+      "max": 1024,
+      "pattern": "s3://.*"
+    },
+    "TemplateSSMDocumentDetails": {
+      "type": "structure",
+      "required": [
+        "DocumentName"
+      ],
+      "members": {
+        "DocumentName": "SSMDocumentName",
+        "DocumentVersion": "SSMDocumentVersion"
+      }
+    },
+    "ThirdPartyCloudRegion": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "TimeWindow": {
+      "type": "structure",
+      "members": {}
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceArn",
+        "TagKeys"
+      ],
+      "members": {
+        "ResourceArn": "AmazonResourceName",
+        "TagKeys": "TagKeyList"
+      }
+    },
+    "Value": {
+      "type": "string"
+    }
+  }
+}

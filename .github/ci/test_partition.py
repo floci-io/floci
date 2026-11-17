@@ -114,11 +114,15 @@ class PartitionTest(unittest.TestCase):
         shards = self.shards(['some/where/EmrHiveStepsDockerIntegrationTest'] + plain, 2)
         self.assertEqual(['some/where/EmrHiveStepsDockerIntegrationTest'], shards[0])
 
-    def test_two_slow_classes_of_one_profile_stay_together(self):
+    def test_two_slow_classes_of_one_profile_are_separate_from_each_other_and_ordinary_members(self):
         self.source('p/EmrDockerRunnerDockerIntegrationTest', '@TestProfile(Docker.class)')
         self.source('p/EmrHiveStepsDockerIntegrationTest', '@TestProfile(Docker.class)')
-        shards = self.shards(['p/EmrDockerRunnerDockerIntegrationTest', 'p/EmrHiveStepsDockerIntegrationTest', 'p/A'], 2)
-        self.assertEqual(['p/EmrDockerRunnerDockerIntegrationTest', 'p/EmrHiveStepsDockerIntegrationTest'], shards[0])
+        self.source('p/A', '@TestProfile(Docker.class)')
+        self.source('p/B', '@TestProfile(Docker.class)')
+        classes = ['p/EmrDockerRunnerDockerIntegrationTest', 'p/EmrHiveStepsDockerIntegrationTest', 'p/A', 'p/B']
+        shards = self.shards(classes, 3)
+        self.assertEqual([['p/EmrDockerRunnerDockerIntegrationTest'],
+                          ['p/EmrHiveStepsDockerIntegrationTest'], ['p/A', 'p/B']], shards)
 
     def test_a_slow_class_that_no_longer_exists_is_named_and_changes_nothing(self):
         self.classes.write_text('p/A\np/EmrHiveStepsDockerIntegrationTest\n')

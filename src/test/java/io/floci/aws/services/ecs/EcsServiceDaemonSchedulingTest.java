@@ -1,12 +1,6 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
@@ -19,7 +13,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,7 +24,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -42,7 +34,7 @@ class EcsServiceDaemonSchedulingTest {
 
     @Test
     void daemonServiceRunsExactlyOneTaskPerActiveContainerInstance() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("daemon-cluster", REGION);
         ContainerInstance a = service.registerContainerInstance("daemon-cluster", null, List.of(), REGION);
         ContainerInstance b = service.registerContainerInstance("daemon-cluster", null, List.of(), REGION);
@@ -77,15 +69,10 @@ class EcsServiceDaemonSchedulingTest {
         // Docker mode with a container manager that refuses to start anything: launchTasks
         // hands back a task already STOPPED. That must neither cover the instance nor count
         // towards runningCount, or ServicesStable would be satisfied by a dead daemon.
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(false);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         when(containerManager.startTask(any(), any(), any(), anyString()))
                 .thenThrow(new RuntimeException("no docker here"));
-        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null);
-        service.initializeStorage();
+        EcsService service = EcsServiceFixtures.builder().dockerMode().containerManager(containerManager).build();
         service.createCluster("daemon-fail", REGION);
         service.registerContainerInstance("daemon-fail", null, List.of(), REGION);
         registerTaskDef(service);
@@ -108,7 +95,7 @@ class EcsServiceDaemonSchedulingTest {
 
     @Test
     void strandedStoppingDaemonTaskStillHoldsItsInstance() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("daemon-stopping", REGION);
         ContainerInstance a = service.registerContainerInstance("daemon-stopping", null, List.of(), REGION);
         registerTaskDef(service);
@@ -136,7 +123,7 @@ class EcsServiceDaemonSchedulingTest {
 
     @Test
     void taskDefinitionChangeReplacesTheDaemonTaskOnEveryInstance() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("daemon-roll", REGION);
         ContainerInstance a = service.registerContainerInstance("daemon-roll", null, List.of(), REGION);
         ContainerInstance b = service.registerContainerInstance("daemon-roll", null, List.of(), REGION);
@@ -165,7 +152,7 @@ class EcsServiceDaemonSchedulingTest {
 
     @Test
     void forceNewDeploymentReplacesTheDaemonTaskOnEveryInstance() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("daemon-force", REGION);
         ContainerInstance a = service.registerContainerInstance("daemon-force", null, List.of(), REGION);
         ContainerInstance b = service.registerContainerInstance("daemon-force", null, List.of(), REGION);
@@ -185,7 +172,7 @@ class EcsServiceDaemonSchedulingTest {
 
     @Test
     void unchangedDaemonServiceDoesNotChurnItsTasks() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("daemon-steady", REGION);
         service.registerContainerInstance("daemon-steady", null, List.of(), REGION);
         service.registerContainerInstance("daemon-steady", null, List.of(), REGION);
@@ -269,7 +256,7 @@ class EcsServiceDaemonSchedulingTest {
 
     @Test
     void daemonIsRejectedForFargateAndForNonEcsDeploymentControllers() {
-        EcsService service = newMockModeService();
+        EcsService service = EcsServiceFixtures.mockModeService();
         service.createCluster("daemon-reject", REGION);
         registerTaskDef(service);
 
@@ -325,50 +312,12 @@ class EcsServiceDaemonSchedulingTest {
     }
 
     private static EcsService newDockerModeServiceWhoseStopsFail() {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(false);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsContainerManager containerManager = mock(EcsContainerManager.class);
         when(containerManager.removeLeftoverContainers()).thenReturn(true);
         when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(inv ->
                 new EcsTaskHandle(inv.<EcsTask>getArgument(0).getTaskArn(), Map.of("agent", "cid"), Map.of()));
         when(containerManager.stopTaskAndCollectExitCodes(any()))
                 .thenThrow(new RuntimeException("docker unavailable"));
-        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null);
-        service.initializeStorage();
-        return service;
-    }
-
-    private static EcsService newMockModeService() {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(true);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        EcsService service = new EcsService(
-                new RegionResolver(REGION, "000000000000"),
-                mock(EcsContainerManager.class),
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory(),
-                null);
-        service.initializeStorage();
-        return service;
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                    String fileName,
-                                                    TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
+        return EcsServiceFixtures.builder().dockerMode().containerManager(containerManager).build();
     }
 }

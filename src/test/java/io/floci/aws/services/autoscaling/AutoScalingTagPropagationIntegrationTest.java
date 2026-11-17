@@ -192,10 +192,12 @@ class AutoScalingTagPropagationIntegrationTest {
     void sparseTagsRetainCreateDefaultsUpdateAndDeleteSemantics() {
         String name = "sparse-tags-" + UUID.randomUUID();
         try (AutoScalingClient client = AwsTestClients.create(AutoScalingClient.builder(), ACCOUNT, Region.of(REGION))) {
+            client.createLaunchConfiguration(request -> request.launchConfigurationName(name)
+                    .imageId("ami-12345678").instanceType("t3.micro"));
             try {
                 request(ACCOUNT, "autoscaling", "CreateAutoScalingGroup")
                         .formParam("AutoScalingGroupName", name)
-                        .formParam("LaunchConfigurationName", "sparse-configuration")
+                        .formParam("LaunchConfigurationName", name)
                         .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 0)
                         .formParam("AvailabilityZones.member.1", REGION + "a")
                         .formParam("Tags.member.3.Key", "existing")
@@ -219,8 +221,13 @@ class AutoScalingTagPropagationIntegrationTest {
                         .post("/").then().statusCode(200);
                 assertTrue(describeGroupTags(client, name).isEmpty());
             } finally {
-                if (!client.describeAutoScalingGroups(r -> r.autoScalingGroupNames(name)).autoScalingGroups().isEmpty()) {
-                    client.deleteAutoScalingGroup(r -> r.autoScalingGroupName(name).forceDelete(true));
+                try {
+                    if (!client.describeAutoScalingGroups(r -> r.autoScalingGroupNames(name))
+                            .autoScalingGroups().isEmpty()) {
+                        client.deleteAutoScalingGroup(r -> r.autoScalingGroupName(name).forceDelete(true));
+                    }
+                } finally {
+                    client.deleteLaunchConfiguration(r -> r.launchConfigurationName(name));
                 }
             }
         }

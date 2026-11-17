@@ -136,6 +136,11 @@ public class DynamoDbService {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
     // Held from an account quota check until the capacity it allowed is stored.
     private final Object capacityLock = new Object();
+    // Held from a resource policy revision check until the policy it allowed is stored.
+    private final Object resourcePolicyLock = new Object();
+    // Held while a table's tags are copied, changed and put in place of the map it held, which is never changed. The
+    // copy is put one entry at a time, as the map always was, so ListTagsOfResource keeps the order it listed.
+    private final Object tagLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -1612,6 +1617,7 @@ public class DynamoDbService {
         if (items == null) return new QueryResult(List.of(), 0, 0, null, List.of());
 
         List<JsonNode> results = new ArrayList<>();
+        List<JsonNode> partition = new ArrayList<>();
 
         if (keyConditions != null) {
             String partitionKeyValue = extractComparisonValue(keyConditions.get(pkName));
@@ -1619,6 +1625,7 @@ public class DynamoDbService {
                 boolean partitionKeyMatches = pkNames.stream().allMatch(name -> item.has(name)
                         && matchesAttributeValue(item.get(name), extractComparisonValue(keyConditions.get(name))));
                 if (!partitionKeyMatches) continue;
+                partition.add(item);
                 if (skName != null && keyConditions.has(skName)) {
                     JsonNode skCondition = keyConditions.get(skName);
                     if (matchesKeyCondition(item.get(skName), skCondition)) {
@@ -1630,7 +1637,7 @@ public class DynamoDbService {
             }
         } else if (keyConditionExpression != null) {
             results = queryWithExpression(items, accessPath, partitionKeyValuePlaceholder,
-                    keyConditionExpression, expressionAttrValues, exprAttrNames);
+                    keyConditionExpression, expressionAttrValues, exprAttrNames, partition);
         }
 
         // Filter out items without GSI key attributes (sparse index behavior).
@@ -1675,15 +1682,12 @@ public class DynamoDbService {
         // The size check comes first for each item — per the Query API reference,
         // "if the processed dataset size exceeds 1 MB before DynamoDB reaches this
         // limit, it stops the operation", so an item that would cross the 1 MB cap
-        // is not read and does not count toward Limit. DynamoDB does not look ahead
-        // either way: a read that stops at a boundary always returns a
-        // LastEvaluatedKey, even when the boundary happens to be the last item of
-        // the result set ("the absence of LastEvaluatedKey is the only way to know
-        // that you have reached the end of the result set").
+        // is not read and does not count toward Limit.
         final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int accSize = 0;
         long billedBytes = 0;
         int included = -1; // index one past the last included item; -1 = no boundary hit
+        boolean stoppedByLimit = false;
         for (int i = 0; i < evaluatedItems.size(); i++) {
             int sz = readItemSize(evaluatedItems.get(i), accessPath, table);
             if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
@@ -1694,21 +1698,30 @@ public class DynamoDbService {
             billedBytes += billedReadSize(evaluatedItems.get(i), accessPath, table, sz);
             if (limit != null && limit > 0 && i + 1 >= limit) {
                 included = i + 1; // the Limit cap stops the read AFTER this item
+                stoppedByLimit = true;
                 break;
             }
         }
         if (included > 0) {
-            lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(included - 1), pkName, sortKeyNames, indexName != null);
+            JsonNode last = evaluatedItems.get(included - 1);
+            boolean rangeEnded = stoppedByLimit && included == evaluatedItems.size()
+                    && endsKeyRange(partition, accessPath, last, (a, b) -> direction * keyOrder.compare(a, b),
+                            () -> keyRangeInclusiveEnd(accessPath, keyConditions, keyConditionExpression,
+                                    exprAttrNames, expressionAttrValues, direction > 0));
+            if (!rangeEnded) {
+                lastEvaluatedKey = buildKeyNode(table, last, pkName, sortKeyNames, indexName != null);
+            }
             evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, included));
         }
 
         int scannedCount = evaluatedItems.size();
         List<JsonNode> scannedItems = evaluatedItems;
 
-        if (filterExpression != null) {
+        // Parse only when there is an item to evaluate: an expression is still only read when an item reaches it.
+        if (filterExpression != null && !evaluatedItems.isEmpty()) {
+            ExpressionEvaluator.Expr filter = ExpressionEvaluator.parse(filterExpression);
             evaluatedItems = evaluatedItems.stream()
-                    .filter(item -> matchesFilterExpression(item, filterExpression,
-                            exprAttrNames, expressionAttrValues))
+                    .filter(item -> ExpressionEvaluator.evaluate(filter, item, exprAttrNames, expressionAttrValues))
                     .toList();
         }
 
@@ -1775,6 +1788,8 @@ public class DynamoDbService {
                 ? items.tailMap(buildItemKeyFromNode(exclusiveStartKey, pkName, skName), false).values()
                 : items.values();
 
+        // Parsed when the first item is evaluated, so a scan that evaluates no item doesn't read it.
+        ExpressionEvaluator.Expr filter = null;
         final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int totalScanned = 0;
         int accSize = 0;
@@ -1817,8 +1832,11 @@ public class DynamoDbService {
             totalScanned++;
             scannedItems.add(item);
             lastScanned = item;
-            boolean matched = (filterExpression == null
-                    || matchesFilterExpression(filtered, filterExpression, expressionAttrNames, expressionAttrValues))
+            if (filterExpression != null && filter == null) {
+                filter = ExpressionEvaluator.parse(filterExpression);
+            }
+            boolean matched = (filter == null
+                    || ExpressionEvaluator.evaluate(filter, filtered, expressionAttrNames, expressionAttrValues))
                     && (scanFilter == null || matchesScanFilterPublic(filtered, scanFilter, conditionalOperator));
             if (matched) {
                 results.add(item);
@@ -2310,7 +2328,8 @@ public class DynamoDbService {
         try {
             validateTransactItem(transactItem, region, staged);
             return null;
-        } catch (KeySchemaMismatchException | ItemNestingExceededException | UpdatedItemTooLargeException e) {
+        } catch (KeySchemaMismatchException | ItemNestingExceededException | UpdatedItemTooLargeException
+                 | UpdateOperandException e) {
             return new TransactionCanceledException.CancellationReason("ValidationError", null, e.getMessage());
         }
     }
@@ -3411,24 +3430,46 @@ public class DynamoDbService {
     // --- Tag Operations ---
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getTags() == null) {
-            table.setTags(new HashMap<>());
+        synchronized (tagLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            Map<String, String> updated = new HashMap<>();
+            if (table.getTags() != null) {
+                table.getTags().forEach(updated::put);
+            }
+            tags.forEach(updated::put);
+            table.setTags(updated);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
         }
-        table.getTags().putAll(tags);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
         LOG.debugv("Tagged resource: {0}", resourceArn);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getTags() != null) {
-            for (String key : tagKeys) {
-                table.getTags().remove(key);
+    /**
+     * Puts CreateTable's tags on the table it has just stored, under the lock TagResource takes, keeping a tag a
+     * TagResource already put on it in the meantime, as that came later.
+     */
+    void putCreationTags(TableDefinition table, Map<String, String> tags) {
+        synchronized (tagLock) {
+            Map<String, String> created = new HashMap<>();
+            tags.forEach(created::put);
+            if (table.getTags() != null) {
+                table.getTags().forEach(created::put);
             }
-            String storageKey = regionKey(region, table.getTableName());
-            tableStore.put(storageKey, table);
+            table.setTags(created);
+        }
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        synchronized (tagLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            if (table.getTags() != null) {
+                Map<String, String> updated = new HashMap<>();
+                table.getTags().forEach(updated::put);
+                tagKeys.forEach(updated::remove);
+                table.setTags(updated);
+                String storageKey = regionKey(region, table.getTableName());
+                tableStore.put(storageKey, table);
+            }
         }
         LOG.debugv("Untagged resource: {0}", resourceArn);
     }
@@ -3438,23 +3479,56 @@ public class DynamoDbService {
         return table.getTags() != null ? table.getTags() : Map.of();
     }
 
+    /**
+     * The tags of the table {@code arn} names, or of the table whose index it names, as an index inherits its table's
+     * tags: the table stored under the ARN's name in the account and Region it names, a pre-multi-account one of the
+     * default account read in place, matched on the whole ARN and, for an index, holding it. Empty for any other ARN,
+     * a stream's included, whose tags are its own and which Floci holds none of.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "dynamodb")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        boolean index = parts.length == 4 && "index".equals(parts[2]);
+        if (!"table".equals(parts[0]) || parts.length != 2 && !index) {
+            return Map.of();
+        }
+        TableDefinition table = AccountAwareStorageBackend.readInAccount(tableStore, parsed.accountId(),
+                regionKey(parsed.region(), parts[1])).orElse(null);
+        if (table == null || table.getTableArn() == null
+                || !arn.equals(index ? table.getTableArn() + "/index/" + parts[3] : table.getTableArn())
+                || index && !table.holdsIndex(parts[3])) {
+            return Map.of();
+        }
+        Map<String, String> tags = table.getTags();
+        return tags == null ? Map.of() : tags;
+    }
+
     /** Result of a successful GetResourcePolicy call: the raw policy document and its revision id. */
     public record ResourcePolicyResult(String policy, String revisionId) {}
 
+    private static final String NO_POLICY_REVISION_ID = "NO_POLICY";
+
     public String putResourcePolicy(String resourceArn, String policy, String expectedRevisionId, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (expectedRevisionId != null
-                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
-            throw new AwsException("PolicyNotFoundException",
-                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+        synchronized (resourcePolicyLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            boolean revisionMatches = NO_POLICY_REVISION_ID.equals(expectedRevisionId)
+                    ? table.getResourcePolicy() == null
+                    : expectedRevisionId == null || expectedRevisionId.equals(table.getResourcePolicyRevisionId());
+            if (!revisionMatches) {
+                throw new AwsException("PolicyNotFoundException",
+                        "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+            }
+            String revisionId = UUID.randomUUID().toString();
+            table.setResourcePolicy(policy);
+            table.setResourcePolicyRevisionId(revisionId);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
+            LOG.debugv("Put resource policy: {0}", resourceArn);
+            return revisionId;
         }
-        String revisionId = UUID.randomUUID().toString();
-        table.setResourcePolicy(policy);
-        table.setResourcePolicyRevisionId(revisionId);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
-        LOG.debugv("Put resource policy: {0}", resourceArn);
-        return revisionId;
     }
 
     public ResourcePolicyResult getResourcePolicy(String resourceArn, String region) {
@@ -3467,23 +3541,25 @@ public class DynamoDbService {
     }
 
     public String deleteResourcePolicy(String resourceArn, String expectedRevisionId, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getResourcePolicy() == null) {
-            throw new AwsException("PolicyNotFoundException",
-                    "No resource policy found for: " + resourceArn, 400);
+        synchronized (resourcePolicyLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            if (table.getResourcePolicy() == null) {
+                throw new AwsException("PolicyNotFoundException",
+                        "No resource policy found for: " + resourceArn, 400);
+            }
+            if (expectedRevisionId != null
+                    && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
+                throw new AwsException("PolicyNotFoundException",
+                        "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+            }
+            String revisionId = table.getResourcePolicyRevisionId();
+            table.setResourcePolicy(null);
+            table.setResourcePolicyRevisionId(null);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
+            LOG.debugv("Deleted resource policy: {0}", resourceArn);
+            return revisionId;
         }
-        if (expectedRevisionId != null
-                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
-            throw new AwsException("PolicyNotFoundException",
-                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
-        }
-        String revisionId = table.getResourcePolicyRevisionId();
-        table.setResourcePolicy(null);
-        table.setResourcePolicyRevisionId(null);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
-        LOG.debugv("Deleted resource policy: {0}", resourceArn);
-        return revisionId;
     }
 
     private TableDefinition findTableByArn(String arn, String region) {
@@ -3635,12 +3711,8 @@ public class DynamoDbService {
                 String leftExpr = valuePart.substring(0, arithmeticIdx).trim();
                 char operator = valuePart.charAt(arithmeticIdx);
                 String rightExpr = valuePart.substring(arithmeticIdx + 1).trim();
-                JsonNode leftVal = evaluateSetExpr(snapshot, leftExpr, exprAttrNames, exprAttrValues);
-                JsonNode rightVal = evaluateSetExpr(snapshot, rightExpr, exprAttrNames, exprAttrValues);
-                if (leftVal == null || rightVal == null || !leftVal.has("N") || !rightVal.has("N")) {
-                    throw new AwsException("ValidationException",
-                            "Invalid UpdateExpression: Incorrect operand type for operator or function", 400);
-                }
+                JsonNode leftVal = typedOperand(snapshot, leftExpr, "N", exprAttrNames, exprAttrValues);
+                JsonNode rightVal = typedOperand(snapshot, rightExpr, "N", exprAttrNames, exprAttrValues);
                 try {
                     BigDecimal left = new BigDecimal(leftVal.get("N").asText());
                     BigDecimal right = new BigDecimal(rightVal.get("N").asText());
@@ -3667,16 +3739,8 @@ public class DynamoDbService {
                     if (commaPos >= 0) {
                         String arg1 = inner.substring(0, commaPos).trim();
                         String arg2 = inner.substring(commaPos + 1).trim();
-                        JsonNode list1 = evaluateSetExpr(snapshot, arg1, exprAttrNames, exprAttrValues);
-                        JsonNode list2 = evaluateSetExpr(snapshot, arg2, exprAttrNames, exprAttrValues);
-                        if (list1 == null || list2 == null) {
-                            throw new AwsException("ValidationException",
-                                    "The provided expression refers to an attribute that does not exist in the item", 400);
-                        }
-                        if (!list1.has("L") || !list2.has("L")) {
-                            throw new AwsException("ValidationException",
-                                    "An operand in the update expression has an incorrect data type", 400);
-                        }
+                        JsonNode list1 = typedOperand(snapshot, arg1, "L", exprAttrNames, exprAttrValues);
+                        JsonNode list2 = typedOperand(snapshot, arg2, "L", exprAttrNames, exprAttrValues);
                         ArrayNode merged =
                                 JsonNodeFactory.instance.arrayNode();
                         list1.get("L").forEach(merged::add);
@@ -3698,12 +3762,8 @@ public class DynamoDbService {
                     LOG.debugv("applySetClause: value was null for valuePart={0}, NOT setting attribute", valuePart);
                 }
             } else if (!valuePart.isEmpty()) {
-                // Plain attribute reference: SET a = b  or  SET a = #alias
-                String refAttr = resolveAttributeName(valuePart, exprAttrNames);
-                JsonNode refValue = getValueAtPath(snapshot, refAttr, exprAttrNames);
-                if (refValue != null) {
-                    setValueAtPath(item, attrPath, refValue, exprAttrNames);
-                }
+                setValueAtPath(item, attrPath, evaluateSetExpr(snapshot, valuePart, exprAttrNames, exprAttrValues),
+                        exprAttrNames);
             }
 
             clause = rest;
@@ -3743,9 +3803,21 @@ public class DynamoDbService {
             return null;
         } else if (expr.startsWith(":") && exprAttrValues != null) {
             return exprAttrValues.get(expr);
-        } else {
-            return getValueAtPath(item, resolveAttributeName(expr, exprAttrNames), exprAttrNames);
         }
+        JsonNode value = getValueAtPath(item, resolveAttributeName(expr, exprAttrNames), exprAttrNames);
+        if (value == null) {
+            throw UpdateOperandException.absentAttribute();
+        }
+        return value;
+    }
+
+    private JsonNode typedOperand(ObjectNode item, String operand, String type,
+                                  JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        JsonNode value = evaluateSetExpr(item, operand, exprAttrNames, exprAttrValues);
+        if (value == null || !value.has(type)) {
+            throw UpdateOperandException.incorrectType();
+        }
+        return value;
     }
 
     private String applyRemoveClause(ObjectNode item, String clause, JsonNode exprAttrNames,
@@ -3972,8 +4044,7 @@ public class DynamoDbService {
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
         for (String type : types) {
             if (operand.has(type) && existingValue != null && !existingValue.has(type)) {
-                throw new AwsException("ValidationException",
-                        "An operand in the update expression has an incorrect data type", 400);
+                throw UpdateOperandException.incorrectType();
             }
         }
     }
@@ -5033,23 +5104,73 @@ public class DynamoDbService {
         return items.subMap(encodedPk + "#", true, encodedPk + "$", false).values();
     }
 
+    // A read that stops at Limit on its last match leaves out LastEvaluatedKey when the partition
+    // holds another item past it, which the key condition then excludes. A table read also leaves
+    // it out on the condition's inclusive bound, as no other item can share that key.
+    private static boolean endsKeyRange(List<JsonNode> partition, DynamoDbAccessPath accessPath, JsonNode last,
+                                        Comparator<JsonNode> readOrder, Supplier<JsonNode> inclusiveEnd) {
+        List<String> partitionKeys = accessPath.partitionKeyNames();
+        Set<String> keyAttributes = accessPath.keyAttributeNames();
+        for (JsonNode item : partition) {
+            if (compareKeyAttributes(item, last, partitionKeys) == 0
+                    && keyAttributes.stream().allMatch(key -> hasNonNullAttribute(item, key))
+                    && readOrder.compare(item, last) > 0) {
+                return true;
+            }
+        }
+        JsonNode end = inclusiveEnd.get();
+        return end != null && ExpressionEvaluator.compareAttributeValues(last.get(accessPath.sortKeyName()), end) == 0;
+    }
+
+    private static JsonNode keyRangeInclusiveEnd(DynamoDbAccessPath accessPath, JsonNode keyConditions,
+                                                 String keyConditionExpression, JsonNode exprAttrNames,
+                                                 JsonNode exprAttrValues, boolean forward) {
+        String sortKey = accessPath.sortKeyName();
+        if (accessPath.isIndex() || sortKey == null) {
+            return null;
+        }
+        if (keyConditions == null) {
+            return keyConditionExpression == null ? null : DynamoDbAccessPathValidator.keyConditionInclusiveEnd(
+                    keyConditionExpression, exprAttrNames, exprAttrValues, sortKey, forward);
+        }
+        JsonNode condition = keyConditions.get(sortKey);
+        JsonNode values = condition == null ? null : condition.get("AttributeValueList");
+        if (values == null || values.isEmpty()) {
+            return null;
+        }
+        return switch (condition.path("ComparisonOperator").asText("EQ")) {
+            case "EQ" -> values.get(0);
+            case "LE" -> forward ? values.get(0) : null;
+            case "GE" -> forward ? null : values.get(0);
+            case "BETWEEN" -> values.get(forward ? 1 : 0);
+            default -> null;
+        };
+    }
+
     private List<JsonNode> queryWithExpression(ConcurrentSkipListMap<String, JsonNode> items,
                                                 DynamoDbAccessPath accessPath,
                                                 String partitionKeyValuePlaceholder,
                                                 String expression,
                                                 JsonNode expressionAttrValues,
-                                                JsonNode exprAttrNames) {
+                                                JsonNode exprAttrNames,
+                                                List<JsonNode> partition) {
         List<JsonNode> results = new ArrayList<>();
         String partitionKeyName = accessPath.partitionKeyName();
         String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
                 ? extractScalarValue(expressionAttrValues.get(partitionKeyValuePlaceholder))
                 : null;
+        // Parsed when the first candidate is evaluated, so no candidate means no parse.
+        ExpressionEvaluator.Expr keyCondition = null;
         for (JsonNode item : queryCandidates(items, accessPath, partitionKeyValue)) {
             if (partitionKeyValue != null
                     && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
             }
-            if (ExpressionEvaluator.matches(expression, item, exprAttrNames, expressionAttrValues)) {
+            partition.add(item);
+            if (keyCondition == null) {
+                keyCondition = ExpressionEvaluator.parse(expression);
+            }
+            if (ExpressionEvaluator.evaluate(keyCondition, item, exprAttrNames, expressionAttrValues)) {
                 results.add(item);
             }
         }

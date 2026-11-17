@@ -98,14 +98,46 @@ public class LambdaTaskAuthorizer {
      *         {@code States.TaskFailed} for a refused assumption, and {@code deniedError} for a refused permission
      */
     void authorize(StateMachine machine, String credentialsRoleArn, String deniedError, List<Permission> permissions) {
+        authorize(machine, credentialsRoleArn, deniedError, permissions, true);
+    }
+
+    /**
+     * As {@link #authorize(StateMachine, String, String, List)}.
+     *
+     * @param checkExecutionRole false for an integration whose tasks do not refuse an execution role for not existing
+     *                           or not trusting Step Functions: a nested execution, which only needs the permissions
+     */
+    void authorize(StateMachine machine, String credentialsRoleArn, String deniedError, List<Permission> permissions,
+                   boolean checkExecutionRole) {
+        decide(machine, credentialsRoleArn, deniedError, permissions, checkExecutionRole);
+    }
+
+    /**
+     * Decides the S3 calls a Distributed Map makes as its execution role, which has no error prefix of its own: a
+     * refused permission fails the state with the error its reader or writer fails with on any other S3 failure.
+     * The execution role has to exist and to trust Step Functions, as for a task, and is refused with
+     * {@code States.Permissions}. A Map has no {@code Credentials} to assume.
+     *
+     * @param refusedError the error a refused permission fails with
+     * @throws AslExecutor.FailStateException {@code States.Permissions} for the execution role, and
+     *         {@code refusedError} for a refused permission
+     */
+    void authorizeMapS3(StateMachine machine, String refusedError, List<Permission> permissions) {
+        decide(machine, null, refusedError, permissions, true);
+    }
+
+    private void decide(StateMachine machine, String credentialsRoleArn, String refusedError,
+                        List<Permission> permissions, boolean checkExecutionRole) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        IamRole executionRole = role(machine.getRoleArn()).orElseThrow(
-                () -> new AslExecutor.FailStateException("States.Permissions",
-                        "The execution role " + machine.getRoleArn() + " does not exist."));
-        if (!trustEvaluator.allowsService(executionRole.getAssumeRolePolicyDocument(), ServicePrincipals.of("states"),
-                machine.getStateMachineArn(), owner.accountId())) {
-            throw new AslExecutor.FailStateException("States.Permissions",
-                    "The execution role " + machine.getRoleArn() + " does not trust Step Functions.");
+        if (checkExecutionRole) {
+            IamRole executionRole = role(machine.getRoleArn()).orElseThrow(
+                    () -> new AslExecutor.FailStateException("States.Permissions",
+                            "The execution role " + machine.getRoleArn() + " does not exist."));
+            if (!trustEvaluator.allowsService(executionRole.getAssumeRolePolicyDocument(),
+                    ServicePrincipals.of("states"), machine.getStateMachineArn(), owner.accountId())) {
+                throw new AslExecutor.FailStateException("States.Permissions",
+                        "The execution role " + machine.getRoleArn() + " does not trust Step Functions.");
+            }
         }
         String effectiveRoleArn = machine.getRoleArn();
         if (credentialsRoleArn != null) {
@@ -118,7 +150,7 @@ public class LambdaTaskAuthorizer {
             Optional<String> refusal = refusal(effectiveRoleArn, permission.action(), evaluatedOn(permission.resourceArn()),
                     owner.region(), permission.conditionKeys());
             if (refusal.isPresent()) {
-                throw new AslExecutor.FailStateException(deniedError, refusal.get());
+                throw new AslExecutor.FailStateException(refusedError, refusal.get());
             }
         }
     }
@@ -225,7 +257,8 @@ public class LambdaTaskAuthorizer {
         // session name, and a session's aws:userid is role-id:session-name, so it and aws:username
         // stay absent, which is what makes a condition on either of them not match.
         CallerArns trustCaller = new CallerArns(sessionArn(callerRoleArn), callerRoleArn,
-                CallerArns.TYPE_ASSUMED_ROLE, null, null);
+                CallerArns.TYPE_ASSUMED_ROLE, null, null)
+                .withOrganization(iamService.organizationContextOf(callerId.accountId()).orElse(null));
         TrustDecision trust = trustEvaluator.decide(target.get().getAssumeRolePolicyDocument(), trustCaller,
                 callerId.accountId(), context);
         ResourceAccountRelationship relationship = relationship(callerId.accountId(), roleAccount);

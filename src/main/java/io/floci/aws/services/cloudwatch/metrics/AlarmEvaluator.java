@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -184,8 +185,11 @@ public class AlarmEvaluator {
             metricsService.setAlarmState(alarm.getAlarmName(), newState, reason, null, region);
         }
 
-        if ("ALARM".equals(newState) && alarm.isActionsEnabled()) {
-            dispatch(alarm, latestValue, region);
+        if ("ALARM".equals(newState)) {
+            Optional<MetricAlarm> current = metricsService.enabledMetricAlarm(alarm.getAlarmName(), region);
+            if (current.isPresent()) {
+                dispatch(current.get(), latestValue, region);
+            }
         }
     }
 

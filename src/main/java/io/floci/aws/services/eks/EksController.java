@@ -1,5 +1,9 @@
 package io.floci.aws.services.eks;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.eks.model.Addon;
@@ -59,20 +63,36 @@ public class EksController {
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
+    private final ObjectMapper objectMapper;
 
     @Inject
     public EksController(EksService eksService, EksAccessEntryService accessEntries,
                          EksPodIdentityAssociationService podIdentityAssociations,
-                         EksAddonService addons) {
+                         EksAddonService addons, ObjectMapper objectMapper) {
         this.eksService = eksService;
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
+        this.objectMapper = objectMapper;
     }
 
+    /**
+     * The body is checked against its botocore shape before it is bound, as EKS refuses a member of the wrong JSON
+     * type: bound first, a number for a boolean member would reach the cluster as {@code true}. A body that passes
+     * the check but still does not bind is refused the same way.
+     */
     @POST
     @Path("/clusters")
-    public Response createCluster(CreateClusterRequest request) {
+    public Response createCluster(JsonNode body) {
+        CreateClusterRequest request = null;
+        if (body != null) {
+            EksRequestShapes.check("CreateCluster", body);
+            try {
+                request = objectMapper.treeToValue(body, CreateClusterRequest.class);
+            } catch (JsonProcessingException e) {
+                throw new AwsException("SerializationException", e.getOriginalMessage(), 400);
+            }
+        }
         Cluster cluster = eksService.createCluster(request);
         return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
@@ -109,6 +129,7 @@ public class EksController {
      */
     private Cluster toClusterResponse(Cluster cluster) {
         if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null
+                && cluster.getNodePrivateIp() == null
                 && cluster.getClusterArgs() == null && cluster.getDefaultStorageClass() == null
                 && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null)) {
             return cluster;
@@ -117,6 +138,7 @@ public class EksController {
         response.setDockerNameRegion(null);
         response.setExplicitVersion(false);
         response.setNodeInstanceType(null);
+        response.setNodePrivateIp(null);
         response.setClusterArgs(null);
         response.setDefaultStorageClass(null);
         response.setJoinedInstanceIds(null);
@@ -130,7 +152,7 @@ public class EksController {
     public Response createNodeGroup(@PathParam("name") String name, CreateNodeGroupRequest request) {
         eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.createNodeGroup(name, request);
-        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
+        return Response.ok(Map.of("nodegroup", toNodegroupResponse(nodeGroup))).build();
     }
 
     @GET
@@ -147,7 +169,7 @@ public class EksController {
             @PathParam("nodegroupName") String nodegroupName) {
         eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.describeNodeGroup(name, nodegroupName);
-        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
+        return Response.ok(Map.of("nodegroup", toNodegroupResponse(nodeGroup))).build();
     }
 
     @DELETE
@@ -156,7 +178,17 @@ public class EksController {
             @PathParam("nodegroupName") String nodegroupName) {
         eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.deleteNodeGroup(name, nodegroupName);
-        return Response.ok(Map.of("nodegroup", nodeGroup)).build();
+        return Response.ok(Map.of("nodegroup", toNodegroupResponse(nodeGroup))).build();
+    }
+
+    /** The node group without {@link Nodegroup#isAutoScalingGroupCreated()}, which is Floci's own record. */
+    private static Nodegroup toNodegroupResponse(Nodegroup nodeGroup) {
+        if (!nodeGroup.isAutoScalingGroupCreated()) {
+            return nodeGroup;
+        }
+        Nodegroup response = nodeGroup.copy();
+        response.setAutoScalingGroupCreated(false);
+        return response;
     }
 
     @POST

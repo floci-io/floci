@@ -13,11 +13,13 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.ec2.AmiImageResolver;
 import io.floci.aws.services.ec2.Ec2ContainerManager;
 import io.floci.aws.services.ec2.Ec2ImageCatalog;
 import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.LaunchTemplate;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.SecurityGroup;
@@ -47,6 +49,8 @@ import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -67,6 +71,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -74,11 +79,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class EksServiceTest {
@@ -1259,6 +1267,192 @@ class EksServiceTest {
     }
 
     @Test
+    void aNodeGroupGetsTheAutoScalingGroupItReportsHoldingTheClusterNode() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(clusterManager, autoScaling);
+        service.createCluster(createTestClusterRequest("asg-cluster"));
+        Instance node = clusterNode("i-0123456789abcdef0", "asg-cluster");
+        when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
+        NodegroupScalingConfig scalingConfig = new NodegroupScalingConfig();
+        scalingConfig.setMinSize(1);
+        scalingConfig.setMaxSize(3);
+        scalingConfig.setDesiredSize(2);
+        CreateNodeGroupRequest request = nodeGroupRequest("workers");
+        request.setScalingConfig(scalingConfig);
+
+        String groupName = reportedAutoScalingGroup(service.createNodeGroup("asg-cluster", request));
+
+        InOrder order = inOrder(autoScaling);
+        order.verify(autoScaling).createEksManagedGroup("us-east-1", groupName, 1, 3, 2,
+                List.of("subnet-0e2907431c9988b72", "subnet-04ad87f71c6e5ab4d"),
+                nodeGroupAutoScalingTags("asg-cluster", "workers"));
+        order.verify(autoScaling).addEksManagedInstance("us-east-1", groupName, node);
+        verifyNoMoreInteractions(autoScaling);
+    }
+
+    @Test
+    void aNodeRegisteringAfterItsNodeGroupsJoinsEachOfTheirAutoScalingGroups() {
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(clusterManager, autoScaling);
+        service.init();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Consumer<Instance>> listener = ArgumentCaptor.forClass(Consumer.class);
+        verify(clusterManager).addNodeRegistrationListener(listener.capture());
+        service.createCluster(createTestClusterRequest("late-node"));
+        String first = reportedAutoScalingGroup(service.createNodeGroup("late-node", nodeGroupRequest("first")));
+        String second = reportedAutoScalingGroup(service.createNodeGroup("late-node", nodeGroupRequest("second")));
+        Instance node = clusterNode("i-0123456789abcdef0", "late-node");
+        when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
+
+        // An EC2 instance joining the cluster is in no managed node group, even tagged with the cluster's name.
+        listener.getValue().accept(clusterNode("i-0fedcba9876543210", "late-node"));
+        // Only the cluster the node names, in the node's Region, is read.
+        listener.getValue().accept(clusterNode("i-0123456789abcdef0", "other-cluster"));
+        Instance inAnotherRegion = clusterNode("i-0123456789abcdef0", "late-node");
+        inAnotherRegion.setRegion("eu-west-1");
+        listener.getValue().accept(inAnotherRegion);
+        verify(autoScaling, never()).addEksManagedInstance(any(), any(), any());
+
+        // A group that fails to take the node does not keep it from the other node groups' groups.
+        doThrow(new IllegalStateException("group storage write failed"))
+                .when(autoScaling).addEksManagedInstance("us-east-1", first, node);
+        listener.getValue().accept(node);
+
+        verify(autoScaling).addEksManagedInstance("us-east-1", first, node);
+        verify(autoScaling).addEksManagedInstance("us-east-1", second, node);
+        verify(autoScaling, times(2)).addEksManagedInstance(any(), any(), any());
+    }
+
+    @Test
+    void deletingANodeGroupOrItsClusterDeletesTheirAutoScalingGroups() {
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(mock(EksClusterManager.class), autoScaling);
+        service.createCluster(createTestClusterRequest("asg-delete"));
+        String first = reportedAutoScalingGroup(service.createNodeGroup("asg-delete", nodeGroupRequest("first")));
+        String second = reportedAutoScalingGroup(service.createNodeGroup("asg-delete", nodeGroupRequest("second")));
+        String third = reportedAutoScalingGroup(service.createNodeGroup("asg-delete", nodeGroupRequest("third")));
+
+        service.deleteNodeGroup("asg-delete", "first");
+
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", first);
+        verify(autoScaling, times(1)).deleteEksManagedGroup(any(), any());
+
+        service.deleteCluster("asg-delete");
+
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", second);
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", third);
+        verify(autoScaling, times(3)).deleteEksManagedGroup(any(), any());
+    }
+
+    @Test
+    void anAutoScalingGroupThatFailsToDeleteLeavesTheNodeGroupAndClusterDeletionsToFinish() {
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService service = serviceWithAutoScaling(mock(EksClusterManager.class), autoScaling);
+        service.createCluster(createTestClusterRequest("asg-delete-failure"));
+        String first = reportedAutoScalingGroup(
+                service.createNodeGroup("asg-delete-failure", nodeGroupRequest("first")));
+        String second = reportedAutoScalingGroup(
+                service.createNodeGroup("asg-delete-failure", nodeGroupRequest("second")));
+        String third = reportedAutoScalingGroup(
+                service.createNodeGroup("asg-delete-failure", nodeGroupRequest("third")));
+        RuntimeException failure = new IllegalStateException("target group storage write failed");
+        doThrow(failure).when(autoScaling).deleteEksManagedGroup("us-east-1", first);
+        doThrow(failure).when(autoScaling).deleteEksManagedGroup("us-east-1", second);
+
+        service.deleteNodeGroup("asg-delete-failure", "first");
+
+        assertEquals(List.of("second", "third"), service.listNodeGroups("asg-delete-failure").stream().sorted().toList());
+
+        service.deleteCluster("asg-delete-failure");
+
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", second);
+        verify(autoScaling).deleteEksManagedGroup("us-east-1", third);
+        assertThrows(AwsException.class, () -> service.describeCluster("asg-delete-failure"));
+    }
+
+    @Test
+    void aNodeGroupStoredBeforeTheseGroupsGetsItsGroupAtOneStartOnly(@TempDir Path directory) {
+        // A node group stored by a Floci that did not keep these groups.
+        EksService legacy = persistentEksService(directory);
+        legacy.init();
+        legacy.createCluster(createTestClusterRequest("backfill-once"));
+        String legacyGroup = reportedAutoScalingGroup(
+                legacy.createNodeGroup("backfill-once", nodeGroupRequest("legacy")));
+        AutoScalingService firstStart = mock(AutoScalingService.class);
+
+        EksService upgraded = persistentEksService(directory, ec2Service, null, firstStart);
+        upgraded.init();
+        String createdGroup = reportedAutoScalingGroup(
+                upgraded.createNodeGroup("backfill-once", nodeGroupRequest("created")));
+
+        List<String> subnets = List.of("subnet-0e2907431c9988b72", "subnet-04ad87f71c6e5ab4d");
+        verify(firstStart).createEksManagedGroup("us-east-1", legacyGroup, 1, 1, 1, subnets,
+                nodeGroupAutoScalingTags("backfill-once", "legacy"));
+        verify(firstStart).createEksManagedGroup("us-east-1", createdGroup, 1, 1, 1, subnets,
+                nodeGroupAutoScalingTags("backfill-once", "created"));
+
+        // Both groups were created, so a group deleted through Auto Scaling since is not created again.
+        AutoScalingService secondStart = mock(AutoScalingService.class);
+        persistentEksService(directory, ec2Service, null, secondStart).init();
+
+        verifyNoInteractions(secondStart);
+    }
+
+    @Test
+    void aRestartedNodeJoinsTheGroupItsNodeGroupAlreadyHas(@TempDir Path directory) {
+        EksService before = persistentEksService(directory, ec2Service, null, mock(AutoScalingService.class));
+        before.init();
+        before.createCluster(createTestClusterRequest("restarted-node"));
+        String groupName = reportedAutoScalingGroup(
+                before.createNodeGroup("restarted-node", nodeGroupRequest("workers")));
+        EksClusterManager clusterManager = mock(EksClusterManager.class);
+        AutoScalingService autoScaling = mock(AutoScalingService.class);
+        EksService after = persistentEksService(directory, null, clusterManager, autoScaling);
+
+        after.init();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Consumer<Instance>> listener = ArgumentCaptor.forClass(Consumer.class);
+        verify(clusterManager).addNodeRegistrationListener(listener.capture());
+        Instance node = clusterNode("i-0123456789abcdef0", "restarted-node");
+        when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
+        listener.getValue().accept(node);
+
+        verify(autoScaling).addEksManagedInstance("us-east-1", groupName, node);
+        verifyNoMoreInteractions(autoScaling);
+    }
+
+    private EksService serviceWithAutoScaling(EksClusterManager clusterManager, AutoScalingService autoScaling) {
+        return new EksService(storageFactory, testConfig(true), regionResolver, clusterManager, null,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), null, autoScaling);
+    }
+
+    /** The tags EKS puts on a node group's Auto Scaling group. */
+    private static Map<String, String> nodeGroupAutoScalingTags(String clusterName, String nodegroupName) {
+        return Map.of(
+                "eks:cluster-name", clusterName,
+                "eks:nodegroup-name", nodegroupName,
+                "k8s.io/cluster-autoscaler/enabled", "true",
+                "k8s.io/cluster-autoscaler/" + clusterName, "owned");
+    }
+
+    private static String reportedAutoScalingGroup(Nodegroup nodeGroup) {
+        List<?> autoScalingGroups = (List<?>) ((Map<?, ?>) nodeGroup.getResources()).get("autoScalingGroups");
+        return (String) ((Map<?, ?>) autoScalingGroups.getFirst()).get("name");
+    }
+
+    /** An instance in us-east-1 tagged, as a cluster's node is, with its cluster's name. */
+    private static Instance clusterNode(String instanceId, String clusterName) {
+        Instance instance = new Instance();
+        instance.setInstanceId(instanceId);
+        instance.setRegion("us-east-1");
+        instance.setTags(List.of(new Tag("eks:cluster-name", clusterName)));
+        return instance;
+    }
+
+    @Test
     void createNodeGroupRecordsLabelsAndTaints() {
         createTestCluster("metadata-cluster");
         CreateNodeGroupRequest request = nodeGroupRequest("labeled-ng");
@@ -1384,6 +1578,17 @@ class EksServiceTest {
         assertEquals(FargateProfileStatus.DELETING, deleted.getStatus());
         assertThrows(AwsException.class, () -> eksService.describeFargateProfile("my-eks-cluster", "profile-a"));
         assertEquals(List.of("profile-b"), eksService.listFargateProfiles("my-eks-cluster"));
+        assertEquals(Optional.of(deleted.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        FargateProfile replacement = eksService.createFargateProfile("my-eks-cluster", fargateProfileRequest("profile-a"));
+        assertNotEquals(deleted.getFargateProfileArn(), replacement.getFargateProfileArn());
+        assertEquals(Optional.of(replacement.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-a");
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-b");
+        eksService.deleteCluster("my-eks-cluster");
+        createTestCluster("my-eks-cluster");
+        assertTrue(eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a").isEmpty());
     }
 
     @Test
@@ -2788,6 +2993,11 @@ class EksServiceTest {
     }
 
     private EksService persistentEksService(Path directory, Ec2Service ec2) {
+        return persistentEksService(directory, ec2, null, null);
+    }
+
+    private EksService persistentEksService(Path directory, Ec2Service ec2, EksClusterManager clusterManager,
+                                            AutoScalingService autoScaling) {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
@@ -2799,9 +3009,9 @@ class EksServiceTest {
             }
         };
         return new EksService(storageFactory, testConfig(true),
-                new RegionResolver("us-east-1", "000000000000"), null, ec2,
+                new RegionResolver("us-east-1", "000000000000"), clusterManager, ec2,
                 new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
-                mock(EksPodIdentityAssociationService.class));
+                mock(EksPodIdentityAssociationService.class), null, autoScaling);
     }
 
     @Test

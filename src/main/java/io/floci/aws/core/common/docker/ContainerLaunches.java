@@ -2,6 +2,7 @@ package io.floci.aws.core.common.docker;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 /**
  * The containers of the runs a component has in progress, by run id, so a stop, a reset or a shutdown can
@@ -32,9 +33,16 @@ public final class ContainerLaunches {
 
     /** Stops every run in progress, as {@link Launch#stopNow} does, so a reset or a shutdown orphans none. */
     public void stopAll(ContainerLifecycleManager lifecycleManager, int stopTimeoutSeconds) {
-        for (Launch launch : launches.values()) {
-            launch.stopNow(lifecycleManager, stopTimeoutSeconds);
-        }
+        stopEach(id -> true, lifecycleManager, stopTimeoutSeconds);
+    }
+
+    /** Stops each run in progress whose id {@code ids} takes, as {@link Launch#stopNow} does. */
+    public void stopEach(Predicate<String> ids, ContainerLifecycleManager lifecycleManager, int stopTimeoutSeconds) {
+        launches.forEach((id, launch) -> {
+            if (ids.test(id)) {
+                launch.stopNow(lifecycleManager, stopTimeoutSeconds);
+            }
+        });
     }
 
     /** A run in progress: its container, once up and until claimed, and whether it was asked to stop. */

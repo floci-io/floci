@@ -112,4 +112,33 @@ class EcsJsonHandlerCommandEntryPointTest {
         assertTrue(container.path("entryPoint").isMissingNode(), "entryPoint must stay absent");
         assertTrue(container.path("command").isMissingNode(), "command must stay absent");
     }
+
+    @Test
+    void emptyCommandEntryPointAndEnvironmentReadBackAsEmptyArrays() throws Exception {
+        String requestJson = """
+                {
+                  "family": "empty-list-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "entryPoint": [],
+                      "command": [],
+                      "environment": []
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode container = objectMapper.valueToTree(response.getEntity())
+                .path("taskDefinition").path("containerDefinitions").get(0);
+
+        for (String field : List.of("entryPoint", "command", "environment")) {
+            JsonNode value = container.path(field);
+            assertTrue(value.isArray() && value.isEmpty(),
+                    field + " must read back as an empty array");
+        }
+    }
 }

@@ -265,6 +265,11 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     }
 
     @Override
+    public Map<String, String> storedTags(String arn) {
+        return dynamoDbService.storedTags(arn);
+    }
+
+    @Override
     public TableDefinition applyReplicaUpdates(Scope scope, String tableName, List<String> addRegions,
                                                List<String> removeRegions) {
         return RequestScopes.callAs(scope.accountId(),

@@ -1,9 +1,12 @@
 package io.floci.aws.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -30,6 +33,11 @@ class CloudFormationEfsIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     private static String template(String fileSystemProperties, String mountTargetSecurityGroup) {
         return """
@@ -94,6 +102,79 @@ class CloudFormationEfsIntegrationTest {
 
     private static String suffix() {
         return Long.toString(System.nanoTime(), 36);
+    }
+
+    @Test
+    void ecsTaskDefinitionResolvesEfsVolumeAndPreservesMountPoints() throws Exception {
+        String stackName = "cfn-efs-ecs-" + suffix();
+        String family = stackName + "-td";
+        createStack(stackName, """
+                {
+                  "Resources": {
+                    "Files": {"Type": "AWS::EFS::FileSystem", "Properties": {}},
+                    "TaskDef": {
+                      "Type": "AWS::ECS::TaskDefinition",
+                      "Properties": {
+                        "Family": "%s",
+                        "ContainerDefinitions": [{
+                          "Name": "app", "Image": "busybox",
+                          "MountPoints": [
+                            {"SourceVolume": "shared", "ContainerPath": "/mnt/efs", "ReadOnly": true},
+                            {"SourceVolume": "scratch", "ContainerPath": "/tmp/work"}
+                          ]
+                        }],
+                        "Volumes": [
+                          {"Name": "shared", "EFSVolumeConfiguration": {
+                            "FilesystemId": {"Ref": "Files"},
+                            "RootDirectory": "/",
+                            "TransitEncryption": "ENABLED"
+                          }},
+                          {"Name": "scratch"},
+                          {"Name": "docker", "DockerVolumeConfiguration": {
+                            "Driver": "local",
+                            "DriverOpts": {"MiXeDKey": "value"},
+                            "Labels": {"TeamName": "platform"}
+                          }}
+                        ]
+                      }
+                    }
+                  },
+                  "Outputs": {"FsId": {"Value": {"Ref": "Files"}}}
+                }
+                """.formatted(family));
+        try {
+            String fileSystemId = output(describe(stackName, CFN_AUTH), "FsId");
+            JsonNode task = RestAssuredJsonUtils.awsActionJson("AmazonEC2ContainerServiceV20141113",
+                    "DescribeTaskDefinition", "{\"taskDefinition\":\"" + family + "\"}")
+                    .path("taskDefinition");
+
+            JsonNode volumes = task.path("volumes");
+            assertEquals(3, volumes.size());
+            assertEquals("shared", volumes.get(0).path("name").asText());
+            assertEquals(fileSystemId, volumes.get(0).path("efsVolumeConfiguration")
+                    .path("fileSystemId").asText());
+            assertEquals("/", volumes.get(0).path("efsVolumeConfiguration")
+                    .path("rootDirectory").asText());
+            assertEquals("ENABLED", volumes.get(0).path("efsVolumeConfiguration")
+                    .path("transitEncryption").asText());
+            assertEquals("scratch", volumes.get(1).path("name").asText());
+            assertTrue(volumes.get(1).path("efsVolumeConfiguration").isMissingNode());
+            JsonNode docker = volumes.get(2).path("dockerVolumeConfiguration");
+            assertEquals("local", docker.path("driver").asText());
+            assertEquals("value", docker.path("driverOpts").path("MiXeDKey").asText());
+            assertEquals("platform", docker.path("labels").path("TeamName").asText());
+
+            JsonNode mountPoints = task.path("containerDefinitions").get(0).path("mountPoints");
+            assertEquals(2, mountPoints.size());
+            assertEquals("shared", mountPoints.get(0).path("sourceVolume").asText());
+            assertEquals("/mnt/efs", mountPoints.get(0).path("containerPath").asText());
+            assertTrue(mountPoints.get(0).path("readOnly").asBoolean());
+            assertEquals("scratch", mountPoints.get(1).path("sourceVolume").asText());
+            assertEquals("/tmp/work", mountPoints.get(1).path("containerPath").asText());
+            assertTrue(mountPoints.get(1).path("readOnly").isMissingNode());
+        } finally {
+            CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+        }
     }
 
     @Test

@@ -203,10 +203,14 @@ public class MemoryLakeFormationStorage implements LakeFormationStorage {
         // Deliberate omission: MaxResults, NextToken, ResourceType, and IncludeRelated are ignored.
         // All results fit on a single page, and SDKs tolerate unset optional filters.
         String filterResourceKey = resource != null ? getResourceKey(resource) : null;
-        return permissionsStorage.scan(k -> k.startsWith(region + ":" + catalogId + ":")).stream()
+        String principalId = principal != null ? principal.getDataLakePrincipalIdentifier() : null;
+        String keyPrefix = principalId != null
+                ? region + ":" + catalogId + ":" + principalId + ":"
+                : region + ":" + catalogId + ":";
+        return permissionsStorage.scan(k -> k.startsWith(keyPrefix)).stream()
                 .filter(p -> {
-                    if (principal != null && principal.getDataLakePrincipalIdentifier() != null) {
-                        if (p.getPrincipal() == null || !principal.getDataLakePrincipalIdentifier().equals(p.getPrincipal().getDataLakePrincipalIdentifier())) {
+                    if (principalId != null) {
+                        if (p.getPrincipal() == null || !principalId.equals(p.getPrincipal().getDataLakePrincipalIdentifier())) {
                             return false;
                         }
                     }

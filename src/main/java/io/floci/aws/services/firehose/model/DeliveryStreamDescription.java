@@ -42,7 +42,7 @@ public class DeliveryStreamDescription {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Source source;
     @JsonProperty("Tags")
-    private List<Tag> tags = new ArrayList<>();
+    private volatile List<Tag> tags = new ArrayList<>();
 
     // Field-level default so streams persisted before this field existed deserialize to
     // the AWS-shaped DISABLED configuration instead of null (Jackson only overwrites it

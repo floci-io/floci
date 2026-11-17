@@ -114,6 +114,7 @@ import io.floci.aws.services.cloudformation.provisioners.SchedulerScheduleGroupC
 import io.floci.aws.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SesCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.SesEventDestinationCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SesReceiptRuleCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SignerCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SnsCfnProvisioner;
@@ -139,7 +140,9 @@ import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.FlowLogService;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
+import io.floci.aws.services.ecs.container.HostVolumePolicy;
 import io.floci.aws.services.efs.EfsService;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
@@ -171,6 +174,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3vectors.S3VectorsService;
 import io.floci.aws.services.scheduler.SchedulerService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
+import io.floci.aws.services.ses.SesConfigurationSetService;
 import io.floci.aws.services.ses.SesIdentityService;
 import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.services.ses.SesService;
@@ -181,6 +185,7 @@ import io.floci.aws.services.ssm.SsmService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.transfer.TransferService;
 import io.floci.aws.services.wafv2.WafV2Service;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -225,6 +230,7 @@ final class CfnProvisionerFixture {
         private S3VectorsService s3VectorsService;
         private SnsService snsService;
         private SesService sesService;
+        private SesConfigurationSetService sesConfigurationSetService;
         private SesReceiptRuleService sesReceiptRuleService;
         private SesIdentityService sesIdentityService;
         private DynamoDbService dynamoDbService;
@@ -358,6 +364,9 @@ final class CfnProvisionerFixture {
             if (sesService != null && sesIdentityService != null) {
                 discovered.add(new SesCfnProvisioner(sesService, sesIdentityService));
             }
+            if (sesConfigurationSetService != null) {
+                discovered.add(new SesEventDestinationCfnProvisioner(sesConfigurationSetService));
+            }
             if (sesReceiptRuleService != null && sesIdentityService != null) {
                 discovered.add(new SesReceiptRuleCfnProvisioner(sesReceiptRuleService, sesIdentityService));
             }
@@ -425,7 +434,8 @@ final class CfnProvisionerFixture {
             }
             if (ecsService != null) {
                 discovered.add(new EcsCapacityCfnProvisioner(ecsService));
-                discovered.add(new EcsCfnProvisioner(ecsService));
+                discovered.add(new EcsCfnProvisioner(ecsService, new EcsJsonHandler(ecsService,
+                        objectMapper, Mockito.mock(HostVolumePolicy.class))));
             }
             if (efsService != null) {
                 discovered.add(new EfsCfnProvisioner(efsService));
@@ -598,6 +608,11 @@ final class CfnProvisionerFixture {
 
         public Builder ses(SesService v) {
             this.sesService = v;
+            return this;
+        }
+
+        public Builder sesConfigurationSets(SesConfigurationSetService v) {
+            this.sesConfigurationSetService = v;
             return this;
         }
 

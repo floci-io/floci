@@ -15,14 +15,18 @@ import io.floci.aws.services.autoscaling.model.MixedInstancesPolicy;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,6 +39,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -345,11 +351,165 @@ class AutoScalingGroupCfnProvisionerTest {
     }
 
     @Test
-    void launchConfigurationUpdateLeavesTheExistingOneAlone() {
-        // Launch configurations have no update API on real AWS, so a same-named one already on file
-        // must not be re-created.
+    void launchConfigurationPropertyChangeReplacesAndDefersOldDeletion() {
+        StackResource resource = launchConfigurationUpdate("old-lc", false);
+        String replacement = resource.getPhysicalId();
+        assertNotEquals("old-lc", replacement);
+        assertTrue(provisioner.hasReplacementUpdate(resource));
+        assertEquals("old-lc", provisioner.updateCleanupPhysicalId(resource));
+        verify(autoScaling, never()).deleteLaunchConfiguration(REGION, "old-lc");
+        provisioner.completeUpdate(resource);
+        verify(autoScaling).deleteLaunchConfiguration(REGION, "old-lc");
+    }
+
+    @Test
+    void launchConfigurationCleanupRetainsInUseFailureAndRetriesAfterRepair() {
+        StackResource resource = launchConfigurationUpdate("old-lc", false);
+        doThrow(new AwsException("ResourceInUse", "Launch configuration is attached", 400))
+                .when(autoScaling).deleteLaunchConfiguration(REGION, "old-lc");
+        UpdateCleanupResult failure = provisioner.completeUpdate(resource);
+        assertFalse(failure.complete());
+        assertEquals("old-lc", failure.previousPhysicalId());
+        assertEquals(1, failure.attempts());
+        doNothing().when(autoScaling).deleteLaunchConfiguration(REGION, "old-lc");
+        assertTrue(provisioner.completeUpdate(resource).complete());
+    }
+
+    @Test
+    void launchConfigurationDeleteDoesNotHideValidationErrorWhileResourceExists() {
+        LaunchConfiguration existing = new LaunchConfiguration();
+        when(autoScaling.describeLaunchConfigurations(REGION, List.of("existing"))).thenReturn(List.of(existing));
+        doThrow(new AwsException("ValidationError", "Cannot delete an attached launch configuration", 400))
+                .when(autoScaling).deleteLaunchConfiguration(REGION, "existing");
+        assertThrows(AwsException.class, () -> provisioner.delete(LAUNCH_CONFIGURATION, "existing", REGION));
+    }
+
+    @Test
+    void launchConfigurationReplacementRollbackRestoresPriorIdentity() {
+        StackResource resource = launchConfigurationUpdate("old-lc", false);
+        String replacement = resource.getPhysicalId();
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals("old-lc", resource.getPhysicalId());
+        verify(autoScaling).deleteLaunchConfiguration(REGION, replacement);
+        verify(autoScaling, never()).deleteLaunchConfiguration(REGION, "old-lc");
+    }
+
+    @Test
+    void launchConfigurationReplacementRejectsUnchangedExplicitNameBeforeMutation() {
+        AwsException failure = assertThrows(AwsException.class, () -> launchConfigurationUpdate("old-lc", true));
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("Rename old-lc"));
+        verify(autoScaling, never()).createLaunchConfiguration(anyString(), anyString(), any(), any(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyList(), any());
+        verify(autoScaling, never()).deleteLaunchConfiguration(anyString(), anyString());
+    }
+
+    private StackResource launchConfigurationUpdate(String oldName, boolean explicit) {
+        ObjectNode before = mapper.createObjectNode().put("ImageId", "ami-1").put("InstanceType", "t3.micro");
+        if (explicit) {
+            before.put("LaunchConfigurationName", oldName);
+        }
+        ObjectNode after = before.deepCopy().put("InstanceType", "t3.small");
+        StackResource resource = resource(LAUNCH_CONFIGURATION, "Lc", oldName);
+        LaunchConfiguration old = new LaunchConfiguration();
+        old.setLaunchConfigurationName(oldName);
+        when(autoScaling.describeLaunchConfigurations(REGION, List.of(oldName))).thenReturn(List.of(old));
+        when(autoScaling.createLaunchConfiguration(anyString(), anyString(), any(), any(), any(), any(),
+                anyList(), any(), any(), any(), any(), anyList(), any())).thenAnswer(invocation -> {
+                    LaunchConfiguration created = new LaunchConfiguration();
+                    created.setLaunchConfigurationName(invocation.getArgument(1));
+                    created.setLaunchConfigurationArn("arn:aws:autoscaling:us-east-1:000000000000:launchConfiguration:new");
+                    return created;
+                });
+        ProvisionContext original = ctx(oldName);
+        ProvisionContext update = new ProvisionContext(original.engine(), REGION, "000000000000",
+                "my-stack", oldName, event -> {}, before);
+        provisioner.provision(resource, after, update);
+        return resource;
+    }
+
+    @Test
+    void launchConfigurationReusesUnchangedInstanceTemplateWithoutExtraSnapshot() {
+        ObjectNode props = instanceProperties();
+        StackResource resource = provisionExistingInstance(props, props.deepCopy(), null, false);
+        assertEquals("my-lc", resource.getPhysicalId());
+        assertTrue(resource.getAttributes().isEmpty());
+    }
+
+    @Test
+    void launchConfigurationRejectsChangedInstanceBeforeMutation() {
+        ObjectNode previous = instanceProperties();
+        provisionExistingInstance(previous.deepCopy().put("InstanceId", "i-changed"), previous, null, true);
+    }
+
+    @Test
+    void launchConfigurationRejectsOtherChangedInputsBeforeMutation() {
+        ObjectNode previous = instanceProperties();
+        provisionExistingInstance(previous.deepCopy().put("InstanceType", "t3.small"), previous, null, true);
+    }
+
+    @Test
+    void launchConfigurationRejectsAddedCreateOnlyInputBeforeMutation() {
+        ObjectNode previous = instanceProperties();
+        ObjectNode current = previous.deepCopy().put("UserData", "IyEvYmluL3NoCmVjaG8gcmVhZHkK");
+        provisionExistingInstance(current, previous, null, true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void launchConfigurationUsesEngineDecisionForReferenceValues(boolean replacement) {
+        ObjectNode previous = instanceProperties();
+        previous.putObject("InstanceId").put("Ref", "SourceInstance");
+        previous.putObject("InstanceType").put("Ref", "InstanceType");
+        PropertyChanges changes = new PropertyChanges(Map.of(), replacement);
+        provisionExistingInstance(instanceProperties(), previous, changes, replacement);
+    }
+
+    @Test
+    void launchConfigurationRejectsRemovalOfTheInstanceSource() {
+        ObjectNode previous = instanceProperties().put("ImageId", "ami-original");
+        ObjectNode current = previous.deepCopy();
+        current.remove("InstanceId");
+        provisionExistingInstance(current, previous, null, true);
+    }
+
+    private ObjectNode instanceProperties() {
+        return mapper.createObjectNode().put("LaunchConfigurationName", "my-lc")
+                .put("InstanceId", "i-original").put("InstanceType", "t3.micro");
+    }
+
+    private StackResource provisionExistingInstance(ObjectNode current, JsonNode previous,
+                                                    PropertyChanges changes, boolean rejected) {
         LaunchConfiguration lc = new LaunchConfiguration();
         lc.setLaunchConfigurationName("my-lc");
+        lc.setImageId("ami-original");
+        lc.setInstanceType("t3.micro");
+        when(autoScaling.describeLaunchConfigurations(REGION, List.of("my-lc"))).thenReturn(List.of(lc));
+        StackResource resource = resource(LAUNCH_CONFIGURATION, "Lc", "my-lc");
+        ProvisionContext original = ctx("my-lc");
+        ProvisionContext context = new ProvisionContext(original.engine(), REGION, "000000000000",
+                "my-stack", "my-lc", event -> {}, previous, changes);
+        if (rejected) {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> provisioner.provision(resource, current, context));
+            assertEquals("ValidationError", failure.getErrorCode());
+            assertTrue(failure.getMessage().contains("Rename my-lc"));
+            assertTrue(resource.getAttributes().isEmpty());
+        } else {
+            provisioner.provision(resource, current, context);
+        }
+        verify(autoScaling, never()).createLaunchConfiguration(anyString(), anyString(), any(), any(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyList(), any());
+        verify(autoScaling, never()).deleteLaunchConfiguration(anyString(), anyString());
+        return resource;
+    }
+
+    @Test
+    void launchConfigurationUpdateLeavesTheExistingOneAlone() {
+        // An unchanged legacy configuration keeps its physical identity.
+        LaunchConfiguration lc = new LaunchConfiguration();
+        lc.setLaunchConfigurationName("my-lc");
+        lc.setImageId("ami-2");
         lc.setLaunchConfigurationArn("arn:aws:autoscaling:us-east-1:000000000000:launchConfiguration:my-lc");
         when(autoScaling.describeLaunchConfigurations(REGION, List.of("my-lc"))).thenReturn(List.of(lc));
         StackResource r = resource(LAUNCH_CONFIGURATION, "Lc", "my-lc");

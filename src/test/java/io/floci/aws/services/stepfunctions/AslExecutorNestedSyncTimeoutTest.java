@@ -2,6 +2,7 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.stepfunctions.model.Execution;
 import io.floci.aws.services.stepfunctions.model.ExecutionStatusSubscription;
 import io.floci.aws.services.stepfunctions.model.HistoryEvent;
@@ -32,6 +33,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -86,6 +88,30 @@ class AslExecutorNestedSyncTimeoutTest {
         assertEquals("states", timedOut.getDetails().get("resourceType"));
         // AWS aborts the child it was waiting on: no error, this exact cause (measured).
         verify(sfnService).stopExecution(eq(CHILD_ARN), eq(ABORT_CAUSE), isNull());
+    }
+
+    @Test
+    void syncStillTimesOutWhenTheChildItAbortsIsGone() {
+        when(sfnService.describeExecution(CHILD_ARN)).thenReturn(child("RUNNING"));
+        doThrow(new AwsException("ExecutionDoesNotExist", "Execution does not exist", 400))
+                .when(sfnService).stopExecution(eq(CHILD_ARN), any(), any());
+
+        Execution execution = run(newExecutor(TimeUnit.NANOSECONDS::sleep), ".sync", 1, false);
+
+        // Best effort: a child that is gone leaves the state ending as it was.
+        assertEquals("States.Timeout", execution.getError());
+    }
+
+    @Test
+    void anotherRefusalAbortingTheChildFailsTheStateWithIt() {
+        when(sfnService.describeExecution(CHILD_ARN)).thenReturn(child("RUNNING"));
+        doThrow(new AwsException("ValidationException", "The execution could not be stopped", 400))
+                .when(sfnService).stopExecution(eq(CHILD_ARN), any(), any());
+
+        Execution execution = run(newExecutor(TimeUnit.NANOSECONDS::sleep), ".sync", 1, false);
+
+        assertEquals("StepFunctions.ValidationException", execution.getError());
+        assertEquals("The execution could not be stopped", execution.getCause());
     }
 
     @Test

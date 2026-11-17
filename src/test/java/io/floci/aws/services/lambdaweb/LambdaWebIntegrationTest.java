@@ -2,6 +2,7 @@ package io.floci.aws.services.lambdaweb;
 
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
@@ -57,7 +58,7 @@ class LambdaWebIntegrationTest {
     void seedCode() {
         LambdaWebRoles.trustLambda(iamService, ROLE);
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, KEY, LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, KEY, LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
     }
 
     @Test
@@ -455,7 +456,7 @@ class LambdaWebIntegrationTest {
                 .body("message", equalTo("The specified S3 object does not exist: s3://" + BUCKET
                         + "/missing.zip. Verify the object exists in the bucket."));
 
-        s3Service.putObject(BUCKET, "deleted.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "deleted.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         String marker = s3Service.deleteObject(BUCKET, "deleted.zip").getVersionId();
         given().contentType("application/json")
                 .body("""

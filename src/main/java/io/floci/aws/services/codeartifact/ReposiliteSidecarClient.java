@@ -350,6 +350,41 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * Fetches this version's own POM and parses its {@code <dependencies>}/{@code <parent>}
+     * elements with {@link PomDependencies}. Tries the standard release name
+     * ({@code <artifactId>-<version>.pom}) first, through {@link #fetchPackageVersionAsset}
+     * rather than a dedicated route: the overwhelmingly common case, and avoids a second network
+     * round trip for it. A {@code -SNAPSHOT} version's real POM is not named that way at all —
+     * {@code mvn deploy} writes it under a timestamped unique-snapshot name instead (e.g.
+     * {@code artifact-1.0-20261115.120000-1.pom}) — so a miss falls back to the real directory
+     * listing {@link #listPackageVersionAssetNames} already exposes and picks whichever entry
+     * ends in {@code .pom} there (the lexicographically greatest one, i.e. the most recent
+     * timestamp, if more than one snapshot deploy's files are still present). That fallback also
+     * means a genuine Reposilite error (not a real 404) surfaces as the same {@link
+     * IllegalStateException} {@link #listPackageVersionAssetNames} already throws for an
+     * unexpected status, rather than this method silently reporting an empty dependency list for
+     * a version whose POM fetch merely failed.
+     */
+    @Override
+    public List<CodeArtifactService.PackageDependency> listPackageVersionDependencies(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version) {
+        Optional<byte[]> pom = fetchPackageVersionAsset(repositoryContainerId, domain, repository, namespace,
+                packageName, version, packageName + "-" + version + ".pom");
+        if (pom.isEmpty()) {
+            String pomName = listPackageVersionAssetNames(repositoryContainerId, domain, repository, namespace,
+                    packageName, version).stream()
+                    .filter(name -> name.endsWith(".pom"))
+                    .max(String::compareTo)
+                    .orElse(null);
+            pom = pomName == null ? Optional.empty()
+                    : fetchPackageVersionAsset(repositoryContainerId, domain, repository, namespace, packageName,
+                            version, pomName);
+        }
+        return pom.map(PomDependencies::parse).orElse(List.of());
+    }
+
+    /**
      * Enumerates every version directory beneath the artifact itself (the same {@code files}
      * array {@link #listPackageVersionAssetNames} already reads one level down, here kept to its
      * {@code DIRECTORY} entries, inverted from that method's own {@code FILE}-only filter), then
@@ -776,15 +811,40 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
      * request for this exact package would keep finding nothing new to add and keep taking this
      * same no-op path, never repairing it, so a client verifying checksums could keep failing
      * indefinitely even once the sidecar itself has long since recovered.
+     *
+     * <p>{@code allowSnapshots}: {@code false} for an external connection (AWS's own "release
+     * versions only" restriction, cited above); {@code true} for a same-domain upstream repository
+     * (16f-UPSTREAM-REPO), which has no such restriction, since a SNAPSHOT already published into
+     * one is a perfectly real, already-retained artifact.
      */
-    public boolean mergeExternalConnectionReleaseVersions(String repositoryContainerId, String namespace,
-            String packageName, byte[] externalMetadataXml, Predicate<String> versionAllowed) {
-        ensureRepository(repositoryContainerId);
-        String externalXml = new String(externalMetadataXml, StandardCharsets.UTF_8);
-        List<String> externalReleaseVersions = XmlParser.extractAll(externalXml, "version").stream()
-                .filter(v -> !v.endsWith("-SNAPSHOT"))
+    /**
+     * The read-only half of {@link #mergeExternalConnectionReleaseVersions}'s own eligibility
+     * filter (SNAPSHOT exclusion plus {@code versionAllowed}), exposed so a caller searching
+     * several candidates in priority order (16f-UPSTREAM-REPO's {@code
+     * CodeArtifactMavenUpstreamRepositoryImporter}) can tell "this candidate's metadata names
+     * nothing usable, try the next one" apart from "this candidate is the one, merge it," without
+     * provisioning this repository or writing anything for a candidate it is about to skip.
+     */
+    static List<String> eligibleReleaseVersions(byte[] metadataXml, Predicate<String> versionAllowed,
+            boolean allowSnapshots) {
+        return eligibleReleaseVersions(new String(metadataXml, StandardCharsets.UTF_8), versionAllowed,
+                allowSnapshots);
+    }
+
+    private static List<String> eligibleReleaseVersions(String xml, Predicate<String> versionAllowed,
+            boolean allowSnapshots) {
+        return XmlParser.extractAll(xml, "version").stream()
+                .filter(v -> allowSnapshots || !v.endsWith("-SNAPSHOT"))
                 .filter(versionAllowed)
                 .toList();
+    }
+
+    public boolean mergeExternalConnectionReleaseVersions(String repositoryContainerId, String namespace,
+            String packageName, byte[] externalMetadataXml, Predicate<String> versionAllowed,
+            boolean allowSnapshots) {
+        ensureRepository(repositoryContainerId);
+        String externalXml = new String(externalMetadataXml, StandardCharsets.UTF_8);
+        List<String> externalReleaseVersions = eligibleReleaseVersions(externalXml, versionAllowed, allowSnapshots);
         if (externalReleaseVersions.isEmpty()) {
             return false;
         }

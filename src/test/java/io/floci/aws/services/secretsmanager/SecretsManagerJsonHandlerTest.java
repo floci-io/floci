@@ -644,6 +644,12 @@ class SecretsManagerJsonHandlerTest {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}";
 
+    /** The same grant, with the wildcard written as one of a list of principals. */
+    private static final String LIST_RESOURCE_POLICY =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Principal\":{\"AWS\":[\"arn:aws:iam::123456789012:root\",\"*\"]},"
+            + "\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}";
+
     private String createSecretReturningArn(String name) {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("Name", name);
@@ -1402,6 +1408,17 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void putResourcePolicyBlocksAWildcardPrincipalWrittenAsAList() {
+        // The principal may be written as a list of principals, and a wildcard among them
+        // is everyone.
+        createSecret("blocked-list-policy");
+        Response response = putResourcePolicy("blocked-list-policy", LIST_RESOURCE_POLICY, true);
+
+        assertThat(response.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) response.getEntity()).type(), is("PublicPolicyException"));
+    }
+
+    @Test
     void putResourcePolicyAllowsAWildcardPrincipalByDefault() {
         // AWS: "By default, public policies aren't blocked."
         createSecret("open-policy");
@@ -1886,5 +1903,23 @@ class SecretsManagerJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("CreateSecret", req, REGION));
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
+    }
+
+    @Test
+    void listSecretsAllFilterSplitsValueIntoWords() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "database");
+        createReq.put("Description", "production credentials");
+        handler.handle("CreateSecret", createReq, REGION);
+        ObjectNode otherReq = MAPPER.createObjectNode();
+        otherReq.put("Name", "unrelated");
+        handler.handle("CreateSecret", otherReq, REGION);
+
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.putArray("Filters").addObject().put("Key", "all").putArray("Values").add("database production");
+        ObjectNode listed = (ObjectNode) handler.handle("ListSecrets", listReq, REGION).getEntity();
+
+        assertThat(listed.get("SecretList").size(), is(1));
+        assertThat(listed.get("SecretList").get(0).get("Name").asText(), is("database"));
     }
 }

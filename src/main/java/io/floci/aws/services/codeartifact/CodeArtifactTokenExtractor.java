@@ -7,10 +7,13 @@ import java.util.Base64;
 
 /**
  * Extracts a CodeArtifact authorization token from an incoming request's {@code Authorization}
- * header, accepting either scheme real package-manager clients use: {@code Bearer <token>}
- * directly, or HTTP Basic with the token as the password field and any username. AWS documents
- * only Basic for Maven's {@code settings.xml} and pip/twine's {@code username=aws} convention;
- * accepting Bearer too costs nothing and matches what a Bearer-only format like npm sends.
+ * header, accepting every scheme a real package-manager client uses: {@code Bearer <token>}
+ * directly, HTTP Basic with the token as the password field and any username, or a bare token
+ * with no scheme prefix at all. AWS documents Basic for Maven's {@code settings.xml} and
+ * pip/twine's {@code username=aws} convention; Bearer for npm's {@code _authToken}; and a bare
+ * token for Cargo (confirmed directly from the Cargo Book's own registry-authentication page:
+ * "the header value is the API token", no prefix). Accepting all three costs nothing: a real
+ * client of one format never happens to send another format's own scheme.
  *
  * <p>Pulled out of {@code CodeArtifactMavenController} once {@code CodeArtifactPypiController}
  * needed the identical extraction: pip and twine authenticate exactly the way Maven's HTTP wagon
@@ -27,9 +30,13 @@ final class CodeArtifactTokenExtractor {
     }
 
     /**
-     * {@code null} when neither scheme is present, malformed, or the Basic credentials have no
-     * password field; {@link CodeArtifactService#resolveAuthorizationToken} treats a null token
-     * the same as any other invalid one.
+     * {@code null} when the header is absent, or present but malformed (a declared Basic payload
+     * that doesn't decode, or with no password field); {@link
+     * CodeArtifactService#resolveAuthorizationToken} treats a null token the same as any other
+     * invalid one. A header that starts with neither known scheme prefix is trusted as a bare
+     * token verbatim (trimmed) rather than rejected outright: a malformed value reaching this
+     * fallback is still just as safely rejected downstream, by {@code resolveAuthorizationToken}
+     * failing to recognize it as a real, live-issued token.
      */
     static String extractToken(HttpHeaders headers) {
         String authorization = headers.getHeaderString(HttpHeaders.AUTHORIZATION);
@@ -42,7 +49,7 @@ final class CodeArtifactTokenExtractor {
         if (authorization.startsWith(BASIC_PREFIX)) {
             return passwordFromBasicCredentials(authorization.substring(BASIC_PREFIX.length()));
         }
-        return null;
+        return authorization.strip();
     }
 
     private static String passwordFromBasicCredentials(String base64Credentials) {

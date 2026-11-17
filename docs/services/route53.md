@@ -199,6 +199,12 @@ aws route53 delete-hosted-zone --id Z1PA6795UKMFR9
 ```
 
 Record names in change batches are stored with lowercase ASCII letters and a trailing dot.
+As the [DNS domain name format](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/DomainNameFormat.html)
+describes, a letter given as an octal escape code (`\101`) is stored as that lowercase letter, and every
+character other than a to z, 0 to 9, hyphen, underscore, `*` and the dots between labels as its escape code, so
+`\101.example.com` and `a.example.com` name one record. Only the `Name`, `Type` and `Action` a record set or
+change holds directly are read, and a second copy of any element a change or record set holds once is refused
+with `InvalidInput`.
 CREATE, UPSERT, and DELETE use that name identity while keeping the record type and
 routing set identifier distinct. A case-only CloudFormation record-name update retains
 the record. DELETE still requires matching record values and routing properties.

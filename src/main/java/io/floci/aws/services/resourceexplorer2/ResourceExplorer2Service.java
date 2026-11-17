@@ -11,6 +11,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -492,6 +493,35 @@ public class ResourceExplorer2Service implements StoredResourceArns {
     @Override
     public Optional<String> find(String type, List<String> names, String region) {
         return Optional.empty();
+    }
+
+    /**
+     * The tags held on the index or view stored under {@code arn}, in the account it names, read in place: both are
+     * kept by their whole ARN, so the ARN is matched whole, and each is an immutable record that tagging replaces.
+     * Empty for an ARN naming neither.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "resource-explorer-2")) {
+            return Map.of();
+        }
+        String account = AwsArnUtils.parse(arn).accountId();
+        if (account.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> tags = AccountAwareStorageBackend.readInAccount(indexStore, account, arn)
+                .map(Taggable::tags)
+                .or(() -> AccountAwareStorageBackend.readInAccount(viewStore, account, arn).map(Taggable::tags))
+                .orElse(null);
+        Map<String, String> held = new LinkedHashMap<>();
+        if (tags != null) {
+            tags.forEach((key, value) -> {
+                if (key != null && value != null) {
+                    held.put(key, value);
+                }
+            });
+        }
+        return held;
     }
 
     /**
@@ -1014,7 +1044,8 @@ public class ResourceExplorer2Service implements StoredResourceArns {
         mutateTags(arn, current -> tagKeys.forEach(current::remove));
     }
 
-    private void mutateTags(String arn, Consumer<Map<String, String>> mutation) {
+    /** One tag change at a time, so two on one resource each keep the other's tags. */
+    private synchronized void mutateTags(String arn, Consumer<Map<String, String>> mutation) {
         StoredTaggable stored = resolveTaggable(arn);
         Map<String, String> updated = stored.entity().tags() != null
                 ? new HashMap<>(stored.entity().tags()) : new HashMap<>();

@@ -5,6 +5,13 @@
 
 Two AWS service models, not one. `Lambda Microvms` (apiVersion 2025-09-09) carries MicroVM images, versions, builds and MicroVMs. `Lambda Core` (apiVersion 2026-04-30) carries VPC egress network connectors under the `/2026-04-04/` prefix. Both sign as `lambda`, so both are served under Floci's existing lambda service and are enabled by it. Tagging rides the classic `/2017-03-31/tags/` routes.
 
+Image versions retain the code artifact URI, base image ARN and version, and build
+role used when they were built. Updating an image changes the latest image inputs
+without changing the inputs returned by GetMicrovmImageVersion or ListMicrovmImageVersions
+for an older version. Stored versions written before build inputs were snapshotted
+remain readable using their parent image's last known inputs; their original build
+inputs cannot be reconstructed.
+
 ## Supported Actions
 
 ### Images, versions and builds

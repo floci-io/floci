@@ -52,6 +52,7 @@ class DsqlStatementsTest {
                 + " greater than or equal to 65536 or equal to 1",
         "CREATE SEQUENCE s2 CACHE 100|22023|CACHE (100) must be greater than or equal to 65536 or equal to 1",
         "ALTER TABLE t ADD COLUMN c int DEFAULT 1|0A000|ALTER TABLE ADD COLUMN with constraint not supported",
+        "ALTER TABLE t ADD COLUMN c varchar(255) NOT NULL|0A000|ALTER TABLE ADD COLUMN with constraint not supported",
         "ALTER TABLE t ADD CONSTRAINT ck CHECK (n > 0)|0A000|unsupported ALTER TABLE ADD CONSTRAINT statement",
         "SELECT * FROM t FOR SHARE|0A000|locking clauses other than FOR UPDATE/FOR KEY SHARE are not supported",
         "SELECT * FROM t FOR NO KEY UPDATE|0A000|locking clauses other than FOR UPDATE/FOR KEY SHARE are not supported",
@@ -136,10 +137,14 @@ class DsqlStatementsTest {
         "CREATE SEQUENCE s1 CACHE 1",
         "CREATE SEQUENCE s3 CACHE 65536",
         "ALTER TABLE t ADD COLUMN d int",
+        "ALTER TABLE t ADD COLUMN b varchar(255) NULL",
+        "ALTER TABLE \"t\" ADD COLUMN \"notes\" varchar(255) null",
         "ALTER TABLE t DROP COLUMN d",
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "SET search_path TO probe",
         "DROP ROLE CURRENT_USER",
+        "DROP ROLE session_user",
+        "DROP ROLE DEFAULT",
         "DROP ROLE IF EXISTS",
         "DROP ROLE a b",
         "DROP ROLE a,",
@@ -215,5 +220,41 @@ class DsqlStatementsTest {
         assertEquals("SELECT 'a;b'", statements.get(0).sql());
         assertEquals("SELECT $f$ ; $f$", statements.get(1).sql());
         assertEquals("SELECT \"x;y\"", statements.get(2).sql());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        "a /* x /* y */ z */ b|a@0-1,b@20-21",
+        "a /* x /* y */ b|a@0-1",
+        "a /* never closed|a@0-1",
+        "a /*|a@0-1",
+        "a -- to the end|a@0-1",
+        "a --|a@0-1",
+        "a - b|a@0-1,-@2-3,b@4-5",
+        "a / b|a@0-1,/@2-3,b@4-5",
+        "a/**/b|a@0-1,b@5-6",
+        "a/*/ b*/c|a@0-1,c@8-9",
+    })
+    void tokenizeSkipsWhitespaceAndCommentsAndKeepsTheTokenPositions(String sql, String expected) {
+        StringBuilder actual = new StringBuilder();
+        for (DsqlStatements.Token token : DsqlStatements.tokenize(sql)) {
+            if (actual.length() > 0) {
+                actual.append(',');
+            }
+            actual.append(token.text()).append('@').append(token.start()).append('-').append(token.end());
+        }
+
+        assertEquals(expected, actual.toString());
+    }
+
+    @Test
+    void tokenizeEndsALineCommentAtEitherLineBreak() {
+        List<DsqlStatements.Token> lineFeed = DsqlStatements.tokenize("a --\nb");
+        List<DsqlStatements.Token> carriageReturn = DsqlStatements.tokenize("a --\rb");
+
+        assertEquals(2, lineFeed.size());
+        assertEquals(5, lineFeed.get(1).start());
+        assertEquals(2, carriageReturn.size());
+        assertEquals(5, carriageReturn.get(1).start());
     }
 }

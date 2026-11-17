@@ -50,6 +50,7 @@ class SsoAdminServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private SsoAdminService service;
+    private SsoPermissionSetRoleProvisioner roleProvisioner;
     private final MutableClock clock = new MutableClock();
     private IdentityStoreService identityStoreService;
     private OrganizationsService organizationsService;
@@ -60,6 +61,7 @@ class SsoAdminServiceTest {
 
     @BeforeEach
     void setUp() {
+        roleProvisioner = Mockito.mock(SsoPermissionSetRoleProvisioner.class, Mockito.RETURNS_MOCKS);
         identityStoreService = Mockito.mock(IdentityStoreService.class);
         organizationsService = Mockito.mock(OrganizationsService.class);
         applicationAccessScopes = new InMemoryStorage<>();
@@ -96,7 +98,7 @@ class SsoAdminServiceTest {
                 organizationsService,
                 ACCOUNT_ID,
                 "us-east-1",
-                clock);
+                clock, roleProvisioner);
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
     }
 
@@ -332,6 +334,21 @@ class SsoAdminServiceTest {
         recreate.put("ClientToken", "replacement-instance-token");
         SsoInstance replacement = emptyService.createInstance(recreate, ACCOUNT_ID, "us-west-2");
         assertFalse(replacement.instanceArn().equals(instance.instanceArn()));
+    }
+
+    @Test
+    void deletingAnInstanceCleansUpItsProvisionedTargetRoles() {
+        PermissionSet permissionSet = service.createPermissionSet(mapper.createObjectNode()
+                .put("InstanceArn", service.getInstanceArn()).put("Name", "Provisioned"));
+        service.provisionPermissionSet(mapper.createObjectNode()
+                .put("InstanceArn", service.getInstanceArn()).put("PermissionSetArn", permissionSet.arn())
+                .put("TargetType", "AWS_ACCOUNT").put("TargetId", "210987654321"));
+
+        service.deleteInstance(mapper.createObjectNode().put("InstanceArn", service.getInstanceArn()), ACCOUNT_ID);
+
+        Mockito.verify(roleProvisioner).remove(Mockito.argThat(provisioning ->
+                permissionSet.arn().equals(provisioning.permissionSetArn())
+                        && "210987654321".equals(provisioning.accountId())), Mockito.eq("us-east-1"));
     }
 
     @Test
@@ -1317,6 +1334,31 @@ class SsoAdminServiceTest {
         assertError("ServiceQuotaExceededException", () -> service.addRegion(overQuota));
     }
 
+    /**
+     * IAM's tag lookup reads a resource's tags as ListTagsForResource does: its own until a tagging call changes them,
+     * then the changed set; nothing for an ARN naming no stored resource or one that is not an Identity Center ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsListTagsForResourceGives() {
+        ObjectNode create = mapper.createObjectNode();
+        create.put("InstanceArn", service.getInstanceArn());
+        create.put("Name", "StoredTagAdmins");
+        create.putArray("Tags").addObject().put("Key", "team").put("Value", "data");
+        PermissionSet permissionSet = service.createPermissionSet(create);
+
+        assertEquals(Map.of("team", "data"), service.storedTags(permissionSet.arn()));
+
+        ObjectNode tag = mapper.createObjectNode();
+        tag.put("ResourceArn", permissionSet.arn());
+        tag.putArray("Tags").addObject().put("Key", "env").put("Value", "prod");
+        service.tagResource(tag);
+
+        assertEquals(Map.of("team", "data", "env", "prod"), service.storedTags(permissionSet.arn()));
+        String unknown = permissionSet.arn().substring(0, permissionSet.arn().length() - 16) + "0000000000000000";
+        assertEquals(Map.of(), service.storedTags(unknown));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::bucket"));
+    }
+
     @Test
     void listTagsForResourceReturnsPermissionSetTagsAndValidatesContext() {
         ObjectNode create = mapper.createObjectNode();
@@ -1928,7 +1970,7 @@ class SsoAdminServiceTest {
                 organizationsService,
                 "999999999999",
                 defaultRegion,
-                Clock.systemUTC());
+                Clock.systemUTC(), Mockito.mock(SsoPermissionSetRoleProvisioner.class, Mockito.RETURNS_MOCKS));
     }
 
     private ObjectNode trustedTokenIssuerRequest(String name, String clientToken) {

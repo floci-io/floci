@@ -62,9 +62,23 @@ changing credentials already issued.
 | `ListStackSetAutoDeploymentTargets` | - |
 <!-- floci:actions:end -->
 
+## IAM Enforcement
+
+With IAM enforcement on, each CloudFormation request is checked on the resources it names, from the generated request
+resources: a stack by its name or its stack id, at the ARN CloudFormation minted for it
+(`stack/<name>/<id>`), and a stack set by its name, at its ARN (`stackset/<name>:<id>`), each found in the caller's
+account and Region; a stack or stack set that does not exist yet, as a create names it, is checked with its id open
+(`stack/<name>/*`). A stack instance is checked on its stack set in the caller's account, whatever account the
+instance is in. An operation whose action has no resource type in the Service Authorization Reference (`ListStacks`,
+`ListStackSets`, `ValidateTemplate`, `CreateStackSet`, the Organizations access calls) is checked on `*`, and so is a
+request naming its stack by no `StackName` (a change set by its ARN alone, `DescribeStackResources` by
+`PhysicalResourceId` alone), the generated data filling the stack from `StackName` only. The
+`stackset-target` and `type` resources the reference also lists for the stack instance and stack set update calls are
+not checked: no member of those requests gives them.
+
 ## StackSets compatibility
 
-StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
+StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's ARN as `StackSetARN`, its `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
 
 With `AutoDeployment` enabled, a service-managed stack set follows its organization. An account created in, invited into or moved under a targeted root or OU gets an instance in every Region of the targets that now cover it, and an account moved out of every target or removed from the organization loses its instances; their stacks stay when `RetainStacksOnAccountRemoval` is set. Account placement changes are reconciled asynchronously, so Organizations calls do not wait for deployments and deployment failures do not undo completed account changes. A second `CreateStackInstances` for a target already recorded adds its Regions to the earlier ones. Automatic creates and deletes are recorded in `ListStackSetOperations` and `DescribeStackSetOperation`, with their timestamps and success or failure status. An account move that needs no instance changes records no operation. A returning account uses a distinct backing-stack name when its previous name remains occupied; the retained stack is not reassociated.
 
@@ -193,7 +207,7 @@ cross-resource references.
 | S3 Vectors | `VectorBucket`, `Index` |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
-| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment), `ReceiptRule` (stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery) |
+| SES | `ConfigurationSet` (only `Name` is supported; option and tag properties fail validation instead of being silently ignored; Ref returns the set name), `ConfigurationSetEventDestination`, `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment), `ReceiptRule` (stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery) |
 | DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one. `KinesisStreamSpecification` applied on create and update; with the DynamoDB Local backend, `StreamArn` is checked as on AWS but nothing is forwarded), `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `CodeSigningConfig`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint`, `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | Signer | `SigningProfile` (identifiers only; Floci has no Signer API) |
@@ -205,14 +219,14 @@ cross-resource references.
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EFS | `FileSystem` (metadata only, there is no NFS data plane), `MountTarget` (`SecurityGroups` update in place, every other property replaces), `AccessPoint` (`AccessPointTags` update in place, every other property replaces) |
-| EKS | `Cluster`, `Nodegroup` |
+| EKS | `Cluster` (created with `Name`, `Version`, `RoleArn` and `Tags`, a replacement included; `EncryptionConfig` and `KubernetesNetworkConfig` are accepted and ignored on create; updated in place for `Tags`, keeping tags added outside the stack; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version` is accepted with a warning and not applied, as the emulator cannot upgrade a cluster in place), `Nodegroup` (created with `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets` and `Tags`; updated in place for `Tags`, keeping tags added outside the stack; a change to `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets`, `AmiType`, `CapacityType`, `DiskSize`, `InstanceTypes` or `RemoteAccess` replaces the nodegroup, as the registry marks them create-only, and deletes the old one once the update commits; `ScalingConfig`, `Labels`, `Taints`, `UpdateConfig`, `Version`, `ReleaseVersion`, `ForceUpdateEnabled`, `LaunchTemplate`, `NodeRepairConfig` and `WarmPoolConfig` are accepted and not applied, whether changed or dropped, with a warning, as the emulator cannot update a nodegroup in place) |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
 | Aurora DSQL | `Cluster` |
-| ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
+| ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `ReplicationGroup` (starts a real container; modifying an existing group in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model), `EventSubscription` |
 | Redshift Serverless | `Namespace` (Managed admin credentials use Secrets Manager; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
 | EC2 | `VPC` (`Tags` update in place, keeping tags added outside the stack; deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported; `Tags` update in place, keeping tags added outside the stack; a failed stack update puts the rules and tags of a group it changed in place back), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway` (zonal; `AvailabilityMode` regional fails; a change to the `Secondary*` address properties updates the gateway in place), `EIP`, `Instance` (`Tags` update in place, keeping tags added outside the stack), `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` (`Tags` are applied and updated in place, keeping tags added outside the stack; any other change fails, since it needs a replacement), `KeyPair` (a created key's private key is stored in the `SecureString` parameter `/ec2/keypair/<KeyPairId>`, as on AWS, and deleted with the key), `PrefixList` (updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails) |
-| Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
+| Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule`, `ListenerCertificate` (`Certificates` update in place, a `ListenerArn` change replaces it) |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
 | Route 53 | `HostedZone`, `RecordSet`, `RecordSetGroup` (written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group's hosted zone), `HealthCheck` |
@@ -400,6 +414,25 @@ list-typed `Paths` holds a single entry; read it with `Fn::Select` as you would 
 Deleting the stack removes the resources in dependency order and finally the organization itself.
 Deleting a resource that is already gone is tolerated.
 
+## Auto Scaling Launch Configurations
+
+CloudFormation preserves an unchanged launch configuration and replaces it when its resolved
+properties change. An unnamed replacement receives a new name; replacing a custom-named
+configuration requires a new `LaunchConfigurationName`. The old configuration remains available
+until dependent groups switch and the stack update commits. A failed update restores the prior
+configuration. `BlockDeviceMappings` and `MetadataOptions` are passed to Auto Scaling.
+
+The shared CloudFormation change detector compares create-only properties using each stack
+version's parameters and resource references. This also covers configurations created before
+replacement support: unchanged references retain their identity, while added or changed values
+or a removed `InstanceId` require replacement. No separate launch-configuration input snapshot
+is needed.
+
+Group creation and updates coordinate with launch-configuration deletion, so a concurrent
+attachment cannot bypass the in-use check. A configuration already deleted cannot be attached.
+Out-of-band deletion remains stack drift; this replacement behavior does not promise automatic
+recreation under a missing configuration's former custom name.
+
 ## Auto Scaling Launch Template Resolution
 
 `AWS::AutoScaling::AutoScalingGroup` resolves its launch template through any of the shapes AWS
@@ -544,8 +577,14 @@ A function whose code is hot-reloaded publishes a version for every new id.
 Like SAM, floci gives the version the function's `DeletionPolicy`, else its `VersionDeletionPolicy`
 (`Delete` or `Retain`), else `Delete` for a function with a `CapacityProviderConfig` and `Retain`
 for any other. So by default the version a new id replaces stays published, and the update reports
-it `DELETE_SKIPPED`. With `Delete` floci reports the old version `DELETE_COMPLETE` but never deletes
-it, where AWS does. A `VersionDeletionPolicy` written as an intrinsic function, such as a `Ref` to
+it `DELETE_SKIPPED`. With `Delete`, physical version deletion uses Lambda's qualified
+`DeleteFunction`: that version is removed while `$LATEST` and other versions remain. An alias
+whose primary target is the version makes deletion fail; removing that alias permits a retry.
+This uses the native service's existing primary-target check; weighted alias references are not covered.
+The same deletion applies to a raw `AWS::Lambda::Version`, template removal and create rollback,
+including `RetainExceptOnCreate`. A version whose parent is already absent can be deleted again.
+This does not add replacement updates for a version that retains the same logical id.
+A `VersionDeletionPolicy` written as an intrinsic function, such as a `Ref` to
 a parameter, is copied onto the version unresolved, as SAM copies it. CloudFormation takes
 intrinsic functions only in resource properties, outputs, metadata attributes and update policy
 attributes, unless a transform such as `AWS::LanguageExtensions` resolves them first, and floci
@@ -641,6 +680,25 @@ target has no port and is its function ARN alone.
   first update that changes the group registers the declared targets and deregisters nothing.
 - `QuicServerId` is accepted and ignored, as Floci's `RegisterTargets` has no QUIC support.
 
+## ELBv2 listener certificates
+
+`AWS::ElasticLoadBalancingV2::ListenerCertificate` adds its `Certificates` to the listener's
+certificate list, as `AddListenerCertificates` does, so `DescribeListenerCertificates` names them and
+an HTTPS or TLS listener serves them by SNI. It is how a CDK listener's `addCertificates` gives a
+listener certificates beyond its default one. `Ref` returns `<ListenerArn>|<suffix>`: CloudFormation
+publishes no format for this resource's identifier, so the format is Floci's.
+
+- On `UpdateStack`, a change to `Certificates` (no interruption, as in AWS) adds the certificates
+  the template gains, then removes the ones it drops. A failed update removes the certificates it
+  added and adds back the ones it removed.
+- A change to `ListenerArn` replaces the resource: the certificates are added to the new listener,
+  and removed from the old one once the update commits.
+- Deleting the resource removes the certificates it added. One that is also the listener's default
+  certificate is refused with `OperationNotPermitted`, as `RemoveListenerCertificates` refuses it.
+- A certificate the listener's list already held when the resource declared it, one added outside
+  the stack for instance, was not added by the resource: neither dropping it from `Certificates` nor
+  deleting the resource takes it off the listener.
+
 ## S3 ownership controls
 
 `AWS::S3::Bucket` applies `OwnershipControls` through the same S3 call as
@@ -703,6 +761,12 @@ resource schema declares (measured). Floci reads them the same way, before anyth
 - The schema's other constraints (allowed values, patterns, bounds) are not checked. AWS also
   records a warning event for a value that it does not convert itself and the handler does
   (`" 128"`, `"0128"`, `" true"`); Floci does not.
+
+`Volumes` and container `MountPoints` reach the registered ECS task definition and appear in
+`DescribeTaskDefinition`. EFS, host and ephemeral volumes use the existing ECS volume models;
+host source paths use the same allowlist check as `RegisterTaskDefinition`. Docker, FSx Windows
+File Server and S3 Files volume settings survive the describe round trip but have no local mount
+backend. EFS uses a local named volume rather than a real NFS data plane.
 
 ## Account-Aware Provisioning
 
@@ -825,7 +889,8 @@ a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s 
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
 their defaults, and the instance profile it supplied is disassociated. A service's `TaskDefinition`,
 `NetworkConfiguration`, `ServiceName`, `LaunchType`, `LoadBalancers`, `CapacityProviderStrategy` and
-`ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
+`ServiceRegistries` are kept, and so is its `DesiredCount`: an update that leaves it out does not send it,
+so the stored count stays, while a new service without one starts at 1. A service's dropped
 `DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
 template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
 the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. A `Route`'s

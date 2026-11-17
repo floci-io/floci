@@ -289,9 +289,58 @@ class EcrImagePushApiDockerIntegrationTest {
                 .body("image.imageManifestMediaType", equalTo("application/vnd.oci.image.manifest.v1+json"));
     }
 
-    /** Last, since every class on this profile shares one registry. */
     @Test
     @Order(10)
+    void registryRetagPreservesImagePushTime() throws Exception {
+        String host = "000000000000.dkr.ecr.us-east-1.localhost";
+        String path = "/v2/" + repo + "/manifests/";
+        Fetched pushed = registryRequest(host, path + "registry", HttpMethod.PUT, null, manifest);
+        assertEquals(201, pushed.statusCode());
+        assertEquals(manifestDigest, pushed.digest());
+
+        long pushTime = call("DescribeImages", "{\"repositoryName\":\"" + repo
+                + "\",\"imageIds\":[{\"imageTag\":\"registry\"}]}")
+                .statusCode(200).extract().jsonPath().getLong("imageDetails[0].imagePushedAt");
+
+        assertEquals(201, registryRequest(host, path + "registry-retag", HttpMethod.PUT, null, manifest).statusCode());
+        long retaggedPushTime = call("DescribeImages", "{\"repositoryName\":\"" + repo
+                + "\",\"imageIds\":[{\"imageTag\":\"registry-retag\"}]}")
+                .statusCode(200).extract().jsonPath().getLong("imageDetails[0].imagePushedAt");
+        assertEquals(pushTime, retaggedPushTime);
+    }
+
+    @Test
+    @Order(11)
+    void anUntaggedImageKeepsItsRepositoryFromBeingDeletedWithoutForce() {
+        String untaggedRepo = repo + "-untagged";
+        call("CreateRepository", "{\"repositoryName\":\"" + untaggedRepo + "\"}").statusCode(200);
+        String upload = initiate(untaggedRepo);
+        part(untaggedRepo, upload, 0, config).statusCode(200);
+        complete(untaggedRepo, upload, configDigest).statusCode(200);
+        String bare = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "%s",
+                  "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": %d, "digest": "%s"},
+                  "layers": []
+                }""".formatted(DOCKER_MANIFEST, config.length, configDigest);
+        String bareDigest = "sha256:" + Digests.sha256Hex(bare.getBytes(StandardCharsets.UTF_8));
+        call("PutImage", "{\"repositoryName\":\"" + untaggedRepo + "\",\"imageManifest\":" + Json.encode(bare) + "}")
+                .statusCode(200).body("image.imageId.imageDigest", equalTo(bareDigest));
+        String byDigest = "{\"repositoryName\":\"" + untaggedRepo + "\",\"imageIds\":"
+                + "[{\"imageDigest\":\"" + bareDigest + "\"}]}";
+
+        call("DeleteRepository", "{\"repositoryName\":\"" + untaggedRepo + "\"}").statusCode(400)
+                .body("__type", equalTo("RepositoryNotEmptyException"));
+        call("BatchGetImage", byDigest).statusCode(200).body("images", hasSize(1)).body("failures", hasSize(0));
+
+        call("BatchDeleteImage", byDigest).statusCode(200).body("failures", hasSize(0));
+        call("DeleteRepository", "{\"repositoryName\":\"" + untaggedRepo + "\"}").statusCode(200);
+    }
+
+    /** Last, since every class on this profile shares one registry. */
+    @Test
+    @Order(12)
     void cleanUp() {
         call("DeleteRepository", "{\"repositoryName\":\"" + repo + "\",\"force\":true}").statusCode(200);
         call("DeleteRepository", "{\"repositoryName\":\"" + immutableRepo + "\",\"force\":true}").statusCode(200);
@@ -322,18 +371,26 @@ class EcrImagePushApiDockerIntegrationTest {
 
     /** A GET through Floci's registry data plane, by the host name a Docker client would use. */
     private Fetched registryGet(String host, String path, String accept) throws Exception {
+        return registryRequest(host, path, HttpMethod.GET, accept, null);
+    }
+
+    private Fetched registryRequest(String host, String path, HttpMethod method, String accept,
+                                    String manifestBody) throws Exception {
         int port = RestAssured.port;
         HttpClient client = vertx.createHttpClient();
         RequestOptions options = new RequestOptions()
                 .setServer(SocketAddress.inetSocketAddress(port, "127.0.0.1"))
                 .setHost(host)
                 .setPort(port)
-                .setMethod(HttpMethod.GET)
+                .setMethod(method)
                 .setURI(path);
         return client.request(options)
                 .compose(request -> {
                     if (accept != null) {
                         request.putHeader("Accept", accept);
+                    }
+                    if (manifestBody != null) {
+                        return request.putHeader("Content-Type", DOCKER_MANIFEST).send(manifestBody);
                     }
                     return request.send();
                 })

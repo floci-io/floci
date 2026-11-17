@@ -49,9 +49,13 @@ public class RestAssuredJsonUtils {
     }
 
     public static Response awsAction(String target, String action, String body) {
+        return awsAction(target, action, body, CONTENT_TYPE_AWS_JSON_1_1);
+    }
+
+    public static Response awsAction(String target, String action, String body, String contentType) {
         return given()
                 .header("X-Amz-Target", target + "." + action)
-                .contentType(CONTENT_TYPE_AWS_JSON_1_1)
+                .contentType(contentType)
                 .body(body)
                 .when()
                 .post("/");

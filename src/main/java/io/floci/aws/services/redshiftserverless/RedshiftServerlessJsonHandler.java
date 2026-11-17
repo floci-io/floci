@@ -11,6 +11,7 @@ import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.services.redshift.RedshiftIamDbUserResolver;
 import io.floci.aws.services.redshift.TempCredential;
+import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import io.floci.aws.services.redshiftserverless.model.ConfigParameter;
 import io.floci.aws.services.redshiftserverless.model.CustomDomainAssociation;
 import io.floci.aws.services.redshiftserverless.model.Namespace;
@@ -48,6 +49,7 @@ public class RedshiftServerlessJsonHandler {
     private final RedshiftServerlessAdminJsonHandler admin;
     private final RedshiftServerlessCustomDomainService customDomains;
     private final RedshiftServerlessSharedSnapshots sharedSnapshots;
+    private final RedshiftServerlessTableRestoreService tableRestores;
 
     @Inject
     public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
@@ -55,7 +57,8 @@ public class RedshiftServerlessJsonHandler {
                                          RedshiftServerlessUsageLimitService usageLimits,
                                          RedshiftServerlessAdminJsonHandler admin,
                                          RedshiftServerlessCustomDomainService customDomains,
-                                         RedshiftServerlessSharedSnapshots sharedSnapshots) {
+                                         RedshiftServerlessSharedSnapshots sharedSnapshots,
+                                         RedshiftServerlessTableRestoreService tableRestores) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamDbUserResolver = iamDbUserResolver;
@@ -63,6 +66,7 @@ public class RedshiftServerlessJsonHandler {
         this.admin = admin;
         this.customDomains = customDomains;
         this.sharedSnapshots = sharedSnapshots;
+        this.tableRestores = tableRestores;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -89,6 +93,9 @@ public class RedshiftServerlessJsonHandler {
                 case "UpdateSnapshot" -> () -> handleUpdateSnapshot(request, region);
                 case "DeleteSnapshot" -> () -> handleDeleteSnapshot(request, region);
                 case "RestoreFromSnapshot" -> () -> handleRestoreFromSnapshot(request, region);
+                case "RestoreTableFromSnapshot" -> () -> handleRestoreTableFromSnapshot(request, region);
+                case "GetTableRestoreStatus" -> () -> handleGetTableRestoreStatus(request, region);
+                case "ListTableRestoreStatus" -> () -> handleListTableRestoreStatus(request, region);
                 case "CreateUsageLimit" -> () -> handleCreateUsageLimit(request, region);
                 case "GetUsageLimit" -> () -> handleGetUsageLimit(request, region);
                 case "ListUsageLimits" -> () -> handleListUsageLimits(request, region);
@@ -292,6 +299,72 @@ public class RedshiftServerlessJsonHandler {
     private Response handleUpdateSnapshot(JsonNode request, String region) {
         return snapshotResponse(service.updateSnapshot(
                 ServerlessSupport.text(request, "snapshotName"), ServerlessSupport.integer(request, "retentionPeriod"), region));
+    }
+
+    private Response handleRestoreTableFromSnapshot(JsonNode request, String region) {
+        TableRestoreStatus status = tableRestores.restoreTable(new RedshiftServerlessTableRestoreService.Request(
+                ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
+                ServerlessSupport.text(request, "snapshotName"), ServerlessSupport.text(request, "sourceDatabaseName"),
+                ServerlessSupport.text(request, "sourceSchemaName"), ServerlessSupport.text(request, "sourceTableName"),
+                ServerlessSupport.text(request, "targetDatabaseName"),
+                ServerlessSupport.text(request, "targetSchemaName"), ServerlessSupport.text(request, "newTableName"),
+                Boolean.TRUE.equals(ServerlessSupport.bool(request, "activateCaseSensitiveIdentifier"))), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("tableRestoreStatus", tableRestoreStatusNode(status));
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetTableRestoreStatus(JsonNode request, String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("tableRestoreStatus", tableRestoreStatusNode(tableRestores.getTableRestoreStatus(
+                ServerlessSupport.text(request, "tableRestoreRequestId"), region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListTableRestoreStatus(JsonNode request, String region) {
+        PaginatedResult<TableRestoreStatus> page = tableRestores.listTableRestoreStatus(
+                ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
+                ServerlessSupport.maxResults(request), ServerlessSupport.text(request, "nextToken"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("tableRestoreStatuses");
+        page.items().forEach(status -> items.add(tableRestoreStatusNode(status)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    /** {@code requestTime} has no timestamp format trait in the model, so it is epoch seconds as a JSON number. */
+    private ObjectNode tableRestoreStatusNode(TableRestoreStatus status) {
+        ObjectNode node = objectMapper.createObjectNode();
+        putIfPresent(node, "message", status.getMessage());
+        putIfPresent(node, "namespaceName", status.getNamespaceName());
+        putIfPresent(node, "newTableName", status.getNewTableName());
+        if (status.getProgressInMegaBytes() != null) {
+            node.put("progressInMegaBytes", status.getProgressInMegaBytes());
+        }
+        if (status.getRequestTime() != null) {
+            node.put("requestTime", status.getRequestTime().toEpochMilli() / 1000.0);
+        }
+        putIfPresent(node, "snapshotName", status.getSnapshotIdentifier());
+        putIfPresent(node, "sourceDatabaseName", status.getSourceDatabaseName());
+        putIfPresent(node, "sourceSchemaName", status.getSourceSchemaName());
+        putIfPresent(node, "sourceTableName", status.getSourceTableName());
+        putIfPresent(node, "status", status.getStatus());
+        putIfPresent(node, "tableRestoreRequestId", status.getTableRestoreRequestId());
+        putIfPresent(node, "targetDatabaseName", status.getTargetDatabaseName());
+        putIfPresent(node, "targetSchemaName", status.getTargetSchemaName());
+        if (status.getTotalDataInMegaBytes() != null) {
+            node.put("totalDataInMegaBytes", status.getTotalDataInMegaBytes());
+        }
+        putIfPresent(node, "workgroupName", status.getWorkgroupName());
+        return node;
+    }
+
+    private static void putIfPresent(ObjectNode node, String field, String value) {
+        if (value != null) {
+            node.put(field, value);
+        }
     }
 
     private Response handleDeleteSnapshot(JsonNode request, String region) {

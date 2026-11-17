@@ -7,6 +7,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudformation.model.ChangeSet;
@@ -66,6 +67,7 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
     private static final String INSTANCE_CHANGE_SET = "stackset-instance";
     private static final String UPDATE_CHANGE_SET = "stackset-update";
     private static final String ORGANIZATIONS_ACCESS_KEY = "organizations-access";
+    private static final String STACK_SET_RESOURCE = "stackset/";
     private static final int STACK_SET_LIMIT = 1000;
     private static final Pattern STACK_SET_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9-]{0,127}");
     private static final Pattern OPERATION_ID = Pattern.compile("[A-Za-z0-9][-A-Za-z0-9]{0,127}");
@@ -206,6 +208,45 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
 
     public StackSet describeStackSet(String name) {
         return getStackSetOrThrow(name);
+    }
+
+    /** The stack set's ARN, {@code stackset/<name>:<id>} in the request's Region, as AWS gives its StackSetARN. */
+    /** The stack set's ARN in the Region given, the one the request naming it is in, whatever context runs it. */
+    public String stackSetArn(StackSet stackSet, String region) {
+        return regionResolver.buildArn("cloudformation", region, STACK_SET_RESOURCE + stackSet.getStackSetId());
+    }
+
+    /**
+     * The ARN of the caller's stack set of that name in the Region given, which IAM checks a request naming it on;
+     * empty for none.
+     */
+    public Optional<String> stackSetArn(String name, String region) {
+        return name == null ? Optional.empty() : stackSets.get(name).map(stackSet -> stackSetArn(stackSet, region));
+    }
+
+    /**
+     * The tags of the stack set stored under {@code arn} in the account the ARN names, a pre-multi-account one of the
+     * default account read in place, by key, which IAM gives a resource-tag condition; empty when there is none. Reads
+     * only, matching the stack set's id, {@code <name>:<id>}, on the ARN.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cloudformation")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String id = parsed.resource().startsWith(STACK_SET_RESOURCE)
+                ? parsed.resource().substring(STACK_SET_RESOURCE.length()) : "";
+        if (id.indexOf(':') < 1) {
+            return Map.of();
+        }
+        String name = id.substring(0, id.indexOf(':'));
+        String account = parsed.accountId();
+        Optional<StackSet> stored = stackSets instanceof AccountAwareStorageBackend<StackSet> aware
+                ? aware.getForAccount(account, name).or(() -> aware.getLegacyForAccount(account, name))
+                : stackSets.get(name);
+        return stored.filter(stackSet -> id.equals(stackSet.getStackSetId()))
+                .<Map<String, String>>map(stackSet -> Map.copyOf(stackSet.getTags()))
+                .orElse(Map.of());
     }
 
     /** The StackSet's permission model, which says whether an update naming no administration role passes the default one. */

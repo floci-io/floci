@@ -60,7 +60,8 @@ class EksCfnProvisionerTest {
                 """), ctx());
 
         assertEquals("prod", r.getPhysicalId());
-        assertEquals(Set.of("Arn", "Endpoint", "CertificateAuthorityData", "OpenIdConnectIssuerUrl"),
+        assertEquals(Set.of("Arn", "Endpoint", "CertificateAuthorityData", "OpenIdConnectIssuerUrl",
+                        "__FlociEksClusterTagKeys"),
                 r.getAttributes().keySet());
         assertEquals("arn:aws:eks:us-east-1:000000000000:cluster/prod", r.getAttributes().get("Arn"));
         assertEquals("LS0tLS1CRUdJTg==", r.getAttributes().get("CertificateAuthorityData"));

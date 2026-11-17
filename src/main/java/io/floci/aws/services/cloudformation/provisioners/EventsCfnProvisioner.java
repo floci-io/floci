@@ -204,6 +204,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             }
             Target target = new Target(targetId, targetArn, input, inputPath);
             target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
+            JsonNode kinesisParamsNode = resolved.path("KinesisParameters");
+            if (kinesisParamsNode.isObject()) {
+                target.setKinesisParameters(MAPPER.convertValue(kinesisParamsNode, Target.KinesisParameters.class));
+            }
             JsonNode httpParamsNode = resolved.path("HttpParameters");
             if (httpParamsNode.isObject()) {
                 target.setHttpParameters(MAPPER.convertValue(httpParamsNode, HttpParameters.class));
@@ -670,15 +674,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      */
     private void reconcileEventBusTags(String arn, Collection<String> managedKeys, Map<String, String> desired,
                                        String region) {
-        List<String> dropped = managedKeys.stream()
-                .filter(key -> !desired.containsKey(key))
-                .toList();
-        if (!dropped.isEmpty()) {
-            eventBridgeService.untagResource(arn, dropped, region);
-        }
-        if (!desired.isEmpty()) {
-            eventBridgeService.tagResource(arn, desired, region);
-        }
+        CfnRollback.reconcileTags(managedKeys, desired,
+                dropped -> eventBridgeService.untagResource(arn, dropped, region),
+                tags -> eventBridgeService.tagResource(arn, tags, region));
     }
 
     private Set<String> eventBusManagedTagKeys(StackResource resource) {

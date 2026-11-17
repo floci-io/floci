@@ -35,7 +35,6 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1700,7 +1699,7 @@ class PostgresProtocolHandlerTest {
                     writeReadyForQuery(out);
                     assertEquals(-1, in.read());
                 })));
-        List<String> logs = records.stream().map(record -> MessageFormat.format(record.getMessage(), record.getParameters())).toList();
+        List<String> logs = records.stream().map(LogCapture::formatted).toList();
         assertTrue(logs.stream().anyMatch(line -> line.contains("user approle: catalog query returned an error")));
         assertFalse(logs.stream().anyMatch(line -> line.contains("SECRET_") || line.contains("X-Amz-")
                 || line.contains("\n") || line.contains("\r")));

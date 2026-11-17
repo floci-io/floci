@@ -60,7 +60,7 @@ class BatchDockerRunnerDockerIntegrationTest {
                 test "$FLOCI_HOSTNAME" = "%s"
                 """.formatted(expectedEndpoint, expectedEndpoint, expectedHostname)));
 
-        BatchRunResult result = runner.run(job, 1);
+        BatchRunResult result = runner.run(job, 1, null);
 
         assertEquals(0, result.exitCode(), result.reason());
     }

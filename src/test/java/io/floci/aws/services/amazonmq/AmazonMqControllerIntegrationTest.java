@@ -1,10 +1,18 @@
 package io.floci.aws.services.amazonmq;
 
+import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -16,8 +24,34 @@ import static org.hamcrest.Matchers.startsWith;
 @QuarkusTest
 class AmazonMqControllerIntegrationTest {
 
+    private static final AtomicLong ACCOUNTS = new AtomicLong(731300000000L);
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     private String createRabbitBroker(String name) {
-        return given()
+        return createRabbitBroker(given(), name);
+    }
+
+    /** A broker created for {@code account} in {@code region}, deleted after the test unless the test did. */
+    private String createRabbitBroker(String account, String region, String name) {
+        String brokerId = createRabbitBroker(mq(account, region), name);
+        cleanup.register(() -> mq(account, region).when().delete("/v1/brokers/{id}", brokerId));
+        return brokerId;
+    }
+
+    private static RequestSpecification mq(String account, String region) {
+        return given().header("Authorization", auth(account, region, "mq"));
+    }
+
+    private static String createRabbitBroker(RequestSpecification request, String name) {
+        return postRabbitBroker(request, name)
+            .statusCode(200)
+            .extract().path("brokerId");
+    }
+
+    private static ValidatableResponse postRabbitBroker(RequestSpecification request, String name) {
+        return request
             .contentType("application/json")
             .body("""
                 {"brokerName": "%s", "engineType": "RABBITMQ",
@@ -27,9 +61,7 @@ class AmazonMqControllerIntegrationTest {
                 """.formatted(name))
         .when()
             .post("/v1/brokers")
-        .then()
-            .statusCode(200)
-            .extract().path("brokerId");
+        .then();
     }
 
     @Test
@@ -201,5 +233,51 @@ class AmazonMqControllerIntegrationTest {
             .post("/v1/brokers")
         .then()
             .statusCode(400);
+    }
+
+    /**
+     * Brokers are Regional: another Region of the account neither lists, describes, reboots nor deletes
+     * one, nor describes its shared resources. Its name is unique in the account, so another Region refuses
+     * it too. The test works in an account of its own, so each listing holds only its brokers.
+     */
+    @Test
+    void aBrokerIsSeenOnlyInTheRegionItWasCreatedIn() {
+        String account = Long.toString(ACCOUNTS.incrementAndGet());
+        String inIreland = createRabbitBroker(account, "eu-west-1", "it-regional");
+
+        mq(account, "us-east-1")
+        .when()
+            .get("/v1/brokers")
+        .then()
+            .statusCode(200)
+            .body("brokerSummaries.brokerId", equalTo(List.of()));
+        for (Function<RequestSpecification, Response> call : List.<Function<RequestSpecification, Response>>of(
+                request -> request.get("/v1/brokers/{id}", inIreland),
+                request -> request.get("/v1/brokers/{id}/shared-resources", inIreland),
+                request -> request.contentType("application/json").post("/v1/brokers/{id}/reboot", inIreland),
+                request -> request.delete("/v1/brokers/{id}", inIreland))) {
+            call.apply(mq(account, "us-east-1"))
+            .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+        }
+
+        postRabbitBroker(mq(account, "us-east-1"), "it-regional")
+            .statusCode(409)
+            .body("__type", equalTo("ConflictException"));
+        String inVirginia = createRabbitBroker(account, "us-east-1", "it-regional-virginia");
+
+        mq(account, "eu-west-1")
+        .when()
+            .get("/v1/brokers")
+        .then()
+            .statusCode(200)
+            .body("brokerSummaries.brokerId", equalTo(List.of(inIreland)));
+        mq(account, "us-east-1")
+        .when()
+            .get("/v1/brokers")
+        .then()
+            .statusCode(200)
+            .body("brokerSummaries.brokerId", equalTo(List.of(inVirginia)));
     }
 }

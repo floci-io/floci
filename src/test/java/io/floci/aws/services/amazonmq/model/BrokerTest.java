@@ -51,6 +51,17 @@ class BrokerTest {
         assertEquals("EBS", roundTripped.getStorageType());
     }
 
+    /** A broker's Region is the one its ARN names, and the default Region's for a broker recorded without one. */
+    @Test
+    void aBrokersRegionIsTheOneItsArnNames() {
+        Broker inIreland = new Broker("b-1", "arn:aws:mq:eu-west-1:000000000000:broker:n:b-1",
+                "n", "RABBITMQ", "3.13", "SINGLE_INSTANCE", "mq.t3.micro");
+        Broker withoutArn = new Broker("b-2", null, "m", "RABBITMQ", "3.13", "SINGLE_INSTANCE", "mq.t3.micro");
+
+        assertEquals("eu-west-1", inIreland.region("us-east-1"));
+        assertEquals("us-east-1", withoutArn.region("us-east-1"));
+    }
+
     /** A broker persisted before these members existed must still load, with them absent. */
     @Test
     void brokerPersistedWithoutNewMembersStillLoads() throws Exception {

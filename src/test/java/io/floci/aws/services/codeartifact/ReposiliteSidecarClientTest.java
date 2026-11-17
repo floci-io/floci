@@ -740,6 +740,85 @@ class ReposiliteSidecarClientTest {
     }
 
     @Test
+    void listPackageVersionDependenciesParsesTheFetchedPomsParentAndDependencies() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String pom = "<project><parent><groupId>com.example</groupId><artifactId>parent-pom</artifactId>"
+                + "<version>1.0.0</version></parent><dependencies>"
+                + "<dependency><groupId>com.example</groupId><artifactId>other</artifactId>"
+                + "<version>2.0.0</version><scope>test</scope></dependency>"
+                + "</dependencies></project>";
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.pom", exchange -> respond(exchange, 200, pom));
+
+        List<CodeArtifactService.PackageDependency> dependencies = client.listPackageVersionDependencies("dom--repo",
+                "dom", "repo", "com.example", "a", "1.0");
+
+        assertThat(dependencies, containsInAnyOrder(
+                new CodeArtifactService.PackageDependency("com.example", "parent-pom", "parent", "1.0.0"),
+                new CodeArtifactService.PackageDependency("com.example", "other", "test", "2.0.0")));
+    }
+
+    @Test
+    void listPackageVersionDependenciesIsEmptyWhenTheVersionHasNoPom() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.pom", exchange -> respond(exchange, 404, ""));
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"a-1.0.jar\",\"type\":\"FILE\"}]}"));
+
+        assertThat(client.listPackageVersionDependencies("dom--repo", "dom", "repo", "com.example", "a", "1.0"),
+                equalTo(List.of()));
+    }
+
+    /**
+     * Qodo review finding: a {@code -SNAPSHOT} version's real POM is not named
+     * {@code <artifactId>-<version>.pom} at all - a real {@code mvn deploy} writes it under a
+     * timestamped unique-snapshot name instead - so the literal-name fetch misses and the fallback
+     * to the real directory listing must find and fetch the real file.
+     */
+    @Test
+    void listPackageVersionDependenciesResolvesASnapshotsRealTimestampedPom() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/1.0-SNAPSHOT/a-1.0-SNAPSHOT.pom",
+                exchange -> respond(exchange, 404, ""));
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0-SNAPSHOT",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0-SNAPSHOT\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"a-1.0-20261115.120000-1.jar\",\"type\":\"FILE\"},"
+                        + "{\"name\":\"a-1.0-20261115.120000-1.pom\",\"type\":\"FILE\"}]}"));
+        String pom = "<project><dependencies><dependency><groupId>com.example</groupId>"
+                + "<artifactId>snapshot-dep</artifactId><version>1.0.0</version></dependency>"
+                + "</dependencies></project>";
+        server.createContext("/dom--repo/com/example/a/1.0-SNAPSHOT/a-1.0-20261115.120000-1.pom",
+                exchange -> respond(exchange, 200, pom));
+
+        List<CodeArtifactService.PackageDependency> dependencies = client.listPackageVersionDependencies("dom--repo",
+                "dom", "repo", "com.example", "a", "1.0-SNAPSHOT");
+
+        assertThat(dependencies, equalTo(List.of(
+                new CodeArtifactService.PackageDependency("com.example", "snapshot-dep", "compile", "1.0.0"))));
+    }
+
+    /**
+     * Qodo review finding: a genuine Reposilite error on the POM fetch (not a real 404) must
+     * surface as an error, not be silently reported as "no dependencies" - this reuses {@link
+     * #listPackageVersionAssetNames}'s own already-established unexpected-status handling as the
+     * fallback path, which is exactly what makes this case throw rather than return quietly.
+     */
+    @Test
+    void listPackageVersionDependenciesThrowsWhenTheFallbackListingFailsWithARealError() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.pom", exchange -> respond(exchange, 404, ""));
+        server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
+                exchange -> respond(exchange, 500, "{\"status\":500,\"message\":\"internal error\"}"));
+
+        assertThrows(IllegalStateException.class,
+                () -> client.listPackageVersionDependencies("dom--repo", "dom", "repo", "com.example", "a", "1.0"));
+    }
+
+    @Test
     void listPackageVersionAssetNamesReturnsOnlyTheFileEntriesFromTheVersionDirectory() {
         server.createContext("/api/maven/details/dom--repo/com/example/a/1.0",
                 exchange -> respond(exchange, 200, "{\"name\":\"1.0\",\"type\":\"DIRECTORY\",\"files\":["
@@ -937,7 +1016,7 @@ class ReposiliteSidecarClientTest {
                 + "<version>1.1</version><version>1.2</version></versions></versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
@@ -979,7 +1058,7 @@ class ReposiliteSidecarClientTest {
                 + "</versioning></metadata>";
 
         client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertEquals(Digests.sha1Hex(putBody.get()), new String(sha1Body.get(), StandardCharsets.UTF_8));
         assertEquals(Digests.md5Hex(putBody.get()), new String(md5Body.get(), StandardCharsets.UTF_8));
@@ -1009,7 +1088,7 @@ class ReposiliteSidecarClientTest {
         // own metadata has no idea that happened, so a merge must never let a rejected version
         // back in just because the public source still lists it.
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> !v.equals("1.1"));
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> !v.equals("1.1"), false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
@@ -1036,7 +1115,7 @@ class ReposiliteSidecarClientTest {
                 + "</versioning></metadata>";
 
         assertThrows(IllegalStateException.class, () -> client.mergeExternalConnectionReleaseVersions("dom--repo",
-                "com.example", "a", externalXml.getBytes(StandardCharsets.UTF_8), v -> true));
+                "com.example", "a", externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false));
     }
 
     /**
@@ -1070,7 +1149,7 @@ class ReposiliteSidecarClientTest {
                 + "<version>1.1</version></versions></versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
@@ -1100,12 +1179,45 @@ class ReposiliteSidecarClientTest {
                 + "<version>1.1-SNAPSHOT</version></versions></versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
         assertEquals(List.of("1.0"), XmlParser.extractAll(xml, "version"));
         assertEquals("1.0", XmlParser.extractFirst(xml, "latest", null));
+    }
+
+    /**
+     * {@code allowSnapshots=true} (16f-UPSTREAM-REPO's same-domain upstream case) keeps a
+     * {@code -SNAPSHOT} version that {@code allowSnapshots=false} (the real-registry external
+     * connection case, covered just above) would have filtered out.
+     */
+    @Test
+    void mergeExternalConnectionReleaseVersionsKeepsSnapshotVersionsWhenAllowed() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.1-SNAPSHOT</latest><versions><version>1.0</version>"
+                + "<version>1.1-SNAPSHOT</version></versions></versioning></metadata>";
+
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, true);
+
+        assertTrue(merged);
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0", "1.1-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
     }
 
     @Test
@@ -1132,7 +1244,7 @@ class ReposiliteSidecarClientTest {
                 + "versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertFalse(merged);
         assertNull(putBody.get());
@@ -1174,7 +1286,7 @@ class ReposiliteSidecarClientTest {
                 + "versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertFalse(merged);
         assertEquals(Digests.sha1Hex(existing.getBytes(StandardCharsets.UTF_8)),

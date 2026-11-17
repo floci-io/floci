@@ -348,6 +348,61 @@ class CloudFrontServiceTest {
         assertEquals(Map.of("team", "infra"), service.listTagsForResource(dist.getArn()));
     }
 
+    /**
+     * IAM's tag lookup, which the key value store service answers for the namespace, reads the tags CloudFront holds
+     * under the whole ARN where its tag handlers keep them, in the account the request runs in, from the store this
+     * service writes them to; the ARN's account does not move the read, since CloudFront ARNs name the default one.
+     */
+    @Test
+    void storedTagsAreTheTagsHeldUnderTheWholeArnWhereTheRequestRuns() {
+        CloudFrontService service = serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX);
+        CloudFrontKeyValueStoreService lookup = keyValueStoresOnTheSameFiles();
+        Distribution dist = service.createDistribution(new Distribution(), Map.of("team", "data"));
+        service.tagResource(dist.getArn(), Map.of("env", "prod"));
+        String otherAccountArn = dist.getArn().replace(ACCOUNT, "111111111111");
+        service.tagResource(otherAccountArn, Map.of("owner", "them"));
+
+        assertEquals(Map.of("team", "data", "env", "prod"), lookup.storedTags(dist.getArn()));
+        assertEquals(Map.of("owner", "them"), lookup.storedTags(otherAccountArn));
+        assertEquals(Map.of(), lookup.storedTags(dist.getArn() + "X"));
+        assertEquals(Map.of(), lookup.storedTags("arn:aws:s3:::" + dist.getId().toLowerCase()));
+    }
+
+    /** A function's ARN is its name, so one deleted and created again starts with no tags, for IAM as for the API. */
+    @Test
+    void aFunctionCreatedAgainUnderADeletedOnesNameHasNoneOfItsTags() {
+        CloudFrontService service = serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX);
+        CloudFrontKeyValueStoreService lookup = keyValueStoresOnTheSameFiles();
+        String arn = service.functionArn("tagged");
+        service.tagResource(arn, Map.of("seeded", "before"));
+        CloudFrontFunction created = service.createFunction(function("tagged"));
+        assertEquals(Map.of(), service.listTagsForResource(arn));
+        service.tagResource(arn, Map.of("team", "data"));
+
+        service.deleteFunction("tagged", created.getEtag());
+        service.createFunction(function("tagged"));
+
+        assertEquals(Map.of(), service.listTagsForResource(arn));
+        assertEquals(Map.of(), lookup.storedTags(arn));
+    }
+
+    /** A key value store service on the same per-file stores as the service {@link #serviceWithDomainSuffix} built. */
+    private CloudFrontKeyValueStoreService keyValueStoresOnTheSameFiles() {
+        StorageFactory sameFiles = Mockito.mock(StorageFactory.class);
+        when(sameFiles.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
+                .thenAnswer(invocation -> stores.computeIfAbsent(invocation.getArgument(1, String.class),
+                        ignored -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
+        return new CloudFrontKeyValueStoreService(sameFiles, new RegionResolver("us-east-1", ACCOUNT));
+    }
+
+    private static CloudFrontFunction function(String name) {
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName(name);
+        function.setFunctionCode("function handler(event) { return event.request; }");
+        function.setRuntime("cloudfront-js-2.0");
+        return function;
+    }
+
     @Test
     void deletingDistributionRemovesTagsStoredUnderItsArn() {
         CloudFrontService service = serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX);

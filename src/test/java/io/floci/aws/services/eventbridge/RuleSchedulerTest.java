@@ -170,6 +170,54 @@ class RuleSchedulerTest {
         assertTrue(scheduler.isRunning(RULE_ARN), "the recreated rule must keep its timer");
     }
 
+    @Test
+    void rateHasNoDeliveryBeforeTimer() {
+        Vertx vertx = mock(Vertx.class);
+        when(vertx.setPeriodic(anyLong(), any())).thenReturn(1L);
+        StoppingInvoker invoker = new StoppingInvoker(() -> { });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        scheduler.startScheduler(RULE_ARN, "rate(10 minutes)", () -> toScheduleData(enabledRule()));
+        assertEquals(0, invoker.invocationCount());
+    }
+
+    @Test
+    void restartingRateHasNoDeliveryBeforeTimer() {
+        Vertx vertx = mock(Vertx.class);
+        when(vertx.setPeriodic(anyLong(), any())).thenReturn(1L, 2L);
+        StoppingInvoker invoker = new StoppingInvoker(() -> { });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        scheduler.startScheduler(RULE_ARN, "rate(10 minutes)", () -> toScheduleData(enabledRule()));
+        scheduler.stopScheduler(RULE_ARN);
+        scheduler.startScheduler(RULE_ARN, "rate(10 minutes)", () -> toScheduleData(enabledRule()));
+        assertEquals(0, invoker.invocationCount());
+    }
+
+    @Test
+    void cronWaitsForTimerAndThenDelivers() {
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+        when(vertx.setTimer(anyLong(), fire.capture())).thenReturn(1L, 2L);
+        StoppingInvoker invoker = new StoppingInvoker(() -> { });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        scheduler.startScheduler(RULE_ARN, EVERY_MINUTE_CRON, () -> toScheduleData(enabledRule()));
+        assertEquals(0, invoker.invocationCount());
+        fire.getValue().handle(1L);
+        assertEquals(1, invoker.invocationCount());
+    }
+
+    @Test
+    void rateTimerCallbackDeliversExactlyOnce() {
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+        when(vertx.setPeriodic(anyLong(), fire.capture())).thenReturn(1L);
+        StoppingInvoker invoker = new StoppingInvoker(() -> { });
+        RuleScheduler scheduler = newScheduler(vertx, invoker);
+        scheduler.startScheduler(RULE_ARN, "rate(10 minutes)", () -> toScheduleData(enabledRule()));
+        int before = invoker.invocationCount();
+        fire.getValue().handle(1L);
+        assertEquals(before + 1, invoker.invocationCount());
+    }
+
     @SuppressWarnings("unchecked")
     private static ArgumentCaptor<Handler<Long>> timerHandlerCaptor() {
         return ArgumentCaptor.forClass(Handler.class);

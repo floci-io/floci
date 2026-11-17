@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
@@ -11,9 +12,14 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
+import software.amazon.awssdk.services.paymentcryptography.model.AddKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Alias;
+import software.amazon.awssdk.services.paymentcryptography.model.As2805KeyVariant;
+import software.amazon.awssdk.services.paymentcryptography.model.CreateKeyRequest;
 import software.amazon.awssdk.services.paymentcryptography.model.DeriveKeyUsage;
+import software.amazon.awssdk.services.paymentcryptography.model.EnableDefaultKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.ExportKeyResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.GetDefaultKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForExportResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForImportResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetPublicKeyCertificateResponse;
@@ -24,10 +30,16 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyAttributes;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyCheckValueAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyMaterialType;
+import software.amazon.awssdk.services.paymentcryptography.model.KeyReplicationState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.MultiRegionKeyType;
+import software.amazon.awssdk.services.paymentcryptography.model.PublicPolicyException;
+import software.amazon.awssdk.services.paymentcryptography.model.RemoveKeyReplicationRegionsResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
+import software.amazon.awssdk.services.paymentcryptography.model.Tr34KeyBlockFormat;
 import software.amazon.awssdk.services.paymentcryptography.model.WrappedKeyMaterialFormat;
 
 import java.io.ByteArrayInputStream;
@@ -43,6 +55,7 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -117,6 +130,166 @@ class PaymentCryptographyTest {
         return key;
     }
 
+    /** The key encryption key an AS2805 cryptogram is wrapped under. */
+    private static Key createKeyEncryptionKey() {
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(key.keyArn());
+        return key;
+    }
+
+    @Test
+    void aKeyIsReplicatedToTheRegionsTheAccountReplicatesToByDefault() {
+        // The account's own default regions are read before the test changes them, so the
+        // cleanup can put them back.
+        List<String> before = client.getDefaultKeyReplicationRegions(r -> { })
+                .enabledReplicationRegions();
+        EnableDefaultKeyReplicationRegionsResponse enabled = client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("us-west-2"));
+        try {
+            assertThat(enabled.enabledReplicationRegions()).contains("us-west-2");
+
+            GetDefaultKeyReplicationRegionsResponse defaults = client.getDefaultKeyReplicationRegions(r -> { });
+            assertThat(defaults.enabledReplicationRegions()).contains("us-west-2");
+
+            // A key created while the default is on takes it.
+            Key key = createAesKey();
+
+            assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+            assertThat(key.primaryRegion()).isEqualTo("us-east-1");
+            assertThat(key.usingDefaultReplicationRegions()).isTrue();
+            // The status of a replica that is there is that it is in sync.
+            assertThat(key.replicationStatus()).containsKey("us-west-2");
+            assertThat(key.replicationStatus().get("us-west-2").status())
+                    .isEqualTo(KeyReplicationState.SYNCHRONIZED);
+        } finally {
+            client.disableDefaultKeyReplicationRegions(r -> r.replicationRegions("us-west-2"));
+            for (String region : before) {
+                client.enableDefaultKeyReplicationRegions(r -> r.replicationRegions(region));
+            }
+        }
+    }
+
+    @Test
+    void theReplicationRegionsOfAKeyCanBeChanged() {
+        Key key = createReplicatedKey("us-west-2");
+
+        assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+        assertThat(key.replicationStatus()).containsKey("us-west-2");
+
+        AddKeyReplicationRegionsResponse added = client.addKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-1"));
+        assertThat(added.key().replicationStatus()).containsKeys("us-west-2", "us-west-1");
+
+        RemoveKeyReplicationRegionsResponse removed = client.removeKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-2"));
+        assertThat(removed.key().replicationStatus()).containsKey("us-west-1");
+        assertThat(removed.key().replicationStatus()).doesNotContainKey("us-west-2");
+    }
+
+    @Test
+    void aRegionTheKeyAlreadyReplicatesIntoIsRefused() {
+        // Adding a region the key already replicates into changes nothing, and a request
+        // that cannot be carried out is refused rather than answered with what it already was.
+        Key key = createReplicatedKey("us-west-2");
+
+        assertRefusedWithValidationException(() -> client.addKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-2")), "already replicates into");
+    }
+
+    @Test
+    void aRegionTheKeyDoesNotReplicateIntoIsRefused() {
+        // There is nothing to take away from a region the key does not replicate into.
+        Key key = createReplicatedKey("us-west-2");
+
+        assertRefusedWithValidationException(() -> client.removeKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-1")), "does not replicate into");
+    }
+
+    @Test
+    void takingTheLastReplicaAwayEndsTheReplication() {
+        // Taking the replica regions away is how the replication is turned off for a key, so
+        // a key that replicates nowhere is not a multi-region key and says so by carrying no
+        // type at all.
+        Key key = createReplicatedKey("us-west-2");
+
+        assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+
+        RemoveKeyReplicationRegionsResponse removed = client.removeKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-2"));
+
+        assertThat(removed.key().multiRegionKeyType()).isNull();
+        assertThat(removed.key().primaryRegion()).isNull();
+        assertThat(removed.key().replicationStatus()).isEmpty();
+    }
+
+    @Test
+    void aKeyThatIsReplicatedHasToBeExportable() {
+        assertRefusedWithValidationException(
+                () -> client.createKey(replicatedKeyRequest(false, "us-west-2")),
+                "exportable");
+    }
+
+    @Test
+    void aNameThatIsNotARegionIsRefused() {
+        // A Region a request names has to be a name of a Region this service serves, and a
+        // name that is not one of those is refused.
+        assertRefusedWithValidationException(() -> client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("moon-west-1")), "moon-west-1");
+    }
+
+    @Test
+    void aRegionOfAnotherPartitionIsRefused() {
+        // A key is replicated within the partition it is in, as the reference says, so a
+        // region of another partition is refused.
+        assertRefusedWithValidationException(
+                () -> client.createKey(replicatedKeyRequest(true, "cn-north-1")),
+                "cn-north-1");
+    }
+
+    @Test
+    void aDefaultRegionOfAnotherPartitionIsRefused() {
+        // The default regions are the regions a new key is replicated to, so they are
+        // within the partition of the region they are the defaults of.
+        assertRefusedWithValidationException(() -> client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("us-gov-west-1")), "us-gov-west-1");
+    }
+
+    @Test
+    void theRegionOfTheRequestIsNotARegionToReplicateTo() {
+        // The key is in the region of the request already, so naming that region is a request
+        // that cannot be carried out.
+        assertRefusedWithValidationException(
+                () -> client.createKey(replicatedKeyRequest(true, "us-east-1")),
+                "us-east-1");
+    }
+
+    @Test
+    void aKeyWhoseRegionsAreChangedHasAConfigurationOfItsOwn() {
+        // A key that took the account's default regions says so, and a key whose regions are
+        // changed afterwards has a configuration of its own, so it says the other thing.
+        Key key = createReplicatedKey("us-west-2");
+
+        assertThat(key.usingDefaultReplicationRegions()).isFalse();
+
+        AddKeyReplicationRegionsResponse added = client.addKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-1"));
+
+        assertThat(added.key().usingDefaultReplicationRegions()).isFalse();
+    }
+
     /**
      * The public half of a certificate, held by the service as a key.
      *
@@ -139,16 +312,108 @@ class PaymentCryptographyTest {
 
     /** A key of the given algorithm, for the data the cipher protects. */
     private static Key createKey(KeyAlgorithm algorithm) {
-        Key key = client.createKey(r -> r
+        return createKey(algorithm, KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    /**
+     * The request that creates a key of the given algorithm and usage.
+     *
+     * @param algorithm the key's algorithm
+     * @param usage the key's usage
+     * @param exportable whether the key may leave the service
+     */
+    private static Consumer<CreateKeyRequest.Builder> keyRequest(KeyAlgorithm algorithm, KeyUsage usage,
+                                                                 boolean exportable) {
+        return r -> r
                 .keyAttributes(a -> a
                         .keyAlgorithm(algorithm)
                         .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyUsage(usage)
                         .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true))
-                .key();
+                .exportable(exportable);
+    }
+
+    /** A key of the given algorithm and usage, for a variant that binds a purpose. */
+    private static Key createKey(KeyAlgorithm algorithm, KeyUsage usage) {
+        Key key = client.createKey(keyRequest(algorithm, usage, true)).key();
         keyArns.add(key.keyArn());
         return key;
+    }
+
+    /**
+     * The request that creates a key of the data the cipher protects, replicated to the
+     * regions named.
+     *
+     * @param exportable whether the key may leave the service
+     * @param regions the regions the key is replicated to
+     */
+    private static Consumer<CreateKeyRequest.Builder> replicatedKeyRequest(boolean exportable,
+                                                                          String... regions) {
+        return r -> {
+            keyRequest(KeyAlgorithm.AES_256, KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY, exportable)
+                    .accept(r);
+            r.replicationRegions(regions);
+        };
+    }
+
+    /**
+     * A key of the data the cipher protects, replicated to the regions named.
+     *
+     * @param regions the regions the key is replicated to
+     */
+    private static Key createReplicatedKey(String... regions) {
+        Key key = client.createKey(replicatedKeyRequest(true, regions)).key();
+        keyArns.add(key.keyArn());
+        return key;
+    }
+
+    /**
+     * The error a request the service refuses carries.
+     *
+     * @param call the request the service refuses
+     * @param message the words the refusal carries
+     */
+    private static void assertRefusedWithValidationException(ThrowingCallable call, String message) {
+        assertThatThrownBy(call)
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
+                .hasMessageContaining(message);
+    }
+
+    /**
+     * The export of a key under an AS2805 cryptogram.
+     *
+     * @param key the key that leaves
+     * @param encryptionKey the key the cryptogram is wrapped under
+     * @return the export
+     */
+    private static ExportKeyResponse exportAs2805(Key key, Key encryptionKey) {
+        return client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+    }
+
+    /**
+     * The import of a cryptogram that carries a key.
+     *
+     * @param encryptionKey the key the cryptogram is wrapped under
+     * @param cryptogram the cryptogram that carries the key
+     * @param exportable whether the key that comes in may leave the service
+     * @return the import
+     */
+    private static ImportKeyResponse importAs2805(Key encryptionKey, String cryptogram,
+                                                   boolean exportable) {
+        return client.importKey(r -> r
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())
+                        .wrappedKeyCryptogram(cryptogram)
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
+                        .exportable(exportable))));
     }
 
     /** The key identifier of an ARN: the part after the last slash. */
@@ -251,6 +516,144 @@ class PaymentCryptographyTest {
     }
 
     @Test
+    void anImportedKeyIsReplicatedToTheRegionsTheRequestNames() {
+        // The model gives an import the same replication regions a creation does, so a key
+        // that comes in can be replicated as soon as it lands.
+        Key wrapping = createWrappingKey();
+        Key key = createAesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.tr31KeyBlock(b -> b.wrappingKeyIdentifier(wrapping.keyArn()))));
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .replicationRegions("us-west-2")
+                .keyMaterial(m -> m.tr31KeyBlock(b -> b
+                        .wrappingKeyIdentifier(wrapping.keyArn())
+                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial()))));
+
+        assertThat(imported.key().multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+        assertThat(imported.key().primaryRegion()).isEqualTo("us-east-1");
+        // The imported key is cleaned up with the others, so it does not stay behind.
+        keyArns.add(imported.key().keyArn());
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughAnAs2805Cryptogram() {
+        Key encryptionKey = createKeyEncryptionKey();
+        Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        ExportKeyResponse exported = exportAs2805(key, encryptionKey);
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = importAs2805(encryptionKey, exported.wrappedKey().keyMaterial(),
+                true);
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+        // The key that comes back is the key that left, so its check value is the one the
+        // exported key had.
+        assertThat(imported.key().keyCheckValue()).isEqualTo(key.keyCheckValue());
+        // The key came into the service, so the cleanup has to take it away again.
+        keyArns.add(imported.key().keyArn());
+    }
+
+    @Test
+    void anAs2805ImportKeepsTheExportabilityTheRequestNamed() {
+        // The model carries the exportability at the top level of the AS2805 import, so a
+        // key imported as one that may not leave is one that may not leave.
+        Key encryptionKey = createKeyEncryptionKey();
+        Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        ExportKeyResponse exported = exportAs2805(key, encryptionKey);
+
+        ImportKeyResponse imported = importAs2805(encryptionKey, exported.wrappedKey().keyMaterial(),
+                false);
+
+        assertThat(imported.key().exportable()).isFalse();
+        // The key came into the service, so the cleanup has to take it away again.
+        keyArns.add(imported.key().keyArn());
+    }
+
+    @Test
+    void aCryptogramUnderEachSupportedVariantIsServed() {
+        // The model names four variants, and the service serves every one of them. A
+        // variant says what the key is for, so the key that leaves under it is a key of
+        // that purpose.
+        Key encryptionKey = createKeyEncryptionKey();
+
+        Map<As2805KeyVariant, KeyUsage> usages = Map.of(
+                As2805KeyVariant.TERMINAL_MAJOR_KEY_VARIANT_00,
+                        KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY,
+                As2805KeyVariant.DATA_ENCRYPTION_KEY_VARIANT_22,
+                        KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,
+                As2805KeyVariant.MESSAGE_AUTHENTICATION_KEY_VARIANT_24,
+                        KeyUsage.TR31_M0_ISO_16609_MAC_KEY,
+                As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28,
+                        KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        for (Map.Entry<As2805KeyVariant, KeyUsage> entry : usages.entrySet()) {
+            As2805KeyVariant variant = entry.getKey();
+            // AS2805's cryptography is all TDES, so every key is a TDES one.
+            Key key = createKey(KeyAlgorithm.TDES_3_KEY, entry.getValue());
+
+            ExportKeyResponse exported = client.exportKey(r -> r
+                    .exportKeyIdentifier(key.keyArn())
+                    .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                            .as2805KeyVariant(variant)
+                            .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+
+            assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                    .as(variant.toString())
+                    .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
+            assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+        }
+    }
+
+    @Test
+    void aCryptogramUnderAVariantThatIsNotTheKeysPurposeIsRefused() {
+        // The variant says what the key is for, so a key of another purpose cannot leave
+        // under it.
+        Key encryptionKey = createKeyEncryptionKey();
+        Key key = createTdesKey();
+
+        assertRefusedWithValidationException(() -> client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.TERMINAL_MAJOR_KEY_VARIANT_00)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())))),
+                "AS2805 variant");
+    }
+
+    @Test
+    void aCryptogramUnderAKeyThatIsNotAKeyEncryptionKeyIsRefused() {
+        // A key that is not a key encryption key cannot be the one a cryptogram is wrapped
+        // under.
+        Key dataKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(dataKey.keyArn());
+        Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        assertThatThrownBy(() -> client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(dataKey.keyArn())))))
+                .isInstanceOf(AwsServiceException.class)
+                .hasMessageContaining("key encryption key");
+    }
+
+    @Test
     void aKeyIsCreatedDisabledAndWithTags() {
         Key key = client.createKey(r -> r
                 .keyAttributes(a -> a
@@ -321,6 +724,48 @@ class PaymentCryptographyTest {
                 .stream()
                 .collect(Collectors.toMap(Tag::key, Tag::value, (a, b) -> a));
         assertThat(tags).containsEntry("owner", "compat");
+    }
+
+    @Test
+    void aResourcePolicyIsPutReadAndDeleted() {
+        Key key = createAesKey();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        assertThat(client.putResourcePolicy(r -> r
+                .resourceArn(key.keyArn())
+                .policy(policy)).policy()).isEqualTo(policy);
+        assertThat(client.getResourcePolicy(r -> r.resourceArn(key.keyArn())).policy())
+                .isEqualTo(policy);
+
+        client.deleteResourcePolicy(r -> r.resourceArn(key.keyArn()));
+
+        assertThatThrownBy(() -> client.getResourcePolicy(r -> r.resourceArn(key.keyArn())))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void aPublicResourcePolicyIsRefused() {
+        Key key = createAesKey();
+
+        assertThatThrownBy(() -> client.putResourcePolicy(r -> r
+                .resourceArn(key.keyArn())
+                .policy("{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\"}]}")))
+                .isInstanceOf(PublicPolicyException.class);
+    }
+    @Test
+    void aKeyIsStoppedAndStartedAgain() {
+        Key key = createAesKey();
+
+        Key stopped = client.stopKeyUsage(r -> r.keyIdentifier(key.keyArn())).key();
+        assertThat(stopped.enabled()).isFalse();
+        assertThat(stopped.usageStopTimestamp()).isNotNull();
+
+        Key started = client.startKeyUsage(r -> r.keyIdentifier(key.keyArn())).key();
+        assertThat(started.enabled()).isTrue();
+        assertThat(started.usageStartTimestamp()).isNotNull();
     }
 
     /**
@@ -592,6 +1037,66 @@ class PaymentCryptographyTest {
                 new X500Name("CN=" + subjectName), subject.getPublic());
         return new JcaX509CertificateConverter().getCertificate(builder.build(
                 new JcaContentSignerBuilder("SHA256withRSA").build(issuer.getPrivate())));
+    }
+
+    @Test
+    void anExportSigningKeyThatIsNotRsa2048IsRefused() {
+        // The block is signed with the key the export parameters issue, and the block's
+        // signature is an RSA one, so a signing key that is not an RSA_2048 one cannot
+        // sign it.
+        assertRefusedWithValidationException(() -> client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.ECC_NIST_P256)),
+                "RSA_2048");
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughATr34KeyBlock() {
+        // The parameters of the import name the certificate the block is wrapped under, and
+        // the parameters of the export name the certificate the block is signed with.
+        GetParametersForImportResponse importParameters = client.getParametersForImport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+        GetParametersForExportResponse exportParameters = client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+
+        // Each certificate is the authority of the party it belongs to.
+        Key receiver = importPublicKey(importParameters.wrappingKeyCertificate());
+        Key sender = importPublicKey(exportParameters.signingKeyCertificate());
+
+        Key key = createTdesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(receiver.keyArn())
+                        .wrappingKeyCertificate(importParameters.wrappingKeyCertificate())
+                        .exportToken(exportParameters.exportToken())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.TR34_KEY_BLOCK);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(sender.keyArn())
+                        .signingKeyCertificate(exportParameters.signingKeyCertificate())
+                        .importToken(importParameters.importToken())
+                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+        // The key that comes back is the key that left, so its check value is the one the
+        // exported key had.
+        assertThat(imported.key().keyCheckValue()).isEqualTo(key.keyCheckValue());
+        // The key came into the service, so the cleanup has to take it away again.
+        keyArns.add(imported.key().keyArn());
     }
 
 }

@@ -19,8 +19,10 @@ import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -68,6 +70,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -108,7 +111,7 @@ import java.util.regex.Pattern;
 import static io.floci.aws.core.common.ReservedTags.rejectUnknownReservedTags;
 
 @ApplicationScoped
-public class CognitoService implements ResourceProvider {
+public class CognitoService implements ResourceProvider, StoredResourceArns {
     private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
     private static final Duration MIN_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofMinutes(5);
     private static final Duration MAX_ACCESS_AND_ID_TOKEN_VALIDITY = Duration.ofDays(1);
@@ -1132,6 +1135,41 @@ public class CognitoService implements ResourceProvider {
     public Map<String, String> listTagsForResource(String resourceArn) {
         UserPool pool = describeUserPoolByArn(resourceArn);
         return new HashMap<>(pool.getUserPoolTags() != null ? pool.getUserPoolTags() : Map.of());
+    }
+
+    @Override
+    public String namespace() {
+        return "cognito-idp";
+    }
+
+    /** A request names a user pool by the id Cognito minted, which its ARN ends in, so there is nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the user pool whose ARN is {@code arn}, in the request's account, where the handlers read: an ARN of
+     * another account names none. Read in place under the pool's id, a pool stored before storage was account-aware
+     * included, and matched on the whole ARN, or on the id for a pool stored before pools recorded their ARN, as
+     * {@link #describeUserPoolByArn} matches it. Tag calls store a new map under the pool's lock, so the read is of
+     * one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cognito-idp")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId()) || !parsed.resource().startsWith("userpool/")) {
+            return Map.of();
+        }
+        Map<String, String> tags = AccountAwareStorageBackend.readInAccount(poolStore, parsed.accountId(),
+                        parsed.resource().substring("userpool/".length()))
+                .filter(pool -> pool.getArn() == null || arn.equals(pool.getArn()))
+                .map(UserPool::getUserPoolTags)
+                .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
     }
 
     private static String extractUserPoolIdFromArn(String resourceArn) {
@@ -3634,7 +3672,8 @@ public class CognitoService implements ResourceProvider {
                     Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                             pool, client, triggerUser, "CustomMessage_SignUp", clientMetadata);
                     messageDispatcher.dispatch(pool, triggerUser, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
-                            code, List.of(deliveryTarget.deliveryMedium()), customMessage);
+                            code, List.of(deliveryTarget.deliveryMedium()), customMessage,
+                            () -> signUpConfirmationLink(client, triggerUser, code));
                 }
             } catch (VerificationCodeException e) {
                 rollbackSignUpConfirmationArtifacts(user);
@@ -3691,6 +3730,24 @@ public class CognitoService implements ResourceProvider {
         }
         authFlowHandler.firePostConfirmation(pool, client, triggerUser,
                 clientMetadata, "PostConfirmation_ConfirmSignUp");
+    }
+
+    /**
+     * Confirms a sign-up opened from a shared-host link. The request carries no AWS credential,
+     * so it arrives in the default account. The client id is unique across accounts, and the
+     * confirmation runs in the account that owns that client. A custom domain pins its account
+     * before the controller calls {@link #confirmSignUp} instead of this method.
+     */
+    void confirmSignUpFromSharedHost(String clientId, String username, String confirmationCode) {
+        if (clientStore instanceof AccountAwareStorageBackend<UserPoolClient> aware) {
+            String accountId = aware.findAnyAccountEntry(clientId)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400))
+                    .account();
+            RequestScopes.runAs(accountId, () ->
+                    confirmSignUp(clientId, username, confirmationCode, Map.of()));
+            return;
+        }
+        confirmSignUp(clientId, username, confirmationCode, Map.of());
     }
 
     private CognitoUser confirmSignUpUnderUserLock(UserPoolClient client, UserPool pool, String username,
@@ -3772,7 +3829,8 @@ public class CognitoService implements ResourceProvider {
                 Map<String, Object> customMessage = authFlowHandler.fireCustomMessage(
                         pool, client, user, "CustomMessage_ResendCode", clientMetadata);
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
-                        code, List.of(deliveryTarget.deliveryMedium()), customMessage);
+                        code, List.of(deliveryTarget.deliveryMedium()), customMessage,
+                        () -> signUpConfirmationLink(client, user, code));
             }
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
@@ -4859,6 +4917,24 @@ public class CognitoService implements ResourceProvider {
         return findCustomDomainForPool(poolId)
                 .map(d -> "https://" + d.getDomain() + "/oauth2/" + operation)
                 .orElse(baseUrl + "/cognito-idp/oauth2/" + operation);
+    }
+
+    /**
+     * The URL in a {@code CONFIRM_WITH_LINK} sign-up or resend email. A custom domain serves
+     * {@code /confirmUser}. Otherwise the link is on Floci's own host. A prefix domain is stored
+     * but not served, so it is not used here.
+     */
+    private String signUpConfirmationLink(UserPoolClient client, CognitoUser user, String code) {
+        String query = "client_id=" + urlEncode(client.getClientId())
+                + "&user_name=" + urlEncode(user.getUsername())
+                + "&confirmation_code=" + urlEncode(code);
+        return findCustomDomainForPool(client.getUserPoolId())
+                .map(domain -> "https://" + domain.getDomain() + "/confirmUser?" + query)
+                .orElse(baseUrl + "/cognito-idp/confirmUser?" + query);
+    }
+
+    private static String urlEncode(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
     // ──────────────────────────── Private helpers ────────────────────────────

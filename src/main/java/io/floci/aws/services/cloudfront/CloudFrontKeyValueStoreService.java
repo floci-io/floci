@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudfront;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
@@ -43,16 +44,25 @@ public class CloudFrontKeyValueStoreService implements StoredResourceArns {
     static final int MAX_STORES = 200;
 
     private static final Pattern STORE_NAME = Pattern.compile("[a-zA-Z0-9_-]{1,64}");
+    private static final Pattern ISSUED_ETAG = Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
     private static final int MAX_COMMENT_LENGTH = 128;
     private static final String STATUS_READY = "READY";
 
     private final StorageBackend<String, KeyValueStore> store;
+    /**
+     * The tags CloudFront holds by resource ARN, which {@link CloudFrontService} keeps; the factory hands every caller
+     * of the file the same store, so this one reads the tags it writes.
+     */
+    private final StorageBackend<String, Map<String, String>> tags;
     private final RegionResolver regionResolver;
 
     @Inject
     public CloudFrontKeyValueStoreService(StorageFactory factory, RegionResolver regionResolver) {
         this.store = factory.create("cloudfront", "cloudfront-key-value-stores.json",
                 new TypeReference<Map<String, KeyValueStore>>() {});
+        this.tags = factory.create("cloudfront", CloudFrontService.TAGS_FILE,
+                new TypeReference<Map<String, Map<String, String>>>() {});
         this.regionResolver = regionResolver;
     }
 
@@ -142,6 +152,26 @@ public class CloudFrontKeyValueStoreService implements StoredResourceArns {
             return Optional.empty();
         }
         return store.get(names.getFirst()).map(KeyValueStore::getArn);
+    }
+
+    /**
+     * The tags CloudFront holds under {@code arn}, whatever its resource type, read in place where its tag handlers
+     * keep and read them: in the account the request runs in, by the whole ARN. CloudFront ARNs name the configured
+     * default account whichever account owns the resource, so the ARN's account does not say where its tags are.
+     * Empty when it holds none there.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        Map<String, String> held = new LinkedHashMap<>();
+        if (!AwsArnUtils.isArnFor(arn, "cloudfront")) {
+            return held;
+        }
+        tags.get(arn).ifPresent(stored -> stored.forEach((key, value) -> {
+            if (key != null && value != null) {
+                held.put(key, value);
+            }
+        }));
+        return held;
     }
     public Optional<KeyValueStore> findByArn(String arn) {
         if (arn == null) {
@@ -273,10 +303,15 @@ public class CloudFrontKeyValueStoreService implements StoredResourceArns {
     }
 
     private static void requireControlPlaneEtag(KeyValueStore kvs, String ifMatch) {
-        if (ifMatch == null || !kvs.getEtag().equals(ifMatch)) {
+        if (kvs.getEtag().equals(ifMatch)) {
+            return;
+        }
+        if (ifMatch == null || !ISSUED_ETAG.matcher(ifMatch).matches()) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
         }
+        throw new AwsException("PreconditionFailed",
+                "The precondition in the If-Match header did not match the current resource.", 412);
     }
 
     private static void requireDataPlaneEtag(KeyValueStore kvs, String ifMatch) {

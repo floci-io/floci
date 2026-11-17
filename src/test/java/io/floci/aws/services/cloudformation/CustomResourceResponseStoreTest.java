@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.lambda.LambdaService;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -17,10 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
-import java.util.logging.Handler;
-import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -128,36 +126,16 @@ class CustomResourceResponseStoreTest {
 
     @Test
     void toleratedWaitSliceTimeoutIsLogged() throws Exception {
-        Logger logger = Logger.getLogger(CustomResourceResponseStore.class.getName());
-        Level previousLevel = logger.getLevel();
-        List<LogRecord> records = new ArrayList<>();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                records.add(record);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        handler.setLevel(Level.ALL);
-        logger.setLevel(Level.ALL);
-        logger.addHandler(handler);
-        try {
+        List<LogRecord> records = LogCapture.capture(CustomResourceResponseStore.class, () -> {
             String token = store.register();
             heartbeatDuringWait(token);
             response.onWait(remaining -> store.complete(token, success()));
-
-            store.await(token, IDLE_TIMEOUT);
-        } finally {
-            logger.removeHandler(handler);
-            logger.setLevel(previousLevel);
-        }
+            try {
+                store.await(token, IDLE_TIMEOUT);
+            } catch (TimeoutException e) {
+                throw new AssertionError("the wait timed out", e);
+            }
+        });
 
         assertTrue(records.stream().anyMatch(record -> record.getMessage() != null
                         && record.getMessage().contains("wait slice")),

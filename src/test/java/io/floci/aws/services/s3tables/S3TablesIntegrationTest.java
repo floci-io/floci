@@ -11,12 +11,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.regex.Pattern;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
@@ -90,7 +92,7 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200)
                 .contentType(containsString(JSON_CONTENT_TYPE))
-                .body("tableARN", equalTo(BUCKET_ARN + "/table/" + TABLE_NAME))
+                .body("tableARN", matchesPattern(Pattern.quote(BUCKET_ARN) + "/table/[0-9a-f-]{36}"))
                 .body("versionToken", not(""))
                 .extract()
                 .path("versionToken");

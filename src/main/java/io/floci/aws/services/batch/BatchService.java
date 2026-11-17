@@ -9,6 +9,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -1037,7 +1038,7 @@ public class BatchService {
                     return;
                 }
                 BatchRunResult result = shouldRunDocker()
-                        ? dockerRunner.run(attemptJob, attemptNumber)
+                        ? dockerRunner.run(attemptJob, attemptNumber, subnetFor(attemptJob))
                         : immediateSuccess(attemptJob);
                 if (finishAttempt(accountId, jobId, result, attemptNumber >= maxAttempts)) {
                     return;
@@ -1049,6 +1050,30 @@ public class BatchService {
         } finally {
             dockerRunner.clearStopRequest(jobId);
         }
+    }
+
+    /**
+     * The subnet a job runs in: AWS Batch places it in a subnet of a compute environment of its queue, here the first
+     * subnet of the first, in the queue's order, that names any. Null for a queue of unmanaged compute environments.
+     * Read as the job's account, since jobs run outside the SubmitJob request.
+     */
+    private String subnetFor(BatchJob job) {
+        return RequestScopes.callAs(job.getAccountId(), job.getRegion(), () -> {
+            BatchJobQueue queue = resolveJobQueueOptional(job.getJobQueue()).orElse(null);
+            if (queue == null || queue.getComputeEnvironmentOrder() == null) {
+                return null;
+            }
+            return queue.getComputeEnvironmentOrder().stream()
+                    .sorted(Comparator.comparingInt(BatchComputeEnvironmentOrder::getOrder))
+                    .map(order -> resolveComputeEnvironmentOptional(order.getComputeEnvironment()))
+                    .flatMap(Optional::stream)
+                    .map(environment -> environment.getComputeResources().get("subnets"))
+                    .filter(subnets -> subnets instanceof List<?> list && !list.isEmpty()
+                            && list.getFirst() instanceof String)
+                    .map(subnets -> (String) ((List<?>) subnets).getFirst())
+                    .findFirst()
+                    .orElse(null);
+        });
     }
 
     private boolean shouldRunDocker() {
@@ -1163,10 +1188,11 @@ public class BatchService {
             results.add(null);
         }
         List<Thread> threads = new ArrayList<>(executions.size());
+        String subnetId = subnetFor(job);
         for (int i = 0; i < executions.size(); i++) {
             int nodeIndex = i;
             threads.add(Thread.startVirtualThread(() -> {
-                BatchRunResult result = dockerRunner.run(job, attemptNumber, executions.get(nodeIndex));
+                BatchRunResult result = dockerRunner.run(job, attemptNumber, executions.get(nodeIndex), subnetId);
                 synchronized (results) {
                     results.set(nodeIndex, result);
                 }

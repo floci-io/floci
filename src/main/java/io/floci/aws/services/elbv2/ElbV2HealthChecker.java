@@ -3,6 +3,7 @@ package io.floci.aws.services.elbv2;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.concurrent.SocketDeadline;
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
@@ -40,6 +41,7 @@ public class ElbV2HealthChecker implements Resettable {
     private final WorkerExecutor probeWorkers;
     private final EmulatorConfig config;
     private final Ec2Service ec2Service;
+    private final Ec2InstancePorts instancePorts;
     private final SSLSocketFactory backendTls = backendTls();
 
     // tgArn → (targetKey → TargetState)
@@ -48,11 +50,17 @@ public class ElbV2HealthChecker implements Resettable {
     private final Map<String, Long> timers = new ConcurrentHashMap<>();
     private final Semaphore probeSlots = new Semaphore(MAX_CONCURRENT_PROBES);
 
+    ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
+        this(vertx, config, ec2Service, new Ec2InstancePorts());
+    }
+
     @Inject
-    public ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
+    public ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service,
+                              Ec2InstancePorts instancePorts) {
         this.vertx = vertx;
         this.config = config;
         this.ec2Service = ec2Service;
+        this.instancePorts = instancePorts;
         this.probeWorkers = vertx.createSharedWorkerExecutor("floci-elbv2-health-probes", MAX_CONCURRENT_PROBES);
     }
 
@@ -154,8 +162,7 @@ public class ElbV2HealthChecker implements Resettable {
     }
 
     public boolean isHealthy(String tgArn, TargetDescription target, int port) {
-        String state = getState(tgArn, target.getId(), port);
-        return "healthy".equals(state) || "initial".equals(state);
+        return "healthy".equals(getState(tgArn, target.getId(), port));
     }
 
     void probeAll(String tgArn, TargetGroup tg) {
@@ -201,8 +208,9 @@ public class ElbV2HealthChecker implements Resettable {
                         state.workerRunning = true;
                     }
                     return SocketDeadline.call(timeout, () -> {
-                        String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, targetId);
-                        return probeOnce(host, probePort, path, timeout, protocol);
+                        Ec2InstancePorts.Endpoint endpoint = ElbV2TargetResolver.resolve(ec2Service,
+                                instancePorts, tg, targetId, probePort);
+                        return probeOnce(endpoint.host(), endpoint.port(), path, timeout, protocol);
                     }, () -> {
                         synchronized (state) {
                             state.workerRunning = false;

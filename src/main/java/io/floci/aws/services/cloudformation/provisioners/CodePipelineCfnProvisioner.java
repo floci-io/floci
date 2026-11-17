@@ -2,7 +2,6 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -17,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -31,6 +31,9 @@ import java.util.Set;
 public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(CodePipelineCfnProvisioner.class);
+    // Configuration holds provider-defined keys that action executors match verbatim.
+    private static final CfnApiShapeConverter.Rules API_SHAPE =
+            new CfnApiShapeConverter.Rules(Map.of(), Set.of("Configuration"), Set.of(), false);
 
     private final CodePipelineService codePipelineService;
     private final RegionResolver regionResolver;
@@ -96,7 +99,7 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
     private static final String DISABLED_STAGES_ATTR = "__FlociCodePipelineDisabledStages";
 
     private void provisionPipeline(StackResource r, JsonNode props, ProvisionContext ctx) {
-        ObjectNode declaration = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
+        ObjectNode declaration = (ObjectNode) CfnApiShapeConverter.convert(ctx.engine().resolveNode(props), API_SHAPE);
         JsonNode transitions = declaration.remove("disableInboundStageTransitions");
         JsonNode tags = declaration.remove("tags");
         declaration.remove("restartExecutionOnUpdate");
@@ -212,7 +215,7 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionCustomActionType(StackResource r, JsonNode props, ProvisionContext ctx) {
-        ObjectNode request = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
+        ObjectNode request = (ObjectNode) CfnApiShapeConverter.convert(ctx.engine().resolveNode(props), API_SHAPE);
         request.remove("tags");
         String physicalId = request.path("category").asText() + "|Custom|"
                 + request.path("provider").asText() + "|" + request.path("version").asText("1");
@@ -231,7 +234,7 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionWebhook(StackResource r, JsonNode props, ProvisionContext ctx) {
-        ObjectNode webhook = (ObjectNode) lowerKeys(ctx.engine().resolveNode(props));
+        ObjectNode webhook = (ObjectNode) CfnApiShapeConverter.convert(ctx.engine().resolveNode(props), API_SHAPE);
         JsonNode registerNode = webhook.remove("registerWithThirdParty");
         boolean register = registerNode != null && registerNode.asBoolean(false);
         String previousPhysicalId = r.getPhysicalId();
@@ -255,34 +258,5 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(name);
         r.getAttributes().put("Url", response.path("webhook").path("url").asText(""));
-    }
-
-    /**
-     * Recursively lowercases the first letter of every object key — except inside
-     * {@code Configuration} maps, whose keys are opaque provider-defined strings
-     * ({@code Owner}, {@code Repo}, {@code ProjectName}, ...) that the action executors
-     * match verbatim.
-     */
-    private JsonNode lowerKeys(JsonNode node) {
-        if (node instanceof ObjectNode objectNode) {
-            ObjectNode result = mapper.createObjectNode();
-            objectNode.fields().forEachRemaining(entry -> {
-                String key = entry.getKey();
-                if ("Configuration".equals(key)) {
-                    result.set("configuration", entry.getValue().deepCopy());
-                    return;
-                }
-                String lowered = key.isEmpty()
-                        ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
-                result.set(lowered, lowerKeys(entry.getValue()));
-            });
-            return result;
-        }
-        if (node instanceof ArrayNode arrayNode) {
-            ArrayNode result = mapper.createArrayNode();
-            arrayNode.forEach(entry -> result.add(lowerKeys(entry)));
-            return result;
-        }
-        return node;
     }
 }

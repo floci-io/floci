@@ -5,11 +5,13 @@ Usage: partition.sh <all-classes.txt> <shard-total> <shard-index>
 
 <all-classes.txt> holds one test class per line in surefire includesFile path
 format (io/github/.../FooTest, no extension). Classes sharing a @TestProfile are
-assigned to the SAME shard atomically: per-shard Quarkus augmentation cost is
+assigned to the SAME shard atomically, except known slow classes: per-shard Quarkus augmentation cost is
 (distinct profiles in shard) x ~5.4s, so splitting a profile group pays its
 augmentation once per shard it touches. Profile-less classes fill the remainder.
 A class counts as one, but for the few in SLOW_CLASSES, whose run time would
-otherwise be invisible to a partition that balances class counts.
+otherwise be invisible to a partition that balances class counts. These are
+separate groups even when they share a profile: saving one augmentation must
+not force minutes of Docker work onto the same shard.
 
 Deterministic: sorted inputs, greedy least-loaded bin-packing, no RNG/timestamps.
 Exit 2 on bad arguments or an unreadable input file.
@@ -86,6 +88,10 @@ def main():
         if key is None:
             plain.append(c)
         else:
+            if weight(c) > 1:
+                key = (key, c)
+            else:
+                key = (key, '')
             groups.setdefault(key, []).append(c)
 
     load = [0] * total

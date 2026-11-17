@@ -1,26 +1,16 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.TaskDefinition;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Task definitions persisted before their storage key carried the region ({@code family:revision})
@@ -37,9 +27,9 @@ class EcsTaskDefinitionLegacyKeyTest {
 
     @Test
     void anotherRegionsRegistrationKeepsALegacyDefinition() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
-        storage.taskDefinitions().put(FAMILY + ":1", legacyDefinition());
-        EcsService service = newService(storage);
+        AccountAwareStorageBackend<TaskDefinition> taskDefinitions = taskDefinitionsStore();
+        taskDefinitions.put(FAMILY + ":1", legacyDefinition());
+        EcsService service = newService(taskDefinitions);
 
         TaskDefinition other = register(service, OTHER);
 
@@ -50,13 +40,13 @@ class EcsTaskDefinitionLegacyKeyTest {
 
     @Test
     void aLegacyDefinitionIsRefiledOnItsNextWriteAndListedOnce() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
-        storage.taskDefinitions().put(FAMILY + ":1", legacyDefinition());
-        EcsService service = newService(storage);
+        AccountAwareStorageBackend<TaskDefinition> taskDefinitions = taskDefinitionsStore();
+        taskDefinitions.put(FAMILY + ":1", legacyDefinition());
+        EcsService service = newService(taskDefinitions);
 
         service.deregisterTaskDefinition(FAMILY + ":1", REGION);
 
-        assertEquals(List.of(REGION + "::" + FAMILY + ":1"), List.copyOf(storage.taskDefinitions().keys()));
+        assertEquals(List.of(REGION + "::" + FAMILY + ":1"), List.copyOf(taskDefinitions.keys()));
         assertEquals(List.of(LEGACY_ARN), service.listTaskDefinitions(REGION, FAMILY, "INACTIVE", null, null, null)
                 .arns());
         assertEquals(2, register(service, REGION).getRevision());
@@ -64,12 +54,12 @@ class EcsTaskDefinitionLegacyKeyTest {
 
     @Test
     void aStoredDefinitionWithoutAnArnBreaksNoLookup() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        AccountAwareStorageBackend<TaskDefinition> taskDefinitions = taskDefinitionsStore();
         TaskDefinition unreadable = legacyDefinition();
         unreadable.setFamily(FAMILY + "-unreadable");
         unreadable.setTaskDefinitionArn(null);
-        storage.taskDefinitions().put(FAMILY + "-unreadable:1", unreadable);
-        EcsService service = newService(storage);
+        taskDefinitions.put(FAMILY + "-unreadable:1", unreadable);
+        EcsService service = newService(taskDefinitions);
 
         TaskDefinition registered = register(service, REGION);
 
@@ -82,11 +72,11 @@ class EcsTaskDefinitionLegacyKeyTest {
 
     @Test
     void aStoredDefinitionWithoutAnArnStaysInTheDefaultRegion() {
-        InMemoryStorageFactory storage = new InMemoryStorageFactory();
+        AccountAwareStorageBackend<TaskDefinition> taskDefinitions = taskDefinitionsStore();
         TaskDefinition unreadable = legacyDefinition();
         unreadable.setTaskDefinitionArn(null);
-        storage.taskDefinitions().put(FAMILY + ":1", unreadable);
-        EcsService service = newService(storage);
+        taskDefinitions.put(FAMILY + ":1", unreadable);
+        EcsService service = newService(taskDefinitions);
 
         TaskDefinition other = register(service, OTHER);
 
@@ -101,7 +91,7 @@ class EcsTaskDefinitionLegacyKeyTest {
     // NullPointerException instead of the ClientException any unknown reference gets.
     @Test
     void aMissingReferenceInAPopulatedRegionIsAClientException() {
-        EcsService service = newService(new InMemoryStorageFactory());
+        EcsService service = EcsServiceFixtures.mockModeService();
         register(service, REGION);
 
         AwsException e = assertThrows(AwsException.class, () -> service.describeTaskDefinition(null, REGION));
@@ -129,41 +119,15 @@ class EcsTaskDefinitionLegacyKeyTest {
         return service.listTaskDefinitions(region, FAMILY, null, null, null, null).arns();
     }
 
-    private static EcsService newService(StorageFactory storage) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(true);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        EcsService service = new EcsService(
-                new RegionResolver(REGION, "000000000000"),
-                mock(EcsContainerManager.class),
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                storage,
-                null);
-        service.initializeStorage();
-        return service;
+    private static AccountAwareStorageBackend<TaskDefinition> taskDefinitionsStore() {
+        return AccountAwareStorageBackend.inMemory(EcsServiceFixtures.ACCOUNT);
     }
 
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @SuppressWarnings("unchecked")
-        AccountAwareStorageBackend<TaskDefinition> taskDefinitions() {
-            return (AccountAwareStorageBackend<TaskDefinition>) stores.computeIfAbsent("ecs-task-definitions.json",
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                    String fileName,
-                                                    TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
+    /** A service whose task definitions start as {@code taskDefinitions} holds them. */
+    private static EcsService newService(AccountAwareStorageBackend<TaskDefinition> taskDefinitions) {
+        return EcsServiceFixtures.builder()
+                .storageFactory(new InMemoryStorageFactory(EcsServiceFixtures.ACCOUNT)
+                        .withStore("ecs-task-definitions.json", taskDefinitions))
+                .build();
     }
 }

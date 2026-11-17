@@ -10,6 +10,9 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
+import io.floci.aws.services.cloudformation.provisioners.ElbV2CfnProvisioner;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.elbv2.model.Action;
@@ -21,6 +24,7 @@ import io.floci.aws.services.elbv2.model.RuleCondition;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
 import io.floci.aws.services.elbv2.model.TargetHealth;
+import io.floci.aws.testing.ThreadStates;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,6 +39,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -48,6 +54,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -105,6 +112,133 @@ class ElbV2ServiceTest {
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
         stubAlbSubnets(ec2Service);
+    }
+
+    @Test
+    void rollbackRestoresLegacyDuplicateZoneSubnetsWhileNewRequestsRemainStrict() {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "legacy-subnets", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of());
+        List<String> legacy = List.of("subnet-a", "subnet-b", "subnet-c");
+        when(ec2Service.describeSubnets(REGION, legacy, Map.of())).thenReturn(List.of(
+                subnet("subnet-a", REGION + "a"), subnet("subnet-b", REGION + "b"),
+                subnet("subnet-c", REGION + "a")));
+        assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(REGION,
+                lb.getLoadBalancerArn(), legacy));
+        StackResource resource = subnetRollbackResource(lb, legacy);
+
+        assertTrue(new ElbV2CfnProvisioner(service).rollbackUpdate(resource));
+
+        assertEquals(legacy, lb.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+        assertFalse(resource.getAttributes().containsKey(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR));
+        assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(REGION,
+                lb.getLoadBalancerArn(), legacy));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rollbackRetainsSnapshotAndStateWhenPriorSubnetsAreMissingOrInAnotherVpc(boolean foreignVpc) {
+        LoadBalancer lb = service.createLoadBalancer(REGION, "rollback-invalid-subnets", "internal", "application",
+                "ipv4", ALB_SUBNETS, List.of(), Map.of());
+        List<String> prior = List.of("subnet-a", "subnet-b", "subnet-c");
+        Subnet other = subnet("subnet-c", REGION + "a");
+        other.setVpcId("vpc-other");
+        when(ec2Service.describeSubnets(REGION, prior, Map.of())).thenReturn(foreignVpc
+                ? List.of(subnet("subnet-a", REGION + "a"), subnet("subnet-b", REGION + "b"), other)
+                : List.of(subnet("subnet-a", REGION + "a"), subnet("subnet-b", REGION + "b")));
+        StackResource resource = subnetRollbackResource(lb, prior);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new ElbV2CfnProvisioner(service).rollbackUpdate(resource));
+
+        assertEquals(foreignVpc ? "InvalidConfigurationRequest" : "SubnetNotFound", failure.getErrorCode());
+        assertEquals(ALB_SUBNETS, lb.getAvailabilityZones().stream().map(AvailabilityZone::getSubnetId).toList());
+        assertEquals(String.join(",", prior), resource.getAttributes()
+                .get(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR));
+        assertEquals("vpc-a", lb.getVpcId());
+    }
+
+    private static StackResource subnetRollbackResource(LoadBalancer lb, List<String> subnets) {
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::ElasticLoadBalancingV2::LoadBalancer");
+        resource.setPhysicalId(lb.getLoadBalancerArn());
+        resource.getAttributes().put(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR,
+                String.join(",", subnets));
+        return resource;
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "ap-northeast-3,AWS,none,false",
+        "us-east-1,AWS,none,false",
+        "us-east-1,ALLOW_SINGLE_ZONE,none,true",
+        "us-east-1,AWS,ALLOW_SINGLE_ZONE,true",
+        "ap-northeast-3,ALLOW_SINGLE_ZONE,AWS,false",
+        "us-east-1,ALLOW_SINGLE_ZONE,AWS,false"
+    })
+    void albZonePolicyAppliesToCreateAndSetSubnets(String region, EmulatorConfig.AlbZoneRule global,
+                                                  String regional, boolean allowed) {
+        Map<String, EmulatorConfig.AlbZoneRule> overrides = "none".equals(regional) ? Map.of()
+                : Map.of(region, EmulatorConfig.AlbZoneRule.valueOf(regional));
+        service.config = albZoneConfig(global, overrides);
+        service.regionResolver = new RegionResolver(region, "000000000000");
+        lenient().when(ec2Service.describeSubnets(eq(region), anyList(), eq(Map.of())))
+                .thenAnswer(invocation -> invocation.<List<String>>getArgument(1).stream()
+                        .map(id -> subnet(id, region + ("subnet-a".equals(id) ? "a" : "b"))).toList());
+        lenient().when(ec2Service.requireSubnet(eq(region), anyString()))
+                .thenAnswer(invocation -> subnet(invocation.getArgument(1), region + "a"));
+        LoadBalancer twoZones = service.createLoadBalancer(region, "two-zones", "internal", "application",
+                "ipv4", ALB_SUBNETS, List.of(), Map.of());
+        if (allowed) {
+            LoadBalancer single = service.createLoadBalancer(region, "one-zone", "internal", "application",
+                    "ipv4", List.of("subnet-a"), List.of(), Map.of());
+            assertEquals(1, single.getAvailabilityZones().size());
+            service.setSubnetsFromRequest(region, twoZones.getLoadBalancerArn(), List.of("subnet-a"));
+            assertEquals(1, twoZones.getAvailabilityZones().size());
+        } else {
+            assertThrows(AwsException.class, () -> service.createLoadBalancer(region, "one-zone", "internal",
+                    "application", "ipv4", List.of("subnet-a"), List.of(), Map.of()));
+            assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(region,
+                    twoZones.getLoadBalancerArn(), List.of("subnet-a")));
+            assertEquals(2, twoZones.getAvailabilityZones().size());
+        }
+        assertThrows(AwsException.class, () -> service.createLoadBalancer(region, "no-zone", "internal",
+                "application", "ipv4", List.of(), List.of(), Map.of()));
+        assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(region,
+                twoZones.getLoadBalancerArn(), List.of()));
+    }
+
+    @Test
+    void singleZonePolicyStillRejectsMultipleSubnetsInTheSameZone() {
+        String region = "ap-northeast-3";
+        service.config = albZoneConfig(EmulatorConfig.AlbZoneRule.ALLOW_SINGLE_ZONE, Map.of());
+        Subnet first = subnet("subnet-a", region + "a");
+        Subnet second = subnet("subnet-b", region + "a");
+        when(ec2Service.describeSubnets(region, ALB_SUBNETS, Map.of())).thenReturn(List.of(first, second));
+        when(ec2Service.describeSubnets(region, List.of("subnet-a"), Map.of())).thenReturn(List.of(first));
+        AwsException rejected = assertThrows(AwsException.class, () -> service.createLoadBalancer(region,
+                "same-zone", "internal", "application", "ipv4", ALB_SUBNETS, List.of(), Map.of()));
+        assertEquals("InvalidConfigurationRequest", rejected.getErrorCode());
+        assertEquals("A load balancer cannot be attached to multiple subnets in the same Availability Zone",
+                rejected.getMessage());
+        LoadBalancer single = service.createLoadBalancer(region, "single-zone", "internal", "application",
+                "ipv4", List.of("subnet-a"), List.of(), Map.of());
+        assertThrows(AwsException.class,
+                () -> service.setSubnetsFromRequest(region, single.getLoadBalancerArn(), ALB_SUBNETS));
+        assertEquals(List.of("subnet-a"), single.getAvailabilityZones().stream()
+                .map(AvailabilityZone::getSubnetId).toList());
+    }
+
+    private static EmulatorConfig albZoneConfig(EmulatorConfig.AlbZoneRule global,
+                                                Map<String, EmulatorConfig.AlbZoneRule> overrides) {
+        EmulatorConfig settings = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
+        when(settings.services()).thenReturn(services);
+        when(services.elbv2()).thenReturn(elbv2);
+        when(elbv2.albZoneRule()).thenReturn(global);
+        when(elbv2.albZoneRuleByRegion()).thenReturn(overrides);
+        lenient().when(settings.hostname()).thenReturn(Optional.empty());
+        return settings;
     }
 
     @Test
@@ -734,6 +868,60 @@ class ElbV2ServiceTest {
         assertTrue(newTargetGroup.getLoadBalancerArns().contains(lbArn));
     }
 
+    /**
+     * Creating, modifying and deleting a rule change which target groups the load balancer routes to while holding
+     * the load balancer, as listener changes do: unlinking the groups nothing routes to any more reads every rule of
+     * the load balancer, so a rule changed beside it unlocked could have the link of a group it forwards to dropped.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify", "delete"})
+    void aRuleChangeWaitsForItsLoadBalancerAndLeavesExactlyTheGroupsItForwardsToLinked(String change)
+            throws Exception {
+        String fallback = createTargetGroup("rule-lock-default-" + change);
+        String first = createTargetGroup("rule-lock-first-" + change);
+        String second = createTargetGroup("rule-lock-second-" + change);
+        LoadBalancer lb = service.createLoadBalancer(REGION, "rule-lock-" + change, "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of());
+        String listener = service.createListener(REGION, lb.getLoadBalancerArn(), "HTTP", 80, null, List.of(),
+                List.of(forwardAction(fallback)), List.of(), Map.of()).getListenerArn();
+        Rule rule = "create".equals(change) ? null : service.createRule(REGION, listener,
+                List.of(pathPattern("/app/*")), 10, List.of(forwardAction(first)), Map.of());
+        AtomicReference<Thread> writer = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> write;
+            synchronized (lb) {
+                write = worker.submit(() -> {
+                    writer.set(Thread.currentThread());
+                    switch (change) {
+                        case "create" -> service.createRule(REGION, listener, List.of(pathPattern("/app/*")), 10,
+                                List.of(forwardAction(first)), Map.of());
+                        case "modify" -> service.modifyRule(REGION, rule.getRuleArn(), null,
+                                List.of(forwardAction(second)));
+                        default -> service.deleteRule(REGION, rule.getRuleArn());
+                    }
+                });
+                ThreadStates.awaitBlockedOrDone(writer, write);
+                assertFalse(write.isDone(), "the rule changed without waiting for its load balancer");
+                ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(writer.get().threadId());
+                assertEquals(Thread.State.BLOCKED, info.getThreadState());
+                assertEquals(Thread.currentThread().threadId(), info.getLockOwnerId());
+            }
+            write.get(5, TimeUnit.SECONDS);
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+        assertEquals(List.of(lb.getLoadBalancerArn()), loadBalancersOf(fallback));
+        assertEquals("create".equals(change) ? List.of(lb.getLoadBalancerArn()) : List.of(), loadBalancersOf(first));
+        assertEquals("modify".equals(change) ? List.of(lb.getLoadBalancerArn()) : List.of(), loadBalancersOf(second));
+    }
+
+    private List<String> loadBalancersOf(String targetGroupArn) {
+        return service.describeTargetGroups(REGION, null, List.of(targetGroupArn), null).getFirst()
+                .getLoadBalancerArns();
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {1, 65535})
     void gatewayListenerRejectsExplicitPortWithoutPublication(int port) {
@@ -937,6 +1125,9 @@ class ElbV2ServiceTest {
     void createLoadBalancerUsesConfiguredHostnameForDnsSuffix() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.hostname()).thenReturn(Optional.of("floci"));
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.elbv2()).thenReturn(mock(EmulatorConfig.ElbV2ServiceConfig.class));
         service.config = config;
 
         String dnsName = service.createLoadBalancer(
@@ -1159,6 +1350,22 @@ class ElbV2ServiceTest {
             service.registerTargets(REGION, tgArn, List.of(target));
         }
         assertEquals(4, service.describeTargetGroups(REGION, null, List.of(tgArn), null).getFirst().getTargets().size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"100.64.0.1", "100.100.100.200", "100.127.255.254"})
+    void registerTargetsAcceptsCarrierGradeIpAddresses(String address) {
+        TargetGroup group = service.createTargetGroup(
+                REGION, "carrier-grade-tg", "HTTP", "HTTP1", 9999, "vpc-a", "ip",
+                "HTTP", "traffic-port", true, "/v1/ready", 30, 5, 5, 2, "200", "ipv4", Map.of());
+        TargetDescription target = new TargetDescription();
+        target.setId(address);
+
+        service.registerTargets(REGION, group.getTargetGroupArn(), List.of(target));
+
+        assertEquals(List.of(address), service.describeTargetGroups(REGION, null,
+                List.of(group.getTargetGroupArn()), null).getFirst().getTargets().stream()
+                .map(TargetDescription::getId).toList());
     }
 
     @ParameterizedTest

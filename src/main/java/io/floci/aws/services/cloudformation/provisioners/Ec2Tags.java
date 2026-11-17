@@ -169,7 +169,7 @@ final class Ec2Tags {
         }
     }
 
-    private static Set<String> touched(Set<String> owned, Map<String, String> desired) {
+    static Set<String> touched(Set<String> owned, Map<String, String> desired) {
         Set<String> touched = new LinkedHashSet<>(owned);
         touched.addAll(desired.keySet());
         return touched;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Vendor ECR request constraints from botocore's Apache-2.0 service model.
 
-`EcrRequestShapes` checks the registry setting and repository creation template actions against
+`EcrRequestShapes` checks the registry setting, repository creation template and image listing actions against
 the vendored file through the shared `RequestConstraintCheck`: member types, required members, lengths and counts, patterns and
 enum values, as the model states them.
 
@@ -30,6 +30,7 @@ OPERATIONS = (
     "BatchGetRepositoryScanningConfiguration",
     "CreateRepositoryCreationTemplate", "UpdateRepositoryCreationTemplate",
     "DescribeRepositoryCreationTemplates", "DeleteRepositoryCreationTemplate",
+    "ListImages", "DescribeImages",
 )
 
 

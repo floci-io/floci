@@ -1,6 +1,10 @@
 package io.floci.aws.services.emrserverless;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -11,6 +15,9 @@ import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecr.model.ImageDetail;
+import io.floci.aws.services.ecr.model.ImageIdentifier;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.ApplicationSummary;
@@ -19,21 +26,27 @@ import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.ListApplicationsRequest;
 import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
+import io.floci.aws.services.iam.IamService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -44,10 +57,31 @@ public class EmrServerlessService {
     // The EMR Serverless user guide's tagging limitations: at most 50 user-created tags per resource
     // (the model's TagMap max of 200 only bounds a single request), and no "aws:" prefix, in any case,
     // on a key or a value. TagKey and TagValue share one character set in the API model.
+    private static final String NOT_STOPPED_FOR_UPDATE =
+            "Application must be in a stopped or created state in order to be updated.";
+    // The settings an update may change only on a CREATED or STOPPED application: all but its maximum capacity and
+    // its custom images, which a STARTED one takes too (checkStartedUpdate).
+    private static final List<Function<UpdateApplicationRequest, Object>> STOPPED_ONLY_SETTINGS = List.of(
+            UpdateApplicationRequest::getReleaseLabel, UpdateApplicationRequest::getInitialCapacity,
+            UpdateApplicationRequest::getAutoStartConfiguration, UpdateApplicationRequest::getAutoStopConfiguration,
+            UpdateApplicationRequest::getNetworkConfiguration, UpdateApplicationRequest::getArchitecture,
+            UpdateApplicationRequest::getMonitoringConfiguration, UpdateApplicationRequest::getRuntimeConfiguration,
+            UpdateApplicationRequest::getSchedulerConfiguration,
+            UpdateApplicationRequest::getDiskEncryptionConfiguration,
+            UpdateApplicationRequest::getInteractiveConfiguration,
+            UpdateApplicationRequest::getIdentityCenterConfiguration,
+            UpdateApplicationRequest::getJobLevelCostAllocationConfiguration);
     private static final int MAX_TAGS = 50;
     private static final String RESERVED_PREFIX = "aws:";
     private static final Pattern TAG_TEXT = Pattern.compile("[A-Za-z0-9 /_.:=+@-]*");
     // ResourceArn's resource: an application, or one of its job runs or sessions.
+    private static final Logger LOG = Logger.getLogger(EmrServerlessService.class);
+    // Floci's ECR's answers for an image it does not hold, and, as ServerException, for image queries with no Docker
+    // daemon to serve its registry.
+    private static final Set<String> UNREADABLE_IMAGE_CODES =
+            Set.of("RepositoryNotFoundException", "ImageNotFoundException", "ServerException");
+    // A release label's major and minor versions.
+    private static final Pattern RELEASE_VERSION = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})(?:\\..*)?");
     private static final Pattern RESOURCE =
             Pattern.compile("/applications/([0-9a-zA-Z]+)(?:/(jobruns|sessions)/([0-9a-zA-Z]+))?");
     private static final List<String> APPLICATION_STATES =
@@ -56,8 +90,8 @@ public class EmrServerlessService {
     private static final int MAX_APPLICATION_STATES = 7;
     private static final int MAX_LIST_RESULTS = 50;
 
-    /** What an EMR Serverless resource ARN names: an application, or one of its job runs. */
-    public record ResourceArn(String arn, String applicationId, String jobRunId) {}
+    /** What an EMR Serverless resource ARN names: an application, or one of its job runs or sessions. */
+    public record ResourceArn(String arn, String applicationId, String jobRunId, String sessionId) {}
 
     private final EmulatorConfig config;
     private final AccountAwareStorageBackend<Application> storage;
@@ -66,6 +100,10 @@ public class EmrServerlessService {
     
     @Inject
     RequestContext requestContext;
+
+    // Floci's ECR, which a custom image's digest is read from as an application starts; none in a test without it.
+    @Inject
+    EcrService ecrService;
 
     @Inject
     public EmrServerlessService(EmulatorConfig config, StorageFactory storageFactory,
@@ -144,15 +182,8 @@ public class EmrServerlessService {
     }
 
     public PaginatedResult<ApplicationSummary> listApplications(ListApplicationsRequest request) {
-        List<String> violations = new ArrayList<>();
-        if (request.getMaxResults() != null) {
-            String violation = SmithyValidationErrors.outOfRange("maxResults", request.getMaxResults(), 1,
-                    MAX_LIST_RESULTS);
-            if (violation != null) {
-                violations.add(violation);
-            }
-        }
-        violations.addAll(statesViolations(request.getStates(), APPLICATION_STATES, MAX_APPLICATION_STATES));
+        List<String> violations = listViolations(request.getMaxResults(), MAX_LIST_RESULTS, request.getStates(),
+                APPLICATION_STATES, MAX_APPLICATION_STATES);
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
@@ -176,10 +207,12 @@ public class EmrServerlessService {
     public synchronized Application updateApplication(String applicationId, UpdateApplicationRequest request) {
         validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), false);
         Application app = getApplication(applicationId);
-        
+
         String state = app.getState();
-        if (!"CREATED".equals(state) && !"STOPPED".equals(state)) {
-            throw new AwsException("ValidationException", "Application must be in a stopped or created state in order to be updated.", 400);
+        if ("STARTED".equals(state)) {
+            checkStartedUpdate(app, request);
+        } else if (!"CREATED".equals(state) && !"STOPPED".equals(state)) {
+            throw new AwsException("ValidationException", NOT_STOPPED_FOR_UPDATE, 400);
         }
 
         if (request.getReleaseLabel() != null) {
@@ -235,10 +268,31 @@ public class EmrServerlessService {
         if (request.getJobLevelCostAllocationConfiguration() != null) {
             app.setJobLevelCostAllocationConfiguration(request.getJobLevelCostAllocationConfiguration());
         }
+        unpinImagesResolvedPerWorkload(app);
 
         app.setUpdatedAt(now());
         storage.put(applicationId, app);
         return app;
+    }
+
+    /**
+     * What an update may change on a STARTED application, from AWS's "Updating Running Applications": its maximum
+     * capacity, "for a STARTED application to modify the scaling boundary", and its custom images, "without stopping
+     * it", though "Custom image updates on running applications are not supported on applications with
+     * pre-initialized capacity configured". Any other setting still needs the application "in a stopped or created
+     * state". A run already going keeps the image and maximum capacity it was launched with, as "existing workloads
+     * continue with the original image" and "The new settings only apply to workers on new workloads"; a new run, or a
+     * new attempt of one, takes the application's current ones.
+     */
+    private static void checkStartedUpdate(Application app, UpdateApplicationRequest request) {
+        if (STOPPED_ONLY_SETTINGS.stream().anyMatch(setting -> setting.apply(request) != null)) {
+            throw new AwsException("ValidationException", NOT_STOPPED_FOR_UPDATE, 400);
+        }
+        boolean images = request.getImageConfiguration() != null || request.getWorkerTypeSpecifications() != null;
+        if (images && app.getInitialCapacity() != null && !app.getInitialCapacity().isEmpty()) {
+            throw new AwsException("ValidationException", "Custom image updates on running applications are not "
+                    + "supported on applications with pre-initialized capacity configured.", 400);
+        }
     }
 
     public synchronized void deleteApplication(String applicationId) {
@@ -261,9 +315,159 @@ public class EmrServerlessService {
         if ("TERMINATED".equals(state)) {
             throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
+        pinImages(app);
         app.setState("STARTED");
         app.setUpdatedAt(now());
         storage.put(applicationId, app);
+    }
+
+    /**
+     * Resolves, as the application starts, each custom image it resolves then: "Custom images are resolved to a digest
+     * at application start; that digest is used for all jobs until the application restarts" (EMR Serverless user
+     * guide, "Image digest resolution behavior"). Its image configuration gets the digest as its
+     * resolvedImageDigest, which "doesn't exist until an application has started", and its runs take that image
+     * until it starts again, an update meanwhile notwithstanding unless it turns the image to resolution per
+     * workload. An image outside ECR, in another account's repository, or one Floci's ECR does not hold, has no digest
+     * read, and is resolved for each run.
+     */
+    private void pinImages(Application app) {
+        Map<String, ImageConfiguration> images = new LinkedHashMap<>();
+        images.put("", app.getImageConfiguration());
+        if (app.getWorkerTypeSpecifications() != null) {
+            app.getWorkerTypeSpecifications().forEach((workerType, specification) ->
+                    images.put(workerType, specification != null ? specification.getImageConfiguration() : null));
+        }
+        // Every digest is read before any is written, so an answer that fails the start leaves the application as it
+        // was.
+        Map<String, String> digests = new LinkedHashMap<>();
+        images.forEach((key, image) -> {
+            String digest = startDigest(app, image);
+            if (digest != null) {
+                digests.put(key, digest);
+            }
+        });
+        Map<String, ImageConfiguration> pinned = new LinkedHashMap<>();
+        images.forEach((key, image) -> {
+            if (image == null) {
+                return;
+            }
+            // A digest from an earlier start is not this start's: one read now replaces it, and none read leaves
+            // none, as the runs then resolve the image themselves.
+            String digest = digests.get(key);
+            image.setResolvedImageDigest(digest);
+            if (digest != null) {
+                ImageConfiguration resolved = new ImageConfiguration();
+                resolved.setImageUri(image.getImageUri());
+                resolved.setResolvedImageDigest(digest);
+                pinned.put(key, resolved);
+            }
+        });
+        app.setPinnedImages(pinned.isEmpty() ? null : pinned);
+    }
+
+    // The digest an image configuration resolves as its application starts, or null where it has none to read then.
+    private String startDigest(Application app, ImageConfiguration image) {
+        if (image == null || image.getImageUri() == null || !applicationLevelDigests(app.getReleaseLabel(), image)) {
+            return null;
+        }
+        return ecrDigest(image.getImageUri(), accountOf(app));
+    }
+
+    /**
+     * Whether a custom image is resolved as its application starts: its image configuration's
+     * applicationLevelDigestResolution, else, as the user guide's table gives the default, true for "EMR 7.13 and
+     * earlier" and false for "EMR 7.14 and later". A release label not of the emr-x.y form is taken as current.
+     */
+    static boolean applicationLevelDigests(String releaseLabel, ImageConfiguration image) {
+        if (image.getApplicationLevelDigestResolution() != null) {
+            return image.getApplicationLevelDigestResolution();
+        }
+        Matcher version = RELEASE_VERSION.matcher(releaseLabel == null ? "" : releaseLabel);
+        if (!version.matches()) {
+            return false;
+        }
+        int major = Integer.parseInt(version.group(1));
+        int minor = Integer.parseInt(version.group(2));
+        return major < 7 || major == 7 && minor <= 13;
+    }
+
+    /**
+     * Each run resolves its image again where an update turns a STARTED application's image to resolution per
+     * workload, or removes it: the pin of an image the application still resolves at its start stays until it starts
+     * again, "that digest is used for all jobs until the application restarts", and any other ends now.
+     */
+    private static void unpinImagesResolvedPerWorkload(Application app) {
+        Map<String, ImageConfiguration> pinned = app.getPinnedImages();
+        if (pinned == null) {
+            return;
+        }
+        Map<String, ImageConfiguration> kept = new LinkedHashMap<>(pinned);
+        kept.keySet().removeIf(key -> {
+            ImageConfiguration current = imageConfigurationOf(app, key);
+            return current == null || current.getImageUri() == null
+                    || !applicationLevelDigests(app.getReleaseLabel(), current);
+        });
+        app.setPinnedImages(kept.isEmpty() ? null : kept);
+    }
+
+    // The application's image configuration for a pin's key: its own for "", else its worker type's.
+    private static ImageConfiguration imageConfigurationOf(Application app, String key) {
+        if (key.isEmpty()) {
+            return app.getImageConfiguration();
+        }
+        WorkerTypeSpecification specification = app.getWorkerTypeSpecifications() == null ? null
+                : app.getWorkerTypeSpecifications().get(key);
+        return specification == null ? null : specification.getImageConfiguration();
+    }
+
+    private static String accountOf(Application app) {
+        return AwsArnUtils.parse(app.getArn()).accountId();
+    }
+
+    /**
+     * The manifest digest of an image in one of the application's account's ECR repositories, the one its URI names
+     * where it names one; null for an image outside ECR, one in another account's repository, which Floci does not
+     * check the application may pull, or one Floci's ECR does not hold or cannot read without Docker. Each run then
+     * resolves the image itself. Any other answer from ECR fails the start.
+     */
+    private String ecrDigest(String imageUri, String accountId) {
+        Optional<EcrRegistryManager.EcrImage> image = EcrRegistryManager.ecrImage(imageUri);
+        if (image.isEmpty() || !accountId.equals(image.get().registryId())) {
+            return null;
+        }
+        if (image.get().digest() != null) {
+            return image.get().digest();
+        }
+        if (ecrService == null) {
+            return null;
+        }
+        try {
+            List<ImageDetail> details = ecrService.describeImages(image.get().repository(),
+                    List.of(new ImageIdentifier(image.get().tag(), null)), image.get().registryId(),
+                    image.get().region()).imageDetails();
+            return details.isEmpty() ? null : details.getFirst().getImageDigest();
+        } catch (AwsException e) {
+            if (!UNREADABLE_IMAGE_CODES.contains(e.getErrorCode())) {
+                throw new AwsException("InternalServerException", "The custom image " + imageUri
+                        + " could not be resolved: " + e.getMessage(), 500);
+            }
+            LOG.infov("The custom image {0} has no digest in Floci's ECR ({1}), so each run resolves it: {2}",
+                    imageUri, e.getErrorCode(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static void clearResolvedDigests(Application app) {
+        if (app.getImageConfiguration() != null) {
+            app.getImageConfiguration().setResolvedImageDigest(null);
+        }
+        if (app.getWorkerTypeSpecifications() != null) {
+            for (WorkerTypeSpecification specification : app.getWorkerTypeSpecifications().values()) {
+                if (specification != null && specification.getImageConfiguration() != null) {
+                    specification.getImageConfiguration().setResolvedImageDigest(null);
+                }
+            }
+        }
     }
 
     public synchronized void stopApplication(String applicationId) {
@@ -276,20 +480,25 @@ public class EmrServerlessService {
             throw new AwsException("ValidationException", "Application is terminated.", 400);
         }
         app.setState("STOPPED");
+        // Its images are resolved again as it starts again.
+        app.setPinnedImages(null);
+        clearResolvedDigests(app);
         app.setUpdatedAt(now());
         storage.put(applicationId, app);
     }
 
     /**
-     * Admits a job run to the application and returns what {@code admit} builds from it. An
+     * Admits a job run or a session to the application and returns what {@code admit} builds from it. An
      * application "only accepts jobs when it's in" STARTED, and auto-start, on unless the
      * application turns it off, starts a CREATED or STOPPED one "on job submission" (EMR Serverless
-     * user guide, "Application states" and "Default application behavior"). {@code check} refuses a
-     * run against the application before auto-start can change it. This service's lock is held
-     * throughout, so the application cannot be updated, stopped or deleted while the run is admitted.
+     * user guide, "Application states" and "Default application behavior"); StartSession's "The application
+     * must be in the STARTED state or have AutoStart enabled" is the same rule. {@code check} refuses the
+     * submission against the application before auto-start can change it, and {@code submission} says what it
+     * is in the refusal of a stopped application. This service's lock is held throughout, so the application
+     * cannot be updated, stopped or deleted while the submission is admitted.
      */
-    public synchronized <T> T admitJobRun(String applicationId, Consumer<Application> check,
-                                          Function<Application, T> admit) {
+    public synchronized <T> T admit(String applicationId, String submission, Consumer<Application> check,
+                                    Function<Application, T> admit) {
         Application app = getApplication(applicationId);
         String state = app.getState();
         if ("TERMINATED".equals(state)) {
@@ -299,7 +508,7 @@ public class EmrServerlessService {
         if (!"STARTED".equals(state)) {
             if (!autoStartEnabled(app)) {
                 throw new AwsException("ValidationException", "Application " + applicationId
-                        + " must be started before a job run is submitted, as its auto-start is disabled.", 400);
+                        + " must be started before " + submission + ", as its auto-start is disabled.", 400);
             }
             startApplication(applicationId);
             app = getApplication(applicationId);
@@ -338,8 +547,8 @@ public class EmrServerlessService {
 
     /**
      * Parses a tagging ARN: {@code arn:<partition>:emr-serverless:<region>:<account>:/applications/<id>},
-     * the form CreateApplication returns, with {@code /jobruns/<id>} for a job run. An ARN of another
-     * Region names nothing here, and neither does a session's, as sessions are not emulated.
+     * the form CreateApplication returns, with {@code /jobruns/<id>} for a job run and {@code /sessions/<id>} for a
+     * session. An ARN of another Region names nothing here.
      */
     public ResourceArn resourceArn(String arn) {
         AwsArnUtils.Arn parsed;
@@ -352,10 +561,12 @@ public class EmrServerlessService {
         if (!"emr-serverless".equals(parsed.service()) || !matcher.matches()) {
             throw new AwsException("ValidationException", "Invalid resourceArn: " + arn, 400);
         }
-        if (!parsed.region().equals(regionResolver.getRegion()) || "sessions".equals(matcher.group(2))) {
+        if (!parsed.region().equals(regionResolver.getRegion())) {
             throw resourceNotFound(arn);
         }
-        return new ResourceArn(arn, matcher.group(1), matcher.group(3));
+        boolean session = "sessions".equals(matcher.group(2));
+        return new ResourceArn(arn, matcher.group(1), session ? null : matcher.group(3),
+                session ? matcher.group(3) : null);
     }
 
     /** Whether the application exists and has not been deleted, which leaves it TERMINATED. */
@@ -365,7 +576,7 @@ public class EmrServerlessService {
 
     /**
      * Runs {@code use} on the application when it exists and has not been deleted, under this service's
-     * lock, so that it cannot be deleted meanwhile, as with {@link #admitJobRun}; returns whether it ran.
+     * lock, so that it cannot be deleted meanwhile, as with {@link #admit}; returns whether it ran.
      */
     public synchronized boolean whileLive(String applicationId, Consumer<Application> use) {
         Optional<Application> app = live(applicationId);
@@ -419,10 +630,54 @@ public class EmrServerlessService {
     }
 
     /**
+     * What is wrong with a ListApplications, ListJobRuns or ListSessions request's {@code maxResults} and
+     * {@code states}.
+     */
+    static List<String> listViolations(Integer maxResults, int maxListResults, List<String> states,
+                                       List<String> allowed, int maxStates) {
+        List<String> violations = new ArrayList<>();
+        if (maxResults != null) {
+            String violation = SmithyValidationErrors.outOfRange("maxResults", maxResults, 1, maxListResults);
+            if (violation != null) {
+                violations.add(violation);
+            }
+        }
+        violations.addAll(statesViolations(states, allowed, maxStates));
+        return violations;
+    }
+
+    // The shape of pageByState's cursors, which a nextToken names: the state group, the creation time, the sequence.
+    private static final String CURSOR_SHAPE = "group-created-sequence";
+
+    /**
+     * A page of ListJobRuns' runs or ListSessions' sessions: {@code matching}, newest first, and, where {@code states}
+     * names any, "grouped by the state", in the order it names them, as each operation's {@code states} member reads.
+     * Of two created within the same millisecond, the later {@code sequence}, {@link #nextSequence}, is the newer; one
+     * stored before sequences were kept has 0, and its id orders it among those. A {@code nextToken} resumes only the
+     * listing {@code namespace} names, in this cursor's shape: one given before sequences were kept, whose cursors
+     * hold none, is refused rather than resuming at the wrong place.
+     */
+    static <T> PaginatedResult<T> pageByState(List<T> matching, Function<T, String> id, Function<T, String> state,
+                                              Function<T, Instant> createdAt, ToLongFunction<T> sequence,
+                                              List<String> states, Integer maxResults, int defaultMaxResults,
+                                              String nextToken, String namespace) {
+        Map<String, String> cursors = new HashMap<>();
+        for (T item : matching) {
+            int group = states == null || states.isEmpty() ? 0 : states.indexOf(state.apply(item));
+            cursors.put(id.apply(item), String.format("%02d%020d%020d%s", group,
+                    Long.MAX_VALUE - createdAt.apply(item).toEpochMilli(),
+                    Long.MAX_VALUE - sequence.applyAsLong(item), id.apply(item)));
+        }
+        return Pagination.paginate(matching, item -> cursors.get(id.apply(item)),
+                maxResults != null ? maxResults : defaultMaxResults, nextToken, namespace + "|" + CURSOR_SHAPE,
+                token -> new AwsException("ValidationException", "Invalid nextToken.", 400));
+    }
+
+    /**
      * The violations of a {@code states} filter: at most {@code max} states, each one of
      * {@code allowed}. A typo would otherwise match nothing and list nothing.
      */
-    static List<String> statesViolations(List<String> states, List<String> allowed, int max) {
+    private static List<String> statesViolations(List<String> states, List<String> allowed, int max) {
         List<String> violations = new ArrayList<>();
         if (states == null) {
             return violations;
@@ -511,9 +766,60 @@ public class EmrServerlessService {
         return text.regionMatches(true, 0, RESERVED_PREFIX, 0, RESERVED_PREFIX.length());
     }
 
-    /** An application or job run id: 16 lowercase hexadecimal characters, within the model's [0-9a-z]+. */
+    /** An application, job run or session id: 16 lowercase hexadecimal characters, within the model's [0-9a-z]+. */
     static String newId() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+    }
+
+    /** A job run's or session's {@code createdBy}: the caller, as GetCallerIdentity reports it, or else the root. */
+    static String createdBy(IamService iamService, RequestContext requestContext, RegionResolver regionResolver,
+                            String accountId) {
+        String accessKeyId = requestContext != null ? requestContext.getAccessKeyId() : null;
+        return iamService.resolveCallerArn(accessKeyId)
+                .orElseGet(() -> regionResolver.buildGlobalArn("iam", accountId, "root"));
+    }
+
+    /**
+     * The run or session that StartJobRun or StartSession started with {@code clientToken}, which a retry returns, or
+     * null. A client token is the request's Region's: reused on another application, it finds the run or session it
+     * started there, whose request then does not match the retry's.
+     */
+    static <T> T startedWithClientToken(List<T> records, String clientToken, Function<T, String> tokenOf,
+                                        Predicate<T> inRequestRegion) {
+        for (T record : records) {
+            if (clientToken.equals(tokenOf.apply(record)) && inRequestRegion.test(record)) {
+                return record;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The sequence of a run or session created at {@code now}, after {@code last}, the latest its service gave: the
+     * microseconds of {@code now}, or one past {@code last} when that is not later. It orders the run after every one
+     * created before it, within the same millisecond too; one an earlier Floci process created has a sequence below
+     * {@code now}'s microseconds, the clock having moved on since, so none is reused.
+     */
+    static long nextSequence(long last, Instant now) {
+        long micros = now.getEpochSecond() * 1_000_000L + now.getNano() / 1_000;
+        return Math.max(micros, last + 1);
+    }
+
+    /**
+     * What a retry of StartJobRun or StartSession must repeat: the application and every member of the body but
+     * the client token itself. Read back from its JSON text, so that its numbers compare equal to those of a stored
+     * request once storage has written and read it.
+     */
+    static JsonNode retriedRequest(ObjectMapper objectMapper, String applicationId, Object request) {
+        ObjectNode node;
+        try {
+            node = (ObjectNode) objectMapper.readTree(objectMapper.writeValueAsString(request));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize a " + request.getClass().getSimpleName(), e);
+        }
+        node.remove("clientToken");
+        node.put("applicationId", applicationId);
+        return node;
     }
 
     private String buildArn(String id) {

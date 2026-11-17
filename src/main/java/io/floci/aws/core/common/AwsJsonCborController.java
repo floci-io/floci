@@ -18,6 +18,7 @@ import io.floci.aws.services.marketplace.MarketplaceEntitlementController;
 import io.floci.aws.services.sns.SnsJsonHandler;
 import io.floci.aws.services.sqs.SqsJsonHandler;
 import io.floci.aws.services.stepfunctions.StepFunctionsJsonHandler;
+import io.floci.aws.services.translate.TranslateJsonHandler;
 import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -72,6 +73,7 @@ public class AwsJsonCborController {
     private final CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler;
     private final MarketplaceEntitlementController marketplaceEntitlementController;
     private final EventBridgeV2Handler eventBridgeV2Handler;
+    private final TranslateJsonHandler translateJsonHandler;
 
     @Inject
     public AwsJsonCborController(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -83,7 +85,8 @@ public class AwsJsonCborController {
                                  StepFunctionsJsonHandler sfnJsonHandler,
                                  CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler,
                                  MarketplaceEntitlementController marketplaceEntitlementController,
-                                 EventBridgeV2Handler eventBridgeV2Handler) {
+                                 EventBridgeV2Handler eventBridgeV2Handler,
+                                 TranslateJsonHandler translateJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -96,6 +99,7 @@ public class AwsJsonCborController {
         this.cloudWatchMetricsJsonHandler = cloudWatchMetricsJsonHandler;
         this.marketplaceEntitlementController = marketplaceEntitlementController;
         this.eventBridgeV2Handler = eventBridgeV2Handler;
+        this.translateJsonHandler = translateJsonHandler;
     }
 
 
@@ -179,6 +183,10 @@ public class AwsJsonCborController {
             gen.writeEndArray();
         } else if (numberIsTimestamp && node.isNumber()) {
             writeCborTimestamp(gen, node, legacyDialect);
+        } else if (node.isBinary()) {
+            // A blob member (e.g. Translate's TranslatedDocument.Content) is a CBOR byte
+            // string on the wire, never base64 text.
+            gen.writeBinary(node.binaryValue());
         } else if (node.isTextual()) {
             gen.writeString(node.textValue());
         } else if (node.isDouble() || node.isFloat()) {
@@ -473,17 +481,20 @@ public class AwsJsonCborController {
     }
 
     static byte[] decodeBody(byte[] compressed) {
+        return decodeBody(compressed, 10 * 1024 * 1024, "PayloadTooLargeException");
+    }
+
+    static byte[] decodeBody(byte[] compressed, int maxRead, String tooLargeErrorCode) {
         int buffSize = 64 * 1024;
         byte[] buffer = new byte[buffSize]; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
         int totalRead = 0;
-        int maxRead = 10 * 1024 * 1024; // 10 MB limit max over all aws services, to avoid OOM. AWS services should not send more than 10 MB in a single request.
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
             int read;
             while ((read = gis.read(buffer)) != -1) {
                 totalRead += read;
                 if (totalRead > maxRead) {
-                    throw new AwsException("PayloadTooLargeException", "Payload Too Large", 413);
+                    throw new AwsException(tooLargeErrorCode, "Payload Too Large", 413);
                 }
                 baos.write(buffer, 0, read);
             }
@@ -516,6 +527,7 @@ public class AwsJsonCborController {
             case "monitoring" -> cloudWatchMetricsJsonHandler.handle(operation, request, region);
             case "marketplace" -> marketplaceEntitlementController.handle(operation, request, region);
             case "eventsv2" -> eventBridgeV2Handler.handle(operation, request, region);
+            case "translate" -> translateJsonHandler.handleCbor(operation, request, region);
             default -> null;
         };
     }

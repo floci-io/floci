@@ -65,6 +65,8 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class CloudFrontService implements ServerCertificateReferenceProvider {
 
+    /** The file CloudFront's tags are stored in, by resource ARN, which IAM's tag lookup also reads. */
+    static final String TAGS_FILE = "cloudfront-tags.json";
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final int MAX_CUSTOM_RESPONSE_HEADERS_POLICIES = 20;
     private static final int MAX_DISTRIBUTIONS_PER_RESPONSE_HEADERS_POLICY = 100;
@@ -209,7 +211,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                 new TypeReference<Map<String, CloudFrontOriginAccessIdentity>>() {});
         this.functionStore = factory.create("cloudfront", "cloudfront-functions.json",
                 new TypeReference<Map<String, CloudFrontFunction>>() {});
-        this.tagStore = factory.create("cloudfront", "cloudfront-tags.json",
+        this.tagStore = factory.create("cloudfront", TAGS_FILE,
                 new TypeReference<Map<String, Map<String, String>>>() {});
         this.cdpStore = factory.create("cloudfront", "cloudfront-continuous-deployment-policies.json",
                 new TypeReference<Map<String, ContinuousDeploymentPolicy>>() {});
@@ -1877,8 +1879,15 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         fn.setEtag(UUID.randomUUID().toString());
         fn.setCreatedTime(Instant.now());
         fn.setLastModifiedTime(Instant.now());
+        // A function's ARN is its name: a new one starts with no tags, whatever was left under that ARN before.
+        tagStore.delete(functionArn(fn.getName()));
         functionStore.put(fn.getName(), fn);
         return fn;
+    }
+
+    /** The ARN of the function {@code name}, which is the one its tags are kept under. */
+    public String functionArn(String name) {
+        return arn("function/" + name);
     }
 
     public CloudFrontFunction describeFunction(String name, String stage) {
@@ -1940,6 +1949,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         }
         functionStore.delete(name);
         functionStore.delete(functionKey(name, "LIVE"));
+        tagStore.delete(functionArn(name));
     }
 
     public List<CloudFrontFunction> listFunctions(String stage, String marker, int maxItems) {

@@ -61,7 +61,7 @@ public class RedshiftServerlessAdminSecrets {
         secrets.restoreManagedSecret(mapper.convertValue(snapshot, Secret.class), region);
     }
 
-    private String value(Namespace namespace) {
+    String value(Namespace namespace) {
         return mapper.createObjectNode().put("engine", "redshift")
                 .put("username", namespace.getAdminUsername())
                 .put("password", namespace.getAdminUserPassword())
