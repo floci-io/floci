@@ -398,7 +398,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // Mount host AWS config into Lambda container (read-only) for SDK credential discovery
         awsConfigPath.ifPresent(hostPath -> {
             if (!Files.isDirectory(Path.of(hostPath))) {
-                LOG.warnv("awsConfigPath '{0}' does not exist or is not a directory; "
+                LOG.warnv("awsConfigPath ''{0}'' does not exist or is not a directory; "
                         + "Lambda containers may fail to discover credentials", hostPath);
             }
             specBuilder.withReadOnlyBind(hostPath, "/opt/aws-config");

@@ -1458,7 +1458,7 @@ public class EksClusterManager
             return configured;
         }
         LOG.warnv("floci.services.eks.node-instance-type {0} is absent from the EC2 catalog; sizing EKS nodes "
-                + "from their node group's instance type", configured.get());
+                + "from their node group''s instance type", configured.get());
         return Optional.empty();
     }
 
