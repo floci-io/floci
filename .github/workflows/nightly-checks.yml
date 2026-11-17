@@ -33,10 +33,10 @@ jobs:
     # EmrFlociContainerNightlyIntegrationTest's 20 and 4 for its setup,
     # EmrServerlessCustomImageNightlyIntegrationTest's 85 and 21 for its setup,
     # EmrServerlessSparkConnectNightlyIntegrationTest's 30, EmrSessionServerNightlyIntegrationTest's 40, and
-    # EmrHiveStepsNightlyIntegrationTest's six two-minute tests and six-minute setup, 248 in all.
+    # EmrHiveStepsNightlyIntegrationTest's five two-minute tests, one five-minute test and six-minute setup, 251 in all.
     # A check added, or a bound raised, raises this with it, so a slow check fails with its own message rather than the
     # job being cancelled with none.
-    timeout-minutes: 268
+    timeout-minutes: 271
     # A fork's schedule would spend its owner's minutes on checks it never asked for; a draft waits until it is
     # ready for review, as the CI shards do.
     if: >-

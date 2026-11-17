@@ -96,6 +96,7 @@ class EmrHiveStepsNightlyIntegrationTest {
     }
 
     @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void hiveAndSparkStepsShareTheClustersMetastoreServiceAndHdfs() {
         // The two steps that read what the first one made, and need nothing from each other, run at once.
         startCluster(HIVE_AND_SPARK, "[]", null, 2);
