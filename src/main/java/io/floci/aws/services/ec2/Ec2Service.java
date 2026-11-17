@@ -7027,6 +7027,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteVpc(String region, String vpcId) {
+        deleteVpc(region, vpcId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the VPC must exist and hold nothing DeleteVpc refuses to delete it
+     * with, and the request is then answered with DryRunOperation, the VPC and its default resources kept.
+     */
+    public void deleteVpc(String region, String vpcId, boolean dryRun) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         synchronized (attachmentTopologyLock(region)) {
@@ -7036,6 +7044,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             requireNoProviderDependency(provider -> provider.hasVpcDependency(region, vpcId),
                     "The vpc '" + vpcId + "' has dependencies and cannot be deleted.");
             requireNoVpcDependents(region, vpcId);
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             deleteVpcDefaultResources(region, vpcId);
             vpcs.delete(key(region, vpcId));
             removeTags(region, vpcId);
@@ -8301,6 +8312,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteSubnet(String region, String subnetId) {
+        deleteSubnet(region, subnetId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the subnet must exist and nothing may still use it, and the request is
+     * then answered with DryRunOperation, the subnet kept.
+     */
+    public void deleteSubnet(String region, String subnetId, boolean dryRun) {
         ensureDefaultResources(region);
         if (subnets.get(key(region, subnetId)).isEmpty()) {
             throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
@@ -8313,6 +8332,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
             requireNoProviderDependency(provider -> provider.hasSubnetDependency(region, subnetId),
                     "The subnet '" + subnetId + "' has dependencies and cannot be deleted.");
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             subnets.delete(key(region, subnetId));
         }
         if (vpcNetworkManager != null) {
@@ -11851,26 +11873,57 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteInternetGateway(String region, String igwId) {
+        deleteInternetGateway(region, igwId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the gateway must exist, and the request is then answered with
+     * DryRunOperation, the gateway kept.
+     */
+    public void deleteInternetGateway(String region, String igwId, boolean dryRun) {
         ensureDefaultResources(region);
-        if (internetGateways.get(key(region, igwId)).isEmpty()) {
-            throw new AwsException("InvalidInternetGatewayID.NotFound", "The internet gateway '" + igwId + "' does not exist", 400);
+        getRequiredInternetGateway(region, igwId);
+        if (dryRun) {
+            throw dryRunOperation();
         }
         internetGateways.delete(key(region, igwId));
     }
 
     public void attachInternetGateway(String region, String igwId, String vpcId) {
+        attachInternetGateway(region, igwId, vpcId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the VPC and the gateway must exist, and the request is then answered
+     * with DryRunOperation, nothing attached.
+     */
+    public void attachInternetGateway(String region, String igwId, String vpcId, boolean dryRun) {
         ensureDefaultResources(region);
         synchronized (attachmentTopologyLock(region)) {
             getRequiredVpc(region, vpcId);
             InternetGateway igw = getRequiredInternetGateway(region, igwId);
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
             internetGateways.put(key(region, igwId), igw);
         }
     }
 
     public void detachInternetGateway(String region, String igwId, String vpcId) {
+        detachInternetGateway(region, igwId, vpcId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the gateway must exist, and the request is then answered with
+     * DryRunOperation, nothing detached.
+     */
+    public void detachInternetGateway(String region, String igwId, String vpcId, boolean dryRun) {
         ensureDefaultResources(region);
         InternetGateway igw = getRequiredInternetGateway(region, igwId);
+        if (dryRun) {
+            throw dryRunOperation();
+        }
 
         igw.getAttachments().removeIf(a -> a.getVpcId().equals(vpcId));
         internetGateways.put(key(region, igwId), igw);
@@ -12635,8 +12688,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Route Tables ──────────────────────────────────────────────────────────
 
     public RouteTable createRouteTable(String region, String vpcId) {
+        return createRouteTable(region, vpcId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the VPC must exist, and the request is then answered with
+     * DryRunOperation, no route table created.
+     */
+    public RouteTable createRouteTable(String region, String vpcId, boolean dryRun) {
         ensureDefaultResources(region);
         Vpc vpc = getRequiredVpc(region, vpcId);
+        if (dryRun) {
+            throw dryRunOperation();
+        }
 
         String rtId = "rtb-" + randomHex(8);
         RouteTable rt = new RouteTable();
@@ -12688,18 +12752,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteRouteTable(String region, String routeTableId) {
+        deleteRouteTable(region, routeTableId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the route table must exist, and the request is then answered with
+     * DryRunOperation, the route table kept.
+     */
+    public void deleteRouteTable(String region, String routeTableId, boolean dryRun) {
         ensureDefaultResources(region);
-        RouteTable rt = routeTables.get(key(region, routeTableId)).orElse(null);
-        if (rt == null) {
-            throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
+        RouteTable rt = getRequiredRouteTable(region, routeTableId);
+        if (dryRun) {
+            throw dryRunOperation();
         }
         routeTables.delete(key(region, routeTableId));
         notifyRouteTableUpdated(region, rt);
     }
 
     public RouteTableAssociation associateRouteTable(String region, String routeTableId, String subnetId) {
+        return associateRouteTable(region, routeTableId, subnetId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the route table must exist, and the request is then answered with
+     * DryRunOperation, nothing associated.
+     */
+    public RouteTableAssociation associateRouteTable(String region, String routeTableId, String subnetId,
+                                                     boolean dryRun) {
         ensureDefaultResources(region);
         RouteTable rt = getRequiredRouteTable(region, routeTableId);
+        if (dryRun) {
+            throw dryRunOperation();
+        }
 
         String assocId = "rtbassoc-" + randomHex(8);
         RouteTableAssociation assoc = new RouteTableAssociation();
@@ -13053,6 +13137,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public void deleteRoute(String region, String routeTableId, String destinationCidrBlock,
                             String destinationIpv6CidrBlock, String destinationPrefixListId) {
+        deleteRoute(region, routeTableId, destinationCidrBlock, destinationIpv6CidrBlock, destinationPrefixListId,
+                false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the route table must hold a route to the destination, and not the
+     * local route, and the request is then answered with DryRunOperation, the route kept.
+     */
+    public void deleteRoute(String region, String routeTableId, String destinationCidrBlock,
+                            String destinationIpv6CidrBlock, String destinationPrefixListId, boolean dryRun) {
         requireExactlyOneDestination("DeleteRoute", destinationCidrBlock, destinationIpv6CidrBlock,
                 destinationPrefixListId);
         final String canonicalDestinationCidrBlock = canonicalizeIpv4Cidr(destinationCidrBlock);
@@ -13077,6 +13171,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             "cannot remove local route " + route.getDestinationCidrBlock()
                                     + " in route table " + routeTableId, 400);
                 }
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             next.removeAll(matched);
             current.setRoutes(next);

@@ -1825,7 +1825,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteVpc(MultivaluedMap<String, String> p, String region) {
-        service.deleteVpc(region, p.getFirst("VpcId"));
+        service.deleteVpc(region, p.getFirst("VpcId"), dryRun(p));
         return booleanResponse("DeleteVpc");
     }
 
@@ -3501,6 +3501,7 @@ public class Ec2QueryHandler {
 
 
     private Response handleCreateDefaultVpc(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         Vpc vpc = service.createDefaultVpc(region);
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateDefaultVpcResponse", AwsNamespaces.EC2)
@@ -3618,7 +3619,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteSubnet(MultivaluedMap<String, String> p, String region) {
-        service.deleteSubnet(region, p.getFirst("SubnetId"));
+        service.deleteSubnet(region, p.getFirst("SubnetId"), dryRun(p));
         return booleanResponse("DeleteSubnet");
     }
 
@@ -4344,6 +4345,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateInternetGateway(MultivaluedMap<String, String> p, String region) {
         List<Tag> resourceTags = parseTagsForResource(p, "internet-gateway");
+        checkDryRun(p);
         InternetGateway igw = service.createInternetGateway(region);
         applyResourceTags(resourceTags, region, igw.getInternetGatewayId());
         XmlBuilder xml = new XmlBuilder()
@@ -4370,17 +4372,17 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteInternetGateway(MultivaluedMap<String, String> p, String region) {
-        service.deleteInternetGateway(region, p.getFirst("InternetGatewayId"));
+        service.deleteInternetGateway(region, p.getFirst("InternetGatewayId"), dryRun(p));
         return booleanResponse("DeleteInternetGateway");
     }
 
     private Response handleAttachInternetGateway(MultivaluedMap<String, String> p, String region) {
-        service.attachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"));
+        service.attachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"), dryRun(p));
         return booleanResponse("AttachInternetGateway");
     }
 
     private Response handleDetachInternetGateway(MultivaluedMap<String, String> p, String region) {
-        service.detachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"));
+        service.detachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"), dryRun(p));
         return booleanResponse("DetachInternetGateway");
     }
 
@@ -4389,7 +4391,7 @@ public class Ec2QueryHandler {
     private Response handleCreateRouteTable(MultivaluedMap<String, String> p, String region) {
         List<Tag> resourceTags = parseTagsForResource(p, "route-table");
         String vpcId = p.getFirst("VpcId");
-        RouteTable rt = service.createRouteTable(region, vpcId);
+        RouteTable rt = service.createRouteTable(region, vpcId, dryRun(p));
         applyResourceTags(resourceTags, region, rt.getRouteTableId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateRouteTableResponse", AwsNamespaces.EC2)
@@ -4420,14 +4422,14 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteRouteTable(MultivaluedMap<String, String> p, String region) {
-        service.deleteRouteTable(region, p.getFirst("RouteTableId"));
+        service.deleteRouteTable(region, p.getFirst("RouteTableId"), dryRun(p));
         return booleanResponse("DeleteRouteTable");
     }
 
     private Response handleAssociateRouteTable(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
         String subnetId = p.getFirst("SubnetId");
-        RouteTableAssociation assoc = service.associateRouteTable(region, rtId, subnetId);
+        RouteTableAssociation assoc = service.associateRouteTable(region, rtId, subnetId, dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateRouteTableResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4440,6 +4442,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDisassociateRouteTable(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         service.disassociateRouteTable(region, p.getFirst("AssociationId"));
         return booleanResponse("DisassociateRouteTable");
     }
@@ -4505,7 +4508,7 @@ public class Ec2QueryHandler {
         String dest = p.getFirst("DestinationCidrBlock");
         String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
         String destPrefixList = p.getFirst("DestinationPrefixListId");
-        service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList);
+        service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList, dryRun(p));
         return booleanResponse("DeleteRoute");
     }
 
