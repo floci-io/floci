@@ -985,7 +985,7 @@ public class CloudFrontController {
                 appendKeyValueStoreAssociations(xml, fn);
                 xml.end("FunctionConfig")
                         .start("FunctionMetadata")
-                        .elem("FunctionARN", service.arn("function/" + fn.getName()))
+                        .elem("FunctionARN", service.functionArn(fn.getName()))
                         .elem("Stage", fn.getStage())
                         .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                         .elem("LastModifiedTime",
@@ -2533,7 +2533,7 @@ public class CloudFrontController {
         appendKeyValueStoreAssociations(xml, fn);
         return xml.end("FunctionConfig")
                 .start("FunctionMetadata")
-                .elem("FunctionARN", service.arn("function/" + fn.getName()))
+                .elem("FunctionARN", service.functionArn(fn.getName()))
                 .elem("Stage", fn.getStage())
                 .elem("CreatedTime", fn.getCreatedTime() != null ? fn.getCreatedTime().toString() : "")
                 .elem("LastModifiedTime",

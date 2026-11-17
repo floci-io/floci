@@ -53,6 +53,8 @@ class IamRestRouteEnforcementIntegrationTest {
     private static final String MANAGEMENT = "731000000154";
     /** Another account, owning the sinks and shares this class's own account reaches across accounts. */
     private static final String PEER = "731000000162";
+    /** The XML namespace of CloudFront's 2020-05-31 control plane requests. */
+    private static final String CLOUDFRONT_XMLNS = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
 
     @TestHTTPResource("/")
     static URI baseUri;
@@ -115,18 +117,10 @@ class IamRestRouteEnforcementIntegrationTest {
     @Test
     void cloudFrontKeyValueStoreControlPlaneIsCheckedAgainstTheStoresReturnedArn() {
         String user = user("route-kvs-control");
-        String name = "kvs-" + suffix();
-        String namespace = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
-        Response created = given().header("Authorization", auth(ADMIN, "cloudfront"))
-                .contentType("application/xml")
-                .body("<CreateKeyValueStoreRequest xmlns=\"" + namespace + "\"><Name>" + name
-                        + "</Name></CreateKeyValueStoreRequest>")
-                .post("/2020-05-31/key-value-store");
-        created.then().statusCode(201);
-        String arn = XmlParser.extractFirst(created.asString(), "ARN", null);
-        String etag = created.header("ETag");
-        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "cloudfront")).header("If-Match", etag)
-                .delete("/2020-05-31/key-value-store/" + name).then().statusCode(204));
+        KeyValueStoreFixture created = keyValueStore();
+        String name = created.name();
+        String arn = created.arn();
+        String etag = created.etag();
 
         policy(user, allow("cloudfront:*", "*") + "," +
                 "{\"Effect\":\"Deny\",\"Action\":\"cloudfront:DeleteKeyValueStore\",\"Resource\":\"" + arn + "\"}");
@@ -141,6 +135,53 @@ class IamRestRouteEnforcementIntegrationTest {
         policy(user, allow("cloudfront:DescribeKeyValueStore", arn));
         as(user, "cloudfront").get("/2020-05-31/key-value-store/" + name).then().statusCode(200);
     }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CloudFront holds on the key value store a request names, so
+     * an allow on one team's tag lets the caller describe that team's store and not another's.
+     */
+    @Test
+    void aCloudFrontResourceTagConditionReadsTheTagsOfTheKeyValueStore() {
+        String user = user("route-kvs-tags");
+        KeyValueStoreFixture tagged = keyValueStore();
+        KeyValueStoreFixture other = keyValueStore();
+        tagCloudFront(tagged.arn(), "data");
+        tagCloudFront(other.arn(), "web");
+
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":\"cloudfront:DescribeKeyValueStore\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        as(user, "cloudfront").get("/2020-05-31/key-value-store/" + tagged.name()).then().statusCode(200);
+        refused(as(user, "cloudfront").get("/2020-05-31/key-value-store/" + other.name()).then(),
+                "cloudfront:DescribeKeyValueStore");
+    }
+
+    /** A CloudFront key value store an administrator created, by its name, ARN and control plane ETag. */
+    private record KeyValueStoreFixture(String name, String arn, String etag) {}
+
+    /** A key value store an administrator creates, deleted after the test. */
+    private KeyValueStoreFixture keyValueStore() {
+        String name = "kvs-" + suffix();
+        Response created = given().header("Authorization", auth(ADMIN, "cloudfront"))
+                .contentType("application/xml")
+                .body("<CreateKeyValueStoreRequest xmlns=\"" + CLOUDFRONT_XMLNS + "\"><Name>" + name
+                        + "</Name></CreateKeyValueStoreRequest>")
+                .post("/2020-05-31/key-value-store");
+        created.then().statusCode(201);
+        String etag = created.header("ETag");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "cloudfront")).header("If-Match", etag)
+                .delete("/2020-05-31/key-value-store/" + name).then().statusCode(204));
+        return new KeyValueStoreFixture(name, XmlParser.extractFirst(created.asString(), "ARN", null), etag);
+    }
+
+    /** Tags the CloudFront resource {@code arn} with the team, as an administrator. */
+    private static void tagCloudFront(String arn, String team) {
+        given().header("Authorization", auth(ADMIN, "cloudfront")).contentType("application/xml")
+                .queryParam("Operation", "Tag").queryParam("Resource", arn)
+                .body("<Tags xmlns=\"" + CLOUDFRONT_XMLNS + "\"><Items><Tag><Key>team</Key><Value>" + team
+                        + "</Value></Tag></Items></Tags>")
+                .post("/2020-05-31/tagging").then().statusCode(204);
+    }
+
     @Test
     void aScheduleRequestSignedForAnotherServiceIsStillCheckedAsScheduler() {
         // Checked by the route it reached, not by the credential scope it was signed with: an S3
