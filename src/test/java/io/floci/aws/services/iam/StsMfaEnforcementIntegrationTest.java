@@ -192,12 +192,13 @@ class StsMfaEnforcementIntegrationTest {
         S3RequestSigner user = userWithPolicy(userName, ASSUME_WITH_MFA);
         MfaDevice device = enabledDeviceFor(userName);
         String roleName = unique("mfa-identity-role");
-        createRoleTrustingUser(roleName, userName);
+        createRoleTrustingAccount(roleName);
 
         // Nothing in the trust policy asks for MFA here: what does is the caller's own permission
         // to call the operation, which is evaluated before the operation runs. AWS denies such a
         // request when "users have not been MFA authenticated", and allows it on the device the
-        // call carries.
+        // call carries. The trust policy names the account rather than the user: one naming the
+        // user would grant the call on its own, needing "no additional identity-based policy".
         assumeRole(user, roleName, device.serialNumber(), device.codeNow()).statusCode(200);
         assumeRole(user, roleName, null, null).statusCode(403);
     }
@@ -327,6 +328,17 @@ class StsMfaEnforcementIntegrationTest {
                 .formatted(ACCOUNT, userName));
         iam("PutRolePolicy", "RoleName", roleName, "PolicyName", "inline",
                 "PolicyDocument", LIST_WITH_MFA);
+    }
+
+    /**
+     * A role any principal of the account may assume whose own identity-based policy allows it, with
+     * nothing in the trust policy about MFA.
+     */
+    private static void createRoleTrustingAccount(String roleName) {
+        iam("CreateRole", "RoleName", roleName, "AssumeRolePolicyDocument", """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}"""
+                .formatted(ACCOUNT));
     }
 
     /** A role {@code userName} may assume, with nothing in the trust policy about MFA. */

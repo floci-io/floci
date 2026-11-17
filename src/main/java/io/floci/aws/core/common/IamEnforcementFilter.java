@@ -7,6 +7,7 @@ import io.floci.aws.services.cloudtrail.CloudTrailService;
 import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
+import io.floci.aws.services.iam.AssumeRolePolicyEvaluator;
 import io.floci.aws.services.iam.IamActionRegistry;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
@@ -222,6 +223,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final ResourceInfo resourceInfo;
     private final Instance<S3Service> s3ServiceProvider;
     private final RequestOperationResolver operationResolver;
+    private final AssumeRolePolicyEvaluator trustPolicyEvaluator;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -242,7 +244,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 Instance<PassedRoleLookup> passedRoleLookups,
                                 Clock clock,
                                 @Context ResourceInfo resourceInfo,
-                                Instance<S3Service> s3ServiceProvider) {
+                                Instance<S3Service> s3ServiceProvider,
+                                AssumeRolePolicyEvaluator trustPolicyEvaluator) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -264,6 +267,34 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.s3ServiceProvider = s3ServiceProvider;
         this.operationResolver =
                 new RequestOperationResolver(actionRegistry, queryServiceResolver, arnBuilder, catalog);
+        this.trustPolicyEvaluator = trustPolicyEvaluator;
+    }
+
+    /** Package-private constructor for callers predating trustPolicyEvaluator. */
+    IamEnforcementFilter(EmulatorConfig config,
+                         AccountResolver accountResolver,
+                         IamService iamService,
+                         IamPolicyEvaluator evaluator,
+                         IamActionRegistry actionRegistry,
+                         AwsQueryServiceResolver queryServiceResolver,
+                         ResourceArnBuilder arnBuilder,
+                         RequestContext requestContext,
+                         IamConditionContextResolver conditionContextResolver,
+                         CloudTrailService cloudTrailService,
+                         CurrentVertxRequest currentVertxRequest,
+                         ResolvedServiceCatalog catalog,
+                         Instance<ScpProvider> scpProvider,
+                         SessionAccountLookup sessionAccountLookup,
+                         Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                         Instance<PassedRoleLookup> passedRoleLookups,
+                         Clock clock,
+                         ResourceInfo resourceInfo,
+                         Instance<S3Service> s3ServiceProvider) {
+        this(config, accountResolver, iamService, evaluator, actionRegistry,
+                queryServiceResolver, arnBuilder, requestContext,
+                conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, passedRoleLookups, clock, resourceInfo,
+                s3ServiceProvider, null);
     }
 
     /** Package-private constructor for callers predating s3ServiceProvider. */
@@ -1272,8 +1303,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         conditionContextResolver.resourceKeys(action, resource));
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
                         taggedContext, resource, region, accountId, resourceOwnerAccountId, action);
-                ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
-                        effectiveResourcePolicies, principal, action, resource, effectiveContext);
+                ResourcePolicyDecision resourcePolicyDecision = "sts:AssumeRole".equals(action)
+                        ? roleTrustGrant(ctx, principal, resource, accountId, effectiveContext)
+                        : evaluator.evaluateResourcePolicyFor(
+                                effectiveResourcePolicies, principal, action, resource, effectiveContext);
                 Decision decision = evaluator.evaluateResolvedResourcePolicy(
                         caller, resourcePolicyDecision, accountRelationship, action, resource, effectiveContext);
                 if (decision != Decision.DENY) {
@@ -1290,6 +1323,47 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
         return false;
+    }
+
+    /**
+     * What the trust policy of the role an {@code sts:AssumeRole} request names grants the caller as
+     * the role's resource-based policy. AWS lets a user assume a role in its own account when the
+     * user is added "as a principal directly in the role's trust policy", "because the role's trust
+     * policy acts as an IAM resource-based policy. When a resource-based policy grants access to a
+     * principal in the same account, no additional identity-based policy is required" (STS API
+     * Reference, AssumeRole). The IAM User Guide's policy evaluation logic says the same of an IAM
+     * user ARN: such a grant is "not limited by an implicit deny in an identity-based policy or
+     * permissions boundary". That is {@link ResourcePolicyDecision#ALLOW_DIRECT_IAM_USER}.
+     *
+     * <p>Every other case is {@link ResourcePolicyDecision#NEUTRAL}, leaving the request to the
+     * caller's identity-based policies here and to the trust policy in STS itself, which refuses it
+     * when the trust policy does not allow it. That covers a trust policy naming the caller's
+     * account, which "delegates authority to the account" and needs an identity-based policy too, a
+     * role in another account, where "a principal needs an Allow in the identity policy and the
+     * resource-based policy", and the principal types the reference does not single out.
+     */
+    private ResourcePolicyDecision roleTrustGrant(ContainerRequestContext ctx, RequestPrincipal principal,
+                                                  String roleArn, String accountId,
+                                                  Map<String, List<String>> context) {
+        if (trustPolicyEvaluator == null || principal.arn() == null || !AwsArnUtils.isArn(roleArn)) {
+            return ResourcePolicyDecision.NEUTRAL;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(roleArn);
+        if (!accountId.equals(arn.accountId())) {
+            return ResourcePolicyDecision.NEUTRAL;
+        }
+        String roleName = arn.resource().substring(arn.resource().lastIndexOf('/') + 1);
+        Optional<IamRole> role = iamService.findRole(accountId, roleName)
+                .filter(found -> IamService.roleArnMatches(roleArn, found));
+        if (role.isEmpty()) {
+            return ResourcePolicyDecision.NEUTRAL;
+        }
+        Map<String, List<String>> trustContext = new HashMap<>(context);
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        AssumeRolePolicyEvaluator.putRequestKeys(trustContext, form.get("RoleSessionName"), form.get("ExternalId"));
+        return trustPolicyEvaluator.grantsToIamUser(role.get().getAssumeRolePolicyDocument(), principal.arn(),
+                accountId, trustContext)
+                ? ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER : ResourcePolicyDecision.NEUTRAL;
     }
 
     /** The same contexts with every object-tag key removed, keeping the principal and global keys. */

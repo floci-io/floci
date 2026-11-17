@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.iam.AssumeRolePolicyEvaluator.TrustDecision;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -602,6 +603,81 @@ class AssumeRolePolicyEvaluatorTest {
         assertEquals(TrustDecision.NEUTRAL, evaluator.decide(trust("{\"AWS\":\"222222222222\"}"),
                 CALLER, CALLER_ACCOUNT, Map.of()));
         assertEquals(TrustDecision.NEUTRAL, evaluator.decide(null, CALLER, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void grantsToAnIamUserTheTrustPolicyNamesByItsArn() {
+        assertTrue(evaluator.grantsToIamUser(trust("{\"AWS\":\"" + CALLER_ARN + "\"}"),
+                CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertTrue(evaluator.grantsToIamUser(trust("{\"AWS\":[\"111111111111\",\"" + CALLER_ARN + "\"]}"),
+                CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        String withPath = "arn:aws:iam::111111111111:user/team/alice";
+        assertTrue(evaluator.grantsToIamUser(trust("{\"AWS\":\"" + withPath + "\"}"),
+                withPath, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void grantsNothingToAnIamUserThroughItsAccountOrEveryPrincipal() {
+        // A Principal naming the account "delegates authority to the account", so it is not a
+        // grant to the user itself.
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"arn:aws:iam::111111111111:root\"}"),
+                CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"111111111111\"}"),
+                CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.grantsToIamUser(trust("\"*\""), CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"*\"}"), CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void grantsNothingToAnIamUserThroughAPatternOrAnotherUser() {
+        // "When you specify users in a Principal element, you cannot use a wildcard (*) to mean
+        // all users. Principals must always name specific users."
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"arn:aws:iam::111111111111:user/*\"}"),
+                CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"arn:aws:iam::111111111111:user/bob\"}"),
+                CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void grantsNothingToACallerThatIsNotAnIamUser() {
+        String sessionArn = "arn:aws:sts::111111111111:assumed-role/builder/sx";
+        String roleArn = "arn:aws:iam::111111111111:role/builder";
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"" + sessionArn + "\"}"),
+                sessionArn, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"" + roleArn + "\"}"),
+                roleArn, CALLER_ACCOUNT, Map.of()));
+        String federatedArn = "arn:aws:sts::111111111111:federated-user/alice";
+        assertFalse(evaluator.grantsToIamUser(trust("{\"AWS\":\"" + federatedArn + "\"}"),
+                federatedArn, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void grantsNothingToAnIamUserWhenADenyApplies() {
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"%1$s"},"Action":"sts:AssumeRole"},
+              {"Effect":"Deny","Principal":{"AWS":"111111111111"},"Action":"sts:AssumeRole"}]}
+            """.formatted(CALLER_ARN);
+        assertFalse(evaluator.grantsToIamUser(doc, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.grantsToIamUser(null, CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+        assertFalse(evaluator.grantsToIamUser("not json", CALLER_ARN, CALLER_ACCOUNT, Map.of()));
+    }
+
+    @Test
+    void grantsToAnIamUserOnlyWhenTheRequestKeysMeetTheCondition() {
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"%1$s"},"Action":"sts:AssumeRole",
+               "Condition":{"StringEquals":{"sts:ExternalId":"expected-id","sts:RoleSessionName":"alice"}}}]}
+            """.formatted(CALLER_ARN);
+        Map<String, List<String>> matching = new HashMap<>();
+        AssumeRolePolicyEvaluator.putRequestKeys(matching, "alice", "expected-id");
+        Map<String, List<String>> noExternalId = new HashMap<>();
+        AssumeRolePolicyEvaluator.putRequestKeys(noExternalId, "alice", null);
+
+        assertTrue(evaluator.grantsToIamUser(doc, CALLER_ARN, CALLER_ACCOUNT, matching));
+        assertFalse(evaluator.grantsToIamUser(doc, CALLER_ARN, CALLER_ACCOUNT, noExternalId));
+        assertEquals(Map.of("sts:RoleSessionName", List.of("alice")), noExternalId);
     }
 
     @Test

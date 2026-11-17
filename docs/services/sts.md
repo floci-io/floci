@@ -395,6 +395,17 @@ and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are h
 The caller's own identity policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
 allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
 
+The trust policy acts as the role's resource-based policy, so an IAM user whose exact ARN it names may assume a role
+in its own account without an identity policy of its own. The [AssumeRole API reference](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html)
+lets a user assume a role in the same account either through "a policy to the user that allows the user to call
+`AssumeRole` (as long as the role's trust policy trusts the account)" or by adding "the user as a principal directly
+in the role's trust policy", because "when a resource-based policy grants access to a principal in the same account,
+no additional identity-based policy is required". Such a grant is not limited by the user's permissions boundary
+either ([policy evaluation logic](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_policy-eval-denyallow.html):
+"not limited by an implicit deny in an identity-based policy or permissions boundary"), while an explicit `Deny` in
+any of the user's policies, and the account's SCPs, still refuse it. A trust policy that names the account (its id
+or its root ARN) still needs the user's identity policy, as does a role in another account.
+
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key
 belongs to its own account, not to the default one. A role session matches a `Principal` that
@@ -419,6 +430,9 @@ when it is written; Floci stores it as given, so the whole document is refused w
 
 ### Known limitations
 
+- **Only an IAM user named by its ARN is granted by the trust policy alone.** Within the role's account, a
+  trust policy naming `"*"`, a role, a role session or a federated user still needs the caller's identity
+  policy to allow `sts:AssumeRole`.
 - **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,
   `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not in the request context, so a condition
   on them does not match, and `sts:TagSession` and `sts:SetSourceIdentity` are not checked.
