@@ -5,6 +5,7 @@ import io.floci.aws.core.common.BackupWindows;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 
@@ -298,15 +299,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
             instance.setEnabledCloudwatchLogsExports(
                     logExportChanges.applyTo(instance.getEnabledCloudwatchLogsExports()));
         }
+        String previousType = instance.getStorageType();
         if (storageType != null) {
             instance.setStorageType(storageType);
-            // a type that carries neither member drops the stored values, so a later switch back reports the baseline
-            if (!"gp3".equals(storageType)) {
-                instance.setStorageThroughput(null);
-                if (!"io1".equals(storageType) && !"io2".equals(storageType)) {
-                    instance.setIops(null);
-                }
-            }
         }
         if (maxAllocatedStorage != null) {
             instance.setMaxAllocatedStorage(maxAllocatedStorage);
@@ -322,6 +317,39 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (storageThroughput != null) {
             instance.setStorageThroughput(storageThroughput);
+        }
+        // One normalisation after the merge: a stored value the resulting type doesn't carry is dropped, and an
+        // Iops carried over from the other family (io <-> gp3) is dropped unless this request set one, so
+        // Describe reports the baseline rather than a figure that belonged to the old type.
+        String resolved = instance.getStorageType();
+        if (!"gp3".equals(resolved)) {
+            instance.setStorageThroughput(null);
+        }
+        if (iopsFamily(resolved) == null || (iops == null && !Objects.equals(iopsFamily(previousType), iopsFamily(resolved)))) {
+            instance.setIops(null);
+        }
+    }
+
+    private static String iopsFamily(String type) {
+        return "gp3".equals(type) ? "gp3" : "io1".equals(type) || "io2".equals(type) ? "io" : null;
+    }
+
+    /**
+     * Refuses Iops or StorageThroughput on a storage type that doesn't carry it, as the Rust reference does
+     * (InvalidParameterCombination). {@code currentType} is the instance's type on Modify, null on Create.
+     */
+    public void validateStorageMembers(String currentType) {
+        String resolved = storageType != null ? storageType : currentType;
+        if (resolved == null) {
+            return;
+        }
+        if (iops != null && iopsFamily(resolved) == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Iops can't be specified for storage type " + resolved + ".", 400);
+        }
+        if (storageThroughput != null && !"gp3".equals(resolved)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "StorageThroughput can't be specified for storage type " + resolved + ".", 400);
         }
     }
 }

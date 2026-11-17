@@ -757,6 +757,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
         if (isBlank(dbClusterIdentifier) && !isAuroraEngine(engineParam)) {
             resolvedSettings.validateStorageType();
+            resolvedSettings.validateStorageMembers(null);
         } else {
             resolvedSettings = resolvedSettings.withStorageType(null);
         }
@@ -3884,6 +3885,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         if (isBlank(instance.getDbClusterIdentifier()) && !isAuroraEngine(engineName(instance))) {
             effective.validateStorageType();
+            effective.validateStorageMembers(instance.getStorageType());
         } else {
             effective = effective.withStorageType(null);
         }

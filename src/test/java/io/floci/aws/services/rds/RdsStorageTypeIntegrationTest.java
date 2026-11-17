@@ -169,6 +169,39 @@ class RdsStorageTypeIntegrationTest {
     }
 
     @Test
+    void anIopsFigureFromIo1DoesNotSurviveASwitchToGp3() {
+        String id = "storage-io1-to-gp3";
+        try {
+            create(id).formParam("StorageType", "io1").formParam("Iops", "2000").post("/").then().statusCode(200);
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp3")
+                    .post("/").then().statusCode(200);
+            assertEquals(List.of("3000"), described(id, "Iops"));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
+    void iopsAndThroughputAreRefusedOnATypeThatDoesNotCarryThem() {
+        String id = "storage-refuse-members";
+        try {
+            create(id).formParam("StorageType", "io1").formParam("Iops", "2000").post("/").then().statusCode(200);
+            Response throughput = query("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("StorageThroughput", "250").post("/");
+            Response iops = query("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("StorageType", "gp2").formParam("Iops", "3000").post("/");
+            query("ModifyDBInstance").formParam("DBInstanceIdentifier", id).formParam("StorageType", "gp3")
+                    .post("/").then().statusCode(200);
+            assertAll(() -> assertEquals(400, throughput.statusCode(), throughput.asString()),
+                    () -> assertTrue(throughput.asString().contains("InvalidParameterCombination")),
+                    () -> assertEquals(400, iops.statusCode(), iops.asString()),
+                    () -> assertEquals(List.of("125"), described(id, "StorageThroughput")));
+        } finally {
+            delete(id);
+        }
+    }
+
+    @Test
     void modifyChangesTheTypeAndOmissionKeepsIt() {
         String id = "storage-type-modify";
         try {
