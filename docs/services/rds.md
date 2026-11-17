@@ -1163,6 +1163,14 @@ so the password challenge is not emitted as separate header and payload writes.
 This supports PgBouncer logins over plaintext and TLS while keeping the same
 password, IAM and database-role checks.
 
+For PostgreSQL, the proxy logs in to the backend with whatever the backend asks for:
+trust, a cleartext or MD5 password, or SCRAM-SHA-256. With SCRAM, it checks the
+backend's server signature before it accepts the login, prepares the password
+with SASLprep as PostgreSQL does, and refuses a backend that switches to a
+cleartext or MD5 request, or starts a second exchange, once the first has begun.
+A backend login the proxy refuses reaches the client as
+`FATAL 08006 Backend database authentication failed`.
+
 IAM database authentication is also supported. Set `--enable-iam-database-authentication` at instance creation time and use `aws rds generate-db-auth-token` to obtain a token.
 
 Aurora members use their cluster's IAM database authentication setting and master
