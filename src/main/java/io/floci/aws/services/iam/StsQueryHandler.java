@@ -413,7 +413,7 @@ public class StsQueryHandler {
 
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {
         if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
-            return AwsQueryResponse.error("AccessDenied", "Cannot call GetSessionToken with session credentials",
+            return AwsQueryResponse.error("AccessDenied", IamService.sessionCredentialRefusal("GetSessionToken"),
                     AwsNamespaces.STS, 403);
         }
         Response integerMembers =

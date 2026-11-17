@@ -291,7 +291,8 @@ When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, credentials from `GetSession
 are evaluated as the identity whose long-term key signed the call, as on AWS:
 
 - `GetSessionToken` credentials have the permissions of that IAM user, or of the account root when its key minted them,
-  still bounded by the account's service control policies.
+  still bounded by the account's service control policies. Whatever those allow, they reach no IAM operation unless an
+  MFA device minted the session, and no STS operation but `AssumeRole` and `GetCallerIdentity`; see [MFA](#mfa).
 - `GetFederationToken` credentials have no permissions without a session policy (`Policy`). With one, they have the
   intersection of that policy and the permissions of the IAM user that minted them, never those of a role that shares
   the federated user's name. A resource policy naming the federated user's ARN can grant access on its own, but not
@@ -352,10 +353,30 @@ permission to make the call is read against that same context, since AWS denies 
 invalid TOTP", so an identity policy conditioned on MFA for `sts:AssumeRole` is satisfied by the
 device the call carries.
 
-One difference from AWS is known and open: AWS says temporary credentials from a `GetSessionToken`
-request "can access IAM and AWS STS API operations *only* if you include MFA information in the
-request for credentials". Floci does not hold a session to that: one minted without a device reaches
-IAM and STS with whatever its user's policies allow.
+What a session token then reaches is narrower than its policies, and under
+[enforcement](iam.md#iam-enforcement-mode) Floci holds it to that. The reference limits these
+credentials twice over (`GetSessionToken`, "Permissions"): "You cannot call any IAM API operations
+unless MFA authentication information is included in the request", and "You cannot call any AWS STS
+API except AssumeRole or GetCallerIdentity". So a session minted behind a device calls IAM as its
+own user may, one minted without a device is refused every IAM operation whatever its policies
+allow, and neither reaches an STS operation other than `AssumeRole` and `GetCallerIdentity`. The
+refusal is `AccessDenied` with `Cannot call <Operation> with session credentials`, the sentence
+`GetSessionToken` and `GetFederationToken` already answer a session caller with, and the IAM half
+adds `that include no MFA information` to name what the credentials do not carry. AWS publishes no
+sentence for either refusal, so both are Floci's own wording for the case.
+
+Two readings of the rule differ, and Floci follows the API reference. The IAM User Guide's
+"Choosing between GetSessionToken and AssumeRole" compresses the pair into one sentence, that such
+credentials "can access IAM and AWS STS API operations *only* if you include MFA information in the
+request for credentials", which reads as though a device opened the rest of STS as well. The
+reference publishes the two bullets apart and conditions only the IAM one on MFA, so here a device
+buys IAM and no more of STS. The two readings agree on a session that carries no device.
+
+These limits are read where every other authorization decision is, so they apply under
+`FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` and nowhere else, while the two operations that take
+long-term credentials only refuse a session caller with either setting, as above. An assumed-role
+session carries none of them: AWS keeps `GetFederationToken` and `GetSessionToken` from it and
+nothing further, and those two operations turn it away themselves.
 
 ## Trust Policy Enforcement
 

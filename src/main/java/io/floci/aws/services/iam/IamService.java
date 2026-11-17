@@ -111,8 +111,7 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class IamService implements SessionAccountLookup, ResourceProvider {
 
-    public static final String FEDERATION_TOKEN_SESSION_MESSAGE =
-            "Cannot call GetFederationToken with session credentials";
+    public static final String FEDERATION_TOKEN_SESSION_MESSAGE = sessionCredentialRefusal("GetFederationToken");
 
     private static final int USER_INLINE_POLICY_SIZE_LIMIT = 2_048;
     private static final int GROUP_INLINE_POLICY_SIZE_LIMIT = 5_120;
@@ -132,6 +131,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private static final String FEDERATED_USER_SESSION_LIMITS =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"iam:*\",\"sts:*\"],\"Resource\":\"*\"}]}";
+    /**
+     * The STS operations a GetSessionToken session reaches, every other one being refused whatever
+     * its policies allow: "You cannot call any AWS STS API except AssumeRole or GetCallerIdentity"
+     * (STS API Reference, GetSessionToken, "Permissions"). GetCallerIdentity is named here for the
+     * reading rather than for the filter, which answers it before it reads a policy at all.
+     */
+    private static final Set<String> STS_ACTIONS_A_SESSION_TOKEN_REACHES =
+            Set.of("sts:AssumeRole", "sts:GetCallerIdentity");
+    /** What the IAM half of that refusal adds, naming what the credentials do not carry. */
+    private static final String WITHOUT_MFA_INFORMATION = " that include no MFA information";
     /**
      * What the account password policy's {@code AllowUsersToChangePassword} authorizes. The guide:
      * the option "gives users access to the iam:ChangePassword action for only their user and to
@@ -5598,6 +5607,73 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * The sentence a {@code GetSessionToken} session is refused with for an operation its
+     * credentials cannot reach, whatever its policies allow, and empty for every other credential.
+     * AWS limits them twice over (STS API Reference, GetSessionToken, "Permissions"): "You cannot
+     * call any IAM API operations unless MFA authentication information is included in the
+     * request", and "You cannot call any AWS STS API except AssumeRole or GetCallerIdentity".
+     *
+     * <p>The MFA half reads the device the session was minted behind rather than this request,
+     * which is where AWS puts it: such credentials reach IAM "only if you include MFA information
+     * in the request for credentials". The STS half is not conditioned on a device, the reference
+     * publishing the two bullets apart, so AssumeRole and GetCallerIdentity are reachable either
+     * way and no other STS operation is.
+     *
+     * <p>Asked only about the two namespaces it can refuse, so no request on another service pays
+     * for the session read. {@code sts:GetSessionToken} and {@code sts:GetFederationToken} are
+     * refused ahead of this, by the operations themselves and with the same sentence, whichever
+     * temporary credential calls them.
+     */
+    public Optional<String> sessionTokenRefusal(String accessKeyId, String action) {
+        if (action == null || !isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        int namespaceEnd = action.indexOf(':');
+        if (namespaceEnd <= 0) {
+            return Optional.empty();
+        }
+        String namespace = action.substring(0, namespaceEnd);
+        boolean iamAction = "iam".equals(namespace);
+        if (!iamAction && !"sts".equals(namespace)) {
+            return Optional.empty();
+        }
+        if (!iamAction && STS_ACTIONS_A_SESSION_TOKEN_REACHES.contains(action)) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> session = findSessionForCallerContext(accessKeyId)
+                .filter(IamService::isSessionTokenSession);
+        if (session.isEmpty() || (iamAction && session.get().getMfaAuthenticatedAt() != null)) {
+            return Optional.empty();
+        }
+        String operation = action.substring(namespaceEnd + 1);
+        return Optional.of(iamAction
+                ? sessionCredentialRefusal(operation) + WITHOUT_MFA_INFORMATION
+                : sessionCredentialRefusal(operation));
+    }
+
+    /**
+     * What Floci refuses a session credential an operation does not take with. AWS publishes no
+     * sentence for any of these, and they are one rule: an operation a session token cannot reach,
+     * whether that is {@code GetSessionToken} itself, {@code GetFederationToken}, or another the
+     * reference keeps from it.
+     */
+    public static String sessionCredentialRefusal(String operation) {
+        return "Cannot call " + operation + " with session credentials";
+    }
+
+    /**
+     * A session {@code GetSessionToken} minted, which acts as the identity whose long-term key
+     * minted it: nothing in the role ARN slot, so neither a role session nor the federated user
+     * {@code GetFederationToken} writes there, no delegation approver, and not one Floci minted
+     * for a presigned URL of its own.
+     */
+    private static boolean isSessionTokenSession(SessionCredential session) {
+        return session.getDelegatedApproverArn() == null
+                && session.getRoleArn() == null
+                && session.getPresignedAction() == null;
+    }
+
+    /**
      * GetSessionToken credentials have the permissions of the identity that minted them: an IAM
      * user's own policies and boundary, or the account root's, which the enforcement filter still
      * bounds by the account's service control policies.
@@ -5806,13 +5882,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (isFederatedUserSession(session)) {
                 return withFederatedUserLimits(federatedUserContext(session));
             }
-            if (session.getRoleArn() == null) {
-                if (session.getPresignedAction() != null) {
-                    // A locally minted identity session can carry a restrictive session policy.
-                    return session.getSessionPolicyDocument() == null ? null
-                            : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
-                                    session.getSessionPolicyDocument(), null);
-                }
+            if (session.getRoleArn() == null && session.getPresignedAction() != null) {
+                // A locally minted identity session can carry a restrictive session policy.
+                return session.getSessionPolicyDocument() == null ? null
+                        : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
+                                session.getSessionPolicyDocument(), null);
+            }
+            if (isSessionTokenSession(session)) {
                 return sessionTokenContext(session);
             }
             if (isAccountRootArn(session.getRoleArn())) {
