@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.services.account.model.AccountInformation;
 import io.floci.aws.services.account.model.AlternateContact;
 import io.floci.aws.services.account.model.ContactInformation;
 import jakarta.inject.Inject;
@@ -16,6 +17,8 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+
+import java.time.temporal.ChronoUnit;
 
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -74,6 +77,31 @@ public class AccountController {
         response.set("ContactInformation", objectMapper.valueToTree(information));
         response.put("VerificationStatus", VERIFICATION_STATUS_NOT_SUPPORTED);
         return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/getAccountInformation")
+    public Response getAccountInformation(String body) {
+        AccountInformation information = accountService.getAccountInformation(
+                requestContext.getAccountId(), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("AccountId", information.accountId());
+        if (information.accountName() != null) {
+            response.put("AccountName", information.accountName());
+        }
+        if (information.accountCreatedDate() != null) {
+            response.put("AccountCreatedDate",
+                    information.accountCreatedDate().truncatedTo(ChronoUnit.SECONDS).toString());
+        }
+        response.put("AccountState", information.accountState());
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/putAccountName")
+    public Response putAccountName(String body) {
+        accountService.putAccountName(requestContext.getAccountId(), readTree(body));
+        return Response.ok().build();
     }
 
     private JsonNode readTree(String body) {

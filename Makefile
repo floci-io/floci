@@ -37,7 +37,8 @@
 # every operation, is generated from botocore's emr-containers model by
 # tools/aws/regen_emr_containers_shapes.py.
 # src/main/resources/aws/account-request-shapes.json, the Account Management request constraints of the
-# contact operations, is generated from botocore's Account model by tools/aws/regen_account_shapes.py.
+# contact and account information operations, is generated from botocore's Account model by
+# tools/aws/regen_account_shapes.py.
 # src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
 # request constraints, is generated from botocore's model by
 # tools/aws/regen_payment_cryptography_shapes.py.

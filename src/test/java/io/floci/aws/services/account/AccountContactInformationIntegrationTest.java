@@ -10,9 +10,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.floci.aws.services.account.AccountRequests.account;
 import static io.floci.aws.services.account.ContactInformationRequests.contactInformationRequest;
 import static io.floci.aws.services.account.ContactInformationRequests.contactOf;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
@@ -95,11 +95,11 @@ class AccountContactInformationIntegrationTest {
 
     @Test
     void nonObjectRequestBodyReturnsSerializationException() {
-        String account = newAccount();
-        put(account, contactInformationRequest()).statusCode(200);
+        String caller = newAccount();
+        put(caller, contactInformationRequest()).statusCode(200);
 
-        get(account, "[]").statusCode(400).body("__type", equalTo("SerializationException"));
-        post(account, "/putContactInformation", "[]")
+        get(caller, "[]").statusCode(400).body("__type", equalTo("SerializationException"));
+        account(caller, "/putContactInformation", "[]")
                 .statusCode(400).body("__type", equalTo("SerializationException"));
     }
 
@@ -154,20 +154,11 @@ class AccountContactInformationIntegrationTest {
         return String.format("7310008259%02d", ACCOUNTS.incrementAndGet());
     }
 
-    private static ValidatableResponse put(String account, ObjectNode request) {
-        return post(account, "/putContactInformation", request.toString());
+    private static ValidatableResponse put(String caller, ObjectNode request) {
+        return account(caller, "/putContactInformation", request.toString());
     }
 
-    private static ValidatableResponse get(String account, String body) {
-        return post(account, "/getContactInformation", body);
-    }
-
-    private static ValidatableResponse post(String account, String path, String body) {
-        return given().contentType("application/json").header("Authorization", authorization(account))
-                .body(body).post(path).then();
-    }
-
-    private static String authorization(String account) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20261114/us-east-1/account/aws4_request";
+    private static ValidatableResponse get(String caller, String body) {
+        return account(caller, "/getContactInformation", body);
     }
 }

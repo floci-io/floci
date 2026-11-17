@@ -554,10 +554,14 @@ public final class TestFixtures {
     }
 
     public static AccountClient accountClient() {
+        return accountClient("test");
+    }
+
+    public static AccountClient accountClient(String accountId) {
         return AccountClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(CREDENTIALS)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
                 .build();
     }
 
