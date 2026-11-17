@@ -167,28 +167,40 @@ class S3VectorsServiceTest {
         service.deleteVectorBucketPolicy("bucket", null, REGION);
     }
 
+    /**
+     * The policy calls take a bucket ARN of the request's Region and refuse one of another Region or partition, as S3
+     * Vectors does (measured on AWS), leaving that bucket's policy alone.
+     */
     @Test
-    void vectorBucketPolicyByArnResolvesTheArnsOwnRegion() {
+    void vectorBucketPolicyByArnIsTakenOnlyInTheRequestsRegion() {
         VectorBucket westBucket = service.createVectorBucket("west-bucket", null, "us-west-2");
         String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String westArn = westBucket.getVectorBucketArn();
 
-        service.putVectorBucketPolicy(null, westBucket.getVectorBucketArn(), policy, REGION);
-        assertEquals(policy, service.getVectorBucketPolicy(null, westBucket.getVectorBucketArn(), REGION));
-        assertEquals(policy, service.getVectorBucketPolicy("west-bucket", null, "us-west-2"));
+        for (Runnable call : List.<Runnable>of(() -> service.putVectorBucketPolicy(null, westArn, policy, REGION),
+                () -> service.getVectorBucketPolicy(null, westArn, REGION),
+                () -> service.deleteVectorBucketPolicy(null, westArn, REGION))) {
+            AwsException refused = assertThrows(AwsException.class, call::run);
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertEquals("Unexpected value for ARN region component", refused.getMessage());
+        }
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> service.getVectorBucketPolicy("west-bucket", null, "us-west-2")).getErrorCode());
 
-        service.deleteVectorBucketPolicy(null, westBucket.getVectorBucketArn(), REGION);
-        AwsException notFound = assertThrows(AwsException.class,
-                () -> service.getVectorBucketPolicy("west-bucket", null, "us-west-2"));
-        assertEquals("NotFoundException", notFound.getErrorCode());
+        service.putVectorBucketPolicy(null, westArn, policy, "us-west-2");
+        assertEquals(policy, service.getVectorBucketPolicy(null, westArn, "us-west-2"));
 
-        // Custom region in a non-commercial deployment stays in the deployment's partition.
+        // A custom Region of a non-commercial deployment is in the deployment's partition: its ARN is taken in that
+        // Region, and a commercial Region's ARN is of another partition.
         S3VectorsService chinaService = new S3VectorsService(inMemoryFactory(),
                 new RegionResolver("cn-north-1", "000000000000"),
                 Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
         VectorBucket customRegionBucket = chinaService.createVectorBucket("custom-bucket", null, "custom-region-1");
         assertTrue(customRegionBucket.getVectorBucketArn().startsWith("arn:aws-cn:s3vectors:custom-region-1:"));
-        chinaService.putVectorBucketPolicy(null, customRegionBucket.getVectorBucketArn(), policy, "cn-north-1");
+        chinaService.putVectorBucketPolicy(null, customRegionBucket.getVectorBucketArn(), policy, "custom-region-1");
         assertEquals(policy, chinaService.getVectorBucketPolicy("custom-bucket", null, "custom-region-1"));
+        assertEquals("Unexpected value for ARN partition component", assertThrows(AwsException.class,
+                () -> chinaService.getVectorBucketPolicy(null, westArn, "cn-north-1")).getMessage());
     }
 
     @Test
@@ -198,16 +210,20 @@ class S3VectorsServiceTest {
         String validPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
         service.putVectorBucketPolicy("bucket", null, validPolicy, REGION);
 
-        // Missing bucket or foreign-account ARN returns NotFoundException (404) and leaves local bucket untouched.
-        String foreignAccountArn = "arn:aws:s3vectors:us-east-1:111122223333:bucket/bucket";
+        // A missing bucket returns NotFoundException (404), and another account's ARN AccessDeniedException (403), as
+        // S3 Vectors answers it (measured on AWS); either leaves the local bucket untouched.
         for (Runnable action : List.<Runnable>of(
                 () -> service.putVectorBucketPolicy("missing", null, validPolicy, REGION),
                 () -> service.getVectorBucketPolicy("missing", null, REGION),
-                () -> service.deleteVectorBucketPolicy("missing", null, REGION),
+                () -> service.deleteVectorBucketPolicy("missing", null, REGION))) {
+            assertRejected("NotFoundException", 404, validPolicy, action);
+        }
+        String foreignAccountArn = "arn:aws:s3vectors:us-east-1:111122223333:bucket/bucket";
+        for (Runnable action : List.<Runnable>of(
                 () -> service.putVectorBucketPolicy(null, foreignAccountArn, "{\"Statement\":[]}", REGION),
                 () -> service.getVectorBucketPolicy(null, foreignAccountArn, REGION),
                 () -> service.deleteVectorBucketPolicy(null, foreignAccountArn, REGION))) {
-            assertRejected("NotFoundException", 404, validPolicy, action);
+            assertRejected("AccessDeniedException", 403, validPolicy, action);
         }
 
         // Neither, both, or invalid bucket names return ValidationException (400).
