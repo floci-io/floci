@@ -311,8 +311,9 @@ nothing answers.
 
 ## Notebook executions
 
-Floci keeps a notebook execution and its lifecycle, but runs no notebook, in either runner mode, and writes no output
-notebook.
+With `runner-mode` set to `docker`, a notebook execution runs its notebook on its cluster and writes it as run (see
+[Running a notebook execution's notebook](#running-a-notebook-executions-notebook)). With the default `immediate`
+mode, Floci keeps an execution and its lifecycle but runs no notebook and writes no output notebook.
 
 * **StartNotebookExecution** refuses a request without `ExecutionEngine.Id` or `ServiceRole`, or with an
   `ExecutionEngine.Type` or `OutputNotebookFormat` the model does not name, with `ValidationException`, and a member of
@@ -326,16 +327,49 @@ notebook.
   `InvalidRequestException` in Floci's own wording. The editor, relative path, S3 locations and parameters are kept as
   given. The execution's id is `ex-` and 29 letters and digits, and its `ExecutionEngine.Type` is `EMR` unless given.
   IAM's `aws:ResourceTag` conditions read its tags.
-* **States**: an execution is `START_PENDING` as it starts, `RUNNING` from then on, and `FINISHED` once the cluster's
-  `step-duration-seconds` has passed (at once by default), with AWS's "Execution is finished for cluster ...". It is
-  `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An execution is terminated if it runs for
-  more than 30 days", in Floci's own wording.
-* **StopNotebookExecution** stops one that has not ended at once, `STOPPED` with AWS's "Execution is stopped for
-  cluster ...". One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **States**: in the `immediate` mode an execution is `START_PENDING` as it starts, `RUNNING` from then on, and
+  `FINISHED` once the cluster's `step-duration-seconds` has passed (at once by default), with AWS's "Execution is
+  finished for cluster ...". It is `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An
+  execution is terminated if it runs for more than 30 days", in Floci's own wording. In the `docker` mode its run sets
+  them (below).
+* **StopNotebookExecution** stops one that has not ended, `STOPPED` with AWS's "Execution is stopped for cluster ...":
+  at once with no notebook running, else `STOPPING` ("Execution is being stopped for cluster ...") until its run has
+  stopped. One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
 * **ListNotebookExecutions** lists the Region's executions that started from `From` (by default 30 days ago) to
   `To` (by default now), filtered by `EditorId`, `Status` and `ExecutionEngineId`, newest first, at most 50 to a page
   ("Returns a maximum of 50 notebook executions") after a `Marker`, which resumes only the listing it came from: the
   same account, Region and filters.
+
+### Running a notebook execution's notebook
+
+With `runner-mode` set to `docker`, an execution runs its notebook on its cluster as a step's command runs: a
+`spark-submit` there, a YARN application with the cluster's Spark settings, as the execution's `ExecutionRoleArn`,
+else the cluster's instance profile, with its `EnvironmentVariables`. No source names the kernel AWS runs a notebook
+with, so Floci runs it with a program of its own, needing only Python and PySpark, which every release's image has,
+not Jupyter:
+
+* **The notebook** is the execution's `NotebookS3Location`, read through the cluster's S3A. AWS finds an EMR
+  Notebook named by `EditorId` and `RelativePath` under the notebook's own S3 location, which Floci keeps none of, so
+  such an execution fails at once, in Floci's own wording.
+* **Its cells**: the code cells run in turn in one Python namespace that holds `spark` and `sc`, each keeping what it
+  printed, the value of its last expression, and any error, every output an earlier run left cleared first. Of
+  sparkmagic's cell commands, a `%%sql` cell runs its body with `spark.sql`, showing the result's first 20 rows, and a
+  `%%local` or `%%spark` one runs its body as Python; any other (`%%configure`, `%%info`, ...) is not run. A `%` or
+  `!` line of IPython's or sparkmagic's commands is not run either, where the cell is not Python as it stands.
+  `NotebookParams`, "Input parameters in JSON format", go in as papermill puts them, in a cell tagged
+  `injected-parameters` after the one tagged `parameters`, else first, as "You can pass different parameter values to
+  a notebook with a parameterized notebook cell", in place of any such cell an earlier run left; each parameter's name
+  must be a Python variable's, or the run fails before any cell. An environment variable `KERNEL_EXTRA_SPARK_OPTS`, as
+  AWS's example passes, goes to `spark-submit` as its options.
+* **The notebook as run**: no source gives where AWS writes it, so Floci writes it under the
+  `OutputNotebookS3Location` prefix, else beside the notebook, in a folder named for the execution, as `<name>.ipynb`
+  and `<name>.html`, and reports the one `OutputNotebookFormat` names, the HTML one, else the notebook, as the
+  execution's `OutputNotebookURI`.
+* **States**: `START_PENDING` until its container runs, then `RUNNING`; `FINISHED` once every cell has run; `FAILED`
+  at the first cell that raises (the notebook as run, written all the same, holds its error), where the run fails
+  otherwise (its reason giving the run's exit code, the notebook as run perhaps not written), where it could not
+  start, where its cluster shuts down, which stops the run, or after 30 days, in Floci's own wording. One Floci stopped
+  running when it restarted fails too.
 
 ## Application UIs
 
@@ -911,7 +945,7 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_CLUSTER_STARTUP_DELAY_SECONDS` | `0` | Seconds a new cluster takes to be ready to run steps, the first half `STARTING` and the second `BOOTSTRAPPING`; `0` makes it ready as soon as it is created |
 | `FLOCI_SERVICES_EMR_STEP_DURATION_SECONDS` | `0` | Seconds a step stays `RUNNING` before it completes; `0` completes it as soon as it starts |
 | `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
-| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step, and each session's Spark Connect server, in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps) and [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)) |
+| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step, each session's Spark Connect server and each notebook execution's notebook in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps), [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server) and [Running a notebook execution's notebook](#running-a-notebook-executions-notebook)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label; a mirror sets `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` too |
 | `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image a `docker` cluster takes HDFS and YARN from, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the Hadoop of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |

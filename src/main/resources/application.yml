@@ -661,7 +661,7 @@ floci:
       cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
       step-duration-seconds: 0              # 0 = a step completes as soon as it starts
       cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
-      runner-mode: immediate                # docker = run bootstrap actions, steps and sessions' servers in containers
+      runner-mode: immediate                # docker = run bootstrap actions, steps, sessions' servers and notebooks in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
