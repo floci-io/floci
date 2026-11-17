@@ -293,9 +293,12 @@ public final class BackendAuthenticator {
         scramVerified = true;
     }
 
-    /** SCRAM's SaltedPassword: PBKDF2 with HMAC-SHA256 (RFC 5802, section 3). */
+    /**
+     * SCRAM's SaltedPassword: PBKDF2 with HMAC-SHA256 (RFC 5802, section 3) of the password after
+     * SASLprep, as PostgreSQL derives it both when it stores a verifier and when it logs in.
+     */
     public static byte[] saltedPassword(String password, byte[] salt, int iterations) throws GeneralSecurityException {
-        PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
+        PBEKeySpec spec = new PBEKeySpec(SaslPrep.prepare(password).toCharArray(), salt, iterations, 256);
         try {
             return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
         } finally {
