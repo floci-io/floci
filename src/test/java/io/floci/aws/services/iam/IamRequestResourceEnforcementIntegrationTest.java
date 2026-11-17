@@ -859,19 +859,52 @@ class IamRequestResourceEnforcementIntegrationTest {
     /** An identity pool is checked on the ARN its id gives, the one Cognito tags it under. */
     @Test
     void anIdentityPoolIsCheckedOnTheArnItsIdGives() {
-        String id = adminJson("cognito-identity", "AWSCognitoIdentityService.CreateIdentityPool")
-                .body("{\"IdentityPoolName\":\"res pool " + suffix() + "\",\"AllowUnauthenticatedIdentities\":false}")
-                .post("/").then().statusCode(200).extract().path("IdentityPoolId");
-        cleanup.register(() -> adminJson("cognito-identity", "AWSCognitoIdentityService.DeleteIdentityPool")
-                .body("{\"IdentityPoolId\":\"" + id + "\"}").post("/"));
-        String arn = "arn:aws:cognito-identity:" + REGION + ":" + ACCOUNT + ":identitypool/" + id;
-        adminJson("cognito-identity", "AWSCognitoIdentityService.TagResource")
-                .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":{\"a\":\"b\"}}").post("/").then().statusCode(200);
+        String id = identityPool(null);
+        String arn = identityPoolArn(id);
+        tagIdentityPool(arn, "{\"a\":\"b\"}");
 
         User user = user("res-identity-pool");
         user.policy(allowOn("cognito-identity:DescribeIdentityPool", arn));
         describeIdentityPool(user, id).statusCode(200);
         refusedJson(describeIdentityPool(user, REGION + ":" + UUID.randomUUID()), "cognito-identity:DescribeIdentityPool");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Cognito holds on the identity pool a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller describe that team's pool and not
+     * another's.
+     */
+    @Test
+    void aCognitoIdentityResourceTagConditionReadsTheTagsOfTheIdentityPool() {
+        String tagged = identityPool("{\"team\":\"web\"}");
+        String other = identityPool("{\"team\":\"web\"}");
+        tagIdentityPool(identityPoolArn(tagged), "{\"team\":\"data\"}");
+
+        User user = user("res-identity-pool-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"cognito-identity:DescribeIdentityPool\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeIdentityPool(user, tagged).statusCode(200);
+        refusedJson(describeIdentityPool(user, other), "cognito-identity:DescribeIdentityPool");
+    }
+
+    /** The id of an identity pool an administrator creates, with the {@code tags} object if any, deleted afterwards. */
+    private String identityPool(String tags) {
+        String id = adminJson("cognito-identity", "AWSCognitoIdentityService.CreateIdentityPool")
+                .body("{\"IdentityPoolName\":\"res pool " + suffix() + "\",\"AllowUnauthenticatedIdentities\":false"
+                        + (tags == null ? "" : ",\"IdentityPoolTags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("IdentityPoolId");
+        cleanup.register(() -> adminJson("cognito-identity", "AWSCognitoIdentityService.DeleteIdentityPool")
+                .body("{\"IdentityPoolId\":\"" + id + "\"}").post("/"));
+        return id;
+    }
+
+    private static String identityPoolArn(String id) {
+        return "arn:aws:cognito-identity:" + REGION + ":" + ACCOUNT + ":identitypool/" + id;
+    }
+
+    private static void tagIdentityPool(String arn, String tags) {
+        adminJson("cognito-identity", "AWSCognitoIdentityService.TagResource")
+                .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":" + tags + "}").post("/").then().statusCode(200);
     }
 
     @Test
