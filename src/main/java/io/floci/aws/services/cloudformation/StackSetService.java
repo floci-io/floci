@@ -7,7 +7,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SmithyValidationErrors;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudformation.model.ChangeSet;
@@ -53,11 +53,15 @@ import java.util.regex.Pattern;
  * <p>A StackSet holds a template and configuration; {@code CreateStackInstances} drives the existing
  * single-stack engine ({@link CloudFormationService}) once per target {@code (account, region)},
  * provisioning the resources into each target account's namespace. The StackSet, instance and
- * operation records themselves live in the administration (caller) account's namespace.
+ * operation records themselves live in the administration (caller) account's namespace, in the Region the stack
+ * set was created in: a stack set is Regional, listed and reached only there, as on AWS, and so are its instances,
+ * operations and automatic deployment targets. Trusted access with Organizations is the organization's, in every
+ * Region.
  *
  * <p>A service-managed stack set with automatic deployment follows the accounts of the organization: an
  * account created in, invited into or moved under one of its targets gets an instance in every Region
- * that target was given, and one no target covers any more loses its instances.
+ * that target was given, and one no target covers any more loses its instances. That runs in each stack set's own
+ * Region, whatever Region the Organizations call was sent to.
  */
 @ApplicationScoped
 public class StackSetService implements PassedRoleLookup, AccountPlacementListener {
@@ -75,7 +79,7 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
     private static final Pattern REGION_PATTERN = Pattern.compile("[A-Za-z0-9-]{1,128}");
 
     private final CloudFormationService cfnService;
-    private final StorageBackend<String, StackSet> stackSets;
+    private final RegionScopedStorage<StackSet> stackSets;
     private final StorageBackend<String, StackInstance> instances;
     private final StorageBackend<String, StackSetOperation> operations;
     private final StorageBackend<String, String> organizationsAccess;
@@ -98,19 +102,25 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         this(cfnService, storageFactory, null, new RegionResolver("us-east-1", "000000000000")); // partition-literal: test-shaped constructor default
     }
 
+    /**
+     * A stack set is Regional, as on AWS, so the stores of stack sets, instances, operations and automatic deployment
+     * targets are the request's Region's view ({@link RegionScopedStorage}); a record stored before, without a
+     * Region, is the default Region's. Trusted access with Organizations is the organization's, so its store is not.
+     */
     @Inject
     public StackSetService(CloudFormationService cfnService, StorageFactory storageFactory,
                            OrganizationsService organizationsService, RegionResolver regionResolver) {
         this.cfnService = cfnService;
-        this.stackSets = storageFactory.create("cloudformation", "cloudformation-stacksets.json",
-                new TypeReference<Map<String, StackSet>>() {});
-        this.instances = storageFactory.create("cloudformation", "cloudformation-stackset-instances.json",
-                new TypeReference<Map<String, StackInstance>>() {});
-        this.operations = storageFactory.create("cloudformation", "cloudformation-stackset-operations.json",
-                new TypeReference<Map<String, StackSetOperation>>() {});
+        this.stackSets = new RegionScopedStorage<>(storageFactory, regionResolver, "cloudformation",
+                "cloudformation-stacksets.json", new TypeReference<Map<String, StackSet>>() {});
+        this.instances = new RegionScopedStorage<>(storageFactory, regionResolver, "cloudformation",
+                "cloudformation-stackset-instances.json", new TypeReference<Map<String, StackInstance>>() {});
+        this.operations = new RegionScopedStorage<>(storageFactory, regionResolver, "cloudformation",
+                "cloudformation-stackset-operations.json", new TypeReference<Map<String, StackSetOperation>>() {});
         this.organizationsAccess = storageFactory.create("cloudformation", "cloudformation-organizations-access.json",
                 new TypeReference<Map<String, String>>() {});
-        this.autoDeploymentTargets = storageFactory.create("cloudformation", "cloudformation-stackset-auto-targets.json",
+        this.autoDeploymentTargets = new RegionScopedStorage<>(storageFactory, regionResolver, "cloudformation",
+                "cloudformation-stackset-auto-targets.json",
                 new TypeReference<Map<String, StackSetAutoDeploymentTarget>>() {});
         this.organizationsService = organizationsService;
         this.regionResolver = regionResolver;
@@ -225,9 +235,9 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
     }
 
     /**
-     * The tags of the stack set stored under {@code arn} in the account the ARN names, a pre-multi-account one of the
-     * default account read in place, by key, which IAM gives a resource-tag condition; empty when there is none. Reads
-     * only, matching the stack set's id, {@code <name>:<id>}, on the ARN.
+     * The tags of the stack set stored under {@code arn} in the account and Region the ARN names, a pre-multi-account
+     * one of the default account read in place, by key, which IAM gives a resource-tag condition; empty when there is
+     * none. Reads only, matching the stack set's id, {@code <name>:<id>}, on the ARN.
      */
     public Map<String, String> storedTags(String arn) {
         if (!AwsArnUtils.isArnFor(arn, "cloudformation")) {
@@ -240,11 +250,8 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
             return Map.of();
         }
         String name = id.substring(0, id.indexOf(':'));
-        String account = parsed.accountId();
-        Optional<StackSet> stored = stackSets instanceof AccountAwareStorageBackend<StackSet> aware
-                ? aware.getForAccount(account, name).or(() -> aware.getLegacyForAccount(account, name))
-                : stackSets.get(name);
-        return stored.filter(stackSet -> id.equals(stackSet.getStackSetId()))
+        return stackSets.readInAccount(parsed.accountId(), parsed.region(), name)
+                .filter(stackSet -> id.equals(stackSet.getStackSetId()))
                 .<Map<String, String>>map(stackSet -> Map.copyOf(stackSet.getTags()))
                 .orElse(Map.of());
     }
@@ -524,15 +531,25 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
                 () -> reconcileAccountPlacement(managementAccountId, accountId)));
     }
 
+    /**
+     * Deploys to or removes from {@code accountId} the instances of every automatically deploying stack set of the
+     * management account, in every Region, each in its own Region, where its instances and operations are.
+     */
     private synchronized void reconcileAccountPlacement(String managementAccountId, String accountId) {
         Set<String> ancestors = ancestorsOf(managementAccountId, accountId);
-        for (StackSet stackSet : stackSets.scan(key -> true)) {
-            if ("SERVICE_MANAGED".equals(stackSet.getPermissionModel()) && stackSet.isAutoDeploymentEnabled()) {
+        for (RegionScopedStorage.RegionEntry<StackSet> entry : stackSets.scanEveryRegion()) {
+            StackSet stackSet = entry.value();
+            // Only a stack set under its own name: one of a Region no partition publishes, kept with
+            // allow-unknown-regions, reads as the default Region's key "<Region>/<name>", and the default
+            // Region's stack set of that name is another one.
+            if (entry.key().equals(stackSet.getStackSetName())
+                    && "SERVICE_MANAGED".equals(stackSet.getPermissionModel()) && stackSet.isAutoDeploymentEnabled()) {
                 try {
-                    autoDeploy(stackSet, accountId, ancestors);
+                    RequestScopes.runAs(managementAccountId, entry.region(),
+                            () -> autoDeploy(stackSet, accountId, ancestors));
                 } catch (RuntimeException e) {
-                    LOG.warnv(e, "Automatic deployment failed for StackSet {0}, account {1}",
-                            stackSet.getStackSetName(), accountId);
+                    LOG.warnv(e, "Automatic deployment failed for StackSet {0} in {1}, account {2}",
+                            stackSet.getStackSetName(), entry.region(), accountId);
                 }
             }
         }
@@ -998,10 +1015,11 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         }
     }
 
+    /** The stack set of that name in the request's Region; another Region's is not found, as one that doesn't exist. */
     private StackSet getStackSetOrThrow(String name) {
         return stackSets.get(name)
                 .orElseThrow(() -> new AwsException("StackSetNotFoundException",
-                        "StackSet [" + name + "] not found", 404));
+                        "StackSet " + name + " not found", 404));
     }
 
     private static String instanceStackName(String stackSetName, String account) {
