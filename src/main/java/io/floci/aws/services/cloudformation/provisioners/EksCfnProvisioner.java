@@ -111,9 +111,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         // Unstripped: createCluster reads the reserved cluster-args tag, then drops it.
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         request.setTags(templateTags);
-        request.setEncryptionConfig(createSetting(props, "EncryptionConfig", true, ctx, new TypeReference<>() { }));
+        request.setEncryptionConfig(createSetting(props, "EncryptionConfig", ctx, new TypeReference<>() { }));
         request.setKubernetesNetworkConfig(
-                createSetting(props, "KubernetesNetworkConfig", false, ctx, new TypeReference<>() { }));
+                createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { }));
         Cluster created = eksService.createCluster(request);
         // The cluster this resource named before is gone or replaced; publish writes only what the
         // new one has, so its endpoint and certificate must not outlive it.
@@ -132,20 +132,17 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * A create-only property in its API request shape, or null when the template leaves it out. A value
-     * of the wrong shape fails the resource. The request model has no ElasticLoadBalancing or
-     * ServiceIpv6Cidr member, so those members of KubernetesNetworkConfig are not read.
+     * A create-only property in its API request shape, or null when the template leaves it out. The
+     * template value is read against the type the resource schema declares, so a value of another type
+     * fails the resource with CloudFormation's wording. The request model has no ElasticLoadBalancing
+     * or ServiceIpv6Cidr member, so those members of KubernetesNetworkConfig are not read.
      */
-    private static <T> T createSetting(JsonNode props, String name, boolean list, ProvisionContext ctx,
-                                       TypeReference<T> type) {
-        JsonNode resolved = props == null || !props.has(name) ? null
-                : ctx.engine().resolveNodeOmittingNoValue(props.get(name));
-        if (resolved == null || resolved.isMissingNode() || resolved.isNull()) {
+    private static <T> T createSetting(JsonNode props, String name, ProvisionContext ctx, TypeReference<T> type) {
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode resolved = types.readProperty(CLUSTER, props, name);
+        types.finish();
+        if (resolved == null) {
             return null;
-        }
-        if (list ? !resolved.isArray() : !resolved.isObject()) {
-            throw new AwsException("ValidationError",
-                    "AWS::EKS::Cluster " + name + " must be " + (list ? "a list" : "an object"), 400);
         }
         try {
             return MAPPER.convertValue(CfnApiShapeConverter.convert(resolved, CfnApiShapeConverter.OMIT_NULL_PROPERTIES),
