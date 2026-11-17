@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.testing.IamSimulationRequests;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
@@ -8,7 +9,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.List;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.IamSimulationRequests.LEVELS;
 import static java.util.Collections.nCopies;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -36,8 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 class IamSimulateOrganizationAndScenarioIntegrationTest {
 
-    private static final String IAM_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261115/us-east-1/iam/aws4_request";
+    private static final String CREDENTIAL = "test";
 
     private static final String ACCOUNT = "000000000000";
 
@@ -50,8 +50,12 @@ class IamSimulateOrganizationAndScenarioIntegrationTest {
     private static final String PRINCIPAL_DECISION = "SimulatePrincipalPolicyResponse"
             + ".SimulatePrincipalPolicyResult.EvaluationResults.member.EvalDecision";
 
+    /** Each resource's own answer, which is where a result carries the resources a call named. */
+    private static final String CUSTOM_RESOURCE_DECISIONS = "SimulateCustomPolicyResponse"
+            + ".SimulateCustomPolicyResult.EvaluationResults.member.ResourceSpecificResults"
+            + ".member.EvalResourceDecision";
+
     private static final String INPUT = "PolicyInputList.member.1";
-    private static final String LEVELS = "OrderedOrganizationPolicyInputList.member.";
 
     /** The EC2 resources the published scenarios require, as ARNs a simulation may name. */
     private static final String INSTANCE = "arn:aws:ec2:us-east-1:000000000000:instance/i-1";
@@ -144,8 +148,10 @@ class IamSimulateOrganizationAndScenarioIntegrationTest {
                 .formParam("ResourceArns.member.5", VOLUME)
                 .formParam("ResourceHandlingOption", "EC2-VPC-EBS");
 
-        // One result per resource named, as every simulation answers, and the scenario is complete.
-        assertEquals(nCopies(5, "allowed"), decisions(simulation, CUSTOM_DECISION));
+        // The one result the action answers with, as every simulation answers now, carrying each
+        // named resource's own decision under it, and the scenario is complete.
+        assertEquals(List.of("allowed"), decisions(simulation, CUSTOM_DECISION));
+        assertEquals(nCopies(5, "allowed"), decisions(simulation, CUSTOM_RESOURCE_DECISIONS));
     }
 
     @Test
@@ -208,9 +214,7 @@ class IamSimulateOrganizationAndScenarioIntegrationTest {
     }
 
     private static RequestSpecification iam(String action) {
-        return given().header("Authorization", IAM_AUTH)
-                .formParam("Action", action)
-                .formParam("Version", "2010-05-08");
+        return IamSimulationRequests.iam(CREDENTIAL, action);
     }
 
     private static RequestSpecification custom(String actionName) {
@@ -242,7 +246,7 @@ class IamSimulateOrganizationAndScenarioIntegrationTest {
 
     private static String decision(RequestSpecification simulation, String path) {
         List<String> decisions = decisions(simulation, path);
-        assertEquals(1, decisions.size(), "one action and one resource answer once");
+        assertEquals(1, decisions.size(), "one action answers once");
         return decisions.getFirst();
     }
 

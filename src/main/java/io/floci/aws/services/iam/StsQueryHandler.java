@@ -306,7 +306,8 @@ public class StsQueryHandler {
         String callerAccount = regionResolver.getAccountId();
         IamService.CallerArns caller = iamService.resolveCallerArns(callerAccessKeyId())
                 .orElseGet(() -> IamService.CallerArns.accountRoot(
-                        regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount));
+                                regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount)
+                        .withOrganization(iamService.organizationContextOf(callerAccount).orElse(null)));
         if (mfa.authenticatedAt() != null) {
             // A device this call presented is this request's own authentication, which is how a
             // long-term key reaches a role whose trust policy "includes a condition that tests for

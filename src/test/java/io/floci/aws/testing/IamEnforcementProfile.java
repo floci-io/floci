@@ -17,15 +17,17 @@ import java.util.Map;
  *   which pass with it off.</li>
  *   <li>{@code floci.services.organizations.scp-enforcement-enabled=true} caps a member account's
  *   permissions with the SCPs its organization attaches.
- *   {@code ScpEnforcementLeaveOrganizationIntegrationTest} and
+ *   {@code ScpEnforcementLeaveOrganizationIntegrationTest},
+ *   {@code ScpEnforcementOrganizationContextIntegrationTest} and
  *   {@code DynamoDbTransactionPolicyBoundaryIntegrationTest} rely on it: each creates an
  *   organization, enables SCPs on its root and attaches a deny that reaches a member account.</li>
  * </ul>
  *
  * <p>SCP enforcement is inert for every other class. An SCP only applies to a member account of an
- * organization whose root has SCPs enabled, and the management account is exempt, as in AWS. No
- * other class creates an organization, so the SCP lookup finds no ceiling for any account they use
- * and the decision is the one IAM enforcement alone makes.
+ * organization whose root has SCPs enabled, and the management account is exempt, as in AWS. The
+ * three classes above are the only ones here that create an organization, each under a management
+ * account of its own and removing it as it ends, so the SCP lookup finds no ceiling for any account
+ * the others use and their decisions are the ones IAM enforcement alone makes.
  */
 public class IamEnforcementProfile implements QuarkusTestProfile {
 

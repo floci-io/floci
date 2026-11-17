@@ -1072,9 +1072,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 Math.max(0, Duration.between(claim.authenticatedAt(), clock.instant()).toSeconds())));
     }
 
+    /**
+     * The account-root principal this filter stands in for, in the organization its account
+     * belongs to. The root user of a member account is a principal of that organization like any
+     * other, so the keys that name it are written for this principal as well; the resolved callers
+     * beside it carry theirs from the lookup that resolved them.
+     */
     private CallerArns accountRootArns(String accountId) {
         String rootArn = AwsArnUtils.Arn.global(requestPartition(), "iam", accountId, "root").toString();
-        return CallerArns.accountRoot(rootArn, accountId);
+        return CallerArns.accountRoot(rootArn, accountId)
+                .withOrganization(iamService.organizationContextOf(accountId).orElse(null));
     }
 
     /**

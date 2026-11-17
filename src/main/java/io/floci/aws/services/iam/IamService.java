@@ -44,6 +44,7 @@ import io.floci.aws.services.iam.model.LoginProfile;
 import io.floci.aws.services.iam.model.OpenIDConnectProvider;
 import io.floci.aws.services.iam.model.OrganizationRootFeatures;
 import io.floci.aws.services.iam.model.OutboundWebIdentityFederation;
+import io.floci.aws.services.iam.model.PolicySource;
 import io.floci.aws.services.iam.model.PolicyVersion;
 import io.floci.aws.services.iam.model.ServerCertificate;
 import io.floci.aws.services.iam.model.ServiceSpecificCredential;
@@ -515,12 +516,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     Instance<DelegationRequestOwnership> delegationRequestOwnership;
 
     /**
+     * The organization an account's principals are in, read the same lazy way, so the keys that
+     * say which organization a caller belongs to are answered by the service that holds it.
+     * Absent in a unit test that builds this service directly, which then carries none of them.
+     */
+    @Inject
+    Instance<PrincipalOrganization> principalOrganizations;
+
+    /**
      * The service control policy levels that cap {@code accountId}, or null when SCPs do not apply
      * to it, for callers that evaluate a principal outside the request filter.
      */
     public List<List<String>> effectiveScpLevels(String accountId) {
         return scpProvider != null && scpProvider.isResolvable()
                 ? scpProvider.get().effectiveScpLevels(accountId) : null;
+    }
+
+    /**
+     * The organization {@code accountId} is in, for the three keys a request context carries for a
+     * principal of that account, or empty when the account is in none and when Organizations is
+     * not deployed. The keys are "populated for you" on every path rather than supplied by a
+     * caller, which is why they are read here rather than asked of whoever builds the context.
+     */
+    public Optional<PrincipalOrganization.OrganizationContext> organizationContextOf(String accountId) {
+        return principalOrganizations != null && principalOrganizations.isResolvable()
+                ? principalOrganizations.get().organizationContextOf(accountId)
+                : Optional.empty();
     }
 
     @Inject
@@ -5914,8 +5935,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return ctx == null ? null : ctx.identityPolicies();
     }
 
+    /**
+     * The caller's own ARN alone. It reads the credential without the organization its account
+     * belongs to: nothing here fills a request context, so no key is owed, and the lookup that
+     * would answer one is not spent.
+     */
     public Optional<String> resolveCallerArn(String accessKeyId) {
-        return resolveCallerArns(accessKeyId).map(CallerArns::callerArn);
+        return callerArnsOf(accessKeyId).map(CallerArns::callerArn);
     }
 
     /**
@@ -5934,13 +5960,27 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
      * @param principalTags the stored user's or assumed role's tags, snapshotted for this request;
      *                      STS session tags are not yet recorded
+     * @param sessionMfa    what the credentials the request was signed with say about multi-factor
+     *                      authentication, or null when they publish neither key
+     * @param organization  the organization the principal's account belongs to, whose three keys go
+     *                      onto the context beside the ones above, or null when the account is in
+     *                      none and when Organizations is not deployed
      */
     public record CallerArns(String callerArn, String principalArn, String principalType,
                              String userId, String userName, boolean permissionsBoundary,
-                             Map<String, String> principalTags, SessionMfa sessionMfa) {
+                             Map<String, String> principalTags, SessionMfa sessionMfa,
+                             PrincipalOrganization.OrganizationContext organization) {
 
         public CallerArns {
             principalTags = Map.copyOf(principalTags);
+        }
+
+        /** A caller whose account's organization has not been read, which every unresolved site gives. */
+        public CallerArns(String callerArn, String principalArn, String principalType,
+                          String userId, String userName, boolean permissionsBoundary,
+                          Map<String, String> principalTags, SessionMfa sessionMfa) {
+            this(callerArn, principalArn, principalType, userId, userName, permissionsBoundary,
+                    principalTags, sessionMfa, null);
         }
 
         /**
@@ -5966,7 +6006,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         /** Copy of this caller with what the session it signed with says about MFA. */
         public CallerArns withSessionMfa(SessionMfa mfa) {
             return new CallerArns(callerArn, principalArn, principalType, userId, userName,
-                    permissionsBoundary, principalTags, mfa);
+                    permissionsBoundary, principalTags, mfa, organization);
+        }
+
+        /**
+         * Copy of this caller in the organization its account belongs to, or this caller unchanged
+         * when it is in none: the keys are absent for a principal outside an organization, which
+         * is what the published availability of all three says.
+         */
+        public CallerArns withOrganization(PrincipalOrganization.OrganizationContext context) {
+            return context == null ? this : new CallerArns(callerArn, principalArn, principalType,
+                    userId, userName, permissionsBoundary, principalTags, sessionMfa, context);
         }
 
         /** A caller without stored principal tags, including account-root and federated identities. */
@@ -6014,6 +6064,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
          * filter's, one per resource the request names, and the one S3 builds when it evaluates a
          * bucket policy itself.
          *
+         * <p>The three keys that name the organization the principal's account is in go on here as
+         * well, through the same writer, because they describe the request the same way the keys
+         * above it do: their published availability is that each is "included in the request
+         * context only if the principal is a member of an organization", so a caller whose account
+         * is in one carries them on every context this method fills, and a caller outside one
+         * carries none of them.
+         *
          * <p>{@code aws:PrincipalType} and {@code aws:userid} are published for every principal,
          * the guide saying both are "included in the request context for all requests, including
          * anonymous requests". {@code aws:username} is not: it is "always included in the request
@@ -6036,6 +6093,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 context.put("aws:username", List.of(userName));
             }
             principalTags.forEach((key, value) -> context.put("aws:PrincipalTag/" + key, List.of(value)));
+            if (organization != null) {
+                organization.putOrganizationKeys(context);
+            }
         }
 
         /**
@@ -6085,21 +6145,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * The principal keys a policy simulation starts with, for the identity named by a
      * {@code PolicySourceArn}. The simulator does not ask a caller for these: the guide lists
      * {@code aws:PrincipalAccount}, {@code aws:PrincipalId}, {@code aws:PrincipalType},
-     * {@code aws:Type}, {@code aws:UserId} and {@code aws:UserName} as "populated for you", and
-     * says the caller provides "the values for all other condition keys".
+     * {@code aws:UserId} and {@code aws:UserName} as the principal context it populates, beside
+     * the organization context {@link PrincipalOrganization} answers, and says the caller provides
+     * "the values for all other condition keys".
      *
      * <p>What a simulation gets here is the principal half of the request context, the same
      * {@link CallerArns#putPrincipalKeys} the enforcement filter writes, so a policy simulates the
      * way it is enforced: {@code aws:PrincipalArn}, {@code aws:PrincipalType},
-     * {@code aws:username} and {@code aws:userid}, with the account added by the caller of this
-     * method. The guide's {@code aws:PrincipalId} and {@code aws:Type} are not in that context on
-     * any request path, so populating them in a simulation alone would answer for keys an
-     * enforced request cannot, and they stay absent here too.
+     * {@code aws:username} and {@code aws:userid}, with the account and the organization added by
+     * the caller of this method. The guide's {@code aws:PrincipalId} is not in that context on any
+     * request path, so populating it in a simulation alone would answer for a key an enforced
+     * request cannot, and it stays absent here too.
      *
      * <p>Only a user source answers here. A role named as a policy source is not a session, so
      * there is no session name to put in an {@code aws:userid} and no documented value for its
      * {@code aws:PrincipalType} in a simulation; those keys stay absent, and a policy that matches
-     * on one does not match, which is what an absent key means everywhere else.
+     * on one does not match, which is what an absent key means everywhere else. The keys that
+     * describe the account rather than the credential are answered for a role source as well, by
+     * the caller of this method.
      */
     public Optional<CallerArns> simulationPrincipalKeys(String principalArn) {
         if (principalArn == null || !principalArn.contains(":user/")) {
@@ -6111,9 +6174,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     /**
      * Both of the caller's ARNs from a single lookup, so they always describe the same credential:
-     * two lookups could straddle a session's expiry and answer for it only once.
+     * two lookups could straddle a session's expiry and answer for it only once. The caller comes
+     * back in the organization its account belongs to, so every context
+     * {@link CallerArns#putPrincipalKeys} fills carries the keys that name it.
      */
     public Optional<CallerArns> resolveCallerArns(String accessKeyId) {
+        return callerArnsOf(accessKeyId).map(this::inOwnOrganization);
+    }
+
+    /**
+     * The caller in the organization its own account belongs to. The account comes from the
+     * principal ARN rather than from the request, which is the account whose policies the
+     * organization's levels cap, and a principal whose ARN names none (a caller the site could not
+     * resolve) is left as it is.
+     *
+     */
+    private CallerArns inOwnOrganization(CallerArns arns) {
+        String account = AwsArnUtils.accountOrDefault(arns.principalArn(), null);
+        return account == null || account.isBlank()
+                ? arns : arns.withOrganization(organizationContextOf(account).orElse(null));
+    }
+
+    private Optional<CallerArns> callerArnsOf(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
@@ -6207,9 +6289,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * without its path. That is the ARN the session recorded when it was issued, read back as is:
      * looking the role up by name would hand an old session the ARN of a same-named role created
      * after it. A caller that needs the caller ARN too reads both through {@link #resolveCallerArns}.
+     *
+     * <p>An ARN is all it answers, so like {@link #resolveCallerArn} it leaves the organization
+     * lookup to the contexts that write keys.
      */
     public Optional<String> resolvePrincipalArn(String accessKeyId) {
-        return resolveCallerArns(accessKeyId).map(CallerArns::principalArn);
+        return callerArnsOf(accessKeyId).map(CallerArns::principalArn);
     }
 
     public Optional<String> resolveCallerUserId(String accessKeyId) {
@@ -6371,22 +6456,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         if (principalArn.contains(":user/")) {
             String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
-            List<String> identityPolicies = withAccountGrants
-                    ? userIdentityPolicies(principalArn, exclusions)
-                    : collectUserPolicies(principalArn, exclusions);
-            if (identityPolicies == null) {
+            NamedPolicies held = namedUserPolicies(principalArn, exclusions, withAccountGrants);
+            if (held == null) {
                 throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
             }
-            return new CallerContext(identityPolicies, null,
+            return CallerContext.named(held.documents(), held.sources(),
                     resolveUserBoundaryDocument(principalArn, exclusions));
         }
         if (principalArn.contains(":role/")) {
             String roleName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
-            List<String> identityPolicies = collectRolePolicies(principalArn, exclusions);
-            if (identityPolicies == null) {
+            NamedPolicies held = namedRolePolicies(principalArn, exclusions);
+            if (held == null) {
                 throw new AwsException("NoSuchEntity", "Role " + roleName + " cannot be found.", 404);
             }
-            return new CallerContext(identityPolicies, null,
+            return CallerContext.named(held.documents(), held.sources(),
                     resolveRoleBoundaryDocument(principalArn, exclusions));
         }
         throw new AwsException("InvalidInput", "PolicySourceArn must identify an IAM user or role.", 400);
@@ -6573,9 +6656,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * it and a simulation leaving out every attached policy still carries it.
      */
     private List<String> userIdentityPolicies(String userArnOrName, PolicyExclusions exclusions) {
-        List<String> docs = collectUserPolicies(userArnOrName, exclusions);
-        if (docs == null) {
+        NamedPolicies held = namedUserPolicies(userArnOrName, exclusions, true);
+        return held == null ? null : held.documents();
+    }
+
+    /** A principal's policy documents and, position for position, where each one came from. */
+    private record NamedPolicies(List<String> documents, List<PolicySource> sources) {
+    }
+
+    /**
+     * The policies a user holds, each named by where it came from, and with the account-level
+     * grants behind {@code withAccountGrants} appended. Those two are attached to nothing, so no
+     * identifier names them and a result reports their statements by position alone.
+     */
+    private NamedPolicies namedUserPolicies(String userArnOrName, PolicyExclusions exclusions,
+                                            boolean withAccountGrants) {
+        Optional<IamUser> user = userFromArnOrName(userArnOrName);
+        if (user.isEmpty()) {
             return null;
+        }
+        NamedPolicies attached = named(exclusions.retained(userPolicies(user.get())));
+        if (!withAccountGrants) {
+            return attached;
         }
         // The flag that answers is the user's own account's, which is the account the lookup above
         // resolved them in: a PolicySourceArn may name another account's user, and that user
@@ -6584,12 +6686,51 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         Optional<String> grant = passwordSelfServiceGrant(account);
         Optional<String> delegationGrant = delegationOwnerGrant(account, userArnOrName);
         if (grant.isEmpty() && delegationGrant.isEmpty()) {
-            return docs;
+            return attached;
         }
-        List<String> withGrant = new ArrayList<>(docs);
-        grant.ifPresent(withGrant::add);
-        delegationGrant.ifPresent(withGrant::add);
-        return withGrant;
+        List<String> documents = new ArrayList<>(attached.documents());
+        List<PolicySource> sources = new ArrayList<>(attached.sources());
+        for (Optional<String> unattached : List.of(grant, delegationGrant)) {
+            unattached.ifPresent(document -> {
+                documents.add(document);
+                sources.add(PolicySource.unnamed());
+            });
+        }
+        return new NamedPolicies(documents, sources);
+    }
+
+    /** The policies a role holds, each named by where it came from. */
+    private NamedPolicies namedRolePolicies(String roleArn, PolicyExclusions exclusions) {
+        return roleFromArnOrName(roleArn)
+                .map(role -> named(exclusions.retained(rolePolicies(role))))
+                .orElse(null);
+    }
+
+    /**
+     * Each held policy's document beside the identifier a result reports for it: an inline policy
+     * by its own name and the type of entity holding it, a managed policy by its name and whether
+     * AWS owns it, which is what the published {@code SourcePolicyType} values distinguish.
+     */
+    private static NamedPolicies named(List<HeldPolicy> held) {
+        List<String> documents = new ArrayList<>(held.size());
+        List<PolicySource> sources = new ArrayList<>(held.size());
+        for (HeldPolicy policy : held) {
+            documents.add(policy.document());
+            sources.add(policy.policyName() != null
+                    ? PolicySource.inline(policy.policyName(), policy.attachmentType())
+                    : PolicySource.managed(policyNameOf(policy.arn()),
+                            AwsManagedPolicies.isManagedPolicyArn(policy.arn())));
+        }
+        return new NamedPolicies(documents, sources);
+    }
+
+    /** A managed policy's own name, which its ARN ends in, past any path it carries. */
+    private static String policyNameOf(String policyArn) {
+        if (policyArn == null) {
+            return null;
+        }
+        int lastSlash = policyArn.lastIndexOf('/');
+        return lastSlash < 0 ? policyArn : policyArn.substring(lastSlash + 1);
     }
 
     /**
@@ -6736,9 +6877,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private List<String> collectUserPolicies(String userArnOrName, PolicyExclusions exclusions) {
-        return userFromArnOrName(userArnOrName)
-                .map(user -> documents(exclusions.retained(userPolicies(user))))
-                .orElse(null);
+        NamedPolicies held = namedUserPolicies(userArnOrName, exclusions, false);
+        return held == null ? null : held.documents();
     }
 
     private List<String> collectRolePolicies(String roleArn) {
@@ -6746,9 +6886,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private List<String> collectRolePolicies(String roleArn, PolicyExclusions exclusions) {
-        return roleFromArnOrName(roleArn)
-                .map(role -> documents(exclusions.retained(rolePolicies(role))))
-                .orElse(null);
+        NamedPolicies held = namedRolePolicies(roleArn, exclusions);
+        return held == null ? null : held.documents();
     }
 
     /** The user's inline and managed policies, then each group's. */
@@ -6784,10 +6923,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                             held.add(new HeldPolicy(arn, document, null, attachmentType, attachmentName)));
         }
         return held;
-    }
-
-    private static List<String> documents(List<HeldPolicy> held) {
-        return held.stream().map(HeldPolicy::document).collect(Collectors.toCollection(ArrayList::new));
     }
 
     /**
