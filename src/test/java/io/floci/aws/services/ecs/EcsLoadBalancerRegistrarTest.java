@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.EcsLoadBalancer;
@@ -50,9 +51,16 @@ class EcsLoadBalancerRegistrarTest {
     @InjectSpy
     EcsContainerManager containerManager;
 
+    @Inject
+    Ec2InstancePorts instancePorts;
+
     private String createTargetGroup(String name) {
+        return createTargetGroup(name, "ip");
+    }
+
+    private String createTargetGroup(String name, String targetType) {
         TargetGroup tg = elbV2Service.createTargetGroup(REGION, name, "HTTP", "HTTP1",
-                8080, "vpc-regtest", "ip",
+                8080, "vpc-regtest", targetType,
                 null, null, false, null, null, null, null, null, null, null, Map.of());
         return tg.getTargetGroupArn();
     }
@@ -350,6 +358,65 @@ class EcsLoadBalancerRegistrarTest {
 
         registrar.evictUnrecordedTargets(taskWithContainer("web", 8080, 42000), List.of(tgArn),
                 List.of(new EcsTaskAddress("172.19.0.9", 8080)), REGION);
+    }
+
+    @Test
+    void instanceTargetGroupGetsTheContainerInstanceIdOnTheHostPort() {
+        String tgArn = createTargetGroup("reg-tg-instance", "instance");
+        EcsTask task = taskWithContainer("web", 8080, 34800);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, svc, "i-0abc1234def567890", REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size());
+        assertEquals("i-0abc1234def567890", health.get(0).getTarget().getId());
+        assertEquals(34800, health.get(0).getTarget().getPort());
+        assertEquals(new Ec2InstancePorts.Endpoint("127.0.0.1", 34800),
+                instancePorts.find("000000000000", "i-0abc1234def567890", 34800).orElseThrow());
+
+        registrar.deregisterTask(task, svc, REGION);
+        assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty());
+        assertFalse(instancePorts.isBound("000000000000", "i-0abc1234def567890", 34800),
+                "the host port is free again once the task is gone");
+    }
+
+    @Test
+    void tasksSharingAnUnpublishedPortOnOneInstanceGetDistinctEphemeralHostPorts() {
+        String tgArn = createTargetGroup("reg-tg-instance-shared", "instance");
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        EcsTask first = taskWithContainer("web", 8080, 8080);
+        EcsTask second = taskWithContainer("web", 8080, 8080);
+        doReturn("172.19.0.5").when(containerManager).resolveContainerHost(first.getContainers().getFirst());
+        doReturn("172.19.0.6").when(containerManager).resolveContainerHost(second.getContainers().getFirst());
+
+        registrar.registerTask(first, svc, "i-0shared000000000a", REGION);
+        registrar.registerTask(second, svc, "i-0shared000000000a", REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(2, health.size());
+        assertEquals(new Ec2InstancePorts.Endpoint("172.19.0.5", 8080),
+                instancePorts.find("000000000000", "i-0shared000000000a", 8080).orElseThrow());
+        assertEquals(new Ec2InstancePorts.Endpoint("172.19.0.6", 8080),
+                instancePorts.find("000000000000", "i-0shared000000000a", 32768).orElseThrow());
+        assertTrue(health.stream().anyMatch(th -> th.getTarget().getPort() == 32768));
+
+        registrar.deregisterTask(first, svc, REGION);
+        registrar.deregisterTask(second, svc, REGION);
+    }
+
+    @Test
+    void ipTargetGroupKeepsTheContainerAddressOnAContainerInstance() {
+        String tgArn = createTargetGroup("reg-tg-ip-on-instance");
+        EcsTask task = taskWithContainer("web", 8080, 34900);
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, svc, "i-0abc1234def567891", REGION);
+
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals("127.0.0.1", health.get(0).getTarget().getId());
+        assertFalse(instancePorts.isBound("000000000000", "i-0abc1234def567891", 34900));
+        registrar.deregisterTask(task, svc, REGION);
     }
 
     /** Stands in for the process dying between the registration and anything after it. */
