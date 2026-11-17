@@ -102,6 +102,22 @@ class DynamoDbPartiQLLimitIntegrationTest {
                     + "failed to satisfy constraint: Member must have value greater than or equal to 1"));
     }
 
+    @ParameterizedTest
+    @Order(6)
+    @ValueSource(strings = {"2147483647", "4294967297", "9223372036854775808"})
+    void aLimitPastTheIntRangeReadsTheRestOfAnOrderedRead(String limit) {
+        String ordered = PARTITION + " ORDER BY sk DESC";
+        String token = read(ordered, "1")
+            .statusCode(200)
+            .body("Items.sk.S", contains("row-4"))
+            .extract().path("NextToken");
+        ddb("ExecuteStatement", "{\"Statement\":" + JsonNodeFactory.instance.textNode(ordered)
+                + ",\"Limit\":" + limit + ",\"NextToken\":" + JsonNodeFactory.instance.textNode(token) + "}")
+            .statusCode(200)
+            .body("Items.sk.S", contains("row-3", "row-2", "row-1"))
+            .body("NextToken", nullValue());
+    }
+
     private static void readsEveryRow(String statement, String limit) {
         read(statement, limit)
             .statusCode(200)
