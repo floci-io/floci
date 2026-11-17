@@ -906,21 +906,30 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         statement(select + "pk='ranges' AND (sk = '1' OR flag = 'x') AND (sk = '2' OR flag = 'one')")
             .statusCode(200)
             .body("Items.sk.S", contains("1"));
-        String pairs = IntStream.range(0, 9)
-                .mapToObj(n -> "(sk = 's" + n + "' OR flag = '" + n + "')")
-                .collect(Collectors.joining(" AND "));
-        for (String where : List.of("pk='ranges' AND sk = '1' AND sk = '2'", "pk='ranges' AND " + pairs,
+        for (int count : List.of(9, 16)) {
+            String pairs = IntStream.range(0, count)
+                    .mapToObj(n -> "(sk = 's" + n + "' OR flag = '" + n + "')")
+                    .collect(Collectors.joining(" AND "));
+            statement(select + "pk='ranges' AND " + pairs).statusCode(200).body("Items", empty());
+        }
+        for (String where : List.of("pk='ranges' AND sk = '1' AND sk = '2'",
                 "pk=true AND sk >= '1' AND sk <= '2'", "pk=1 AND sk >= '1' AND sk <= '2'",
-                "pk='ranges' AND sk >= 1 AND sk <= '2'")) {
+                "pk='ranges' AND sk >= 1 AND sk <= '2'",
+                "pk=true AND ((sk >= 'b' AND sk <= 'c') OR sk = 'a')",
+                "pk=true AND (sk = 's0' OR flag = '0') AND (sk = 's1' OR flag = '1')",
+                "pk='ranges' AND ((sk >= 'b' AND sk <= 'c') OR sk = 1)")) {
             statement(select + where).statusCode(200).body("Items", empty());
         }
 
         statement(select + "pk='ranges' AND (sk = '1' OR flag = 'x') AND (sk = '1' OR flag = 'one')")
             .statusCode(400)
             .body("message", equalTo("Overlapping conditions with range keys are not supported in where clause"));
-        statement(select + "pk=true AND (sk = 'a' OR (sk >= 'b' AND sk <= 'c'))")
-            .statusCode(400)
-            .body("message", equalTo("Key value must be of type S, N, or B. Key name: pk, Key type: BOOL"));
+        for (String where : List.of("pk=true AND (sk = 'a' OR (sk >= 'b' AND sk <= 'c'))",
+                "pk=true AND (flag = '0' OR sk = 's0') AND (sk = 's1' OR flag = '1')")) {
+            statement(select + where)
+                .statusCode(400)
+                .body("message", equalTo("Key value must be of type S, N, or B. Key name: pk, Key type: BOOL"));
+        }
         statement(select + "pk='ranges' AND sk >= '1' AND sk <= '2' ORDER BY sk DESC")
             .statusCode(400)
             .body("message", equalTo(

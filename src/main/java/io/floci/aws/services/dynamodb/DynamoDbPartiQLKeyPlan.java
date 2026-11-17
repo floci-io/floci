@@ -12,6 +12,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -286,20 +287,40 @@ final class DynamoDbPartiQLKeyPlan {
                 yield spread;
             }
             case Cond.Or or when anyLeaf(or, this::isKeyCondition) -> {
-                List<Spread> spread = or.operands().stream().flatMap(operand -> spread(operand).stream()).toList();
-                tooManyBranches |= spread.size() > MAX_BRANCHES;
-                yield spread;
+                List<List<Spread>> operands = or.operands().stream().map(this::spread).toList();
+                yield upToTheFirstScan(operands.stream().flatMap(List::stream));
             }
             default -> List.of(new Spread(List.of(), List.of(cond)));
         };
     }
 
     private List<Spread> and(List<Spread> left, List<Spread> right) {
-        if ((long) left.size() * right.size() > MAX_BRANCHES) {
-            tooManyBranches = true;
-            return left;
+        return upToTheFirstScan(left.stream().flatMap(l -> right.stream().map(l::and)));
+    }
+
+    // DynamoDB walks the branches in written order and scans from the first one that names the sort key
+    // twice, so it never reads the branches after that one by key.
+    private List<Spread> upToTheFirstScan(Stream<Spread> branches) {
+        List<Spread> kept = new ArrayList<>();
+        for (Iterator<Spread> each = branches.iterator(); each.hasNext(); ) {
+            Spread branch = each.next();
+            kept.add(branch);
+            if (namesTheSortKeyTwice(branch)) {
+                break;
+            }
+            if (kept.size() > MAX_BRANCHES) {
+                tooManyBranches = true;
+                break;
+            }
         }
-        return left.stream().flatMap(l -> right.stream().map(l::and)).toList();
+        return kept;
+    }
+
+    private boolean namesTheSortKeyTwice(Spread spread) {
+        return spread.keyConditions().stream()
+                .filter(condition -> !condition.path().root().equals(partitionKey))
+                .distinct()
+                .count() > 1;
     }
 
     private static boolean anyLeaf(Cond cond, Predicate<Cond.Leaf> test) {
