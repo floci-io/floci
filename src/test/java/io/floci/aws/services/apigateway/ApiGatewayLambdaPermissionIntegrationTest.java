@@ -1,5 +1,6 @@
 package io.floci.aws.services.apigateway;
 
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -38,8 +39,8 @@ import static org.mockito.Mockito.verify;
 
 /**
  * With IAM enforcement on, a REST API Lambda integration invokes the function only when the
- * function policy allows apigateway.amazonaws.com to, for the method's execute-api ARN when the
- * grant names one. A refused call is answered with the gateway's 500 "Internal server error" and
+ * function policy allows apigateway.amazonaws.com to, for the request's execute-api ARN when the
+ * grant names one. That ARN carries the concrete request path and the function's Region. A refused call is answered with the gateway's 500 "Internal server error" and
  * never reaches the function. An integration that names {@code credentials} invokes as that role,
  * so the function policy does not decide it.
  */
@@ -47,6 +48,7 @@ import static org.mockito.Mockito.verify;
 @TestProfile(IamEnforcementProfile.class)
 class ApiGatewayLambdaPermissionIntegrationTest {
 
+    private static final String OTHER_REGION = "us-west-2";
     private static final String PROXY_RESPONSE = "{\"statusCode\":200,\"body\":\"invoked\"}";
 
     @InjectSpy
@@ -122,7 +124,7 @@ class ApiGatewayLambdaPermissionIntegrationTest {
     @Test
     void anyMethodIsAuthorizedForTheRequestVerb() {
         String functionArn = createFunction("any-method-" + suffix());
-        String apiId = createApi("ANY", "AWS_PROXY", functionArn, null);
+        String apiId = createApi("/items", "ANY", "AWS_PROXY", functionArn, null);
         addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items");
 
         execute(apiId).statusCode(200).body(equalTo("invoked"));
@@ -153,26 +155,90 @@ class ApiGatewayLambdaPermissionIntegrationTest {
         verify(lambdaService).invokeTarget(any(), eq(functionArn), any(), eq(InvocationType.RequestResponse));
     }
 
+    @Test
+    void grantWithAWildcardForAPathParameterCoversTheRequestPath() {
+        String functionArn = createFunction("path-param-" + suffix());
+        String apiId = createApi("/items/{id}", "GET", "AWS_PROXY", functionArn, null);
+        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items/*");
+
+        execute(apiId, "/items/42").statusCode(200).body(equalTo("invoked"));
+
+        verify(lambdaService).invokeTarget(any(), eq(functionArn), any(), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void grantForAnotherPathParameterValueDoesNotCoverThisOne() {
+        String functionArn = createFunction("other-item-" + suffix());
+        String apiId = createApi("/items/{id}", "GET", "AWS_PROXY", functionArn, null);
+        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items/7");
+
+        execute(apiId, "/items/42").statusCode(500);
+
+        verify(lambdaService, never()).invokeTarget(any(), any(), any(), any());
+    }
+
+    @Test
+    void greedyResourceIsAuthorizedForTheFullRequestPath() {
+        String functionArn = createFunction("greedy-" + suffix());
+        String apiId = createApi("/items/{proxy+}", "GET", "AWS_PROXY", functionArn, null);
+        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items/*");
+
+        execute(apiId, "/items/a/b").statusCode(200).body(equalTo("invoked"));
+
+        verify(lambdaService).invokeTarget(any(), eq(functionArn), any(), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void crossRegionFunctionIsAuthorizedInTheFunctionsRegion() {
+        String functionArn = createFunction(OTHER_REGION, "cross-region-" + suffix());
+        String apiId = createApi("AWS_PROXY", functionArn, null);
+        addPermission(functionArn, "arn:aws:execute-api:" + OTHER_REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items");
+
+        execute(apiId).statusCode(200).body(equalTo("invoked"));
+
+        verify(lambdaService).invokeTarget(any(), eq(functionArn), any(), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void crossRegionGrantInTheApisRegionDoesNotCoverTheCall() {
+        String functionArn = createFunction(OTHER_REGION, "api-region-" + suffix());
+        String apiId = createApi("AWS_PROXY", functionArn, null);
+        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items");
+
+        execute(apiId).statusCode(500);
+
+        verify(lambdaService, never()).invokeTarget(any(), any(), any(), any());
+    }
+
     private static String suffix() {
         return UUID.randomUUID().toString().substring(0, 8);
     }
 
     private static ValidatableResponse execute(String apiId) {
-        return given().when().get("/execute-api/" + apiId + "/test/items").then();
+        return execute(apiId, "/items");
+    }
+
+    private static ValidatableResponse execute(String apiId, String path) {
+        return given().when().get("/execute-api/" + apiId + "/test" + path).then();
     }
 
     private String createApi(String type, String functionArn, String credentials) {
-        return createApi("GET", type, functionArn, credentials);
+        return createApi("/items", "GET", type, functionArn, credentials);
     }
 
-    private String createApi(String httpMethod, String type, String functionArn, String credentials) {
-        String apiId = createLambdaRestApi(httpMethod, type, functionArn, credentials);
+    private String createApi(String resourcePath, String httpMethod, String type, String functionArn,
+                             String credentials) {
+        String apiId = createLambdaRestApi(resourcePath, httpMethod, type, functionArn, credentials);
         cleanup.push(() -> apiGateway().delete("/restapis/" + apiId).then().statusCode(202));
         return apiId;
     }
 
     private String createFunction(String name) {
-        lambda()
+        return createFunction(REGION, name);
+    }
+
+    private String createFunction(String region, String name) {
+        lambda(region)
                 .body("""
                         {"FunctionName":"%s","Runtime":"nodejs20.x","Handler":"index.handler",
                          "Role":"arn:aws:iam::%s:role/lambda-role"}""".formatted(name, ACCOUNT))
@@ -180,8 +246,8 @@ class ApiGatewayLambdaPermissionIntegrationTest {
                 .post("/2015-03-31/functions")
         .then()
                 .statusCode(201);
-        cleanup.push(() -> lambda().delete("/2015-03-31/functions/{name}", name).then().statusCode(204));
-        return "arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:" + name;
+        cleanup.push(() -> lambda(region).delete("/2015-03-31/functions/{name}", name).then().statusCode(204));
+        return "arn:aws:lambda:" + region + ":" + ACCOUNT + ":function:" + name;
     }
 
     private static void addPermission(String functionArn, String sourceArn) {
@@ -190,10 +256,11 @@ class ApiGatewayLambdaPermissionIntegrationTest {
         request.put("Action", "lambda:InvokeFunction");
         request.put("Principal", "apigateway.amazonaws.com");
         request.put("SourceArn", sourceArn);
-        lambda().body(request).post("/2015-03-31/functions/{name}/policy", functionArn).then().statusCode(201);
+        lambda(AwsArnUtils.parse(functionArn).region()).body(request)
+                .post("/2015-03-31/functions/{name}/policy", functionArn).then().statusCode(201);
     }
 
-    private static RequestSpecification lambda() {
-        return signed("lambda").contentType("application/json");
+    private static RequestSpecification lambda(String region) {
+        return signed("lambda", region).contentType("application/json");
     }
 }

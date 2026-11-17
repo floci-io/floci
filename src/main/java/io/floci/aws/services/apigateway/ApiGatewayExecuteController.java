@@ -634,8 +634,7 @@ public class ApiGatewayExecuteController {
             return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
                     "Cannot resolve function from URI: " + integration.getUri());
         }
-        if (!apiGatewayMayInvoke(integration, functionName,
-                buildMethodArn(region, apiId, stageName, httpMethod, resource.getPath()))) {
+        if (!apiGatewayMayInvoke(integration, functionName, region, apiId, stageName, httpMethod, path)) {
             return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500, "Internal server error");
         }
 
@@ -1511,19 +1510,25 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * Whether the function policy lets API Gateway invoke {@code functionName} for this method. An
-     * integration with {@code credentials} invokes as that role instead, so the function policy is
-     * not consulted for it.
+     * Whether the function policy lets API Gateway invoke {@code functionName} for this request. The
+     * source ARN names the API's account, the stage, the request verb and the concrete request path,
+     * in the function's Region rather than the API's, as Lambda checks it for a cross-Region API; a
+     * function reference without a Region is taken to be in the API's. An integration with
+     * {@code credentials} invokes as that role instead, so the function policy is not consulted for it.
      */
-    private boolean apiGatewayMayInvoke(Integration integration, String functionName, String methodArn) {
+    private boolean apiGatewayMayInvoke(Integration integration, String functionName, String apiRegion,
+                                        String apiId, String stageName, String httpMethod, String requestPath) {
         if (serviceCallAuthorizer == null
                 || (integration.getCredentials() != null && !integration.getCredentials().isBlank())) {
             return true;
         }
-        AwsArnUtils.Arn source = AwsArnUtils.parse(methodArn);
+        String functionRegion = LambdaArnUtils.resolve(functionName).region();
+        String sourceArn = buildMethodArn(functionRegion != null ? functionRegion : apiRegion, apiId, stageName,
+                httpMethod, requestPath);
+        AwsArnUtils.Arn source = AwsArnUtils.parse(sourceArn);
         String functionArn = LambdaArnUtils.functionArn(functionName, source.partition(), source.region(),
                 source.accountId());
-        return serviceCallAuthorizer.authorize("apigateway", "lambda:InvokeFunction", functionArn, methodArn,
+        return serviceCallAuthorizer.authorize("apigateway", "lambda:InvokeFunction", functionArn, sourceArn,
                 source.accountId()) == Decision.ALLOW;
     }
 
@@ -2023,8 +2028,8 @@ public class ApiGatewayExecuteController {
                     throw new AwsException("InvalidParameterValueException",
                             "Cannot resolve Lambda function name from URI: " + integration.getUri(), 400);
                 }
-                if (!apiGatewayMayInvoke(integration, functionName,
-                        buildMethodArn(region, scope.apiId(), stageName, httpMethod, resource.getPath()))) {
+                if (!apiGatewayMayInvoke(integration, functionName, region, scope.apiId(), stageName, httpMethod,
+                        path)) {
                     return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
                             "Internal server error");
                 }

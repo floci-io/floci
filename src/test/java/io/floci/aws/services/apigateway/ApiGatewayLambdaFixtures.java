@@ -10,7 +10,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 
 /**
- * A deployed REST API whose {@code items} resource has one method integrated with a Lambda
+ * A deployed REST API whose resource at a given path has one method integrated with a Lambda
  * function, served on the {@code test} stage, and the signed requests that build it.
  */
 final class ApiGatewayLambdaFixtures {
@@ -21,15 +21,18 @@ final class ApiGatewayLambdaFixtures {
     private ApiGatewayLambdaFixtures() {
     }
 
-    static String createLambdaRestApi(String httpMethod, String type, String functionArn, String credentials) {
+    static String createLambdaRestApi(String resourcePath, String httpMethod, String type, String functionArn,
+                                      String credentials) {
         String apiId = apiGateway()
                 .body("{\"name\":\"lambda-integration-" + UUID.randomUUID().toString().substring(0, 8) + "\"}")
                 .post("/restapis").then().statusCode(201).extract().path("id");
-        String rootId = apiGateway().get("/restapis/" + apiId + "/resources")
+        String resourceId = apiGateway().get("/restapis/" + apiId + "/resources")
                 .then().statusCode(200).extract().path("item[0].id");
-        String resourceId = apiGateway().body("{\"pathPart\":\"items\"}")
-                .post("/restapis/" + apiId + "/resources/" + rootId)
-                .then().statusCode(201).extract().path("id");
+        for (String pathPart : resourcePath.substring(1).split("/")) {
+            resourceId = apiGateway().body(Map.of("pathPart", pathPart))
+                    .post("/restapis/" + apiId + "/resources/" + resourceId)
+                    .then().statusCode(201).extract().path("id");
+        }
         String methodPath = "/restapis/" + apiId + "/resources/" + resourceId + "/methods/" + httpMethod;
         apiGateway().body("{\"authorizationType\":\"NONE\"}").put(methodPath).then().statusCode(201);
 
@@ -59,7 +62,11 @@ final class ApiGatewayLambdaFixtures {
     }
 
     static RequestSpecification signed(String service) {
-        return given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20261011/" + REGION
+        return signed(service, REGION);
+    }
+
+    static RequestSpecification signed(String service, String region) {
+        return given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20261011/" + region
                 + "/" + service + "/aws4_request, SignedHeaders=host, Signature=abc");
     }
 }

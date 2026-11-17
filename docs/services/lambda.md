@@ -145,9 +145,12 @@ part in authorizing calls to the function:
 - An API Gateway REST API whose `AWS_PROXY` or `AWS` integration names the function invokes it on
   its own behalf. The function policy has to allow `lambda:InvokeFunction` to
   `apigateway.amazonaws.com`, as `AddPermission --principal apigateway.amazonaws.com` writes it,
-  and a function with no policy refuses the call. `aws:SourceArn` is the method's execute-api ARN,
-  `arn:aws:execute-api:<region>:<account>:<api-id>/<stage>/<METHOD>/<resource path>`, built from
-  the resource path template such as `items/{id}`, and `aws:SourceAccount` is the API's account.
+  and a function with no policy refuses the call. `aws:SourceArn` is the request's execute-api ARN,
+  `arn:aws:execute-api:<region>:<account>:<api-id>/<stage>/<METHOD>/<path>`, where `<path>` is the
+  concrete request path such as `items/42` rather than the resource path template `items/{id}`, so
+  a grant for `.../GET/items/*` covers it. `<region>` is the function's Region, not the API's, when
+  the two differ, as Lambda's guide for API Gateway specifies; a function named without a Region is
+  taken to be in the API's. `aws:SourceAccount` is the API's account.
   For an `ANY` method, `<METHOD>` is the request's verb, as in a Lambda authorizer's `methodArn`;
   this was not measured on AWS. A refused call is answered with `500` and
   `{"message": "Internal server error"}`; see [API Gateway](api-gateway.md#integration-settings).

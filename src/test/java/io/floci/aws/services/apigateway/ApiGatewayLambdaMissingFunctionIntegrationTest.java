@@ -41,7 +41,7 @@ class ApiGatewayLambdaMissingFunctionIntegrationTest {
     void proxyIntegrationToAMissingFunctionAnswersFunctionNotFound() {
         String functionArn = "arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:missing-"
                 + UUID.randomUUID().toString().substring(0, 8);
-        apiId = createLambdaRestApi("GET", "AWS_PROXY", functionArn, null);
+        apiId = createLambdaRestApi("/items", "GET", "AWS_PROXY", functionArn, null);
 
         given().when().get("/execute-api/" + apiId + "/test/items")
         .then()
