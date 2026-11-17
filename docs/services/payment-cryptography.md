@@ -247,7 +247,9 @@
   access the policy grants is not enforced: the service's operations are not among the ones
   IAM checks.
 - **Key usage:** `StopKeyUsage` disables the key and records when it stopped, and
-  `StartKeyUsage` enables it again and records when it started. A stopped key stays
+  `StartKeyUsage` enables it again and records when it started. The moment recorded is the
+  moment the key changed state, so a request that names a key that is already in the state
+  it asks for changes nothing and keeps the moment it changed. A stopped key stays
   readable and its material stays where it is, so it can be started again. A replica is
   read-only, so the change is made on the primary, and a request that names a replica is
   refused. The change reaches the replicas: a stop on the primary stops the use of the

@@ -4,8 +4,10 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -13,6 +15,9 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 
 import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -552,6 +557,61 @@ class PaymentCryptographyServiceTest {
         AwsException stop = assertThrows(AwsException.class,
                 () -> service.stopKeyUsage(replica));
         assertEquals("ValidationException", stop.getErrorCode());
+    }
+
+    @Test
+    void aKeyThatIsStoppedAgainKeepsTheMomentItStopped() {
+        // The guide says the moment the use stops is when the key became inactive, so a
+        // request that names a key that is already stopped changes nothing. The clock moves
+        // between the two requests, so a moment that followed the request would be told
+        // apart from the moment of the change.
+        ManualClock clock = new ManualClock(Instant.parse("2026-01-01T00:00:00Z"));
+        PaymentCryptographyService timed = serviceAt(clock);
+        PaymentCryptographyKey key = timed.createKey("us-east-1", dataKeyAttributes(),
+                dataKeyModes(), true, true, Map.of());
+
+        PaymentCryptographyKey stopped = timed.stopKeyUsage(key);
+        // The answer is the record of the key itself, so the moment is read before the
+        // next request changes it.
+        long moment = stopped.getUsageStopTimestamp();
+        clock.advance(Duration.ofHours(1));
+        PaymentCryptographyKey again = timed.stopKeyUsage(key);
+
+        assertFalse(again.isEnabled(), "the key is enabled after it was stopped again");
+        assertEquals(moment, again.getUsageStopTimestamp(),
+                "the moment the key stopped is the moment of the request, not of the change");
+    }
+
+    @Test
+    void aKeyThatIsStartedAgainKeepsTheMomentItBegan() {
+        // The guide says the moment the use starts is when the key became active, so a
+        // request that names a key that is already in use keeps the moment it became
+        // active. The clock moves between the two requests, so a moment that followed the
+        // request would be told apart from the moment of the change.
+        ManualClock clock = new ManualClock(Instant.parse("2026-01-01T00:00:00Z"));
+        PaymentCryptographyService timed = serviceAt(clock);
+        PaymentCryptographyKey key = timed.createKey("us-east-1", dataKeyAttributes(),
+                dataKeyModes(), true, true, Map.of());
+        long moment = key.getUsageStartTimestamp();
+
+        clock.advance(Duration.ofHours(1));
+        PaymentCryptographyKey again = timed.startKeyUsage(key);
+
+        assertTrue(again.isEnabled(), "the key is disabled after it was started again");
+        assertEquals(moment, again.getUsageStartTimestamp(),
+                "the moment the key began is the moment of the request, not of the change");
+    }
+
+    /** A service whose notion of time the test moves itself. */
+    private PaymentCryptographyService serviceAt(ManualClock clock) {
+        return new PaymentCryptographyService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"),
+                new SecureRandom(),
+                new PaymentCryptographyRequestContext(),
+                new CertificateGenerator(),
+                clock);
     }
 
     @Test

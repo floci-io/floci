@@ -411,11 +411,13 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized PaymentCryptographyKey startKeyUsage(PaymentCryptographyKey key) {
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
-        current.setEnabled(true);
-        current.setUsageStartTimestamp(clock.instant().getEpochSecond());
-        current.setUsageStopTimestamp(0);
-        storeKey(current);
-        refreshReplicas(current, current.getReplicationRegions());
+        if (!current.isEnabled()) {
+            current.setEnabled(true);
+            current.setUsageStartTimestamp(clock.instant().getEpochSecond());
+            current.setUsageStopTimestamp(0);
+            storeKey(current);
+            refreshReplicas(current, current.getReplicationRegions());
+        }
         return current;
     }
 
@@ -435,10 +437,12 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized PaymentCryptographyKey stopKeyUsage(PaymentCryptographyKey key) {
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
-        current.setEnabled(false);
-        current.setUsageStopTimestamp(clock.instant().getEpochSecond());
-        storeKey(current);
-        refreshReplicas(current, current.getReplicationRegions());
+        if (current.isEnabled()) {
+            current.setEnabled(false);
+            current.setUsageStopTimestamp(clock.instant().getEpochSecond());
+            storeKey(current);
+            refreshReplicas(current, current.getReplicationRegions());
+        }
         return current;
     }
 
