@@ -218,6 +218,10 @@
   "AWS::CodeBuild::Project": [
     "Name"
   ],
+  "AWS::CodeDeploy::Application": [
+    "ApplicationName",
+    "ComputePlatform"
+  ],
   "AWS::CodePipeline::CustomActionType": [
     "Category",
     "ConfigurationProperties",
