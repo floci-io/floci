@@ -125,6 +125,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     /** The ports of a cluster's MapReduce JobHistory server on its primary node, Hadoop's own defaults. */
     public static final int JOB_HISTORY_PORT = 10020;
     public static final int JOB_HISTORY_WEB_PORT = 19888;
+    /** A cluster's Spark History Server's port, "Spark HistoryServer | http://master-public-dns-name:18080/". */
+    public static final int SPARK_HISTORY_WEB_PORT = 18080;
+    /**
+     * Where a cluster's Spark applications keep their event logs, which its Spark History Server reads: "By default,
+     * Amazon EMR stores event logs in the /var/log/spark/apps directory of HDFS".
+     */
+    public static final String SPARK_EVENT_LOGS = "/var/log/spark/apps";
     // Spark's default checkpoint manager goes through Hadoop's FileContext, which refuses an hdfs:// path without a
     // host, though "hdfs:///path-to-data" and "/path-to-data" "would resolve to the same location in HDFS", as the
     // Management Guide puts it; so a streaming query keeps its checkpoints through the file system instead.
@@ -1625,8 +1632,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A step's Spark on its cluster's YARN: the ResourceManager on the primary node; Spark's jars from the node's image,
     // which is the step's; executors and a cluster-mode driver sized for the NodeManager rather than the image's 14 GB
     // ("determined by the core and task instance types" on EMR), which the cluster's spark-defaults and the step's own
-    // options replace; a client-mode driver reached at the container's name on the cluster's network; and the step's
-    // AWS environment for each executor and a cluster-mode driver, as its container has it.
+    // options replace; a client-mode driver reached at the container's name on the cluster's network; where the
+    // primary node runs a Spark History Server, as on a cluster with Spark, its event logs in the cluster's HDFS, where
+    // the server reads them, which the application's tracking URL leads to once it has ended; and the step's AWS
+    // environment for each executor and a cluster-mode driver, as its container has it.
     private static List<SparkSetting> yarnSettings(Job job, List<String> executorEnvironment) {
         List<SparkSetting> settings = new ArrayList<>(List.of(
                 new SparkSetting("spark.hadoop.yarn.resourcemanager.hostname", job.storage().resourceManager()),
@@ -1637,6 +1646,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("spark.driver.cores", "1"),
                 new SparkSetting("spark.driver.host", driverHost(job)),
                 new SparkSetting("spark.driver.bindAddress", "0.0.0.0")));
+        String history = job.storage().sparkHistoryServer();
+        if (history != null) {
+            settings.add(new SparkSetting("spark.eventLog.enabled", "true"));
+            settings.add(new SparkSetting("spark.eventLog.dir", "hdfs://" + SPARK_EVENT_LOGS));
+            settings.add(new SparkSetting("spark.yarn.historyServer.address", history + ":" + SPARK_HISTORY_WEB_PORT));
+        }
         for (String variable : executorEnvironment) {
             int equals = variable.indexOf('=');
             String name = variable.substring(0, equals);

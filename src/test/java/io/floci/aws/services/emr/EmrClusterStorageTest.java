@@ -1366,7 +1366,46 @@ class EmrClusterStorageTest {
                                 + " | grep -q \"\\\"activeNodes\\\":[1-9]\"")
                         + waitUntil("curl -sf -m 5 http://$(cat /tmp/floci-hdfs-bind):19888/ws/v1/history/info"
                                 + " | grep -q historyInfo")
-                        + "fi; touch /tmp/floci-hdfs-ready")));
+                        + "fi; if [ -n \"$FLOCI_SPARK_HISTORY\" ]; then ")
+                && entrypoint.get(2).contains("> /dev/null; do [ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2;"
+                        + " done; fi; touch /tmp/floci-hdfs-ready")));
+        // A cluster without Spark runs no Spark History Server.
+        assertNull(started.sparkHistoryServer());
+        verify(spec, never()).withEnv(eq("FLOCI_SPARK_HISTORY"), anyString());
+        verify(spec, never()).withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+    }
+
+    @Test
+    void aClusterWithSparkHasItsPrimaryNodeRunASparkHistoryServerOnItsApplicationsEventLogs() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
+        when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-7", hdfsName)).thenReturn("172.18.0.8");
+        ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", null, () -> new ClusterStorage.Yarn(4096, 4).withSparkHistory(true), NOT_STOPPED);
+
+        // The cluster's Spark applications keep their event logs where it reads them.
+        assertEquals(HOST, started.sparkHistoryServer());
+        verify(spec).withEnv("FLOCI_SPARK_HISTORY", "1");
+        verify(spec).withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+        // The event logs' folder, "/var/log/spark/apps", made in the HDFS with the others; the server started once it
+        // is there, reading it, listening where HDFS does, one of the node's daemons, and waited for before the node is
+        // ready.
+        verify(spec).withEntrypoint(argThat(entrypoint -> {
+            String script = entrypoint.get(2);
+            int folders = script.indexOf("[ -z \"$FLOCI_YARN_MEMORY_MB\" ] || dirs=\"$dirs /var/log/spark/apps\"; ");
+            int made = script.indexOf("hdfs dfs -mkdir -p $dirs || exit 1; ");
+            int launched = script.indexOf("if [ -n \"$FLOCI_SPARK_HISTORY\" ]; then SPARK_LOCAL_IP=$FLOCI_HDFS_BIND"
+                    + " SPARK_HISTORY_OPTS=\"-Dspark.history.fs.logDirectory=hdfs://$FLOCI_HDFS_HOST:8020"
+                    + "/var/log/spark/apps -Dspark.history.ui.port=18080\" /usr/lib/spark/bin/spark-class"
+                    + " org.apache.spark.deploy.history.HistoryServer & n=$((n + 1)); fi; ");
+            int answered = script.indexOf(
+                    "until curl -sf -m 5 http://$(cat /tmp/floci-hdfs-bind):18080/api/v1/version");
+            int ready = script.indexOf("touch /tmp/floci-hdfs-ready");
+            return folders >= 0 && folders < made && made < launched && launched < answered && answered < ready;
+        }));
     }
 
     @Test
@@ -1650,8 +1689,8 @@ class EmrClusterStorageTest {
         // the others in one go.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
                 "if [ -n \"$FLOCI_HIVE_METASTORE\" ]; then dirs=\"$dirs /user/hive/warehouse /tmp/hadoop/.hiveJars\";")
-                && entrypoint.get(2).contains("hdfs dfs -mkdir -p $dirs || exit 1; "
-                        + "if [ -n \"$FLOCI_HIVE_METASTORE\" ]; then "
+                && entrypoint.get(2).indexOf("hdfs dfs -mkdir -p $dirs || exit 1; ") < entrypoint.get(2).indexOf(
+                        "fi; if [ -n \"$FLOCI_HIVE_METASTORE\" ]; then "
                         + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); hdfs dfs -put -f \"$jar\" "
                         + "/tmp/hadoop/.hiveJars/$(basename \"$jar\" .jar)"
                         + "-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; until (exec 3<>/dev/tcp")));

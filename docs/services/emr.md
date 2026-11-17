@@ -373,8 +373,8 @@ not Jupyter:
 
 ## Application UIs
 
-Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI or YARN timeline
-server: a presigned URL to one of those opens a page Floci serves at `/_aws/emr/app-ui` on its own address
+Floci keeps a cluster's persistent application UIs, but serves no persistent UI, Tez UI or YARN timeline server: a
+presigned URL to one of those opens a page Floci serves at `/_aws/emr/app-ui` on its own address
 (`base-url`, or `hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for, and so does
 one to an on-cluster UI in the `immediate` mode. The link is signed with a key Floci makes as it starts and lasts an
 hour, as no source gives AWS's; one changed, past its hour or given before Floci restarted opens a `403` page, and one
@@ -382,7 +382,13 @@ whose cluster has gone a `404`.
 
 In the `docker` mode, an on-cluster UI that runs on the cluster's primary node opens for real: the `ResourceManager`
 ("YARN ResourceManager | http://master-public-dns-name:8088/"), an `ApplicationMaster` through the ResourceManager's
-web proxy, and the `JobHistoryServer`, on a cluster whose primary node runs YARN (see **YARN**). Each opens on a host of
+web proxy, and the `JobHistoryServer`, on a cluster whose primary node runs YARN (see **YARN**), and on one with Spark
+its `SparkHistoryServer` ("Spark HistoryServer | http://master-public-dns-name:18080/"). A step's Spark on the
+cluster's YARN keeps its event logs where "By default, Amazon EMR stores event logs", "the /var/log/spark/apps directory
+of HDFS" (`spark.eventLog.dir`, unless the cluster's `spark-defaults` give another, which the server then does not
+read), and gives the server's address as `spark.yarn.historyServer.address`, so an ended application's tracking URL
+leads to its page there; the server reads that folder only, whatever the cluster's `spark.history.*` settings say.
+Each opens on a host of
 its own, as AWS's application UIs are on hosts of their own under "emrappui-prod.us-east-1.amazonaws.com", which "are
 registered in the Public Suffix List": `http://<secret>-<port>.emrappui.<Floci's host and port>/`, the secret 26
 random letters and digits that only this link holds, so the host itself is the link's authority, as the interface
@@ -416,8 +422,9 @@ arrives, and an interface that sends nothing for a minute has the request given 
   refused, and the URL is `PresignedURLReady` at once. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI,
   the `ResourceManager` by default, while the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. With an
   `ApplicationId`, the ResourceManager's link lands on the application's page, an application master's on its UI
-  through the web proxy, and the JobHistory server's on the job of that id (`job_` in place of `application_`); without
-  one, on the cluster's applications, its running ones, and its jobs. A link Floci opens for real is
+  through the web proxy, the JobHistory server's on the job of that id (`job_` in place of `application_`), and the
+  Spark History Server's on the application's; without one, on the cluster's applications, its running ones, its jobs,
+  and its Spark applications. A link Floci opens for real is
   `PresignedURLReady` once the primary node is: until then, as on a cluster no step has run on yet, the node starts as
   a step's would ("Used to determine if the presigned URL is ready"), and its host answers with a `503` page meanwhile.
   Any other is ready at once.
@@ -541,7 +548,9 @@ holding the driver and its executors, or a command or a script. The cluster itse
   reach, and the cluster's Spark, MapReduce (see **Hadoop streaming and MapReduce**) and Hive's Tez (see **Hive steps**)
   run on them. Beside them runs the MapReduce JobHistory server EMR's primary node runs too (a release's `mapred-site`
   classification "Restarts Hadoop MapReduce-HistoryServer"), on Hadoop's own ports, 10020 and 19888 for its web
-  pages, from the jobs' history in the cluster's HDFS, and the node is ready once it answers. A
+  pages, from the jobs' history in the cluster's HDFS, and, on a cluster with Spark, a Spark History Server on 18080,
+  from the Spark applications' event logs in `/var/log/spark/apps` of the cluster's HDFS (see
+  [Application UIs](#application-uis)); the node is ready once both answer. A
   Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
   mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
   mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's
