@@ -103,7 +103,9 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   application is refused.
 * **Idempotency**: `clientToken` is the idempotency token. Repeating a request with the same token
   returns the original run; reusing the token with a different request answers `ConflictException`
-  (HTTP 409) "Request did not match the original".
+  (HTTP 409) "Request did not match the original". The two are compared as the run each would start holds them:
+  `executionTimeoutMinutes` left out or 720, and `tags` left out or empty, count as the same; a member the run would
+  hold otherwise, such as a `mode` given where the original left it out, or a tag with an empty value, does not.
 * **Execution timeout**: `executionTimeoutMinutes` is 0 to 1,000,000, 0 meaning no timeout. From
   release `emr-7.11.0`, a `BATCH` run's timeout must be 1 to 10080 minutes (7 days), as the model and
   the 7.11.0 release notes say; a run outside that is refused with `ValidationException`. The AWS runtime for
@@ -117,7 +119,8 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   error the model declares for this, with that sentence as its message: AWS's own message is not
   recorded, so the wording is Floci's reading. It terminates the application's sessions (see
   [Sessions](#sessions)).
-* **ListJobRuns** returns the newest runs first, filtered by `states`, `createdAtAfter`,
+* **ListJobRuns** returns the newest runs first, the later of two started within the same millisecond
+  first too, filtered by `states`, `createdAtAfter`,
   `createdAtBefore` and `mode`, at most 50 per page. With several `states`, the runs are grouped by
   state in the order the filter names them. A state or mode that does not exist, or more than 8
   states, is refused with `ValidationException`. An unknown application has no runs. A `nextToken`
@@ -160,7 +163,9 @@ and its lifecycle but runs no driver for it.
   Spark (`emr-spark-8.0.0` on), whose `interactiveConfiguration.sessionEnabled` is `true`. As for a job run, a
   `CREATED` or `STOPPED` application is started unless its auto-start is off, when the session is refused, and so is
   one on a terminated application. Each of these refusals is `ValidationException` in Floci's own wording, as AWS's is
-  not recorded. `clientToken` is the idempotency token, as for a job run. An application holds at most 25 sessions
+  not recorded. `clientToken` is the idempotency token, compared as for a job run: `idleTimeoutMinutes` left out or
+  60, `tags` left out or empty, and `configurationOverrides` without a `runtimeConfiguration` count as the same. An
+  application holds at most 25 sessions
   that have not ended, as "Each EMR Serverless application supports up to 25 concurrent sessions by default"; a 26th
   is refused with `ServiceQuotaExceededException` (HTTP 402). Of `configurationOverrides`, only `runtimeConfiguration`
   is kept: "Only runtime configuration overrides are supported." A `runtimeConfiguration` with a member of the wrong
@@ -185,8 +190,8 @@ and its lifecycle but runs no driver for it.
   time-limited to 1 hour". AWS's endpoint is an `https://` URL without a port; a Spark Connect URL holds no path, so
   Floci's is its address alone, port included, and the token names the session. A session that has ended, or is
   `TERMINATING`, is refused with `ValidationException`, in Floci's own wording.
-* **ListSessions** returns the newest sessions first, filtered by `states`, `createdAtAfter` and `createdAtBefore`, at
-  most 50 per page, grouped by state as `ListJobRuns` groups runs.
+* **ListSessions** returns the newest sessions first, as `ListJobRuns` orders runs, filtered by `states`,
+  `createdAtAfter` and `createdAtBefore`, at most 50 per page, grouped by state as `ListJobRuns` groups runs.
 * **GetResourceDashboard** takes a `resourceType` of `SESSION`, the only one, and gives a link like
   `GetDashboardForJobRun`'s, valid for an hour, to a page about the session on Floci's address, which stands in for
   the session's Spark UI or Spark History Server. `accessSystemProfileLogs` changes nothing.

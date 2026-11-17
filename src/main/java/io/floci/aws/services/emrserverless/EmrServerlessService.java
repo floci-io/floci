@@ -46,6 +46,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.ToLongFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -645,22 +646,30 @@ public class EmrServerlessService {
         return violations;
     }
 
+    // The shape of pageByState's cursors, which a nextToken names: the state group, the creation time, the sequence.
+    private static final String CURSOR_SHAPE = "group-created-sequence";
+
     /**
      * A page of ListJobRuns' runs or ListSessions' sessions: {@code matching}, newest first, and, where {@code states}
      * names any, "grouped by the state", in the order it names them, as each operation's {@code states} member reads.
-     * A {@code nextToken} resumes only the listing {@code namespace} names.
+     * Of two created within the same millisecond, the later {@code sequence}, {@link #nextSequence}, is the newer; one
+     * stored before sequences were kept has 0, and its id orders it among those. A {@code nextToken} resumes only the
+     * listing {@code namespace} names, in this cursor's shape: one given before sequences were kept, whose cursors
+     * hold none, is refused rather than resuming at the wrong place.
      */
     static <T> PaginatedResult<T> pageByState(List<T> matching, Function<T, String> id, Function<T, String> state,
-                                              Function<T, Instant> createdAt, List<String> states, Integer maxResults,
-                                              int defaultMaxResults, String nextToken, String namespace) {
+                                              Function<T, Instant> createdAt, ToLongFunction<T> sequence,
+                                              List<String> states, Integer maxResults, int defaultMaxResults,
+                                              String nextToken, String namespace) {
         Map<String, String> cursors = new HashMap<>();
         for (T item : matching) {
             int group = states == null || states.isEmpty() ? 0 : states.indexOf(state.apply(item));
-            cursors.put(id.apply(item), String.format("%02d%020d%s", group,
-                    Long.MAX_VALUE - createdAt.apply(item).toEpochMilli(), id.apply(item)));
+            cursors.put(id.apply(item), String.format("%02d%020d%020d%s", group,
+                    Long.MAX_VALUE - createdAt.apply(item).toEpochMilli(),
+                    Long.MAX_VALUE - sequence.applyAsLong(item), id.apply(item)));
         }
         return Pagination.paginate(matching, item -> cursors.get(id.apply(item)),
-                maxResults != null ? maxResults : defaultMaxResults, nextToken, namespace,
+                maxResults != null ? maxResults : defaultMaxResults, nextToken, namespace + "|" + CURSOR_SHAPE,
                 token -> new AwsException("ValidationException", "Invalid nextToken.", 400));
     }
 
@@ -783,6 +792,17 @@ public class EmrServerlessService {
             }
         }
         return null;
+    }
+
+    /**
+     * The sequence of a run or session created at {@code now}, after {@code last}, the latest its service gave: the
+     * microseconds of {@code now}, or one past {@code last} when that is not later. It orders the run after every one
+     * created before it, within the same millisecond too; one an earlier Floci process created has a sequence below
+     * {@code now}'s microseconds, the clock having moved on since, so none is reused.
+     */
+    static long nextSequence(long last, Instant now) {
+        long micros = now.getEpochSecond() * 1_000_000L + now.getNano() / 1_000;
+        return Math.max(micros, last + 1);
     }
 
     /**

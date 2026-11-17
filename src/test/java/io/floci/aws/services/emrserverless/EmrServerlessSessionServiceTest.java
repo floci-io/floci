@@ -20,7 +20,11 @@ import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -45,15 +49,17 @@ class EmrServerlessSessionServiceTest {
     private EmrServerlessService applications;
     private EmrServerlessSessionService sessions;
     private MutableClock clock;
+    private IamService iamService;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn(ACCOUNT_ID);
         clock = new MutableClock();
-        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
+        regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         applications = new EmrServerlessService(config, new InMemoryStorageFactory(ACCOUNT_ID), regionResolver, clock);
-        IamService iamService = mock(IamService.class);
+        iamService = mock(IamService.class);
         when(iamService.resolveCallerArn(any())).thenReturn(Optional.empty());
         EmrServerlessJobRunService jobRuns = new EmrServerlessJobRunService(AccountAwareStorageBackend.inMemory(
                 ACCOUNT_ID), applications, iamService, regionResolver, null, objectMapper, 0, clock);
@@ -262,6 +268,50 @@ class EmrServerlessSessionServiceTest {
         assertTrue(sessions.route("not-a-token").isEmpty());
         clock.advance(EmrServerlessSessionService.TOKEN_VALIDITY);
         assertEquals(EmrServerlessSessionService.TOKEN_EXPIRED, sessions.route(token).orElseThrow().refusal());
+    }
+
+    @Test
+    void sessionsStartedWithinTheSameMillisecondListNewestFirst() {
+        EmrServerlessJobRunService jobRuns = new EmrServerlessJobRunService(AccountAwareStorageBackend.inMemory(
+                ACCOUNT_ID), applications, iamService, regionResolver, null, objectMapper, 0, clock);
+        EmrServerlessSessionService frozen = new EmrServerlessSessionService(AccountAwareStorageBackend.inMemory(
+                ACCOUNT_ID), applications, jobRuns, iamService, regionResolver, null, objectMapper,
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC), "http://localhost:4566/");
+        String applicationId = application("emr-7.13.0", "SPARK", true);
+        List<String> started = new ArrayList<>();
+        for (int session = 0; session < 12; session++) {
+            started.add(frozen.startSession(applicationId, request()).getSessionId());
+        }
+
+        List<String> listed = frozen.listSessions(applicationId, null, null, null, null, null).items().stream()
+                .map(SessionSummary::getSessionId).toList();
+
+        assertEquals(started.reversed(), listed);
+    }
+
+    @Test
+    void aRetryIsTheOriginalSessionWhereTheSessionWouldHoldTheSameAndConflictsWhereItWouldNot() {
+        String applicationId = application("emr-7.13.0", "SPARK", true);
+        StartSessionRequest first = request();
+        first.setIdleTimeoutMinutes(60L);
+        first.setTags(Map.of());
+        first.setConfigurationOverrides(Map.of());
+        Session original = sessions.startSession(applicationId, first);
+        // The session holds the default idle timeout, no tags and no overrides either way.
+        StartSessionRequest retry = request();
+        retry.setClientToken(first.getClientToken());
+        StartSessionRequest emptyTag = request();
+        emptyTag.setClientToken(first.getClientToken());
+        emptyTag.setTags(Map.of("team", ""));
+        StartSessionRequest renamed = request();
+        renamed.setClientToken(first.getClientToken());
+        renamed.setName("another");
+
+        assertEquals(original.getSessionId(), sessions.startSession(applicationId, retry).getSessionId());
+        for (StartSessionRequest conflicting : List.of(emptyTag, renamed)) {
+            assertEquals("ConflictException", assertThrows(AwsException.class,
+                    () -> sessions.startSession(applicationId, conflicting)).getErrorCode());
+        }
     }
 
     @Test
