@@ -305,7 +305,7 @@ final class DynamoDbPartiQLKeyPlan {
         for (Iterator<Spread> each = branches.iterator(); each.hasNext(); ) {
             Spread branch = each.next();
             kept.add(branch);
-            if (namesTheSortKeyTwice(branch)) {
+            if (branchOf(branch).readsWholeTable()) {
                 break;
             }
             if (kept.size() > MAX_BRANCHES) {
@@ -314,13 +314,6 @@ final class DynamoDbPartiQLKeyPlan {
             }
         }
         return kept;
-    }
-
-    private boolean namesTheSortKeyTwice(Spread spread) {
-        return spread.keyConditions().stream()
-                .filter(condition -> !condition.path().root().equals(partitionKey))
-                .distinct()
-                .count() > 1;
     }
 
     private static boolean anyLeaf(Cond cond, Predicate<Cond.Leaf> test) {
