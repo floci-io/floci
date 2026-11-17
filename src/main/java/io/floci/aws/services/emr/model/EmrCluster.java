@@ -39,6 +39,8 @@ public class EmrCluster {
     private boolean autoTerminate;
     private boolean unhealthyNodeReplacement;
     private boolean keepJobFlowAliveWhenNoSteps;
+    // RunJobFlow's SessionEnabled: whether the cluster takes Spark Connect sessions.
+    private boolean sessionEnabled;
     private int normalizedInstanceHours;
     private int stepConcurrencyLevel = 1;
     private int ebsRootVolumeSize;
@@ -247,4 +249,7 @@ public class EmrCluster {
 
     public List<EmrInstanceFleet> getInstanceFleets() { return instanceFleets; }
     public void setInstanceFleets(List<EmrInstanceFleet> instanceFleets) { this.instanceFleets = instanceFleets; }
+
+    public boolean isSessionEnabled() { return sessionEnabled; }
+    public void setSessionEnabled(boolean sessionEnabled) { this.sessionEnabled = sessionEnabled; }
 }

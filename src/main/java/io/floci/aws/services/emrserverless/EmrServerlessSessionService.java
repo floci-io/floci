@@ -10,6 +10,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
@@ -22,13 +23,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -65,7 +64,6 @@ public class EmrServerlessSessionService {
     static final Duration HARD_LIMIT = Duration.ofHours(24);
     // "Authentication tokens are time-limited to 1 hour."
     static final Duration TOKEN_VALIDITY = Duration.ofHours(1);
-    private static final int TOKEN_BYTES = 32;
     // Where GetSessionEndpoint points; nothing answers Spark Connect there, as Floci runs no driver for a session.
     static final String ENDPOINT_PATH = "/_aws/emr-serverless/sessions/";
     private static final String SPARK_TYPE = "SPARK";
@@ -83,7 +81,6 @@ public class EmrServerlessSessionService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String baseUrl;
-    private final SecureRandom random = new SecureRandom();
 
     @Inject
     public EmrServerlessSessionService(StorageFactory storageFactory, EmrServerlessService applications,
@@ -107,7 +104,7 @@ public class EmrServerlessSessionService {
         this.requestContext = requestContext;
         this.objectMapper = objectMapper;
         this.clock = clock;
-        this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this.baseUrl = baseUrl;
     }
 
     /**
@@ -201,20 +198,14 @@ public class EmrServerlessSessionService {
      * to 1 hour". The endpoint is on Floci's own address, where nothing answers Spark Connect, as Floci runs no driver
      * for a session. No source gives AWS's answer for a session that has ended, so the refusal's wording is Floci's.
      */
-    public synchronized Endpoint sessionEndpoint(String applicationId, String sessionId) {
+    public synchronized SparkConnectEndpoint sessionEndpoint(String applicationId, String sessionId) {
         applications.getApplication(applicationId);
         Session session = settle(findSession(applicationId, sessionId)).getSession();
         if (ENDED.contains(session.getState())) {
             throw new AwsException("ValidationException", "Session " + sessionId + " has ended.", 400);
         }
-        byte[] token = new byte[TOKEN_BYTES];
-        random.nextBytes(token);
-        return new Endpoint(baseUrl + ENDPOINT_PATH + applicationId + "/" + sessionId,
-                HexFormat.of().formatHex(token), now().plus(TOKEN_VALIDITY));
-    }
-
-    /** GetSessionEndpoint's endpoint, its token and when the token expires. */
-    public record Endpoint(String url, String authToken, Instant authTokenExpiresAt) {
+        return SparkConnectEndpoint.issue(baseUrl, ENDPOINT_PATH + applicationId + "/" + sessionId, now(),
+                TOKEN_VALIDITY);
     }
 
     /**

@@ -273,9 +273,12 @@ final class EmrSparkSteps {
     // Apache Spark, which installs neither Hive, HCatalog nor Pig.
     private static boolean installs(String releaseLabel, String applications, ObjectMapper objectMapper,
                                     String... names) {
-        if (releaseLabel != null && EmrServerlessSparkRunner.sparkRuntime(releaseLabel)) {
-            return false;
-        }
+        return (releaseLabel == null || !EmrServerlessSparkRunner.sparkRuntime(releaseLabel))
+                && names(applications, objectMapper, names);
+    }
+
+    /** Whether a cluster's stored {@code Applications} name any of {@code names}, in any case. */
+    static boolean names(String applications, ObjectMapper objectMapper, String... names) {
         for (JsonNode application : stored(applications, objectMapper)) {
             String name = application.path("Name").asText();
             for (String installed : names) {

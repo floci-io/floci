@@ -1353,9 +1353,11 @@ public class EmrServerlessJobRunService implements Resettable {
         return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 11) || sparkRuntime(releaseLabel);
     }
 
-    // A release of the AWS runtime for Apache Spark, which starts at emr-spark-8.0-preview and comes after EMR
-    // Serverless 7.14.0 in the release list.
-    static boolean sparkRuntime(String releaseLabel) {
+    /**
+     * Whether {@code releaseLabel} is a release of the AWS runtime for Apache Spark, emr-spark-8.0 or later, which
+     * starts at emr-spark-8.0-preview and comes after EMR Serverless 7.14.0 in the release list.
+     */
+    public static boolean sparkRuntime(String releaseLabel) {
         return releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 0);
     }
 

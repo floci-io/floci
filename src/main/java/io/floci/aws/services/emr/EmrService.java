@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -18,6 +19,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -31,6 +33,7 @@ import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
+import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emr.model.SecurityConfiguration;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
@@ -51,6 +54,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -132,6 +136,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final String KEY_SEPARATOR = "::";
 
     private final AccountAwareStorageBackend<EmrCluster> clusterStore;
+    // Clusters' Spark Connect sessions, by session id.
+    private final AccountAwareStorageBackend<EmrSession> sessionStore;
     // A security configuration is Regional: keyed by Region and name (securityConfigurationKey).
     private final AccountAwareStorageBackend<SecurityConfiguration> secConfigStore;
     // Block public access is an account setting per Region, so this store is keyed by Region.
@@ -207,6 +213,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             "{\"BlockPublicSecurityGroupRules\":true,"
                     + "\"PermittedPublicSecurityGroupRuleRanges\":[{\"MinRange\":22,\"MaxRange\":22}]}";
     private final String defaultReleaseLabel;
+    // Floci's own address, which GetSessionEndpoint's endpoint is on.
+    private final String baseUrl;
 
     /**
      * When the service next brings a cluster up to date by itself, and where it then sends the events
@@ -282,6 +290,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                Executor stepExecutor, IamService iamService) {
         this.clusterStore = storageFactory.create("emr", "emr-clusters.json",
                 new TypeReference<Map<String, EmrCluster>>() {});
+        this.sessionStore = storageFactory.create("emr", "emr-sessions.json",
+                new TypeReference<Map<String, EmrSession>>() {});
         this.secConfigStore = storageFactory.create("emr", "emr-security-configs.json",
                 new TypeReference<Map<String, SecurityConfiguration>>() {});
         this.blockPublicAccessStore = storageFactory.create("emr", "emr-block-public-access.json",
@@ -290,6 +300,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         migrateLegacySecurityConfigurations();
         this.eventPublisher = eventPublisher;
         this.defaultReleaseLabel = config.services().emr().defaultReleaseLabel();
+        this.baseUrl = config.effectiveBaseUrl();
         this.sparkRunner = sparkRunner;
         this.bootstrapRunner = bootstrapRunner;
         this.clusterStorage = clusterStorage;
@@ -660,6 +671,162 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             store(cluster);
             return result;
         });
+    }
+
+    // ──────────────────────────── Sessions ────────────────────────────
+
+    /**
+     * Starts a Spark Connect session on the cluster ({@link EmrSessions}), or, for a retry with the same client
+     * request token, returns the one it started: "If you retry a request that completed successfully using the same
+     * client request token, the service returns the original response", which said SUBMITTED. A retry is the same
+     * request when it asks for the same session, whatever members it leaves at their defaults; a token reused for a
+     * different one is refused, in Floci's own wording, as the model declares no conflict error. The answer is a copy
+     * of the session, in the state StartSession reports.
+     */
+    public EmrSession startSession(String clusterId, EmrSessions.Request request) {
+        EmrSessions.validate(request);
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            List<EmrSession> sessions = settledSessions(cluster);
+            String parameters = sessionParameters(cluster.getId(), request);
+            EmrSession existing = EmrSessions.startedWithToken(sessions, request.clientRequestToken());
+            if (existing != null) {
+                if (!sameRequest(existing.getRequest(), parameters)) {
+                    throw invalid("ClientRequestToken " + request.clientRequestToken()
+                            + " was used with a different request.");
+                }
+                EmrSession original = sessionCopy(existing);
+                original.setState(EmrSessions.SUBMITTED);
+                return original;
+            }
+            EmrSessions.checkStartable(cluster, sessions, SNAPSHOT_MAPPER);
+            String id = "is-" + randomId(13);
+            long sequence = sessions.stream().mapToLong(EmrSession::getSequence).max().orElse(0) + 1;
+            EmrSession session = EmrSessions.start(cluster, request, id,
+                    regionResolver.buildArn("elasticmapreduce", regionOf(cluster),
+                            "cluster/" + cluster.getId() + "/session/" + id),
+                    regionResolver.getAccountId(), now(), sequence, parameters);
+            sessionStore.put(id, session);
+            return sessionCopy(session);
+        });
+    }
+
+    public EmrSession getSession(String clusterId, String sessionId) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            return sessionCopy(EmrSessions.find(cluster, settledSessions(cluster), sessionId));
+        });
+    }
+
+    /**
+     * The cluster's sessions, "Newer sessions are returned first", filtered by {@code states}, at most
+     * {@code maxResults} (1 to 100) to a page. A {@code nextToken} resumes only the listing it came from.
+     */
+    public PaginatedResult<EmrSession> listSessions(String clusterId, List<String> states, Integer maxResults,
+                                                    String nextToken) {
+        if (maxResults != null) {
+            String violation = SmithyValidationErrors.outOfRange("maxResults", maxResults, 1,
+                    EmrSessions.MAX_LIST_RESULTS);
+            if (violation != null) {
+                throw SmithyValidationErrors.validationException(violation);
+            }
+        }
+        EmrSessions.validateStates(states);
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            List<EmrSession> matching = settledSessions(cluster).stream()
+                    .filter(session -> states == null || states.isEmpty() || states.contains(session.getState()))
+                    .toList();
+            String namespace = String.join("|", "ListSessions", cluster.getId(),
+                    String.valueOf(states != null ? states : List.of()));
+            // Newest first: the later of a cluster's sessions has the higher sequence.
+            PaginatedResult<EmrSession> page = Pagination.paginate(matching,
+                    session -> String.format("%020d", Long.MAX_VALUE - session.getSequence()),
+                    maxResults != null ? maxResults : EmrSessions.MAX_LIST_RESULTS, nextToken, namespace,
+                    token -> invalid("Invalid NextToken."));
+            return new PaginatedResult<>(page.items().stream().map(EmrService::sessionCopy).toList(),
+                    page.nextToken());
+        });
+    }
+
+    public EmrSession terminateSession(String clusterId, String sessionId) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            EmrSession session = EmrSessions.find(cluster, settledSessions(cluster), sessionId);
+            EmrSessions.terminate(session, now());
+            sessionStore.put(session.getId(), session);
+            return sessionCopy(session);
+        });
+    }
+
+    /**
+     * Where a client connects to a session that has not ended, with a token that expires in an hour, as
+     * "Authentication tokens expire after 1 hour". The endpoint is on Floci's own address, where nothing answers
+     * Spark Connect, as Floci runs no Spark Connect server for a session.
+     */
+    public SparkConnectEndpoint sessionEndpoint(String clusterId, String sessionId) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            EmrSession session = EmrSessions.find(cluster, settledSessions(cluster), sessionId);
+            EmrSessions.requireNotEnded(session);
+            return SparkConnectEndpoint.issue(baseUrl, EmrSessions.ENDPOINT_PATH + cluster.getId() + "/"
+                    + session.getId(), now(), EmrSessions.TOKEN_VALIDITY);
+        });
+    }
+
+    /**
+     * The cluster's sessions, as stored, oldest first, once the cluster and each of them is brought up to date: kept
+     * apart from the cluster, so that its sessions, ended ones included, weigh on no other read or write of it.
+     */
+    private List<EmrSession> settledSessions(EmrCluster cluster) {
+        settle(cluster);
+        Instant now = now();
+        List<EmrSession> sessions = sessionStore.scan(key -> true).stream()
+                .filter(session -> cluster.getId().equals(session.getClusterId()))
+                .sorted(Comparator.comparingLong(EmrSession::getSequence))
+                .toList();
+        for (EmrSession session : sessions) {
+            if (EmrSessions.settle(cluster, session, now)) {
+                sessionStore.put(session.getId(), session);
+            }
+        }
+        return sessions;
+    }
+
+    /**
+     * What a retry must ask for: the cluster and the session's parameters as the session would hold them, a member
+     * left out, given as null or empty, or at its default, alike.
+     */
+    private static String sessionParameters(String clusterId, EmrSessions.Request request) {
+        ObjectNode parameters = SNAPSHOT_MAPPER.createObjectNode();
+        parameters.put("ClusterId", clusterId);
+        parameters.put("Name", request.name());
+        parameters.put("ExecutionRoleArn", request.executionRoleArn());
+        parameters.set("EngineConfigurations", rawJson(request.engineConfigurations()));
+        parameters.set("MonitoringConfiguration", rawJson(request.monitoringConfiguration()));
+        parameters.put("SessionIdleTimeoutInMinutes", request.idleTimeoutMinutes());
+        parameters.set("Tags", SNAPSHOT_MAPPER.valueToTree(request.tags() != null ? request.tags() : Map.of()));
+        return parameters.toString();
+    }
+
+    private static JsonNode rawJson(String json) {
+        if (json == null) {
+            return null;
+        }
+        try {
+            return SNAPSHOT_MAPPER.readTree(json);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot read a session's stored configuration", e);
+        }
+    }
+
+    // Whether a retry's parameters are the original's, member for member whatever their order.
+    private static boolean sameRequest(String stored, String retried) {
+        return Objects.equals(rawJson(stored), rawJson(retried));
+    }
+
+    private static EmrSession sessionCopy(EmrSession session) {
+        return SNAPSHOT_MAPPER.convertValue(session, EmrSession.class);
     }
 
     // ──────────────────────────── Instance groups / fleets ────────────────────────────
@@ -1286,7 +1453,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 .findFirst();
     }
 
-    private static AwsException invalid(String message) {
+    static AwsException invalid(String message) {
         return new AwsException("InvalidRequestException", message, 400);
     }
 
@@ -1415,7 +1582,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /** Shutting down or ended: "A job flow that is shutting down, terminated, or finished may not be modified." */
-    private static boolean isShutDown(EmrCluster cluster) {
+    static boolean isShutDown(EmrCluster cluster) {
         return EmrClusterLifecycle.TERMINATING.equals(cluster.getState())
                 || EmrClusterLifecycle.isTerminated(cluster.getState());
     }
