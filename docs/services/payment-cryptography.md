@@ -248,7 +248,10 @@
   IAM checks.
 - **Key usage:** `StopKeyUsage` disables the key and records when it stopped, and
   `StartKeyUsage` enables it again and records when it started. A stopped key stays
-  readable and its material stays where it is, so it can be started again.
+  readable and its material stays where it is, so it can be started again. A replica is
+  read-only, so the change is made on the primary, and a request that names a replica is
+  refused. The change reaches the replicas: a stop on the primary stops the use of the
+  replicas too, as the reference says.
 - **Not yet emulated:** the key restore operation, the multi-party approval operations
   and the certificate signing request.
 

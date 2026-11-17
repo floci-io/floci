@@ -399,13 +399,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      *
      * <p>The moment the use starts is now, and a key that had been stopped is usable again:
      * the stop moment is cleared, because a key that is in use has no such moment.
+     *
+     * <p>A replica is read-only, so the change is made on the primary, and it reaches the
+     * replicas, as the reference says it does.
      */
     public synchronized PaymentCryptographyKey startKeyUsage(PaymentCryptographyKey key) {
         PaymentCryptographyKey current = liveKey(key);
+        requireNotReplica(current, "a replica is read-only");
         current.setEnabled(true);
         current.setUsageStartTimestamp(Instant.now().getEpochSecond());
         current.setUsageStopTimestamp(0);
         storeKey(current);
+        refreshReplicas(current, current.getReplicationRegions());
         return current;
     }
 
@@ -414,12 +419,17 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      *
      * <p>A stopped key stays readable, and its material stays where it is: only the use of
      * it stops, so a key may be started again.
+     *
+     * <p>A replica is read-only, so the change is made on the primary, and it reaches the
+     * replicas, as the reference says it does.
      */
     public synchronized PaymentCryptographyKey stopKeyUsage(PaymentCryptographyKey key) {
         PaymentCryptographyKey current = liveKey(key);
+        requireNotReplica(current, "a replica is read-only");
         current.setEnabled(false);
         current.setUsageStopTimestamp(Instant.now().getEpochSecond());
         storeKey(current);
+        refreshReplicas(current, current.getReplicationRegions());
         return current;
     }
 
@@ -624,6 +634,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             replica.setTags(new LinkedHashMap<>(primary.getTags()));
             replica.setKeyState(primary.getKeyState());
             replica.setEnabled(primary.isEnabled());
+            replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
+            replica.setUsageStopTimestamp(primary.getUsageStopTimestamp());
             replica.setUsingDefaultReplicationRegions(primary.isUsingDefaultReplicationRegions());
             replica.setPrimaryRegion(primary.getPrimaryRegion());
             replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
@@ -1645,6 +1657,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         replica.setTags(new LinkedHashMap<>(primary.getTags()));
         replica.setCreateTimestamp(primary.getCreateTimestamp());
         replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
+        replica.setUsageStopTimestamp(primary.getUsageStopTimestamp());
         replica.setPrimaryRegion(primary.getPrimaryRegion());
         replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
         replica.setMultiRegionKeyType("REPLICA");

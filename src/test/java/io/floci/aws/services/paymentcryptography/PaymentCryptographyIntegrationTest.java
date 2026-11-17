@@ -913,6 +913,25 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aStoppedKeyStopsItsReplica() {
+        // The reference says a stop on the primary stops the usage of the replicas too, so
+        // the replica of the key is disabled as well.
+        String arn = call("CreateKey", createReplicatedKeyBody("[\"us-west-2\"]"))
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String replicaArn = arn.replace(":us-east-1:", ":us-west-2:");
+
+        call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false));
+
+        callIn("us-west-2", "GetKey", "{\"KeyIdentifier\":\"" + replicaArn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.UsageStopTimestamp", notNullValue());
+    }
+
+    @Test
     void aKeyThatDoesNotExistIsNotFound() {
         call("GetKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:000000000000:key/"
                 + "0123456789abcdef0123456789abcdef\"}")

@@ -519,6 +519,42 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aStoppedKeyStopsItsReplicas() {
+        // The reference says a stop on the primary stops the usage of the replicas too, so
+        // the replica carries the primary's enablement and the moments it changed.
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+
+        PaymentCryptographyKey stopped = service.stopKeyUsage(key);
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+        assertFalse(replica.isEnabled(), "the replica is still enabled after the key was stopped");
+        assertEquals(stopped.getUsageStopTimestamp(), replica.getUsageStopTimestamp(),
+                "the replica does not carry the moment the key was stopped");
+
+        service.startKeyUsage(key);
+
+        replica = service.findKey("us-west-2", key.getKeyId());
+        assertTrue(replica.isEnabled(), "the replica is still disabled after the key was started");
+        assertEquals(0, replica.getUsageStopTimestamp(),
+                "a replica in use still carries the moment the key was stopped");
+    }
+
+    @Test
+    void aReplicaIsNotStartedOrStopped() {
+        // A replica is read-only, so the use of a key is started and stopped on the primary.
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        AwsException start = assertThrows(AwsException.class,
+                () -> service.startKeyUsage(replica));
+        assertEquals("ValidationException", start.getErrorCode());
+
+        AwsException stop = assertThrows(AwsException.class,
+                () -> service.stopKeyUsage(replica));
+        assertEquals("ValidationException", stop.getErrorCode());
+    }
+
+    @Test
     void theKeysAreListedAPageAtATime() {
         createKey("us-east-1");
         createKey("us-east-1");
