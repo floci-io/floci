@@ -2243,7 +2243,7 @@ When enabled, Floci creates the `floci-deployer` user if it does not already exi
 
 Requests signed with the seeded access key return the deployer user ARN from `sts:GetCallerIdentity`.
 
-The default access key ID, `floci`, is shorter than IAM allows: `DeleteAccessKey` and `UpdateAccessKey` take an `AccessKeyId` of 16 to 128 characters matching `[\w]+`, so the AWS SDKs and Floci refuse the default with a validation error, and `DeleteUser` then refuses the user with `DeleteConflict` while the key exists. To provision with the deployer and then retire it, set an ID in IAM's format, for example:
+The default access key ID, `floci`, is shorter than IAM allows: `DeleteAccessKey` and `UpdateAccessKey` take an `AccessKeyId` of 16 to 128 characters matching `[\w]+`, so the AWS SDKs and Floci refuse the default with a validation error, and `DeleteUser` then refuses the user with `DeleteConflict` while the key exists. To provision with the deployer and then retire it, set an ID in IAM's format, for example (any value other than `floci` must be in that format, or Floci refuses to start):
 
 ```bash
 FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true
@@ -3918,7 +3918,7 @@ of the role it was issued for, whatever region later calls are signed for. See [
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
 | `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
-| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` | `floci` | Access key ID of the seeded deployer's key; 16 to 128 word characters make it deletable |
+| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` | `floci` | Access key ID of the seeded deployer's key: `floci`, or 16 to 128 word characters, which make it deletable |
 | `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` | _(unset)_ | Seed an account alias at startup; unset means the account has no alias |
 | `FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH` | _(unset)_ | A JSON file of partner account id to boundary ARN to policy document, standing in for the permissions boundaries AWS registers for a delegation partner by email; unset means none is registered |
 

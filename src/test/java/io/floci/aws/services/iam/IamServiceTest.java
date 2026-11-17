@@ -3145,6 +3145,28 @@ class IamServiceTest {
                 accessKeyIds(restarted, "floci-deployer"));
     }
 
+    /**
+     * IAM takes an AccessKeyId of "Minimum length of 16. Maximum length of 128." matching
+     * {@code [\w]+} (IAM API Reference, AccessKey), so a key seeded under any other ID could never
+     * be deactivated or deleted. Only the legacy default is kept outside that format.
+     */
+    @Test
+    void seedingRefusesAnAccessKeyIdOutsideIamsFormat() {
+        for (String accessKeyId : List.of("AKIAFLOCIDEPLOY", "AKIA-FLOCI-DEPLOYER", "A".repeat(129), "test")) {
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                    () -> startSeedingDeployerAs(accessKeyId, new InMemoryStorage<>(), new InMemoryStorage<>()));
+            assertTrue(ex.getMessage().contains("floci.services.iam.seed-deployer-access-key-id"), ex.getMessage());
+        }
+    }
+
+    @Test
+    void seedingAcceptsTheDefaultAccessKeyIdAndOnesInIamsFormat() {
+        for (String accessKeyId : List.of("floci", "AKIAFLOCIDEPLOYE", "A".repeat(128), "AKIA_FLOCI_DEPLOYER")) {
+            IamService seeded = startSeedingDeployerAs(accessKeyId, new InMemoryStorage<>(), new InMemoryStorage<>());
+            assertEquals(List.of(accessKeyId), accessKeyIds(seeded, "floci-deployer"));
+        }
+    }
+
     @Test
     void attachManagedPolicyToRole() {
         iamService.seedAwsManagedPolicies();

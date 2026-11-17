@@ -203,6 +203,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
+    /** An AccessKeyId as IAM documents it: 16 to 128 characters matching {@code [\w]+}. */
+    private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile("\\w{16,128}");
     private static final String ACCOUNT_ALIAS_KEY = "account-alias";
     /** As AWS documents it: no leading or trailing dash, and no two dashes in a row. */
     private static final Pattern ACCOUNT_ALIAS_PATTERN =
@@ -891,6 +893,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void seedDefaultDeployerPrincipal() {
+        // The legacy default stays accepted so setups signing with floci / floci keep working.
+        // Any other ID IAM would not issue is refused at startup rather than seeded as a key that
+        // DeleteAccessKey and UpdateAccessKey could never take.
+        if (!DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(seededDeployerAccessKeyId)
+                && (seededDeployerAccessKeyId == null
+                        || !ACCESS_KEY_ID_PATTERN.matcher(seededDeployerAccessKeyId).matches())) {
+            throw new IllegalArgumentException("floci.services.iam.seed-deployer-access-key-id must be "
+                    + DEFAULT_DEPLOYER_ACCESS_KEY_ID + " or 16 to 128 characters matching [\\w]+, as IAM "
+                    + "requires of an access key ID: " + seededDeployerAccessKeyId);
+        }
         String adminPolicyArn = AwsManagedPolicies.arnPrefix(regionResolver.getDefaultPartition())
                 + "/AdministratorAccess";
         IamUser user = users.get(DEFAULT_DEPLOYER_USER)

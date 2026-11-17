@@ -1779,6 +1779,7 @@ public interface EmulatorConfig {
          * Access key ID of the seeded deployer's key. The default {@code floci} is shorter than
          * the 16 characters IAM requires of an AccessKeyId, so DeleteAccessKey and UpdateAccessKey
          * refuse it; an ID of 16 to 128 word characters lets the key be retired like any other.
+         * Seeding refuses to start with any other value outside that format.
          */
         @WithDefault("floci")
         String seedDeployerAccessKeyId();
