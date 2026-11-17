@@ -6,7 +6,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamGroup;
 import io.floci.aws.services.iam.model.IamPolicy;
+import io.floci.aws.services.iam.model.IamUser;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
@@ -104,6 +106,37 @@ class IamManagedPolicyCfnProvisionerTest {
     }
 
     @Test
+    void updateDetachesExplicitLegacyUserAndGroupTargets() throws Exception {
+        IamPolicy policy = mock(IamPolicy.class);
+        when(policy.getArn()).thenReturn(ARN);
+        when(policy.getPolicyId()).thenReturn("AID1");
+        when(policy.getDefaultVersionId()).thenReturn("v1");
+        when(iam.createPolicy(eq("app-policy"), eq("/"), eq(null), any(), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
+        when(iam.getPolicy(ARN)).thenReturn(policy);
+        when(iam.listEntitiesForPolicy(ARN))
+                .thenReturn(new IamService.PolicyEntities(List.of(), List.of(), List.of()));
+        when(iam.listPolicyVersions(ARN)).thenReturn(List.of());
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        r.getAttributes().put("PolicyId", "AID1");
+        r.getAttributes().put("ManagedPolicyUserTargets", "legacy-user");
+        r.getAttributes().put("ManagedPolicyGroupTargets", "legacy-group");
+
+        provisioner.provision(r, props("""
+                {"ManagedPolicyName": "app-policy",
+                 "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                """), ctx(ARN));
+
+        verify(iam).detachUserPolicy("legacy-user", ARN);
+        verify(iam).detachGroupPolicy("legacy-group", ARN);
+        verify(iam, never()).listUsers("/");
+        verify(iam, never()).listGroups("/");
+        assertEquals("", r.getAttributes().get("ManagedPolicyUserTargets"));
+        assertEquals("", r.getAttributes().get("ManagedPolicyGroupTargets"));
+    }
+
+    @Test
     void failedGroupAttachUndoesNewRoleAndUserAttachments() throws Exception {
         IamPolicy policy = mock(IamPolicy.class);
         when(policy.getArn()).thenReturn(ARN);
@@ -146,6 +179,16 @@ class IamManagedPolicyCfnProvisionerTest {
         r.getAttributes().put("ManagedPolicyRoleTargets", "app-role");
         r.getAttributes().put("ManagedPolicyUserTargets", "app-user");
         r.getAttributes().put("ManagedPolicyGroupTargets", "app-group");
+        r.getAttributes().put("ManagedPolicyUserTargetIds", "AIDAUSER");
+        r.getAttributes().put("ManagedPolicyGroupTargetIds", "AGROUP");
+        IamUser user = mock(IamUser.class);
+        when(user.getUserId()).thenReturn("AIDAUSER");
+        when(user.getUserName()).thenReturn("app-user");
+        when(iam.listUsers("/")).thenReturn(List.of(user));
+        IamGroup group = mock(IamGroup.class);
+        when(group.getGroupId()).thenReturn("AGROUP");
+        when(group.getGroupName()).thenReturn("app-group");
+        when(iam.listGroups("/")).thenReturn(List.of(group));
 
         provisioner.delete(r, "us-east-1");
 
@@ -154,6 +197,65 @@ class IamManagedPolicyCfnProvisionerTest {
         order.verify(iam).detachUserPolicy("app-user", ARN);
         order.verify(iam).detachGroupPolicy("app-group", ARN);
         order.verify(iam).deletePolicy(ARN);
+    }
+
+    @Test
+    void deleteUsesExplicitLegacyUserAndGroupTargetsWithoutScanning() {
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        r.getAttributes().put("ManagedPolicyUserTargets", "legacy-user");
+        r.getAttributes().put("ManagedPolicyGroupTargets", "legacy-group");
+
+        provisioner.delete(r, "us-east-1");
+
+        verify(iam).detachUserPolicy("legacy-user", ARN);
+        verify(iam).detachGroupPolicy("legacy-group", ARN);
+        verify(iam, never()).listUsers("/");
+        verify(iam, never()).listGroups("/");
+        verify(iam).deletePolicy(ARN);
+    }
+
+    @Test
+    void legacyPolicyDeletePreservesUnrecordedUserAndGroupAttachments() {
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        when(iam.listRoles("/")).thenReturn(List.of());
+        IamUser outsideUser = mock(IamUser.class);
+        when(outsideUser.getAttachedPolicyArns()).thenReturn(new ArrayList<>(List.of(ARN)));
+        when(outsideUser.getUserName()).thenReturn("outside-user");
+        when(iam.listUsers("/")).thenReturn(List.of(outsideUser));
+        IamGroup outsideGroup = mock(IamGroup.class);
+        when(outsideGroup.getAttachedPolicyArns()).thenReturn(new ArrayList<>(List.of(ARN)));
+        when(outsideGroup.getGroupName()).thenReturn("outside-group");
+        when(iam.listGroups("/")).thenReturn(List.of(outsideGroup));
+        doThrow(new AwsException("DeleteConflict", "policy still attached", 409))
+                .when(iam).deletePolicy(ARN);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.delete(r, "us-east-1"));
+
+        assertEquals("DeleteConflict", failure.getErrorCode());
+        verify(iam, never()).detachUserPolicy("outside-user", ARN);
+        verify(iam, never()).detachGroupPolicy("outside-group", ARN);
+        verify(iam, never()).listUsers("/");
+        verify(iam, never()).listGroups("/");
+    }
+
+    @Test
+    void emptyRecordedPrincipalTargetsDoNotScanOrDetach() {
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        r.getAttributes().put("ManagedPolicyUserTargets", "\n");
+        r.getAttributes().put("ManagedPolicyGroupTargets", "\n");
+        r.getAttributes().put("ManagedPolicyUserTargetIds", "AIDAUSER");
+        r.getAttributes().put("ManagedPolicyGroupTargetIds", "AGROUP");
+
+        provisioner.delete(r, "us-east-1");
+
+        verify(iam, never()).listUsers("/");
+        verify(iam, never()).listGroups("/");
+        verify(iam, never()).detachUserPolicy(any(), eq(ARN));
+        verify(iam, never()).detachGroupPolicy(any(), eq(ARN));
+        verify(iam).deletePolicy(ARN);
     }
 
     @Test

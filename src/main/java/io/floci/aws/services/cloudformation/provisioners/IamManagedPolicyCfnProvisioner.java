@@ -13,12 +13,15 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -63,9 +66,12 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         String existingArn = r.getPhysicalId();
 
         // Check every declared target before creating a policy or publishing a new version.
-        roleNames.forEach(iamService::getRole);
-        userNames.forEach(iamService::getUser);
-        groupNames.forEach(iamService::getGroup);
+        List<IamRole> declaredRoles = roleNames.stream().map(iamService::getRole).toList();
+        List<IamUser> declaredUsers = userNames.stream().map(iamService::getUser).toList();
+        List<IamGroup> declaredGroups = groupNames.stream().map(iamService::getGroup).toList();
+        String roleTargetIds = targetIds(declaredRoles, IamRole::getRoleId);
+        String userTargetIds = targetIds(declaredUsers, IamUser::getUserId);
+        String groupTargetIds = targetIds(declaredGroups, IamGroup::getGroupId);
 
         IamPolicy policy;
         IamService.PolicyEntities priorEntities = null;
@@ -77,6 +83,9 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         String previousRoleTargets = r.getAttributes().get("ManagedPolicyRoleTargets");
         String previousUserTargets = r.getAttributes().get("ManagedPolicyUserTargets");
         String previousGroupTargets = r.getAttributes().get("ManagedPolicyGroupTargets");
+        String previousRoleTargetIds = r.getAttributes().get("ManagedPolicyRoleTargetIds");
+        String previousUserTargetIds = r.getAttributes().get("ManagedPolicyUserTargetIds");
+        String previousGroupTargetIds = r.getAttributes().get("ManagedPolicyGroupTargetIds");
         try {
             policy = iamService.createPolicy(policyName, "/", null, document, Map.of());
             createdPolicy = true;
@@ -120,32 +129,27 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
             createdVersionForRollback = iamService.createPolicyVersion(existingArn, document, true);
             // Targets this stack attached on the previous pass but no longer listed in the
             // template are detached, matching CloudFormation's update semantics.
-            if (previousRoleTargets != null && !previousRoleTargets.isBlank()) {
-                for (String previousRole : previousRoleTargets.split("\n")) {
-                    if (!roleNames.contains(previousRole)) {
-                        try {
-                            iamService.detachRolePolicy(previousRole, existingArn);
-                            changes.detachedRoles.add(previousRole);
-                        } catch (AwsException detachFailure) {
-                            // Update is idempotent like the delete path: the attachment can already
-                            // be gone on a retry, but other failures must surface and still restore
-                            // the version/attachments this pass changed, the same as a failure in
-                            // the attach loop below (this loop runs first, so that loop's own catch
-                            // never sees this failure).
-                            if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
-                                restoreOnUpdateFailure(detachFailure, r, existingArn,
-                                        false, changes,
-                                        previousRoleTargets, previousUserTargets, previousGroupTargets,
-                                        previousDefaultVersionId, createdVersionForRollback,
-                                        prunedVersionsForRollback);
-                                throw detachFailure;
-                            }
+            for (String previousRole : resolvePreviousTargets(previousRoleTargets, previousRoleTargetIds,
+                    priorEntities.roles(), IamRole::getRoleId, IamRole::getRoleName)) {
+                if (!roleNames.contains(previousRole)) {
+                    try {
+                        iamService.detachRolePolicy(previousRole, existingArn);
+                        changes.detachedRoles.add(previousRole);
+                    } catch (AwsException detachFailure) {
+                        if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
+                            restoreOnUpdateFailure(detachFailure, r, existingArn,
+                                    false, changes,
+                                    previousRoleTargets, previousUserTargets, previousGroupTargets,
+                                    previousRoleTargetIds, previousUserTargetIds, previousGroupTargetIds,
+                                    previousDefaultVersionId, createdVersionForRollback,
+                                    prunedVersionsForRollback);
+                            throw detachFailure;
                         }
                     }
                 }
             }
-            if (previousUserTargets != null && !previousUserTargets.isBlank()) {
-                for (String previousUser : previousUserTargets.split("\n")) {
+            for (String previousUser : resolvePreviousTargetsWithIds(previousUserTargets, previousUserTargetIds,
+                    priorEntities.users(), IamUser::getUserId, IamUser::getUserName)) {
                     if (!userNames.contains(previousUser)) {
                         try {
                             iamService.detachUserPolicy(previousUser, existingArn);
@@ -155,6 +159,7 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                                 restoreOnUpdateFailure(detachFailure, r, existingArn,
                                         false, changes,
                                         previousRoleTargets, previousUserTargets, previousGroupTargets,
+                                        previousRoleTargetIds, previousUserTargetIds, previousGroupTargetIds,
                                         previousDefaultVersionId, createdVersionForRollback,
                                         prunedVersionsForRollback);
                                 throw detachFailure;
@@ -162,9 +167,8 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                         }
                     }
                 }
-            }
-            if (previousGroupTargets != null && !previousGroupTargets.isBlank()) {
-                for (String previousGroup : previousGroupTargets.split("\n")) {
+            for (String previousGroup : resolvePreviousTargetsWithIds(previousGroupTargets, previousGroupTargetIds,
+                    priorEntities.groups(), IamGroup::getGroupId, IamGroup::getGroupName)) {
                     if (!groupNames.contains(previousGroup)) {
                         try {
                             iamService.detachGroupPolicy(previousGroup, existingArn);
@@ -174,6 +178,7 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                                 restoreOnUpdateFailure(detachFailure, r, existingArn,
                                         false, changes,
                                         previousRoleTargets, previousUserTargets, previousGroupTargets,
+                                        previousRoleTargetIds, previousUserTargetIds, previousGroupTargetIds,
                                         previousDefaultVersionId, createdVersionForRollback,
                                         prunedVersionsForRollback);
                                 throw detachFailure;
@@ -181,7 +186,6 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                         }
                     }
                 }
-            }
         }
         r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         r.getAttributes().put("PolicyId", policy.getPolicyId());
@@ -197,6 +201,9 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("ManagedPolicyRoleTargets", String.join("\n", roleNames));
         r.getAttributes().put("ManagedPolicyUserTargets", String.join("\n", userNames));
         r.getAttributes().put("ManagedPolicyGroupTargets", String.join("\n", groupNames));
+        putTargetIds(r, "ManagedPolicyRoleTargetIds", roleTargetIds);
+        putTargetIds(r, "ManagedPolicyUserTargetIds", userTargetIds);
+        putTargetIds(r, "ManagedPolicyGroupTargetIds", groupTargetIds);
 
         String policyArn = policy.getArn();
         // On adopt, attachments from the previous pass are not this attempt's to undo.
@@ -234,6 +241,7 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         } catch (RuntimeException failure) {
             restoreOnUpdateFailure(failure, r, policyArn, createdPolicy, changes,
                     previousRoleTargets, previousUserTargets, previousGroupTargets,
+                    previousRoleTargetIds, previousUserTargetIds, previousGroupTargetIds,
                     previousDefaultVersionId, createdVersionForRollback,
                     prunedVersionsForRollback);
             throw failure;
@@ -249,70 +257,30 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
     private void restoreOnUpdateFailure(RuntimeException failure, StackResource r, String policyArn,
                                         boolean createdPolicy, AttachmentChanges changes,
                                         String previousRoleTargets, String previousUserTargets,
-                                        String previousGroupTargets, String previousDefaultVersionId,
+                                         String previousGroupTargets,
+                                         String previousRoleTargetIds, String previousUserTargetIds,
+                                         String previousGroupTargetIds, String previousDefaultVersionId,
                                         PolicyVersion createdVersionForRollback,
                                         List<PolicyVersion> prunedVersionsForRollback) {
         boolean cleanupSucceeded = true;
-        List<String> rollbackGroups = new ArrayList<>(changes.attachedGroups);
-        Collections.reverse(rollbackGroups);
-        for (String groupName : rollbackGroups) {
-            String cleanupDescription = "detach policy " + policyArn + " from group " + groupName;
-            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                    () -> iamService.detachGroupPolicy(groupName, policyArn))) {
-                cleanupSucceeded = false;
-            }
-        }
-        List<String> rollbackUsers = new ArrayList<>(changes.attachedUsers);
-        Collections.reverse(rollbackUsers);
-        for (String userName : rollbackUsers) {
-            String cleanupDescription = "detach policy " + policyArn + " from user " + userName;
-            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                    () -> iamService.detachUserPolicy(userName, policyArn))) {
-                cleanupSucceeded = false;
-            }
-        }
-        List<String> rollbackRoles = new ArrayList<>(changes.attachedRoles);
-        Collections.reverse(rollbackRoles);
-        for (String roleName : rollbackRoles) {
-            String cleanupDescription = "detach policy " + policyArn + " from role " + roleName;
-            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                    () -> iamService.detachRolePolicy(roleName, policyArn))) {
-                cleanupSucceeded = false;
-            }
-        }
+        cleanupSucceeded &= attemptPrincipalCleanup(failure, policyArn, "group", changes.attachedGroups,
+                name -> iamService.detachGroupPolicy(name, policyArn), "detach");
+        cleanupSucceeded &= attemptPrincipalCleanup(failure, policyArn, "user", changes.attachedUsers,
+                name -> iamService.detachUserPolicy(name, policyArn), "detach");
+        cleanupSucceeded &= attemptPrincipalCleanup(failure, policyArn, "role", changes.attachedRoles,
+                name -> iamService.detachRolePolicy(name, policyArn), "detach");
         if (createdPolicy
                 && !CfnRollback.attemptIamCleanup(failure, "delete policy " + policyArn,
                         () -> iamService.deletePolicy(policyArn))) {
             cleanupSucceeded = false;
         }
         // An adopted update may already have detached targets and replaced the default version.
-        List<String> reattachGroups = new ArrayList<>(changes.detachedGroups);
-        Collections.reverse(reattachGroups);
-        for (String groupName : reattachGroups) {
-            String cleanupDescription = "reattach policy " + policyArn + " to group " + groupName;
-            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                    () -> iamService.attachGroupPolicy(groupName, policyArn))) {
-                cleanupSucceeded = false;
-            }
-        }
-        List<String> reattachUsers = new ArrayList<>(changes.detachedUsers);
-        Collections.reverse(reattachUsers);
-        for (String userName : reattachUsers) {
-            String cleanupDescription = "reattach policy " + policyArn + " to user " + userName;
-            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                    () -> iamService.attachUserPolicy(userName, policyArn))) {
-                cleanupSucceeded = false;
-            }
-        }
-        List<String> reattachRoles = new ArrayList<>(changes.detachedRoles);
-        Collections.reverse(reattachRoles);
-        for (String roleName : reattachRoles) {
-            String cleanupDescription = "reattach policy " + policyArn + " to role " + roleName;
-            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
-                    () -> iamService.attachRolePolicy(roleName, policyArn))) {
-                cleanupSucceeded = false;
-            }
-        }
+        cleanupSucceeded &= attemptPrincipalCleanup(failure, policyArn, "group", changes.detachedGroups,
+                name -> iamService.attachGroupPolicy(name, policyArn), "reattach");
+        cleanupSucceeded &= attemptPrincipalCleanup(failure, policyArn, "user", changes.detachedUsers,
+                name -> iamService.attachUserPolicy(name, policyArn), "reattach");
+        cleanupSucceeded &= attemptPrincipalCleanup(failure, policyArn, "role", changes.detachedRoles,
+                name -> iamService.attachRolePolicy(name, policyArn), "reattach");
         if (previousDefaultVersionId != null) {
             String restoredVersionId = previousDefaultVersionId;
             String restoreDescription = "restore default policy version " + restoredVersionId + " on " + policyArn;
@@ -348,6 +316,9 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
             restoreTargetAttribute(r, "ManagedPolicyRoleTargets", previousRoleTargets);
             restoreTargetAttribute(r, "ManagedPolicyUserTargets", previousUserTargets);
             restoreTargetAttribute(r, "ManagedPolicyGroupTargets", previousGroupTargets);
+            restoreTargetAttribute(r, "ManagedPolicyRoleTargetIds", previousRoleTargetIds);
+            restoreTargetAttribute(r, "ManagedPolicyUserTargetIds", previousUserTargetIds);
+            restoreTargetAttribute(r, "ManagedPolicyGroupTargetIds", previousGroupTargetIds);
             if (previousDefaultVersionId != null) {
                 r.getAttributes().put("DefaultVersionId", previousDefaultVersionId);
             }
@@ -369,6 +340,77 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         } else {
             resource.getAttributes().put(key, previousValue);
         }
+    }
+
+    private static <T> String targetIds(List<T> entities, Function<T, String> idGetter) {
+        if (entities.isEmpty()
+                || entities.stream().anyMatch(entity -> entity == null || idGetter.apply(entity) == null)) {
+            return null;
+        }
+        return entities.stream().map(idGetter).collect(Collectors.joining("\n"));
+    }
+
+    private static <T> List<String> resolvePreviousTargets(String names, String ids, List<T> attached,
+                                                            Function<T, String> idGetter,
+                                                            Function<T, String> nameGetter) {
+        List<String> targetNames = splitTargets(names);
+        if (targetNames.isEmpty()) {
+            return List.of();
+        }
+        if (ids == null) {
+            return targetNames;
+        }
+        Map<String, String> currentNames = attached.stream().collect(Collectors.toMap(
+                idGetter, nameGetter, (first, ignored) -> first));
+        List<String> targetIds = splitTargets(ids);
+        List<String> resolved = new ArrayList<>();
+        for (int i = 0; i < targetNames.size(); i++) {
+            String id = i < targetIds.size() ? targetIds.get(i) : null;
+            if (id == null || id.isBlank()) {
+                resolved.add(targetNames.get(i));
+            } else if (currentNames.containsKey(id)) {
+                resolved.add(currentNames.get(id));
+            }
+        }
+        return resolved;
+    }
+
+    private static <T> List<String> resolvePreviousTargetsWithIds(String names, String ids, List<T> attached,
+                                                                   Function<T, String> idGetter,
+                                                                   Function<T, String> nameGetter) {
+        if (names == null) {
+            return List.of();
+        }
+        return ids == null || ids.isBlank()
+                ? splitTargets(names) : resolvePreviousTargets(names, ids, attached, idGetter, nameGetter);
+    }
+
+    private static List<String> splitTargets(String targets) {
+        return targets == null ? List.of() : targets.lines().filter(target -> !target.isBlank()).toList();
+    }
+
+    private static void putTargetIds(StackResource resource, String key, String ids) {
+        if (ids == null) {
+            resource.getAttributes().remove(key);
+        } else {
+            resource.getAttributes().put(key, ids);
+        }
+    }
+
+    private static boolean attemptPrincipalCleanup(RuntimeException failure, String policyArn, String type,
+                                                   Collection<String> names, Consumer<String> action,
+                                                   String operation) {
+        boolean succeeded = true;
+        List<String> reversed = new ArrayList<>(names);
+        Collections.reverse(reversed);
+        for (String name : reversed) {
+            String preposition = "reattach".equals(operation) ? " to " : " from ";
+            String description = operation + " policy " + policyArn + preposition + type + " " + name;
+            if (!CfnRollback.attemptIamCleanup(failure, description, () -> action.accept(name))) {
+                succeeded = false;
+            }
+        }
+        return succeeded;
     }
 
     private static final class AttachmentChanges {

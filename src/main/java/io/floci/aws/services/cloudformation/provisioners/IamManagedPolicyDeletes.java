@@ -8,7 +8,11 @@ import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.IamUser;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -32,48 +36,53 @@ final class IamManagedPolicyDeletes {
     static List<String> roleTargets(IamService iamService, StackResource resource) {
         String policyArn = resource.getPhysicalId();
         String targets = resource.getAttributes().get("ManagedPolicyRoleTargets");
-        if (targets == null) {
-            // Stacks persisted before target metadata was introduced still need to be deletable.
-            // The policy is stack-owned, so discover only roles that currently reference this ARN.
-            targets = iamService.listRoles("/").stream()
-                    .filter(role -> role.getAttachedPolicyArns().contains(policyArn))
-                    .map(IamRole::getRoleName)
-                    .collect(Collectors.joining("\n"));
+        String ids = resource.getAttributes().get("ManagedPolicyRoleTargetIds");
+        if (targets != null) {
+            List<String> recordedNames = splitTargets(targets);
+            if (recordedNames.isEmpty() || ids == null || ids.isBlank()) {
+                return recordedNames;
+            }
+            return recordedTargets(targets, ids,
+                    iamService.listRoles("/"), IamRole::getRoleId, IamRole::getRoleName);
         }
-        if (targets == null || targets.isBlank()) {
+        // Stacks persisted before target metadata was introduced still need to be deletable.
+        // The policy is stack-owned, so discover only roles that currently reference this ARN.
+        List<IamRole> attachedRoles = iamService.listRoles("/");
+        targets = attachedRoles.stream()
+                .filter(role -> role.getAttachedPolicyArns().contains(policyArn))
+                .map(IamRole::getRoleName)
+                .collect(Collectors.joining("\n"));
+        if (targets.isBlank()) {
             return List.of();
         }
-        return targets.lines().filter(roleName -> !roleName.isBlank()).toList();
+        return recordedTargets(targets, ids, attachedRoles,
+                IamRole::getRoleId, IamRole::getRoleName);
     }
 
     static List<String> userTargets(IamService iamService, StackResource resource) {
-        String policyArn = resource.getPhysicalId();
         String targets = resource.getAttributes().get("ManagedPolicyUserTargets");
-        if (targets == null) {
-            targets = iamService.listUsers("/").stream()
-                    .filter(user -> user.getAttachedPolicyArns().contains(policyArn))
-                    .map(IamUser::getUserName)
-                    .collect(Collectors.joining("\n"));
-        }
-        if (targets == null || targets.isBlank()) {
+        String ids = resource.getAttributes().get("ManagedPolicyUserTargetIds");
+        if (targets == null || splitTargets(targets).isEmpty()) {
             return List.of();
         }
-        return targets.lines().filter(userName -> !userName.isBlank()).toList();
+        if (ids == null || ids.isBlank()) {
+            return splitTargets(targets);
+        }
+        return recordedTargets(targets, ids,
+                iamService.listUsers("/"), IamUser::getUserId, IamUser::getUserName);
     }
 
     static List<String> groupTargets(IamService iamService, StackResource resource) {
-        String policyArn = resource.getPhysicalId();
         String targets = resource.getAttributes().get("ManagedPolicyGroupTargets");
-        if (targets == null) {
-            targets = iamService.listGroups("/").stream()
-                    .filter(group -> group.getAttachedPolicyArns().contains(policyArn))
-                    .map(IamGroup::getGroupName)
-                    .collect(Collectors.joining("\n"));
-        }
-        if (targets == null || targets.isBlank()) {
+        String ids = resource.getAttributes().get("ManagedPolicyGroupTargetIds");
+        if (targets == null || splitTargets(targets).isEmpty()) {
             return List.of();
         }
-        return targets.lines().filter(groupName -> !groupName.isBlank()).toList();
+        if (ids == null || ids.isBlank()) {
+            return splitTargets(targets);
+        }
+        return recordedTargets(targets, ids,
+                iamService.listGroups("/"), IamGroup::getGroupId, IamGroup::getGroupName);
     }
 
     /**
@@ -83,34 +92,52 @@ final class IamManagedPolicyDeletes {
      */
     static void detachAndDeletePolicy(IamService iamService, StackResource resource) {
         String policyArn = resource.getPhysicalId();
-        for (String roleName : roleTargets(iamService, resource)) {
-            try {
-                iamService.detachRolePolicy(roleName, policyArn);
-            } catch (AwsException e) {
-                if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                    throw e;
-                }
-            }
-        }
-        for (String userName : userTargets(iamService, resource)) {
-            try {
-                iamService.detachUserPolicy(userName, policyArn);
-            } catch (AwsException e) {
-                if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                    throw e;
-                }
-            }
-        }
-        for (String groupName : groupTargets(iamService, resource)) {
-            try {
-                iamService.detachGroupPolicy(groupName, policyArn);
-            } catch (AwsException e) {
-                if (!"NoSuchEntity".equals(e.getErrorCode())) {
-                    throw e;
-                }
-            }
-        }
+        detachTargets(policyArn, roleTargets(iamService, resource), iamService::detachRolePolicy);
+        detachTargets(policyArn, userTargets(iamService, resource), iamService::detachUserPolicy);
+        detachTargets(policyArn, groupTargets(iamService, resource), iamService::detachGroupPolicy);
         deletePolicyTolerating(iamService, policyArn);
+    }
+
+    private static <T> List<String> recordedTargets(String targets, String ids, List<T> attached,
+                                                     Function<T, String> idGetter,
+                                                     Function<T, String> nameGetter) {
+        List<String> targetNames = splitTargets(targets);
+        if (targetNames.isEmpty()) {
+            return List.of();
+        }
+        if (ids == null) {
+            return targetNames;
+        }
+        Map<String, String> currentNames = attached.stream().collect(Collectors.toMap(
+                idGetter, nameGetter, (first, ignored) -> first));
+        List<String> targetIds = splitTargets(ids);
+        List<String> resolved = new ArrayList<>();
+        for (int i = 0; i < targetNames.size(); i++) {
+            String id = i < targetIds.size() ? targetIds.get(i) : null;
+            if (id == null || id.isBlank()) {
+                resolved.add(targetNames.get(i));
+            } else if (currentNames.containsKey(id)) {
+                resolved.add(currentNames.get(id));
+            }
+        }
+        return resolved;
+    }
+
+    private static List<String> splitTargets(String targets) {
+        return targets == null ? List.of() : targets.lines().filter(target -> !target.isBlank()).toList();
+    }
+
+    private static void detachTargets(String policyArn, List<String> names,
+                                      BiConsumer<String, String> detach) {
+        for (String name : names) {
+            try {
+                detach.accept(name, policyArn);
+            } catch (AwsException e) {
+                if (!"NoSuchEntity".equals(e.getErrorCode())) {
+                    throw e;
+                }
+            }
+        }
     }
 
     /** Deletes the policy, tolerating one already gone. */

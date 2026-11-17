@@ -342,6 +342,32 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     }
 
     @Test
+    void updateDetachesRenamedUsersAndGroupsByIdentity() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-mp-renamed-update-" + suffix;
+        String policyName = "mp-renamed-update-" + suffix;
+        String oldUser = "mp-user-before-" + suffix;
+        String newUser = "mp-user-after-" + suffix;
+        String oldGroup = "mp-group-before-" + suffix;
+        String newGroup = "mp-group-after-" + suffix;
+        String arn = policyArn(policyName);
+
+        iam("CreateUser", "UserName", oldUser);
+        iam("CreateGroup", "GroupName", oldGroup);
+        createStack(stackName, literalPrincipalManagedPolicyTemplate(
+                policyName, "s3:GetObject", oldUser, oldGroup));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        iam("UpdateUser", "UserName", oldUser, "NewUserName", newUser);
+        iam("UpdateGroup", "GroupName", oldGroup, "NewGroupName", newGroup);
+        updateStack(stackName, literalRoleManagedPolicyTemplate(policyName, "s3:PutObject"));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        assertFalse(iam("ListAttachedUserPolicies", "UserName", newUser).contains(arn));
+        assertFalse(iam("ListAttachedGroupPolicies", "GroupName", newGroup).contains(arn));
+    }
+
+    @Test
     void failedGroupAttachOnUpdateRestoresPriorUserAndGroupAttachments()
             throws ReflectiveOperationException {
         String suffix = Long.toString(System.nanoTime(), 36);
