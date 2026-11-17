@@ -1208,6 +1208,33 @@ class IamRestRouteEnforcementIntegrationTest {
         request(user, "ram", "DELETE", "/deleteresourceshare?resourceShareArn=" + encoded(share), null).statusCode(200);
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags RAM holds on the resource share a request names, so an allow
+     * on one team's tag lets the caller update that team's share and not another's.
+     */
+    @Test
+    void aRamResourceTagConditionReadsTheTagsOfTheResourceShare() {
+        String tagged = taggedShare("data");
+        String other = taggedShare("web");
+        String user = user("route-ram-tags");
+
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":\"ram:UpdateResourceShare\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        request(user, "ram", "POST", "/updateresourceshare", "{\"resourceShareArn\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refused(request(user, "ram", "POST", "/updateresourceshare", "{\"resourceShareArn\":\"" + other + "\"}"),
+                "ram:UpdateResourceShare");
+    }
+
+    /** A resource share an administrator makes and tags with the team, deleted after the test; its ARN. */
+    private String taggedShare(String team) {
+        String share = madeShare(adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}")
+                .post("/createresourceshare").then());
+        adminOf("ram").body("{\"resourceShareArn\":\"" + share + "\",\"tags\":[{\"key\":\"team\",\"value\":\""
+                + team + "\"}]}").post("/tagresource").then().statusCode(200);
+        return share;
+    }
+
     @Test
     void ramCreateIsCheckedOnTheShareItMakesAndThePermissionsItNames() {
         String user = user("route-ram-create");

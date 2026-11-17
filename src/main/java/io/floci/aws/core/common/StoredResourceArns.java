@@ -25,7 +25,8 @@ import java.util.Optional;
  * the key an alias names; EMR, for the clusters of its instance groups and a tag call's resource and the tags of a
  * cluster; IAM Identity Center, for the accounts its permission sets are provisioned to and the tags of an instance,
  * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view; OAM and RAM,
- * for the sinks, invitations and shares of other accounts they act on, and OAM for the tags of a sink or a link;
+ * for the sinks, invitations and shares of other accounts they act on, OAM for the tags of a sink or a link, and
+ * RAM for the tags of a resource share;
  * Secrets Manager, for the secret a name or an ARN names, random suffix included, and its tags; EventBridge
  * Scheduler, for its default schedule group and its groups' tags;
  * CloudFormation, for the stack or the stack set a name names, whose id it minted, and the tags of a stack, a stack set
