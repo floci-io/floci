@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import io.floci.aws.services.lambda.launcher.InvocationLogTail;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import javax.net.ssl.KeyManager;
@@ -36,6 +37,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -199,9 +201,23 @@ public class KubernetesApiClient {
      * underlying connection and the kubelet stops the follow.
      */
     public InputStream openPodLogStream(String namespace, String podName, String containerName) {
+        return openPodLogs(namespace, podName, containerName, "&follow=true");
+    }
+
+    public String readPodLogTail(String namespace, String podName, Instant since) {
+        String options = "&follow=false&tailLines=4096&sinceTime="
+                + URLEncoder.encode(since.toString(), StandardCharsets.UTF_8);
+        try (InputStream logs = openPodLogs(namespace, podName, "runtime", options)) {
+            return InvocationLogTail.read(logs);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read invocation logs for pod " + podName, e);
+        }
+    }
+
+    private InputStream openPodLogs(String namespace, String podName, String containerName, String options) {
         ensureInitialized();
         String path = podPath(namespace, podName) + "/log?container="
-                + URLEncoder.encode(containerName, StandardCharsets.UTF_8) + "&follow=true";
+                + URLEncoder.encode(containerName, StandardCharsets.UTF_8) + options;
         try {
             HttpResponse<InputStream> response = http.send(requestBuilder(path).GET().build(), HttpResponse.BodyHandlers.ofInputStream());
             if (response.statusCode() != 200) {

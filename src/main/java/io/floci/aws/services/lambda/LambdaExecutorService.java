@@ -25,6 +25,7 @@ import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -201,6 +202,12 @@ public class LambdaExecutorService implements Resettable {
                 null, null);
     }
 
+    InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
+                        String invokedQualifier, String clientContext, boolean logTail) {
+        return invoke(fn, payload, type, chainDepth, invokedQualifier, clientContext, UUID.randomUUID().toString(),
+                null, null, logTail);
+    }
+
     /**
      * A synchronous invocation whose response, if the runtime streams it, goes to {@code listener}
      * as it arrives rather than into the returned result.
@@ -214,6 +221,12 @@ public class LambdaExecutorService implements Resettable {
     private InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
                                 String invokedQualifier, String clientContext, String requestId,
                                 ResponseStreamListener listener, String traceId) {
+        return invoke(fn, payload, type, chainDepth, invokedQualifier, clientContext, requestId, listener, traceId, false);
+    }
+
+    private InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
+                                String invokedQualifier, String clientContext, String requestId,
+                                ResponseStreamListener listener, String traceId, boolean logTail) {
         if (type == InvocationType.DryRun) {
             return new InvokeResult(204, null, new byte[0], null, requestId);
         }
@@ -265,7 +278,7 @@ public class LambdaExecutorService implements Resettable {
         }
 
         try {
-            return executeSync(fn, payload, requestId, clientContext, invokedQualifier, listener, traceId);
+            return executeSync(fn, payload, requestId, clientContext, invokedQualifier, listener, traceId, logTail);
         } finally {
             permit.close();
         }
@@ -321,7 +334,7 @@ public class LambdaExecutorService implements Resettable {
         }
         InvokeResult result;
         try (permit) {
-            result = executeSync(event.fn(), event.payload(), event.requestId(), null, event.invokedQualifier(), null, null);
+            result = executeSync(event.fn(), event.payload(), event.requestId(), null, event.invokedQualifier(), null, null, false);
         } catch (RuntimeException e) {
             LOG.warnv("Error in async Lambda execution for {0}: {1}", event.fn().getFunctionName(), e.getMessage());
             // Stops retrying, as upstream did: routes the previous attempt's result, or UnknownError when
@@ -399,7 +412,7 @@ public class LambdaExecutorService implements Resettable {
 
     private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId,
                                      String clientContext, String invokedQualifier,
-                                     ResponseStreamListener listener, String traceId) {
+                                     ResponseStreamListener listener, String traceId, boolean logTail) {
         ContainerHandle handle;
         try {
             handle = warmPool.acquireProvisioned(fn, invokedQualifier);
@@ -423,6 +436,7 @@ public class LambdaExecutorService implements Resettable {
         boolean initializing = !runtimeApiServer.hasRuntimePolled();
         long dispatchWaitMs = dispatchWaitMs(fn.getTimeout(), initializing,
                 runtimeApiServer.getContainerStartedAtMs(), System.currentTimeMillis());
+        Instant logStart = handle.beginInvocation();
         try {
             runtimeApiServer.enqueue(invocation);
 
@@ -431,6 +445,7 @@ public class LambdaExecutorService implements Resettable {
                     .get(dispatchWaitMs, TimeUnit.MILLISECONDS);
             InvokeResult result = invocation.getResultFuture().get();
 
+            includeLogTail(result, handle, logStart, logTail);
             warmPool.release(handle);
             return result;
 
@@ -447,15 +462,28 @@ public class LambdaExecutorService implements Resettable {
                 } else {
                     LOG.warnv("Function {0} timed out after {1}s", fn.getFunctionName(), fn.getTimeout());
                 }
-                warmPool.destroyHandle(handle);
-                return new InvokeResult(200, "Unhandled",
+                InvokeResult result = new InvokeResult(200, "Unhandled",
                         buildErrorPayload("Task timed out after " + fn.getTimeout() + " seconds", "Function.TimedOut"),
                         null, requestId);
+                includeLogTail(result, handle, logStart, logTail);
+                warmPool.destroyHandle(handle);
+                return result;
             }
             LOG.warnv("Invocation error for function {0}: {1}", fn.getFunctionName(), cause.getMessage());
             warmPool.destroyHandle(handle);
             return new InvokeResult(200, "Unhandled",
                     buildErrorPayload(cause.getMessage(), "InvocationError"), null, requestId);
+        }
+    }
+
+    private void includeLogTail(InvokeResult result, ContainerHandle handle, Instant since, boolean requested) {
+        if (requested) {
+            try {
+                result.setLogResult(handle.readLogTail(since));
+            } catch (Exception e) {
+                LOG.warnv("Could not read invocation logs for function {0}: {1}",
+                        handle.getFunctionName(), e.getMessage());
+            }
         }
     }
 

@@ -1457,6 +1457,13 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
     public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type, String clientContext, String durableExecutionName,
                                String traceHeader) {
+        return invoke(region, functionName, queryQualifier, payload, type, clientContext, durableExecutionName,
+                traceHeader, false);
+    }
+
+    public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
+                               InvocationType type, String clientContext, String durableExecutionName,
+                               String traceHeader, boolean logTail) {
         validateInvokeQualifier(queryQualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
@@ -1475,8 +1482,11 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         if (durable != null) {
             return durable;
         }
-        InvokeResult result = executorService.invoke(fn, payload, type,
-                LambdaInvocationChain.currentDepth(), qualifier, clientContext);
+        InvokeResult result = logTail
+                ? executorService.invoke(fn, payload, type,
+                        LambdaInvocationChain.currentDepth(), qualifier, clientContext, true)
+                : executorService.invoke(fn, payload, type,
+                        LambdaInvocationChain.currentDepth(), qualifier, clientContext);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
