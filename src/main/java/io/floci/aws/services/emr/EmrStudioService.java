@@ -106,8 +106,8 @@ public class EmrStudioService {
         requireMember(violations, "workspaceSecurityGroupId", requested.getWorkspaceSecurityGroupId());
         requireMember(violations, "engineSecurityGroupId", requested.getEngineSecurityGroupId());
         requireMember(violations, "defaultS3Location", requested.getDefaultS3Location());
-        checkEnum(violations, "authMode", requested.getAuthMode(), AUTH_MODES);
-        checkEnum(violations, "idcUserAssignment", requested.getIdcUserAssignment(), USER_ASSIGNMENTS);
+        EmrService.checkEnum(violations, "authMode", requested.getAuthMode(), AUTH_MODES);
+        EmrService.checkEnum(violations, "idcUserAssignment", requested.getIdcUserAssignment(), USER_ASSIGNMENTS);
         checkLength(violations, "name", requested.getName());
         checkLength(violations, "description", requested.getDescription());
         if (!violations.isEmpty()) {
@@ -235,21 +235,14 @@ public class EmrStudioService {
     /** The tags held on the Studio stored under {@code arn}, in the account and Region it names, for IAM. */
     public Map<String, String> storedTags(String arn) {
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        String resource = parsed.resource();
-        if (!resource.startsWith(STUDIO_RESOURCE) || resource.indexOf('/', STUDIO_RESOURCE.length()) >= 0) {
+        String studioId = EmrService.resourceIdOf(parsed, STUDIO_RESOURCE);
+        if (studioId == null) {
             return Map.of();
         }
-        Map<String, String> held = new LinkedHashMap<>();
-        String studioId = resource.substring(STUDIO_RESOURCE.length());
-        AccountAwareStorageBackend.readInAccount(store, parsed.accountId(), studioId)
+        return AccountAwareStorageBackend.readInAccount(store, parsed.accountId(), studioId)
                 .filter(studio -> parsed.region().equals(studio.getRegion()) && arn.equals(studio.getStudioArn()))
-                .map(EmrStudio::getTags)
-                .ifPresent(tags -> tags.forEach((key, value) -> {
-                    if (key != null && value != null) {
-                        held.put(key, value);
-                    }
-                }));
-        return held;
+                .map(studio -> EmrService.heldTags(studio.getTags()))
+                .orElse(Map.of());
     }
 
     /** Removes a Studio "from the Studio metadata store", its session mappings with it. */
@@ -331,7 +324,7 @@ public class EmrStudioService {
     public synchronized PaginatedResult<StudioMapping> listSessionMappings(String studioId, String identityType,
                                                                            String marker) {
         List<String> violations = new ArrayList<>();
-        checkEnum(violations, "identityType", identityType, IDENTITY_TYPES);
+        EmrService.checkEnum(violations, "identityType", identityType, IDENTITY_TYPES);
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
@@ -377,7 +370,7 @@ public class EmrStudioService {
         if (policyRequired && sessionPolicyArn == null) {
             violations.add(SmithyValidationErrors.notNull("sessionPolicyArn"));
         }
-        checkEnum(violations, "identityType", identity.type(), IDENTITY_TYPES);
+        EmrService.checkEnum(violations, "identityType", identity.type(), IDENTITY_TYPES);
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
@@ -492,12 +485,6 @@ public class EmrStudioService {
     private static void requireMember(List<String> violations, String member, String value) {
         if (value == null) {
             violations.add(SmithyValidationErrors.notNull(member));
-        }
-    }
-
-    private static void checkEnum(List<String> violations, String member, String value, List<String> allowed) {
-        if (value != null && !allowed.contains(value)) {
-            violations.add(SmithyValidationErrors.notInEnum(value, member, allowed));
         }
     }
 

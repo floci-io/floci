@@ -4,7 +4,7 @@
 **Endpoint:** `http://localhost:4566/`
 **Target prefix:** `X-Amz-Target: ElasticMapReduce.*`
 
-Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, Spark Connect sessions, EMR Studios and their session mappings, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
+Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, Spark Connect sessions, EMR Studios and their session mappings, notebook executions, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
 
 ## Supported Actions
 
@@ -39,6 +39,10 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `ListStudioSessionMappings` | Lists the session mappings of a Studio, or of every Studio |
 | `UpdateStudioSessionMapping` | Changes a mapped user's or group's session policy |
 | `DeleteStudioSessionMapping` | Removes a user or group from a Studio |
+| `StartNotebookExecution` | Starts a notebook execution on a cluster; see [Notebook executions](#notebook-executions) |
+| `DescribeNotebookExecution` | Returns a notebook execution's status, times and configuration |
+| `StopNotebookExecution` | Stops a notebook execution that has not ended |
+| `ListNotebookExecutions` | Lists notebook executions, newest first, by editor, status, time and cluster |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
 | `AddInstanceFleet` | Adds an instance fleet to a cluster |
@@ -265,6 +269,34 @@ nothing answers.
   wording. Getting, updating and removing a mapping finds it by the id or the name it was made with, so one whose
   user or group has since been deleted can still be removed. The `SessionPolicyArn` is kept as given. `ListStudioSessionMappings` lists a Studio's mappings, or every
   Studio's when it names none, filtered by `IdentityType`, in the order they were made, 50 to a page.
+
+## Notebook executions
+
+Floci keeps a notebook execution and its lifecycle, but runs no notebook, in either runner mode, and writes no output
+notebook.
+
+* **StartNotebookExecution** refuses a request without `ExecutionEngine.Id` or `ServiceRole`, or with an
+  `ExecutionEngine.Type` or `OutputNotebookFormat` the model does not name, with `ValidationException`, and a member of
+  the wrong JSON type with `SerializationException`. The cluster must be `RUNNING` or `WAITING` and meet the EMR
+  Notebooks cluster requirements: "Only clusters created using Amazon EMR release version 5.18.0 and later are
+  supported", "The cluster must be launched with Hadoop, Spark, and Livy" and, "For Amazon EMR release versions
+  5.32.0 and later, or 6.2.0 and later", Jupyter Enterprise Gateway too (the AWS runtime for Apache Spark's releases
+  name no Hadoop among their applications). An account runs at most 100 executions that have not ended in a Region,
+  as "A maximum of 100 concurrent executions are supported per AWS Region per account". A blank `ServiceRole` is
+  refused too. Each of these refusals is
+  `InvalidRequestException` in Floci's own wording. The editor, relative path, S3 locations and parameters are kept as
+  given. The execution's id is `ex-` and 29 letters and digits, and its `ExecutionEngine.Type` is `EMR` unless given.
+  IAM's `aws:ResourceTag` conditions read its tags.
+* **States**: an execution is `START_PENDING` as it starts, `RUNNING` from then on, and `FINISHED` once the cluster's
+  `step-duration-seconds` has passed (at once by default), with AWS's "Execution is finished for cluster ...". It is
+  `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An execution is terminated if it runs for
+  more than 30 days", in Floci's own wording.
+* **StopNotebookExecution** stops one that has not ended at once, `STOPPED` with AWS's "Execution is stopped for
+  cluster ...". One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **ListNotebookExecutions** lists the Region's executions that started from `From` (by default 30 days ago) to
+  `To` (by default now), filtered by `EditorId`, `Status` and `ExecutionEngineId`, newest first, at most 50 to a page
+  ("Returns a maximum of 50 notebook executions") after a `Marker`, which resumes only the listing it came from: the
+  same account, Region and filters.
 
 ## Running steps
 
