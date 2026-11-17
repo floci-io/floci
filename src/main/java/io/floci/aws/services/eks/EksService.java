@@ -815,6 +815,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         cluster.setTags(request.getTags() != null ? ReservedTags.stripReservedTags(request.getTags()) : new HashMap<>());
 
+        // Refused before the cluster security group exists, so a bad ipFamily leaves nothing behind.
+        resolveIpFamily(request.getKubernetesNetworkConfig());
         ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
         SecurityGroup clusterSg = null;
         if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
@@ -1789,8 +1791,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         config.setServiceIpv4Cidr(resolvedCidr);
-        config.setIpFamily(request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4");
+        config.setIpFamily(resolveIpFamily(request));
         return config;
+    }
+
+    private static String resolveIpFamily(KubernetesNetworkConfig request) {
+        String ipFamily = request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4";
+        if (!"ipv4".equals(ipFamily) && !"ipv6".equals(ipFamily)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid ipFamily '" + ipFamily + "'. Valid values: ipv4 | ipv6", 400);
+        }
+        return ipFamily;
     }
 
     static Logging defaultLogging() {
@@ -1855,8 +1866,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     "Only one encryption configuration is allowed", 400);
         }
         EncryptionConfig config = requestedConfigs.getFirst();
-        if (config == null || config.getResources() == null || config.getResources().isEmpty()
-                || !List.of("secrets").equals(config.getResources())) {
+        // AWS: Resources is optional, "this field no longer affects which resources are encrypted", and
+        // "secrets" is the only supported value.
+        boolean resourcesOmitted = config != null && (config.getResources() == null || config.getResources().isEmpty());
+        if (config == null || !(resourcesOmitted || List.of("secrets").equals(config.getResources()))) {
             throw new AwsException("InvalidParameterException",
                     "Invalid k8s resource and provider for encryption", 400);
         }
