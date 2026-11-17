@@ -296,12 +296,10 @@ AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
 AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
-AWS::EKS::Cluster	EncryptionConfig	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
 AWS::EKS::Cluster	KubeApiServerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeControllerManagerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
-AWS::EKS::Cluster	KubernetesNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	Logging	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored

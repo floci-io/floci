@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -110,6 +111,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         // Unstripped: createCluster reads the reserved cluster-args tag, then drops it.
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         request.setTags(templateTags);
+        request.setEncryptionConfig(createSetting(props, "EncryptionConfig", true, ctx, new TypeReference<>() { }));
+        request.setKubernetesNetworkConfig(
+                createSetting(props, "KubernetesNetworkConfig", false, ctx, new TypeReference<>() { }));
         Cluster created = eksService.createCluster(request);
         // The cluster this resource named before is gone or replaced; publish writes only what the
         // new one has, so its endpoint and certificate must not outlive it.
@@ -124,6 +128,32 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
             // The cluster the prior physical id named is deleted once the update commits, and the
             // new one is removed if the update rolls back.
             ReplacementCleanup.record(r, ctx, attributesBefore, replaces);
+        }
+    }
+
+    /**
+     * A create-only property in its API request shape, or null when the template leaves it out. A value
+     * of the wrong shape fails the resource. The request model has no ElasticLoadBalancing or
+     * ServiceIpv6Cidr member, so those members of KubernetesNetworkConfig are not read.
+     */
+    private static <T> T createSetting(JsonNode props, String name, boolean list, ProvisionContext ctx,
+                                       TypeReference<T> type) {
+        JsonNode resolved = props == null || !props.has(name) ? null
+                : ctx.engine().resolveNodeOmittingNoValue(props.get(name));
+        if (resolved == null || resolved.isMissingNode() || resolved.isNull()
+                || (resolved.isTextual() && resolved.asText().isBlank())) {
+            return null;
+        }
+        if (list ? !resolved.isArray() : !resolved.isObject()) {
+            throw new AwsException("ValidationError",
+                    "AWS::EKS::Cluster " + name + " must be " + (list ? "a list" : "an object"), 400);
+        }
+        try {
+            return MAPPER.convertValue(CfnApiShapeConverter.convert(resolved, CfnApiShapeConverter.OMIT_NULL_PROPERTIES),
+                    type);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationError", "AWS::EKS::Cluster " + name + " is not valid: "
+                    + e.getMessage(), 400);
         }
     }
 
