@@ -68,6 +68,13 @@ class PaymentCryptographyIntegrationTest {
 
     private static final String CREATE_KEY = CREATE_KEY_BODY.formatted("");
 
+    /** The member that makes a key disabled, as the request names it. */
+    private static final String DISABLED = """
+            ,"Enabled":false""";
+
+    /** A key that is made disabled when it is created. */
+    private static final String CREATE_DISABLED_KEY = CREATE_KEY_BODY.formatted(DISABLED);
+
     private static final String CREATE_WRAPPING_KEY = """
             {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
              "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
@@ -906,10 +913,19 @@ class PaymentCryptographyIntegrationTest {
                     .body("Key.Enabled", equalTo(false))
                     .body("Key.UsageStopTimestamp", notNullValue());
 
-        call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+        assertKeyIsStarted(call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+    }
+
+    @Test
+    void aKeyCreatedDisabledIsStarted() {
+        // A key may be made disabled, and it is enabled again with the same operation that
+        // starts a key that was stopped.
+        String arn = call("CreateKey", CREATE_DISABLED_KEY)
                 .then().statusCode(200)
-                    .body("Key.Enabled", equalTo(true))
-                    .body("Key.UsageStartTimestamp", notNullValue());
+                    .body("Key.Enabled", equalTo(false))
+                    .extract().path("Key.KeyArn");
+
+        assertKeyIsStarted(call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}"));
     }
 
     @Test
@@ -929,6 +945,13 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200)
                     .body("Key.Enabled", equalTo(false))
                     .body("Key.UsageStopTimestamp", notNullValue());
+    }
+
+    /** A key that is started is enabled again, and it says when its use began. */
+    private static void assertKeyIsStarted(Response answer) {
+        answer.then().statusCode(200)
+                .body("Key.Enabled", equalTo(true))
+                .body("Key.UsageStartTimestamp", notNullValue());
     }
 
     @Test
