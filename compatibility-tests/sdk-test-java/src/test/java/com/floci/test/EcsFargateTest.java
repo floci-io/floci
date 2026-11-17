@@ -69,32 +69,16 @@ class EcsFargateTest {
         String suffix = TestFixtures.uniqueName("fargate");
         clusterName = "sdk-fargate-cluster-" + suffix;
         family = "sdk-fargate-task-" + suffix;
-        String vpcId = ec2.createVpc(request -> request.cidrBlock("10.99.0.0/16")).vpc().vpcId();
-        CLEANUP.addFirst(() -> ec2.deleteVpc(request -> request.vpcId(vpcId)));
-        subnetId = ec2.createSubnet(request -> request.vpcId(vpcId).cidrBlock("10.99.0.0/24"))
-                .subnet().subnetId();
-        CLEANUP.addFirst(() -> ec2.deleteSubnet(request -> request.subnetId(subnetId)));
+        Ec2TestNetwork network = Ec2TestNetwork.create(ec2);
+        CLEANUP.addFirst(network::close);
+        subnetId = network.subnetId();
         ecs.createCluster(CreateClusterRequest.builder().clusterName(clusterName).build());
         CLEANUP.addFirst(() -> ecs.deleteCluster(request -> request.cluster(clusterName)));
     }
 
     @AfterAll
     static void cleanup() {
-        RuntimeException failure = null;
-        while (!CLEANUP.isEmpty()) {
-            try {
-                CLEANUP.removeFirst().run();
-            } catch (RuntimeException error) {
-                if (failure == null) {
-                    failure = error;
-                } else {
-                    failure.addSuppressed(error);
-                }
-            }
-        }
-        if (failure != null) {
-            throw failure;
-        }
+        FixtureCleanup.run(CLEANUP, null);
     }
 
     private static Task rememberTask(Task task) {
