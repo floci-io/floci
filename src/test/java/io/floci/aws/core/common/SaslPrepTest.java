@@ -49,6 +49,9 @@ class SaslPrepTest {
             "אa",
             // right-to-left, but not first and last
             "א1",
+            // C.8 prohibits U+0341 and U+0340, checked before NFKC replaces them with U+0301 and U+0300
+            "pa\u00E9s\u015B\u0341",
+            "\u00E9\u0340",
             // nothing left after the mapping
             "­",
     })

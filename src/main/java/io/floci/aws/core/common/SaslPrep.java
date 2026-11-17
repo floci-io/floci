@@ -5,9 +5,11 @@ import java.text.Normalizer;
 /**
  * SASLprep (RFC 4013) as PostgreSQL applies it to a SCRAM password ({@code pg_saslprep}): an
  * all-ASCII password is taken as it is; any other is mapped (RFC 3454 table B.1 to nothing, table
- * C.1.2 spaces to U+0020), normalized to NFKC, then checked for prohibited characters and the
- * bidirectional rules. Where PostgreSQL finds the result invalid, it derives the key from the
- * password as given, and so does this.
+ * C.1.2 spaces to U+0020), the mapped code points are checked for prohibited and unassigned
+ * characters and the bidirectional rules, and the result is their NFKC normalization. As in
+ * {@code pg_saslprep}, the checks run before NFKC rather than on its output, so a prohibited
+ * character that NFKC would replace, such as U+0341, still fails them. Where PostgreSQL finds the
+ * password invalid, it derives the key from the password as given, and so does this.
  *
  * <p>The JDK's character data is of a later Unicode version than RFC 3454's 3.2. A code point
  * unassigned in 3.2 but assigned since, such as most emoji, is prohibited by PostgreSQL, so it
@@ -78,8 +80,7 @@ final class SaslPrep {
         if (mapped.isEmpty()) {
             return password;
         }
-        String normalized = Normalizer.normalize(mapped, Normalizer.Form.NFKC);
-        int[] codePoints = normalized.codePoints().toArray();
+        int[] codePoints = mapped.codePoints().toArray();
         boolean rightToLeft = false;
         boolean leftToRight = false;
         for (int codePoint : codePoints) {
@@ -95,7 +96,7 @@ final class SaslPrep {
                 || !isRightToLeft(codePoints[codePoints.length - 1]))) {
             return password;
         }
-        return normalized;
+        return Normalizer.normalize(mapped, Normalizer.Form.NFKC);
     }
 
     private static boolean isRightToLeft(int codePoint) {
