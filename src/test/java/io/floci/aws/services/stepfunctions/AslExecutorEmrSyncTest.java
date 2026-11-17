@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.emr.EmrHandler;
+import io.floci.aws.services.emr.EmrNotebookExecutionService;
 import io.floci.aws.services.emr.EmrService;
 import io.floci.aws.services.emr.EmrStudioService;
 import io.floci.aws.services.emr.model.EmrCluster;
@@ -73,7 +74,8 @@ class AslExecutorEmrSyncTest {
                 .sfnService(instance)
                 .customResourceLiveness(null)
                 .emrTaskInvoker(new EmrTaskInvoker(
-                        new EmrHandler(emrService, mock(EmrStudioService.class), objectMapper), objectMapper))
+                        new EmrHandler(emrService, mock(EmrStudioService.class),
+                                mock(EmrNotebookExecutionService.class), objectMapper), objectMapper))
                 .nanoTime(testNanos::get)
                 .sleeper(testNanos::addAndGet)
                 .build();

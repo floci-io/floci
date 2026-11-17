@@ -54,6 +54,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -271,6 +272,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // as they are needed, and absent in a test that builds this service itself.
     @Inject
     Provider<EmrStudioService> studios;
+
+    // The notebook executions, whose tags this service answers for too; looked up as they are needed.
+    @Inject
+    Provider<EmrNotebookExecutionService> notebookExecutions;
 
     @Inject
     public EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
@@ -1223,9 +1228,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * The tags held on the cluster or Studio stored under {@code arn}, in the account it names, read in place: the
-     * cluster of that id in the ARN's Region, or one recorded with no Region, as the tag handlers find it, or the
-     * Studio of that id in the ARN's Region; empty for an ARN naming nothing stored or naming anything else.
+     * The tags held on the cluster, Studio or notebook execution stored under {@code arn}, in the account it names,
+     * read in place: the cluster of that id in the ARN's Region, or one recorded with no Region, as the tag handlers
+     * find it, or the Studio or execution of that id in the ARN's Region; empty for an ARN naming nothing stored or
+     * naming anything else.
      */
     @Override
     public Map<String, String> storedTags(String arn) {
@@ -1237,21 +1243,37 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         if (resource.startsWith(EmrStudioService.STUDIO_RESOURCE)) {
             return studioService().map(service -> service.storedTags(arn)).orElse(Map.of());
         }
-        if (!resource.startsWith(CLUSTER_RESOURCE) || resource.indexOf('/', CLUSTER_RESOURCE.length()) >= 0
-                || !arn.equals(AwsArnUtils.Arn.of("elasticmapreduce", parsed.region(), parsed.accountId(), resource)
-                        .toString())) {
+        if (resource.startsWith(EmrNotebookExecutionService.EXECUTION_RESOURCE)) {
+            return notebookExecutions != null ? notebookExecutions.get().storedTags(arn) : Map.of();
+        }
+        String clusterId = resourceIdOf(parsed, CLUSTER_RESOURCE);
+        if (clusterId == null || !arn.equals(AwsArnUtils.Arn.of("elasticmapreduce", parsed.region(),
+                parsed.accountId(), resource).toString())) {
             return Map.of();
         }
-        Map<String, String> held = new LinkedHashMap<>();
-        AccountAwareStorageBackend.readInAccount(clusterStore, parsed.accountId(),
-                        resource.substring(CLUSTER_RESOURCE.length()))
+        return AccountAwareStorageBackend.readInAccount(clusterStore, parsed.accountId(), clusterId)
                 .filter(cluster -> cluster.getRegion() == null || cluster.getRegion().equals(parsed.region()))
-                .map(EmrCluster::getTags)
-                .ifPresent(tags -> tags.forEach((key, value) -> {
-                    if (key != null && value != null) {
-                        held.put(key, value);
-                    }
-                }));
+                .map(cluster -> heldTags(cluster.getTags()))
+                .orElse(Map.of());
+    }
+
+    /** The id after {@code prefix} in the resource of an ARN naming one resource of that type; null for another. */
+    static String resourceIdOf(AwsArnUtils.Arn arn, String prefix) {
+        String resource = arn.resource();
+        return resource.startsWith(prefix) && resource.indexOf('/', prefix.length()) < 0
+                ? resource.substring(prefix.length()) : null;
+    }
+
+    /** A resource's tags as IAM's conditions read them: those with both a key and a value. */
+    static Map<String, String> heldTags(Map<String, String> tags) {
+        Map<String, String> held = new LinkedHashMap<>();
+        if (tags != null) {
+            tags.forEach((key, value) -> {
+                if (key != null && value != null) {
+                    held.put(key, value);
+                }
+            });
+        }
         return held;
     }
 
@@ -1536,14 +1558,21 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // Whether a cluster of releaseLabel takes CancelSteps: from 4.8.0 on but 5.0.0; a label not of the emr-x.y.z form
     // is taken as current.
     static boolean cancelsSteps(String releaseLabel) {
+        return releaseAtLeast(releaseLabel, 4, 8, 0) && !"emr-5.0.0".equals(releaseLabel);
+    }
+
+    /**
+     * Whether {@code releaseLabel} is {@code major.minor.patch} or later; a label not of the emr-x.y.z form, such as
+     * the AWS runtime for Apache Spark's, is taken as current.
+     */
+    static boolean releaseAtLeast(String releaseLabel, int major, int minor, int patch) {
         Matcher version = RELEASE_VERSION.matcher(releaseLabel == null ? "" : releaseLabel);
         if (!version.matches()) {
             return true;
         }
-        int major = Integer.parseInt(version.group(1));
-        int minor = Integer.parseInt(version.group(2));
-        int patch = Integer.parseInt(version.group(3));
-        return (major > 4 || major == 4 && minor >= 8) && !(major == 5 && minor == 0 && patch == 0);
+        int[] label = {Integer.parseInt(version.group(1)), Integer.parseInt(version.group(2)),
+                Integer.parseInt(version.group(3))};
+        return Arrays.compare(label, new int[]{major, minor, patch}) >= 0;
     }
 
     // Why a cluster gets no instance group or fleet of the other kind: "The configuration option you choose applies to
@@ -1633,6 +1662,25 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         for (EmrCluster c : clusters) {
             mutation.accept(c);
             clusterStore.put(c.getId(), c);
+        }
+    }
+
+    /**
+     * When the cluster began to shut down, if it has: as it began terminating, or else as it ended, or else
+     * {@code now}; null while it runs. A session or notebook execution on it ends then.
+     */
+    static Instant shutDownAt(EmrCluster cluster, Instant now) {
+        if (!isShutDown(cluster)) {
+            return null;
+        }
+        return cluster.getTerminatingDateTime() != null ? cluster.getTerminatingDateTime()
+                : cluster.getEndDateTime() != null ? cluster.getEndDateTime() : now;
+    }
+
+    /** Adds the violation of an enum member whose value is not one of {@code allowed}, as AWS's validation words it. */
+    static void checkEnum(List<String> violations, String member, String value, List<String> allowed) {
+        if (value != null && !allowed.contains(value)) {
+            violations.add(SmithyValidationErrors.notInEnum(value, member, allowed));
         }
     }
 

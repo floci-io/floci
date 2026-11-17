@@ -201,8 +201,7 @@ final class EmrSessions {
             return false;
         }
         boolean changed = false;
-        Instant clusterEnd = EmrService.isShutDown(cluster) ? firstOf(cluster.getTerminatingDateTime(),
-                cluster.getEndDateTime(), now) : null;
+        Instant clusterEnd = EmrService.shutDownAt(cluster, now);
         if (SUBMITTED.equals(session.getState())
                 && (clusterEnd == null || session.getCreatedAt().isBefore(clusterEnd))) {
             session.setState(IDLE);
@@ -269,14 +268,5 @@ final class EmrSessions {
         session.setEndedAt(at);
         session.setUpdatedAt(at);
         session.setIdleSince(null);
-    }
-
-    private static Instant firstOf(Instant... instants) {
-        for (Instant instant : instants) {
-            if (instant != null) {
-                return instant;
-            }
-        }
-        return null;
     }
 }

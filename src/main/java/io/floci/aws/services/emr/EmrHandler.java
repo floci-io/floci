@@ -19,6 +19,7 @@ import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
+import io.floci.aws.services.emr.model.EmrNotebookExecution;
 import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emr.model.EmrStudio;
@@ -53,12 +54,15 @@ public class EmrHandler {
 
     private final EmrService service;
     private final EmrStudioService studios;
+    private final EmrNotebookExecutionService notebookExecutions;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public EmrHandler(EmrService service, EmrStudioService studios, ObjectMapper objectMapper) {
+    public EmrHandler(EmrService service, EmrStudioService studios, EmrNotebookExecutionService notebookExecutions,
+                      ObjectMapper objectMapper) {
         this.service = service;
         this.studios = studios;
+        this.notebookExecutions = notebookExecutions;
         this.objectMapper = objectMapper;
     }
 
@@ -94,6 +98,10 @@ public class EmrHandler {
                 case "ListStudioSessionMappings" -> handleListStudioSessionMappings(request);
                 case "UpdateStudioSessionMapping" -> handleUpdateStudioSessionMapping(request);
                 case "DeleteStudioSessionMapping" -> handleDeleteStudioSessionMapping(request);
+                case "StartNotebookExecution" -> handleStartNotebookExecution(request);
+                case "DescribeNotebookExecution" -> handleDescribeNotebookExecution(request);
+                case "StopNotebookExecution" -> handleStopNotebookExecution(request);
+                case "ListNotebookExecutions" -> handleListNotebookExecutions(request);
                 case "AddInstanceGroups" -> handleAddInstanceGroups(request);
                 case "ListInstanceGroups" -> handleListInstanceGroups(request);
                 case "AddInstanceFleet" -> handleAddInstanceFleet(request);
@@ -711,6 +719,133 @@ public class EmrHandler {
             throw malformed(member + " must be a boolean");
         }
         return value.asBoolean();
+    }
+
+    // ──────────────────────────── Notebook executions ────────────────────────────
+
+    private Response handleStartNotebookExecution(JsonNode request) {
+        EmrNotebookExecution execution = new EmrNotebookExecution();
+        execution.setEditorId(string(request, "EditorId"));
+        execution.setRelativePath(string(request, "RelativePath"));
+        execution.setName(string(request, "NotebookExecutionName"));
+        execution.setNotebookParams(string(request, "NotebookParams"));
+        JsonNode engine = request.path("ExecutionEngine");
+        if (!engine.isMissingNode() && !engine.isNull()) {
+            requireStructure(engine, "ExecutionEngine");
+            execution.setEngineId(string(engine, "Id"));
+            execution.setEngineType(string(engine, "Type"));
+            execution.setMasterInstanceSecurityGroupId(string(engine, "MasterInstanceSecurityGroupId"));
+            execution.setExecutionRoleArn(string(engine, "ExecutionRoleArn"));
+        }
+        execution.setServiceRole(string(request, "ServiceRole"));
+        execution.setNotebookInstanceSecurityGroupId(string(request, "NotebookInstanceSecurityGroupId"));
+        execution.setTags(tagList(request.path("Tags"), "Tags"));
+        JsonNode input = request.path("NotebookS3Location");
+        if (!input.isMissingNode() && !input.isNull()) {
+            requireStructure(input, "NotebookS3Location");
+            execution.setNotebookS3Bucket(string(input, "Bucket"));
+            execution.setNotebookS3Key(string(input, "Key"));
+        }
+        JsonNode output = request.path("OutputNotebookS3Location");
+        if (!output.isMissingNode() && !output.isNull()) {
+            requireStructure(output, "OutputNotebookS3Location");
+            execution.setOutputNotebookS3Bucket(string(output, "Bucket"));
+            execution.setOutputNotebookS3Key(string(output, "Key"));
+        }
+        execution.setOutputNotebookFormat(string(request, "OutputNotebookFormat"));
+        execution.setEnvironmentVariables(stringMap(request.path("EnvironmentVariables"), "EnvironmentVariables"));
+        EmrNotebookExecution started = notebookExecutions.start(execution);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("NotebookExecutionId", started.getId());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeNotebookExecution(JsonNode request) {
+        EmrNotebookExecution execution = notebookExecutions.describe(string(request, "NotebookExecutionId"));
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("NotebookExecutionId", execution.getId());
+        putIfSet(node, "EditorId", execution.getEditorId());
+        ObjectNode engine = node.putObject("ExecutionEngine");
+        engine.put("Id", execution.getEngineId());
+        engine.put("Type", execution.getEngineType());
+        putIfSet(engine, "MasterInstanceSecurityGroupId", execution.getMasterInstanceSecurityGroupId());
+        putIfSet(engine, "ExecutionRoleArn", execution.getExecutionRoleArn());
+        putIfSet(node, "NotebookExecutionName", execution.getName());
+        putIfSet(node, "NotebookParams", execution.getNotebookParams());
+        node.put("Status", execution.getStatus());
+        putEpoch(node, "StartTime", execution.getStartTime());
+        putEpoch(node, "EndTime", execution.getEndTime());
+        node.put("Arn", execution.getArn());
+        putIfSet(node, "LastStateChangeReason", execution.getLastStateChangeReason());
+        putIfSet(node, "NotebookInstanceSecurityGroupId", execution.getNotebookInstanceSecurityGroupId());
+        node.set("Tags", tagArray(execution.getTags()));
+        putS3Location(node, "NotebookS3Location", execution.getNotebookS3Bucket(), execution.getNotebookS3Key());
+        putS3Location(node, "OutputNotebookS3Location", execution.getOutputNotebookS3Bucket(),
+                execution.getOutputNotebookS3Key());
+        putIfSet(node, "OutputNotebookFormat", execution.getOutputNotebookFormat());
+        if (execution.getEnvironmentVariables() != null) {
+            ObjectNode variables = node.putObject("EnvironmentVariables");
+            execution.getEnvironmentVariables().forEach(variables::put);
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("NotebookExecution", node);
+        return Response.ok(response).build();
+    }
+
+    private Response handleStopNotebookExecution(JsonNode request) {
+        notebookExecutions.stop(string(request, "NotebookExecutionId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListNotebookExecutions(JsonNode request) {
+        PaginatedResult<EmrNotebookExecution> page = notebookExecutions.list(string(request, "EditorId"),
+                string(request, "Status"),
+                // As ListClusters reads its CreatedAfter and CreatedBefore.
+                AwsJsonTimestamp.epochSeconds(request, "From", "InvalidRequestException"),
+                AwsJsonTimestamp.epochSeconds(request, "To", "InvalidRequestException"),
+                string(request, "ExecutionEngineId"), string(request, "Marker"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("NotebookExecutions");
+        for (EmrNotebookExecution execution : page.items()) {
+            ObjectNode summary = summaries.addObject();
+            summary.put("NotebookExecutionId", execution.getId());
+            putIfSet(summary, "EditorId", execution.getEditorId());
+            putIfSet(summary, "NotebookExecutionName", execution.getName());
+            summary.put("Status", execution.getStatus());
+            putEpoch(summary, "StartTime", execution.getStartTime());
+            putEpoch(summary, "EndTime", execution.getEndTime());
+            putS3Location(summary, "NotebookS3Location", execution.getNotebookS3Bucket(),
+                    execution.getNotebookS3Key());
+            summary.put("ExecutionEngineId", execution.getEngineId());
+        }
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private void putS3Location(ObjectNode node, String field, String bucket, String key) {
+        if (bucket != null || key != null) {
+            ObjectNode location = node.putObject(field);
+            putIfSet(location, "Bucket", bucket);
+            putIfSet(location, "Key", key);
+        }
+    }
+
+    // A map of strings; null when it is not there.
+    private static Map<String, String> stringMap(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        requireStructure(value, member);
+        Map<String, String> values = new LinkedHashMap<>();
+        value.properties().forEach(entry -> {
+            if (!entry.getValue().isTextual()) {
+                throw malformed(member + " must be a map of strings");
+            }
+            values.put(entry.getKey(), entry.getValue().asText());
+        });
+        return values;
     }
 
     // ──────────────────────────── Instance groups / fleets ────────────────────────────
