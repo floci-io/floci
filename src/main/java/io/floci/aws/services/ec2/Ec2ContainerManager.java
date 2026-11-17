@@ -164,6 +164,13 @@ public class Ec2ContainerManager {
     private final ExecutorService executor;
     private final Semaphore metadataSetupSlots = new Semaphore(METADATA_SETUP_CONCURRENCY);
     private final Map<String, CompletableFuture<Void>> lifecycleOperations = new ConcurrentHashMap<>();
+    /**
+     * Writes an instance back to the store. The state changes made here run on executor threads
+     * after the request that started them has returned, so nothing else would persist them: the
+     * stored record would keep the state that request wrote, and a process stopped before the next
+     * write would restore it as {@code pending} or {@code shutting-down} for good.
+     */
+    private volatile Consumer<Instance> persister = instance -> { };
     /** Instances whose service-network lookup failed and is retried on the next address read. */
     private final Set<String> serviceNetworkRetries = ConcurrentHashMap.newKeySet();
     /** The latest service-network lookup started per instance; only that one may publish. */
@@ -583,6 +590,7 @@ public class Ec2ContainerManager {
                     failLaunch(instance, leasedPrivateIp);
                     return;
                 }
+                persist(instance);
 
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
                         instanceId, containerId, String.valueOf(sshHostPort));
@@ -818,6 +826,18 @@ public class Ec2ContainerManager {
         }
     }
 
+    void setPersister(Consumer<Instance> persister) {
+        this.persister = persister;
+    }
+
+    private void persist(Instance instance) {
+        try {
+            persister.accept(instance);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not persist the state of EC2 instance {0}", instance.getInstanceId());
+        }
+    }
+
     private void failLaunch(Instance instance) {
         failLaunch(instance, instance.getPrivateIpAddress());
     }
@@ -844,7 +864,7 @@ public class Ec2ContainerManager {
                     && instance.getDockerContainerId() == null
                     && instance.getSshHostPort() <= 0
                     && (instance.getContainerBridgeIp() == null || instance.getContainerBridgeIp().isBlank());
-            instance.setState(InstanceState.terminated());
+            instance.markTerminated(System.currentTimeMillis());
             containerId = instance.getDockerContainerId();
             sshHostPort = instance.getSshHostPort();
             containerIp = instance.getContainerBridgeIp();
@@ -855,6 +875,7 @@ public class Ec2ContainerManager {
             serviceNetworkRetries.remove(instance.getInstanceId());
             serviceNetworkLookups.remove(instance.getInstanceId());
         }
+        persist(instance);
         if (alreadyCleaned) {
             return;
         }
@@ -911,7 +932,7 @@ public class Ec2ContainerManager {
             if ("running".equals(state)) {
                 return false;
             }
-            instance.setState(InstanceState.terminated());
+            instance.markTerminated(System.currentTimeMillis());
         }
         failLaunch(instance);
         return true;
@@ -995,6 +1016,7 @@ public class Ec2ContainerManager {
      */
     private void markContainerlessRunning(Instance instance) {
         if (markRunning(instance)) {
+            persist(instance);
             LOG.infov("EC2 instance {0} is running without a backing container (no Docker daemon reachable)",
                     instance.getInstanceId());
         }
@@ -1069,7 +1091,9 @@ public class Ec2ContainerManager {
             } catch (Exception e) {
                 LOG.warnv("Error stopping EC2 container {0}: {1}", containerId, e.getMessage());
             }
-            instance.compareAndSetState(stopping, InstanceState.stopped());
+            if (instance.compareAndSetState(stopping, InstanceState.stopped())) {
+                persist(instance);
+            }
         });
     }
 
@@ -1151,13 +1175,17 @@ public class Ec2ContainerManager {
                     setUpMetadataEndpoint = namespace == null;
                 }
             } catch (InterruptedException e) {
-                instance.compareAndSetState(pending, InstanceState.stopped());
+                if (instance.compareAndSetState(pending, InstanceState.stopped())) {
+                    persist(instance);
+                }
                 rollbackProtectedMetadataRegistration(instance, protectedMetadataAddress, retainedMetadataRegistration);
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
                 LOG.warnv("Error starting EC2 container {0}: {1}", containerId, e.getMessage());
-                instance.compareAndSetState(pending, InstanceState.stopped());
+                if (instance.compareAndSetState(pending, InstanceState.stopped())) {
+                    persist(instance);
+                }
                 rollbackProtectedMetadataRegistration(instance, protectedMetadataAddress, retainedMetadataRegistration);
                 return;
             }
@@ -1166,6 +1194,7 @@ public class Ec2ContainerManager {
                 rollbackProtectedMetadataRegistration(instance, protectedMetadataAddress, retainedMetadataRegistration);
                 return;
             }
+            persist(instance);
             if (postStart != null) {
                 try {
                     postStart.run();
@@ -1677,9 +1706,14 @@ public class Ec2ContainerManager {
                 // have Docker refuse it.
                 vpcNetworkManager.releasePrivateIp(instance.getOwnerId(), instance.getRegion(), instance.getSubnetId(),
                         instance.getPrivateIpAddress());
-                instance.setState(InstanceState.terminated());
-                instance.setTerminatedAt(System.currentTimeMillis());
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Error tearing down EC2 instance {0}; marking it terminated anyway",
+                        instance.getInstanceId());
             } finally {
+                // Whatever the teardown managed, the instance must not stay shutting-down: nothing
+                // else would ever finish it, and a leftover container is collected on the next start.
+                instance.markTerminated(System.currentTimeMillis());
+                persist(instance);
                 if (afterTeardown != null && containerGone) {
                     try {
                         afterTeardown.run();
