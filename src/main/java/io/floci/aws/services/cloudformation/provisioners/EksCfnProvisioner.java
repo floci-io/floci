@@ -19,7 +19,6 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -313,7 +312,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         boolean updates = ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), r.getAttributes());
         // CapacityType, NodegroupName, RemoteAccess, NodeRole, ClusterName, InstanceTypes, DiskSize,
         // AmiType and Subnets are create-only in the registry: a change to one replaces the nodegroup.
-        boolean replaces = updates && ctx.changes(NODEGROUP, props).requiresReplacement();
+        PropertyChanges changes = updates ? ctx.changes(NODEGROUP, props) : null;
+        boolean replaces = changes != null && changes.requiresReplacement();
         String clusterName = ctx.resolveOptional(props, "ClusterName");
         String[] prior = updates ? nodegroupNames(ctx.priorPhysicalId(), r.getAttributes()) : null;
         if (updates && prior == null) {
@@ -332,7 +332,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         }
         Nodegroup live = prior != null && !replaces ? liveNodegroup(prior[0], prior[1]) : null;
         if (live != null) {
-            updateNodegroupInPlace(r, props, ctx, live);
+            updateNodegroupInPlace(r, props, ctx, live, changes);
             return;
         }
         Nodegroup request = new Nodegroup();
@@ -398,11 +398,6 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                 "ResourceNotFoundException");
     }
 
-    private static JsonNode resolvedNode(ProvisionContext ctx, JsonNode props, String name) {
-        JsonNode node = props == null ? null : props.get(name);
-        return node == null || node.isNull() ? null : ctx.engine().resolveNode(node);
-    }
-
     /** The nodegroup an update starts from, or null when it or its cluster is gone and the update creates one. */
     private Nodegroup liveNodegroup(String clusterName, String nodegroupName) {
         try {
@@ -420,12 +415,13 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      * EksService has no UpdateNodegroupConfig or UpdateNodegroupVersion, so the one mutable property
      * floci honors is Tags; a change to any other updatable property is accepted with a warning.
      */
-    private void updateNodegroupInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Nodegroup live) {
-        JsonNode priorProps = ctx.priorProperties();
+    private void updateNodegroupInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Nodegroup live,
+                                        PropertyChanges changes) {
         List<String> changed = new ArrayList<>();
         for (String property : UNSUPPORTED_NODEGROUP_UPDATES) {
-            // Resolved as nodes: ScalingConfig, Labels and the other objects have no text form.
-            if (!Objects.equals(resolvedNode(ctx, props, property), resolvedNode(ctx, priorProps, property))) {
+            // The engine's own comparison, which resolves parameters and Refs on both sides.
+            PropertyChanges.Kind kind = changes.kindOf(property);
+            if (kind != null && kind != PropertyChanges.Kind.UNCHANGED) {
                 changed.add(property);
             }
         }
