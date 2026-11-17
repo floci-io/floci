@@ -919,21 +919,6 @@ public class ElastiCacheService implements ResourceProvider {
         }
     }
 
-    /** The region in a restored resource's ARN; one recorded without an ARN counts as the default region's. */
-    private String regionOf(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
-    }
-
-    /**
-     * Whether a resource belongs to the request's Region. Replication groups, cache clusters (including
-     * Memcached ones, which DescribeCacheClusters lists too), users and user groups are stored per account;
-     * like AWS, the Describe* listings only show the requesting Region's.
-     * The getters stay unscoped: credential lookups, restore and validation run outside a request.
-     */
-    boolean inRequestRegion(String arn) {
-        return regionResolver.getRegion().equals(regionOf(arn));
-    }
-
     /**
      * Restarts the container and auth proxy behind a standalone Redis or Valkey cache cluster,
      * the same pair {@link #provisionCacheCluster} creates. The cache comes back empty, as it
@@ -954,7 +939,8 @@ public class ElastiCacheService implements ResourceProvider {
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultImage();
         try {
-            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, regionOf(cluster.getArn()));
+            ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image,
+                    regionResolver.regionOf(cluster.getArn()));
             synchronized (lockFor("cc:" + clusterId)) {
                 if (cacheClusterRestoreTargetLost(accountId, clusterId)) {
                     abandonRestoredCacheClusterContainer(clusterId, handle);
@@ -1083,7 +1069,8 @@ public class ElastiCacheService implements ResourceProvider {
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
         try {
-            ElastiCacheContainerHandle handle = containerManager.tryStart(groupId, image, regionOf(group.getArn()));
+            ElastiCacheContainerHandle handle = containerManager.tryStart(groupId, image,
+                    regionResolver.regionOf(group.getArn()));
             synchronized (lockFor("rg:" + groupId)) {
                 if (restoreTargetLost(accountId, groupId)) {
                     abandonRestoredContainer(groupId, handle);
@@ -1221,7 +1208,8 @@ public class ElastiCacheService implements ResourceProvider {
                 inFlightMemberId = node.getMemberClusterId();
                 ElastiCacheContainerHandle handle = containerManager.start(
                         node.getMemberClusterId(), image,
-                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()), regionOf(group.getArn()));
+                        clusterNodeFlags(endpointHost, announceIp, node.getProxyPort()),
+                        regionResolver.regionOf(group.getArn()));
                 inFlightMemberId = null;
                 handles.add(handle);
                 node.setContainerId(handle.getContainerId());
@@ -1333,12 +1321,12 @@ public class ElastiCacheService implements ResourceProvider {
 
     public Collection<ReplicationGroup> listReplicationGroups(String filterGroupId) {
         if (filterGroupId != null && !filterGroupId.isBlank()) {
-            return groups.get(filterGroupId).filter(g -> inRequestRegion(g.getArn()))
+            return groups.get(filterGroupId).filter(g -> regionResolver.inRequestRegion(g.getArn()))
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("ReplicationGroupNotFoundFault",
                             "Replication group " + filterGroupId + " not found.", 404));
         }
-        return groups.scan(k -> true).stream().filter(g -> inRequestRegion(g.getArn())).toList();
+        return groups.scan(k -> true).stream().filter(g -> regionResolver.inRequestRegion(g.getArn())).toList();
     }
 
     public void deleteReplicationGroup(String groupId) {
@@ -1454,7 +1442,7 @@ public class ElastiCacheService implements ResourceProvider {
         snapshot.setEngineVersion(group.getEngineVersion());
         snapshot.setCacheNodeType(group.getCacheNodeType());
         snapshot.setNumCacheClusters(group.getNumCacheClusters());
-        snapshot.setArn(regionResolver.buildArn("elasticache", regionOf(group.getArn()),
+        snapshot.setArn(regionResolver.buildArn("elasticache", regionResolver.regionOf(group.getArn()),
                 "snapshot:" + snapshotName));
         snapshot.setCreatedAt(Instant.now());
         snapshot.setSizeBytes(archive.length() * 3L / 4L);
@@ -2129,7 +2117,7 @@ public class ElastiCacheService implements ResourceProvider {
     public List<MemberCacheCluster> listMemberCacheClusters(String filterClusterId) {
         List<MemberCacheCluster> members = new ArrayList<>();
         for (ReplicationGroup group : groups.scan(k -> true)) {
-            if (!inRequestRegion(group.getArn())) {
+            if (!regionResolver.inRequestRegion(group.getArn())) {
                 continue;
             }
             for (MemberCacheCluster member : memberCacheClusters(group)) {
@@ -2731,13 +2719,18 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * {@code user} as the request's Region lists it, or empty when it is another Region's. AWS has the built-in
+     * Replication groups, cache clusters (including Memcached ones, which DescribeCacheClusters lists too), users and
+     * user groups are stored per account; like AWS, the Describe* listings only show the requesting Region's
+     * ({@link RegionResolver#inRequestRegion}). The getters stay unscoped: credential lookups, restore and validation
+     * run outside a request.
+     *
+     * <p>{@code user} as the request's Region lists it, or empty when it is another Region's. AWS has the built-in
      * default user in every Region; Floci seeds one per account, so it is listed in every Region, with that
      * Region's ARN.
      */
     private Optional<ElastiCacheUser> inRequestRegion(ElastiCacheUser user) {
         if (!DEFAULT_USER_ID.equals(user.getUserId())) {
-            return inRequestRegion(user.getArn()) ? Optional.of(user) : Optional.empty();
+            return regionResolver.inRequestRegion(user.getArn()) ? Optional.of(user) : Optional.empty();
         }
         String arn = regionResolver.buildArn("elasticache", regionResolver.getRegion(), "user:" + DEFAULT_USER_ID);
         if (arn.equals(user.getArn())) {
@@ -2911,12 +2904,12 @@ public class ElastiCacheService implements ResourceProvider {
     public Collection<ElastiCacheUserGroup> listUserGroups(String filterUserGroupId) {
         if (filterUserGroupId != null && !filterUserGroupId.isBlank()) {
             ElastiCacheUserGroup userGroup = getUserGroup(filterUserGroupId);
-            if (!inRequestRegion(userGroup.getArn())) {
+            if (!regionResolver.inRequestRegion(userGroup.getArn())) {
                 throw userGroupNotFound(filterUserGroupId);
             }
             return List.of(userGroup);
         }
-        return userGroups.scan(k -> true).stream().filter(g -> inRequestRegion(g.getArn())).toList();
+        return userGroups.scan(k -> true).stream().filter(g -> regionResolver.inRequestRegion(g.getArn())).toList();
     }
 
     public ElastiCacheUserGroup modifyUserGroup(String userGroupId, List<String> userIdsToAdd,
@@ -3026,7 +3019,7 @@ public class ElastiCacheService implements ResourceProvider {
     /** The request Region's user groups the user is a member of, as DescribeUserGroups lists them there. */
     public List<String> userGroupIdsContaining(String userId) {
         return userGroups.scan(k -> true).stream()
-                .filter(g -> inRequestRegion(g.getArn()))
+                .filter(g -> regionResolver.inRequestRegion(g.getArn()))
                 .filter(g -> g.getUserIds().contains(userId))
                 .map(ElastiCacheUserGroup::getUserGroupId)
                 .toList();
@@ -3712,7 +3705,8 @@ public class ElastiCacheService implements ResourceProvider {
     private void recordParameterGroupUse(Map<String, Set<String>> regionsUsing, String accountId, String name,
                                          String arn) {
         if (name != null) {
-            regionsUsing.computeIfAbsent(accountId + "/" + name, ignored -> new LinkedHashSet<>()).add(regionOf(arn));
+            regionsUsing.computeIfAbsent(accountId + "/" + name, ignored -> new LinkedHashSet<>())
+                    .add(regionResolver.regionOf(arn));
         }
     }
 
@@ -3834,10 +3828,10 @@ public class ElastiCacheService implements ResourceProvider {
         return reservedParameterGroups.containsKey(parameterGroupReservationKey(name))
                 || groups.scan(key -> true).stream()
                         .anyMatch(group -> name.equals(group.getCacheParameterGroupName())
-                                && inRequestRegion(group.getArn()))
+                                && regionResolver.inRequestRegion(group.getArn()))
                 || cacheClusters.scan(key -> true).stream()
                         .anyMatch(cluster -> name.equals(cluster.getCacheParameterGroupName())
-                                && inRequestRegion(cluster.getArn()));
+                                && regionResolver.inRequestRegion(cluster.getArn()));
     }
 
     @Override
