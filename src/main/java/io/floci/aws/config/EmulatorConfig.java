@@ -1669,6 +1669,37 @@ public interface EmulatorConfig {
         @WithDefault("300")
         int latestRestorableLagSeconds();
 
+        /**
+         * Open shards in each DynamoDB stream of the native engine. An item's changes always go to the shard its
+         * partition key picks, so they stay in order. AWS gives each table partition a shard of its own.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT
+         */
+        @WithDefault("1")
+        int streamShardCount();
+
+        /**
+         * Seconds a stream shard of the native engine stays open before it closes and a child shard, which names it
+         * as its parent, takes its keys. 0 keeps shards open until the stream is disabled.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS
+         */
+        @WithDefault("0")
+        long streamShardRolloverSeconds();
+
+        /**
+         * Expire a stream shard iterator 15 minutes after it is returned, as AWS does.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamIteratorExpiryEnabled();
+
+        /**
+         * Keep stream records, and shards after they close, for 24 hours as AWS does, and refuse a shard iterator
+         * for a sequence number the shard no longer holds or never held.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamRetentionEnabled();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
