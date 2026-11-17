@@ -597,6 +597,9 @@ public class S3Service implements Resettable, ResourceProvider {
         Optional<Bucket> existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
             Bucket bucket = existing.get();
+            if (!internal && bucket.isServiceOwned()) {
+                throw new AwsException("BucketAlreadyExists", "The requested bucket name is not available.", 409);
+            }
             if (!internal && isDefaultS3Region(bucket.getRegion()) && isDefaultS3Region(region)) {
                 LOG.infov("Bucket already exists in default region, treating CreateBucket as idempotent: {0}", bucketName);
                 return bucket;

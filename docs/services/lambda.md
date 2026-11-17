@@ -107,6 +107,11 @@ retaining the shared regional bucket for other functions. Customer buckets with 
 names remain visible. Existing persisted buckets without service-ownership metadata are
 not migrated or reclassified by name.
 
+Creating a customer bucket with the exact name of an existing service-owned deployment
+bucket returns `BucketAlreadyExists` (HTTP 409), including in `us-east-1`. Ordinary
+customer buckets keep S3's default-region creation behavior, and Lambda can reuse its
+shared deployment bucket for subsequent functions.
+
 ### Function policies under IAM enforcement
 
 With [IAM enforcement](iam.md#resource-based-policies) on, the statements `AddPermission` adds take

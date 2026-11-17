@@ -220,6 +220,22 @@ class S3ServiceTest {
         assertFalse(mapper.readValue("{\"name\":\"legacy-customer\"}", Bucket.class).isServiceOwned());
     }
 
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"us-east-1", "eu-west-1"})
+    void customerCreateCannotClaimServiceOwnedBucket(String region) {
+        String name = "service-owned-bucket";
+        Bucket bucket = s3Service.createServiceOwnedBucket(name, region);
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> s3Service.createBucket(name, region));
+
+        assertEquals("BucketAlreadyExists", conflict.getErrorCode());
+        assertEquals(409, conflict.getHttpStatus());
+        assertTrue(bucket.isServiceOwned());
+        assertTrue(s3Service.listBuckets().isEmpty());
+    }
+
     @Test
     void listBucketsHidesScratchBucketsButKeepsOtherInternalPrefixBuckets() {
         s3Service.createBucket("bucket-a", "us-east-1");
