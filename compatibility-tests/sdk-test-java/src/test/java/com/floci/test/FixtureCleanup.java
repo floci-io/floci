@@ -1,10 +1,12 @@
 package com.floci.test;
 
+import org.opentest4j.TestAbortedException;
+
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 
-/** Runs registered teardown actions while retaining the original test failure. */
+/** Runs teardown actions, preserving test failures and surfacing cleanup failures after an abort. */
 final class FixtureCleanup {
 
     private FixtureCleanup() {
@@ -22,11 +24,11 @@ final class FixtureCleanup {
         if (errors.isEmpty()) {
             return;
         }
-        if (failure != null) {
+        if (failure != null && !(failure instanceof TestAbortedException)) {
             errors.forEach(failure::addSuppressed);
             return;
         }
-        RuntimeException aggregate = new RuntimeException("Test fixture cleanup failed");
+        RuntimeException aggregate = new RuntimeException("Test fixture cleanup failed", failure);
         errors.forEach(aggregate::addSuppressed);
         throw aggregate;
     }
