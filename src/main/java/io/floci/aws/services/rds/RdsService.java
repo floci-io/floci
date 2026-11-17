@@ -756,6 +756,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstanceSettings resolvedSettings = withEffectiveWindows(settings, null)
                 .withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), effectiveRegion));
         if (isBlank(dbClusterIdentifier) && !isAuroraEngine(engineParam)) {
+            resolvedSettings = resolvedSettings.withIopsDefaultType();
             resolvedSettings.validateStorageType();
             resolvedSettings.validateStorageMembers(null);
         } else {

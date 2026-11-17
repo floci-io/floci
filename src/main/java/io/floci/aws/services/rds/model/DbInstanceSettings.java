@@ -250,6 +250,11 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 resolvedCaCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
+    /** Create's documented default: "io1, if the Iops parameter is specified". */
+    public DbInstanceSettings withIopsDefaultType() {
+        return storageType == null && iops != null && iops != 0 ? withStorageType("io1") : this;
+    }
+
     public void validateStorageType() {
         if (storageType != null && !Set.of("gp2", "gp3", "io1", "io2").contains(storageType)) {
             throw new AwsException("StorageTypeNotSupported",
@@ -336,14 +341,15 @@ public record DbInstanceSettings(Boolean storageEncrypted,
 
     /**
      * Refuses Iops or StorageThroughput on a storage type that doesn't carry it, as the Rust reference does
-     * (InvalidParameterCombination). {@code currentType} is the instance's type on Modify, null on Create.
+     * (InvalidParameterCombination). Rust checks on Modify only; Floci checks Create too. {@code currentType} is the instance's type on Modify, null on Create.
      */
     public void validateStorageMembers(String currentType) {
         String resolved = storageType != null ? storageType : currentType;
         if (resolved == null) {
             return;
         }
-        if (iops != null && iopsFamily(resolved) == null) {
+        // Iops=0 is how a modify says "back to standard storage", so it is no Iops at all
+        if (iops != null && iops != 0 && iopsFamily(resolved) == null) {
             throw new AwsException("InvalidParameterCombination",
                     "Iops can't be specified for storage type " + resolved + ".", 400);
         }
