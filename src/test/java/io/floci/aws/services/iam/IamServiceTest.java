@@ -499,9 +499,12 @@ class IamServiceTest {
         // The principal keys ride along from the same lookup: a role session is typed as an
         // assumed role, its aws:userid is the stored role-id:session-name, and it has no
         // aws:username, which the guide lists as not present for a role.
+        // It carries what its credentials say about MFA as well, which for a session minted
+        // without a device is the key present and false.
         assertEquals(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
                         "arn:aws:iam::123456789012:role/team/TestRole",
-                        IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null),
+                        IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null)
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
         // An expired session answers for neither, never for one and not the other.
         assertTrue(service.resolveCallerArns("ASIAEXPIREDSESSION").isEmpty());
@@ -743,7 +746,8 @@ class IamServiceTest {
         // Acting as the user means carrying the user's principal keys, aws:username included:
         // the guide gives one to an IAM user and to no other principal.
         assertEquals(new IamService.CallerArns(alice.getArn(), alice.getArn(),
-                        IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice"),
+                        IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice")
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIASESSIONTOKEN").orElseThrow());
         assertEquals(alice.getUserId(), service.resolveCallerUserId("ASIASESSIONTOKEN", "token").orElseThrow());
     }
@@ -762,7 +766,8 @@ class IamServiceTest {
         // present for the account root.
         assertEquals(new IamService.CallerArns("arn:aws:iam::000000000000:root",
                         "arn:aws:iam::000000000000:root", IamService.CallerArns.TYPE_ACCOUNT,
-                        "000000000000", null),
+                        "000000000000", null)
+                        .withSessionMfa(new IamService.CallerArns.SessionMfa(false, 0)),
                 service.resolveCallerArns("ASIAROOTSESSION").orElseThrow());
     }
 
@@ -870,7 +875,9 @@ class IamServiceTest {
         assertFederatedUserLimits(withPolicy.identityPolicies().getLast());
         assertEquals(ALL_S3, withPolicy.sessionPolicyDocument());
         // The same aws:userid both ways, since one derivation now serves both readers, and no
-        // aws:username: the guide lists it as not present for a federated user.
+        // aws:username: the guide lists it as not present for a federated user. No MFA state
+        // either, the same guide putting federated identities with the long-term keys, so this
+        // session publishes neither MFA key where every other session publishes the first.
         assertEquals(new IamService.CallerArns(federatedArn, federatedArn,
                         IamService.CallerArns.TYPE_FEDERATED_USER, "000000000000:Bob", null),
                 service.resolveCallerArns("ASIAWITHPOLICY").orElseThrow());

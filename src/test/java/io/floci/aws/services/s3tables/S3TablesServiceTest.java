@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3tables.model.S3Table;
@@ -54,6 +55,47 @@ class S3TablesServiceTest {
         Mockito.when(s3Service.listObjectVersions(Mockito.anyString(), Mockito.any(), Mockito.any(), Mockito.anyInt(),
                 Mockito.any(), Mockito.any())).thenReturn(new S3Service.ListVersionsResult(List.of(), List.of(), false, null, null));
         service = new S3TablesService(storageFactory, new RegionResolver(REGION, ACCOUNT_ID), s3Service);
+    }
+
+    /**
+     * The tags IAM gives a resource-tag condition: the table bucket's or a table's, read on the whole ARN in the
+     * account and Region it names, and none for anything else.
+     */
+    @Test
+    void storedTagsReadsTheBucketOrTheTableItsArnNames() {
+        TableBucket bucket = service.createTableBucket(BUCKET, null, null, Map.of("team", "data"), REGION);
+        service.createNamespace(bucket.getArn(), List.of("analytics"), REGION);
+        S3Table table = service.createTable(bucket.getArn(), "analytics", "events", "ICEBERG", null, null, null,
+                Map.of("owner", "alice"), REGION);
+
+        assertEquals(Map.of("team", "data"), service.storedTags(bucket.getArn()));
+        assertEquals(Map.of("owner", "alice"), service.storedTags(table.getArn()));
+        assertEquals(Map.of(), service.storedTags(bucket.getArn() + "/table/other"));
+        assertEquals(Map.of(), service.storedTags(bucket.getArn().replace(":" + ACCOUNT_ID + ":", ":111122223333:")));
+        assertEquals(Map.of(), service.storedTags(bucket.getArn().replace(REGION, "eu-west-1")));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::" + BUCKET));
+    }
+
+    /** A bucket stored before storage was account-aware is read in place for the default account, never migrated. */
+    @Test
+    void storedTagsReadsAPreMultiAccountBucketOfTheDefaultAccountInPlace() {
+        InMemoryStorage<String, TableBucket> raw = new InMemoryStorage<>();
+        StorageFactory legacyFactory = new StorageFactory(null, null) {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return (AccountAwareStorageBackend<V>) new AccountAwareStorageBackend<>(raw, null, ACCOUNT_ID);
+            }
+        };
+        S3TablesService legacy = new S3TablesService(legacyFactory, new RegionResolver(REGION, ACCOUNT_ID), s3Service);
+        String arn = "arn:aws:s3tables:" + REGION + ":" + ACCOUNT_ID + ":bucket/" + BUCKET;
+        raw.put(REGION + "::" + BUCKET, new TableBucket(BUCKET, arn, "2026-01-01T00:00:00Z", ACCOUNT_ID, null, null,
+                Map.of("team", "data")));
+
+        assertEquals(Map.of("team", "data"), legacy.storedTags(arn));
+        assertEquals(Map.of(), legacy.storedTags(arn.replace(":" + ACCOUNT_ID + ":", ":111122223333:")));
+        assertTrue(raw.get(REGION + "::" + BUCKET).isPresent());
     }
 
     @Test

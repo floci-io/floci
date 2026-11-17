@@ -25,12 +25,15 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.ecr.model.ImageDetail;
 import software.amazon.awssdk.services.ecr.model.InvalidParameterException;
 import software.amazon.awssdk.services.ecr.model.ListImagesResponse;
+import software.amazon.awssdk.services.ecr.model.TagStatus;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -56,6 +59,7 @@ class EcrListImagesPaginationIntegrationTest {
     private static final String ACCOUNT = "741650100001";
     private static final Region REGION = Region.EU_CENTRAL_1;
     private static final String DIGEST = "sha256:" + "a".repeat(64);
+    private static final String UNTAGGED_DIGEST = "sha256:" + "b".repeat(64);
 
     @InjectMock
     EcrRegistryManager registryManager;
@@ -63,6 +67,8 @@ class EcrListImagesPaginationIntegrationTest {
     StorageFactory storageFactory;
     @Inject
     ObjectMapper mapper;
+    @Inject
+    EcrService ecrService;
 
     private final Map<String, String> images = new ConcurrentHashMap<>();
     private final List<SeededRepository> repositories = new ArrayList<>();
@@ -203,6 +209,23 @@ class EcrListImagesPaginationIntegrationTest {
     }
 
     @Test
+    void sdkListsAnUntaggedImageByDigestAndFiltersByTagStatus() {
+        seed(1);
+        images.put(UNTAGGED_DIGEST, UNTAGGED_DIGEST);
+        ecrService.recordImagePush(ACCOUNT, REGION.id(), repository, DIGEST, Instant.now());
+        ecrService.recordImagePush(ACCOUNT, REGION.id(), repository, UNTAGGED_DIGEST, Instant.now());
+        assertEquals(List.of(DIGEST + "/tag-000", UNTAGGED_DIGEST + "/null"), listed(null));
+        assertEquals(List.of(DIGEST + "/tag-000", UNTAGGED_DIGEST + "/null"), listed(TagStatus.ANY));
+        assertEquals(List.of(DIGEST + "/tag-000"), listed(TagStatus.TAGGED));
+        assertEquals(List.of(UNTAGGED_DIGEST + "/null"), listed(TagStatus.UNTAGGED));
+        List<ImageDetail> details = client.describeImages(request -> request.repositoryName(repository)
+                .filter(filter -> filter.tagStatus(TagStatus.UNTAGGED))).imageDetails();
+        assertEquals(1, details.size());
+        assertEquals(UNTAGGED_DIGEST, details.get(0).imageDigest());
+        assertTrue(details.get(0).imageTags().isEmpty());
+    }
+
+    @Test
     void sdkReturnsAnEmptyPageWithoutAToken() {
         ListImagesResponse response = client.listImages(request -> request.repositoryName(repository));
         assertTrue(response.imageIds().isEmpty());
@@ -236,8 +259,17 @@ class EcrListImagesPaginationIntegrationTest {
         try (exchange) {
             String path = exchange.getRequestURI().getPath();
             if ("GET".equals(exchange.getRequestMethod())) {
+                String reference = path.substring(path.lastIndexOf('/') + 1);
+                if (path.contains("/manifests/") && !images.containsKey(reference)) {
+                    exchange.sendResponseHeaders(404, -1);
+                    return;
+                }
+                if (path.contains("/manifests/")) {
+                    exchange.getResponseHeaders().set("Docker-Content-Digest", images.get(reference));
+                }
                 Map<String, Object> body = path.endsWith("/tags/list")
-                        ? Map.of("tags", images.keySet().stream().sorted(Comparator.reverseOrder()).toList())
+                        ? Map.of("tags", images.keySet().stream().filter(key -> !key.startsWith("sha256:"))
+                                .sorted(Comparator.reverseOrder()).toList())
                         : Map.of("repositories", List.of());
                 byte[] bytes = mapper.writeValueAsBytes(body);
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -252,6 +284,16 @@ class EcrListImagesPaginationIntegrationTest {
                 exchange.sendResponseHeaders(digest != null ? 200 : 404, -1);
             }
         }
+    }
+
+    private List<String> listed(TagStatus status) {
+        return client.listImages(request -> {
+            request.repositoryName(repository);
+            if (status != null) {
+                request.filter(filter -> filter.tagStatus(status));
+            }
+        }).imageIds().stream()
+                .map(image -> image.imageDigest() + "/" + image.imageTag()).sorted().toList();
     }
 
     private static List<String> tags(ListImagesResponse response) {

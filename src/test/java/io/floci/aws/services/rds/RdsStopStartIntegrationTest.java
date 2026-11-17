@@ -1,29 +1,38 @@
 package io.floci.aws.services.rds;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.core.command.ExecStartResultCallback;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbInstance;
+import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.EventRuleQueue;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.rds.RdsClient;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -49,6 +58,11 @@ class RdsStopStartIntegrationTest {
     @Inject
     RdsService rdsService;
 
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
     @BeforeEach
     void checkDocker() {
         try {
@@ -63,6 +77,44 @@ class RdsStopStartIntegrationTest {
                 .contentType(URLENC)
                 .formParam("Action", action)
                 .formParam("Version", "2014-10-31");
+    }
+
+    @Test
+    void realClusterRecoveryEmitsMemberEventsAndKeepsSqlData() throws Exception {
+        String id = "native-events-" + Long.toUnsignedString(System.nanoTime(), 36);
+        String member = id + "-member";
+        String account = "000000000000";
+        String memberArn = "arn:aws:rds:us-east-1:" + account + ":db:" + member;
+        String pattern = "{\"source\":[\"aws.rds\"],\"resources\":[\"" + memberArn + "\"]}";
+        try (RdsClient rds = AwsTestClients.create(RdsClient.builder(), account, Region.US_EAST_1);
+             EventRuleQueue queue = EventRuleQueue.route(account, Region.US_EAST_1.id(), id, pattern)) {
+            rds.createDBCluster(r -> r.dbClusterIdentifier(id).engine("aurora-postgresql").engineVersion("16.3")
+                    .masterUsername("admin").masterUserPassword("password123").databaseName("appdb"));
+            rds.createDBInstance(r -> r.dbInstanceIdentifier(member).dbClusterIdentifier(id)
+                    .engine("aurora-postgresql").dbInstanceClass("db.r6g.large"));
+            try {
+                psql(rdsService.getDbCluster(id).getContainerId(),
+                        "CREATE TABLE marker(v text); INSERT INTO marker VALUES ('native-event-row');");
+                rds.stopDBCluster(r -> r.dbClusterIdentifier(id));
+                assertEquals("stopped", rds.describeDBClusters(r -> r.dbClusterIdentifier(id))
+                        .dbClusters().getFirst().status());
+                rds.startDBCluster(r -> r.dbClusterIdentifier(id));
+                assertTrue(psql(rdsService.getDbCluster(id).getContainerId(), "SELECT v FROM marker;")
+                        .contains("native-event-row"));
+                List<JsonNode> messages = queue.drain();
+                assertEquals(2, messages.size());
+                for (int i = 0; i < messages.size(); i++) {
+                    JsonNode event = messages.get(i);
+                    assertEquals("RDS DB Instance Event", event.path("detail-type").asText());
+                    assertEquals(memberArn, event.path("resources").get(0).asText());
+                    assertEquals(i == 0 ? "RDS-EVENT-0087" : "RDS-EVENT-0088",
+                            event.path("detail").path("EventID").asText());
+                }
+            } finally {
+                rds.deleteDBInstance(r -> r.dbInstanceIdentifier(member).skipFinalSnapshot(true));
+                rds.deleteDBCluster(r -> r.dbClusterIdentifier(id).skipFinalSnapshot(true));
+            }
+        }
     }
 
     @Test

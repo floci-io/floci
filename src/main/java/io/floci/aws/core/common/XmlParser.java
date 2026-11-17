@@ -60,6 +60,18 @@ public final class XmlParser {
      * DTD processing disabled. DOM is required by the JDK XML-DSig API.
      */
     public static Document parseDocument(String xml) throws Exception {
+        return parseDocument(xml.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * As above, parsing the original raw bytes directly rather than a {@link String} already
+     * decoded as UTF-8: letting the parser itself read {@code xml}'s own bytes is what lets it
+     * honor a declared non-UTF-8 {@code encoding} in the XML prolog, or a UTF-16 byte-order mark,
+     * the way the XML spec requires. Pre-decoding as UTF-8 before this point (the {@link
+     * #parseDocument(String)} overload's own contract, left unchanged for its existing callers)
+     * would silently corrupt or fail to parse a document that declares a different encoding.
+     */
+    public static Document parseDocument(byte[] xml) throws Exception {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setNamespaceAware(true);
         factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
@@ -68,8 +80,7 @@ public final class XmlParser {
         factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
         factory.setXIncludeAware(false);
         factory.setExpandEntityReferences(false);
-        return factory.newDocumentBuilder().parse(
-                new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)));
+        return factory.newDocumentBuilder().parse(new ByteArrayInputStream(xml));
     }
 
     /**

@@ -104,6 +104,8 @@ class RequestResourceMembersTest {
                 RequestResourceMembers.table().resourceTagKeys().get("secretsmanager").get("Secret"));
         assertEquals(List.of("aws:ResourceTag/", "ssm:resourceTag/"),
                 RequestResourceMembers.table().resourceTagKeys().get("ssm").get("parameter"));
+        assertEquals(List.of("aws:ResourceTag/", "rds:pg-tag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("rds").get("pg"));
         ObjectNode document = (ObjectNode) MAPPER.readTree("""
                 {"namespaces":{"example":["example"]},"arnFormats":{"example":{
                 "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},
@@ -114,7 +116,9 @@ class RequestResourceMembersTest {
                 parse(document.toString()).resourceTagKeys().get("example").get("thing"));
         for (String invalid : List.of("{\"missing\":[\"vendor:ResourceTag/\"]}",
                 "{\"thing\":\"vendor:ResourceTag/\"}", "{\"thing\":[\"vendor:ResourceTag\"]}",
-                "{\"thing\":[\"vendor:ResourceTag/\",\"vendor:ResourceTag/\"]}")) {
+                "{\"thing\":[\"vendor:ResourceTag/\",\"vendor:ResourceTag/\"]}",
+                "{\"thing\":[\"vendor:thing-tag/\"]}", "{\"thing\":[\"example:other-tag/\"]}",
+                "{\"thing\":[\"example:req-tag/\"]}")) {
             ObjectNode changed = document.deepCopy();
             ((ObjectNode) changed.path("resourceTagKeys")).set("example", MAPPER.readTree(invalid));
             assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
@@ -176,6 +180,8 @@ class RequestResourceMembersTest {
                 .collect(Collectors.toSet()),
                 "only the operations listed to read override hand-built operations");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
+        assertTrue(table.operations().containsKey("rds:CreateDBParameterGroup"));
+        assertTrue(table.operations().containsKey("rds:CreateDBProxy"));
         assertTrue(table.otherNamespaces().stream().noneMatch(table.notCovered()::contains));
         table.operations().forEach((operation, resources) -> {
             Map<String, ArnFormat> formats = table.formats().get(operation.substring(0, operation.indexOf(':')));
@@ -418,6 +424,12 @@ class RequestResourceMembersTest {
                 Map.of(), Map.of(), null, Map.of(), false, null)),
                 parseUnchecked("{\"namespaces\":{\"a\":[]}," + formats + ",\"operations\":{\"a:Op\":{\"types\":[],"
                         + "\"resources\":[]," + makes + "}}}").makes().get("a:Op"));
+        // So does a create acting on other types alone (Glue's CreateConnection, on its connection type).
+        String kinds = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
+                + "\"kind\":\"arn:${Partition}:a:${Region}:${Account}:kind/${KindName}\"}}";
+        assertEquals(List.of("thing"), parseUnchecked("{\"namespaces\":{\"a\":[]}," + kinds
+                + ",\"operations\":{\"a:Op\":{\"types\":[\"kind\"],\"resources\":[]," + makes + "}}}")
+                .makes().get("a:Op").getFirst().types());
         for (String bad : List.of("\"types\":[\"thing\"],\"resources\":[]," + makes, "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"type\":\"thing\",\"fill\":{},\"made\":true}]", "\"types\":[],\"resources\":[],"
                 + "\"makes\":[{\"types\":[\"thing\"],\"arn\":\"ThingArn\"}]")) {
@@ -546,11 +558,11 @@ class RequestResourceMembersTest {
     }
 
     /**
-     * Each resource a create whose action acts on no type makes, from a request naming it, is where its tags go, and
-     * the create itself names none.
+     * Each resource a create whose action acts on no type, or on other types alone, makes, from a request naming it,
+     * is where its tags go, and a create acting on no type names nothing itself.
      */
     @TestFactory
-    Stream<DynamicTest> everyResourceACreateActingOnNoTypeMakesIsWhereItsTagsGo() {
+    Stream<DynamicTest> everyResourceACreateMakesIsWhereItsTagsGo() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         return table.makes().entrySet().stream().map(operation -> DynamicTest.dynamicTest(operation.getKey(), () -> {
             String namespace = operation.getKey().substring(0, operation.getKey().indexOf(':'));
@@ -570,8 +582,10 @@ class RequestResourceMembersTest {
                     "000000000000");
             assertEquals(List.of(expected), RequestResources.created(operation.getKey(), null, json(body.toString()),
                     "aws", "us-east-1", "000000000000", labels), body + " " + labels);
-            assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
-                    "us-east-1", "000000000000", null, labels));
+            if (table.types().getOrDefault(operation.getKey(), List.of()).isEmpty()) {
+                assertEquals(List.of(), RequestResources.of(operation.getKey(), json(body.toString()), "aws",
+                        "us-east-1", "000000000000", null, labels));
+            }
         }));
     }
 
@@ -662,7 +676,7 @@ class RequestResourceMembersTest {
      * {@code ""}).
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
-        if (resource.arn() != null || resource.fill().values().stream()
+        if (resource.arn() != null || Stream.concat(resource.fill().values().stream(), resource.find().stream())
                 .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
                         || !AwsArnUtils.isArn(given.get(member))))) {
             return false;

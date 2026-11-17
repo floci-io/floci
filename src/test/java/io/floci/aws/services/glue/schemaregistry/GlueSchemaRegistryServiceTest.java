@@ -141,7 +141,7 @@ class GlueSchemaRegistryServiceTest {
 
         assertEquals("default-registry", registry.getRegistryName());
         assertEquals("AVAILABLE", registry.getStatus());
-        assertEquals(1, service.listRegistries().size());
+        assertEquals(1, service.listRegistries(REGION).size());
     }
 
     @Test
@@ -163,7 +163,7 @@ class GlueSchemaRegistryServiceTest {
         service.createRegistry("a", null, null, REGION);
         service.createRegistry("b", null, null, REGION);
 
-        List<Registry> registries = service.listRegistries();
+        List<Registry> registries = service.listRegistries(REGION);
 
         assertEquals(2, registries.size());
     }
@@ -174,8 +174,8 @@ class GlueSchemaRegistryServiceTest {
         service.createRegistry("b", null, null, REGION);
         service.createRegistry("c", null, null, REGION);
 
-        GlueSchemaRegistryService.Page<Registry> first = service.listRegistries(2, null);
-        GlueSchemaRegistryService.Page<Registry> second = service.listRegistries(2, first.nextToken());
+        GlueSchemaRegistryService.Page<Registry> first = service.listRegistries(REGION, 2, null);
+        GlueSchemaRegistryService.Page<Registry> second = service.listRegistries(REGION, 2, first.nextToken());
 
         assertEquals(2, first.items().size());
         assertEquals("2", first.nextToken());
@@ -186,7 +186,7 @@ class GlueSchemaRegistryServiceTest {
 
     @Test
     void listRegistriesEmptyByDefault() {
-        assertTrue(service.listRegistries().isEmpty());
+        assertTrue(service.listRegistries(REGION).isEmpty());
     }
 
     @Test
@@ -218,7 +218,7 @@ class GlueSchemaRegistryServiceTest {
         service.createRegistry("r1", null, null, REGION);
         SchemaVersion first = service.createSchema(new RegistryId("r1", null),
                 "users", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).firstVersion();
-        service.putSchemaVersionMetadata(first.getSchemaVersionId(), "team", "platform");
+        service.putSchemaVersionMetadata(first.getSchemaVersionId(), "team", "platform", REGION);
 
         service.deleteRegistry(new RegistryId("r1", null), REGION);
         service.createRegistry("r1", null, null, REGION);
@@ -228,7 +228,7 @@ class GlueSchemaRegistryServiceTest {
                 service.getSchemaVersion(null, first.getSchemaVersionId(), null, false, REGION));
         assertEquals("EntityNotFoundException", versionEx.getErrorCode());
         AwsException metadataEx = assertThrows(AwsException.class, () ->
-                service.querySchemaVersionMetadata(first.getSchemaVersionId(), null));
+                service.querySchemaVersionMetadata(first.getSchemaVersionId(), null, REGION));
         assertEquals("EntityNotFoundException", metadataEx.getErrorCode());
     }
 
@@ -606,7 +606,7 @@ class GlueSchemaRegistryServiceTest {
             public Optional<Schema> get(String key) {
                 Optional<Schema> schema = super.get(key);
                 if (Thread.currentThread() == lookupThread.get()
-                        && key.equals("reg:users") && paused.compareAndSet(false, true)) {
+                        && key.equals(REGION + "::reg:users") && paused.compareAndSet(false, true)) {
                     firstSchemaRead.countDown();
                     awaitRelease(finishLookup);
                 }
@@ -1097,32 +1097,32 @@ class GlueSchemaRegistryServiceTest {
     void putSchemaVersionMetadataStoresKeyValue() {
         String svId = firstVersionId();
 
-        GlueSchemaRegistryService.MetadataPutResult r = service.putSchemaVersionMetadata(svId, "team", "platform");
+        GlueSchemaRegistryService.MetadataPutResult r = service.putSchemaVersionMetadata(svId, "team", "platform", REGION);
 
         assertEquals("team", r.metadataKey());
         assertEquals("platform", r.metadataValue());
-        Map<String, MetadataInfo> map = service.querySchemaVersionMetadata(svId, null);
+        Map<String, MetadataInfo> map = service.querySchemaVersionMetadata(svId, null, REGION);
         assertEquals("platform", map.get("team").getMetadataValue());
     }
 
     @Test
     void putSchemaVersionMetadataDuplicateKeyValueRejected() {
         String svId = firstVersionId();
-        service.putSchemaVersionMetadata(svId, "team", "platform");
+        service.putSchemaVersionMetadata(svId, "team", "platform", REGION);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.putSchemaVersionMetadata(svId, "team", "platform"));
+                service.putSchemaVersionMetadata(svId, "team", "platform", REGION));
         assertEquals("AlreadyExistsException", ex.getErrorCode());
     }
 
     @Test
     void putSchemaVersionMetadataSameKeyNewValueDemotesOld() {
         String svId = firstVersionId();
-        service.putSchemaVersionMetadata(svId, "team", "platform");
+        service.putSchemaVersionMetadata(svId, "team", "platform", REGION);
 
-        service.putSchemaVersionMetadata(svId, "team", "data");
+        service.putSchemaVersionMetadata(svId, "team", "data", REGION);
 
-        Map<String, MetadataInfo> map = service.querySchemaVersionMetadata(svId, null);
+        Map<String, MetadataInfo> map = service.querySchemaVersionMetadata(svId, null, REGION);
         assertEquals("data", map.get("team").getMetadataValue());
         assertEquals(1, map.get("team").getOtherMetadataValueList().size());
         assertEquals("platform", map.get("team").getOtherMetadataValueList().get(0).getMetadataValue());
@@ -1131,19 +1131,19 @@ class GlueSchemaRegistryServiceTest {
     @Test
     void putSchemaVersionMetadataForUnknownVersionThrows() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.putSchemaVersionMetadata("does-not-exist", "team", "platform"));
+                service.putSchemaVersionMetadata("does-not-exist", "team", "platform", REGION));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 
     @Test
     void removeSchemaVersionMetadataCurrentPromotesNext() {
         String svId = firstVersionId();
-        service.putSchemaVersionMetadata(svId, "team", "platform");
-        service.putSchemaVersionMetadata(svId, "team", "data");
+        service.putSchemaVersionMetadata(svId, "team", "platform", REGION);
+        service.putSchemaVersionMetadata(svId, "team", "data", REGION);
 
-        service.removeSchemaVersionMetadata(svId, "team", "data");
+        service.removeSchemaVersionMetadata(svId, "team", "data", REGION);
 
-        Map<String, MetadataInfo> map = service.querySchemaVersionMetadata(svId, null);
+        Map<String, MetadataInfo> map = service.querySchemaVersionMetadata(svId, null, REGION);
         assertEquals("platform", map.get("team").getMetadataValue());
         assertNull(map.get("team").getOtherMetadataValueList());
     }
@@ -1151,29 +1151,29 @@ class GlueSchemaRegistryServiceTest {
     @Test
     void removeSchemaVersionMetadataLastValueDeletesKey() {
         String svId = firstVersionId();
-        service.putSchemaVersionMetadata(svId, "team", "platform");
+        service.putSchemaVersionMetadata(svId, "team", "platform", REGION);
 
-        service.removeSchemaVersionMetadata(svId, "team", "platform");
+        service.removeSchemaVersionMetadata(svId, "team", "platform", REGION);
 
-        assertTrue(service.querySchemaVersionMetadata(svId, null).isEmpty());
+        assertTrue(service.querySchemaVersionMetadata(svId, null, REGION).isEmpty());
     }
 
     @Test
     void removeSchemaVersionMetadataNotFoundThrows() {
         String svId = firstVersionId();
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.removeSchemaVersionMetadata(svId, "missing", "x"));
+                service.removeSchemaVersionMetadata(svId, "missing", "x", REGION));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 
     @Test
     void querySchemaVersionMetadataWithFilterReturnsSubset() {
         String svId = firstVersionId();
-        service.putSchemaVersionMetadata(svId, "team", "platform");
-        service.putSchemaVersionMetadata(svId, "owner", "alice");
+        service.putSchemaVersionMetadata(svId, "team", "platform", REGION);
+        service.putSchemaVersionMetadata(svId, "owner", "alice", REGION);
 
         Map<String, MetadataInfo> filtered = service.querySchemaVersionMetadata(svId,
-                List.of(new GlueSchemaRegistryService.MetadataKeyValueFilter("team", null)));
+                List.of(new GlueSchemaRegistryService.MetadataKeyValueFilter("team", null)), REGION);
 
         assertEquals(1, filtered.size());
         assertTrue(filtered.containsKey("team"));
@@ -1186,12 +1186,12 @@ class GlueSchemaRegistryServiceTest {
                 "a", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).firstVersion();
         service.registerSchemaVersion(new SchemaId("reg", "a", null), AVRO_V2_BACKWARD_OK, REGION);
         service.updateSchema(new SchemaId("reg", "a", null), null, null, 2L, REGION);
-        service.putSchemaVersionMetadata(first.getSchemaVersionId(), "team", "platform");
+        service.putSchemaVersionMetadata(first.getSchemaVersionId(), "team", "platform", REGION);
 
         service.deleteSchemaVersions(new SchemaId("reg", "a", null), "1", REGION);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.querySchemaVersionMetadata(first.getSchemaVersionId(), null));
+                service.querySchemaVersionMetadata(first.getSchemaVersionId(), null, REGION));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 
@@ -1199,9 +1199,9 @@ class GlueSchemaRegistryServiceTest {
     void tagAndGetTagsForRegistry() {
         Registry r = service.createRegistry("reg", null, null, REGION);
 
-        service.tagResource(r.getRegistryArn(), Map.of("env", "prod", "team", "platform"));
+        service.tagResource(r.getRegistryArn(), Map.of("env", "prod", "team", "platform"), REGION);
 
-        Map<String, String> tags = service.getTags(r.getRegistryArn());
+        Map<String, String> tags = service.getTags(r.getRegistryArn(), REGION);
         assertEquals(2, tags.size());
         assertEquals("prod", tags.get("env"));
     }
@@ -1212,20 +1212,20 @@ class GlueSchemaRegistryServiceTest {
         Schema schema = service.createSchema(new RegistryId("reg", null),
                 "a", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION).schema();
 
-        service.tagResource(schema.getSchemaArn(), Map.of("owner", "alice"));
+        service.tagResource(schema.getSchemaArn(), Map.of("owner", "alice"), REGION);
 
-        Map<String, String> tags = service.getTags(schema.getSchemaArn());
+        Map<String, String> tags = service.getTags(schema.getSchemaArn(), REGION);
         assertEquals("alice", tags.get("owner"));
     }
 
     @Test
     void untagResourceRemovesKeys() {
         Registry r = service.createRegistry("reg", null, null, REGION);
-        service.tagResource(r.getRegistryArn(), Map.of("env", "prod", "team", "platform"));
+        service.tagResource(r.getRegistryArn(), Map.of("env", "prod", "team", "platform"), REGION);
 
-        service.untagResource(r.getRegistryArn(), List.of("env"));
+        service.untagResource(r.getRegistryArn(), List.of("env"), REGION);
 
-        Map<String, String> tags = service.getTags(r.getRegistryArn());
+        Map<String, String> tags = service.getTags(r.getRegistryArn(), REGION);
         assertEquals(1, tags.size());
         assertTrue(tags.containsKey("team"));
     }
@@ -1233,7 +1233,7 @@ class GlueSchemaRegistryServiceTest {
     @Test
     void tagResourceWithMalformedArnThrows() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.tagResource("not-an-arn", Map.of("a", "b")));
+                service.tagResource("not-an-arn", Map.of("a", "b"), REGION));
         assertEquals("InvalidInputException", ex.getErrorCode());
     }
 
@@ -1242,7 +1242,7 @@ class GlueSchemaRegistryServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.tagResource(
                         "arn:aws:glue:us-east-1:" + ACCOUNT_ID + ":registry/missing",
-                        Map.of("a", "b")));
+                        Map.of("a", "b"), REGION));
         assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 }

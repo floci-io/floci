@@ -62,6 +62,11 @@ public class PaymentCryptographyJsonHandler {
             case "GetPublicKeyCertificate" -> () -> getPublicKeyCertificate(request, region);
             case "GetParametersForImport" -> () -> getParametersForImport(request, region);
             case "GetParametersForExport" -> () -> getParametersForExport(request, region);
+            case "AddKeyReplicationRegions" -> () -> addKeyReplicationRegions(request, region);
+            case "RemoveKeyReplicationRegions" -> () -> removeKeyReplicationRegions(request, region);
+            case "GetDefaultKeyReplicationRegions" -> () -> getDefaultKeyReplicationRegions(request, region);
+            case "EnableDefaultKeyReplicationRegions" -> () -> enableDefaultKeyReplicationRegions(request, region);
+            case "DisableDefaultKeyReplicationRegions" -> () -> disableDefaultKeyReplicationRegions(request, region);
             case "TagResource" -> () -> tagResource(request, region);
             case "UntagResource" -> () -> untagResource(request, region);
             case "ListTagsForResource" -> () -> listTagsForResource(request, region);
@@ -117,7 +122,8 @@ public class PaymentCryptographyJsonHandler {
             declared.put("DeriveKeyUsage", request.path("DeriveKeyUsage").asText());
         }
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
-                request.path("Exportable").asBoolean(false), enabled, tagsOf(request));
+                request.path("Exportable").asBoolean(false), enabled, tagsOf(request),
+                stringsOf(request, "ReplicationRegions"));
         return Map.of("Key", keyObject(key));
     }
 
@@ -360,6 +366,10 @@ public class PaymentCryptographyJsonHandler {
         out.put("KeyCheckValue", key.getKeyCheckValue());
         out.put("Enabled", key.isEnabled());
         out.put("Exportable", key.isExportable());
+        if (key.getMultiRegionKeyType() != null) {
+            out.put("MultiRegionKeyType", key.getMultiRegionKeyType());
+            out.put("PrimaryRegion", key.getPrimaryRegion());
+        }
         return out;
     }
 
@@ -384,6 +394,23 @@ public class PaymentCryptographyJsonHandler {
         }
         if (key.getDeleteTimestamp() > 0) {
             out.put("DeleteTimestamp", key.getDeleteTimestamp());
+        }
+        if (key.getMultiRegionKeyType() != null) {
+            out.put("MultiRegionKeyType", key.getMultiRegionKeyType());
+            out.put("PrimaryRegion", key.getPrimaryRegion());
+            if ("PRIMARY".equals(key.getMultiRegionKeyType())) {
+                // The replication status and the defaults flag belong to the primary: a
+                // replica answers with the kind of the key and its primary Region alone,
+                // as the reference's own answer shows.
+                Map<String, Object> status = new LinkedHashMap<>();
+                for (String target : key.getReplicationRegions()) {
+                    // The model's replication states are IN_PROGRESS, DELETE_IN_PROGRESS, FAILED
+                    // and SYNCHRONIZED. A replica that is there is a key that is in sync.
+                    status.put(target, Map.of("Status", "SYNCHRONIZED"));
+                }
+                out.put("ReplicationStatus", status);
+                out.put("UsingDefaultReplicationRegions", key.isUsingDefaultReplicationRegions());
+            }
         }
         return out;
     }
@@ -463,7 +490,8 @@ public class PaymentCryptographyJsonHandler {
                 "imports");
         PaymentCryptographyKey key = service.importKey(region, form, members(material.path(form)),
                 request.path("KeyCheckValueAlgorithm").asText(),
-                request.path("Enabled").asBoolean(true), tagsOf(request));
+                request.path("Enabled").asBoolean(true), tagsOf(request),
+                stringsOf(request, "ReplicationRegions"));
         return Map.of("Key", keyObject(key));
     }
 
@@ -545,5 +573,68 @@ public class PaymentCryptographyJsonHandler {
             return node.asText();
         }
         return node.asText();
+    }
+
+    /**
+     * The key with the regions the request names added to its replication.
+     */
+    private Map<String, Object> addKeyReplicationRegions(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.addKeyReplicationRegions(region,
+                request.path("KeyIdentifier").asText(), stringsOf(request, "ReplicationRegions"));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /**
+     * The key with the regions the request names taken away from its replication.
+     */
+    private Map<String, Object> removeKeyReplicationRegions(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.removeKeyReplicationRegions(region,
+                request.path("KeyIdentifier").asText(), stringsOf(request, "ReplicationRegions"));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /**
+     * The regions the account replicates a new key to by default.
+     *
+     * <p>The settings are the ones of the Region the request is in, so each Region has its
+     * own.
+     */
+    private Map<String, Object> getDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions", service.defaultReplicationRegions(region));
+    }
+
+    /** Turns the default replication of the account on for the regions the request names. */
+    private Map<String, Object> enableDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions",
+                service.enableDefaultReplicationRegions(region,
+                        stringsOf(request, "ReplicationRegions")));
+    }
+
+    /** Turns the default replication of the account off for the regions the request names. */
+    private Map<String, Object> disableDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions",
+                service.disableDefaultReplicationRegions(region,
+                        stringsOf(request, "ReplicationRegions")));
+    }
+
+    /**
+     * The strings of a request, such as the replication regions.
+     *
+     * <p>The shape check settles that the member is a list of names, so a request that names a
+     * region that is not one is refused before this reads it.
+     *
+     * @param request the request the member is in
+     * @param member the member to read
+     */
+    private static List<String> stringsOf(JsonNode request, String member) {
+        JsonNode declared = request.get(member);
+        if (declared == null || declared.isNull()) {
+            return new ArrayList<>();
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : declared) {
+            values.add(value.asText());
+        }
+        return values;
     }
 }

@@ -84,7 +84,6 @@ AWS::AutoScaling::AutoScalingGroup	NotificationConfigurations	accepted and ignor
 AWS::AutoScaling::AutoScalingGroup	PlacementGroup	accepted and ignored
 AWS::AutoScaling::AutoScalingGroup	SkipZonalShiftValidation	accepted and ignored
 AWS::AutoScaling::AutoScalingGroup	TrafficSources	accepted and ignored
-AWS::AutoScaling::LaunchConfiguration	BlockDeviceMappings	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCId	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCSecurityGroups	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	EbsOptimized	accepted and ignored
@@ -288,7 +287,6 @@ AWS::ECS::TaskDefinition	PlacementConstraints	accepted and ignored
 AWS::ECS::TaskDefinition	ProxyConfiguration	accepted and ignored
 AWS::ECS::TaskDefinition	Tags	accepted and ignored
 AWS::ECS::TaskDefinition	TrustedExecutionConfiguration	accepted and ignored
-AWS::ECS::TaskDefinition	Volumes	accepted and ignored
 AWS::EFS::FileSystem	BypassPolicyLockoutSafetyCheck	Floci's EFS service applies a file system policy without a lockout check, so there is nothing to bypass
 AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS replication, so the destination file system is not created
 AWS::EKS::Cluster	AccessConfig	accepted and ignored
@@ -632,13 +630,20 @@ AWS::S3::Bucket	ObjectLockConfiguration	silently dropped, as the S3CfnProvisione
 AWS::S3::Bucket	ObjectLockEnabled	accepted and ignored
 AWS::S3::Bucket	ReplicationConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::SES::ConfigurationSet	ArchivingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	DeliveryOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	ReputationOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	SendingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	SuppressionOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	Tags	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	TrackingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	VdmOptions	explicitly rejected; only the Name property is currently provisioned
 AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
 AWS::SNS::Subscription	Region	accepted and ignored
 AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
 AWS::SNS::Topic	ArchivePolicy	accepted and ignored
 AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
 AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored
-AWS::SNS::Topic	DisplayName	accepted and ignored
 AWS::SNS::Topic	KmsMasterKeyId	accepted and ignored
 AWS::SNS::Topic	SignatureVersion	accepted and ignored
 AWS::SNS::Topic	Tags	accepted and ignored

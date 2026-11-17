@@ -79,7 +79,8 @@ public class Stack {
     private Map<String, ChangeSet> changeSets = orderedMap();
     private Map<String, String> tags = orderedMap();
     private boolean enableTerminationProtection = false;
-    private volatile String stackPolicyBody;
+    private String stackPolicyBody;
+    private volatile String delegatedRoleBoundaryArn;
     /**
      * Set when an update rollback fails, and kept until a rollback completes or the stack is
      * deleted: the state from before the failed update, and the logical ids whose rollback has not
@@ -243,6 +244,17 @@ public class Stack {
     public void setEnableTerminationProtection(boolean enableTerminationProtection) { this.enableTerminationProtection = enableTerminationProtection; }
     public String getStackPolicyBody() { return stackPolicyBody; }
     public void setStackPolicyBody(String stackPolicyBody) { this.stackPolicyBody = stackPolicyBody; }
+
+    /**
+     * The permissions boundary a delegation registered for whoever created or last updated this
+     * stack, or null for every other stack. A role this stack provisions carries it, the partner
+     * guide limiting roles "created or managed through temporary access": provisioning runs after
+     * the request that asked for it, so the cap has to travel with the stack to reach the role.
+     */
+    public String getDelegatedRoleBoundaryArn() { return delegatedRoleBoundaryArn; }
+    public void setDelegatedRoleBoundaryArn(String delegatedRoleBoundaryArn) {
+        this.delegatedRoleBoundaryArn = delegatedRoleBoundaryArn;
+    }
     public StackUpdateSnapshot getUpdateRollbackSnapshot() { return updateRollbackSnapshot; }
     public void setUpdateRollbackSnapshot(StackUpdateSnapshot updateRollbackSnapshot) { this.updateRollbackSnapshot = updateRollbackSnapshot; }
     public List<String> getUpdateRollbackResourceIds() { return updateRollbackResourceIds; }

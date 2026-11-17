@@ -90,15 +90,29 @@ class DynamoDbPartiQLHandler {
         DynamoDbPartiQLKeyPlan keys = new DynamoDbPartiQLKeyPlan(stmt.where(), accessPath, table);
         keys.requireKeyTypesMatchSchema();
         keys.requireNoOverlap();
+        keys.requireFilterWithoutKeys();
         keys.requireReadsWithinLimit();
         requireFilterAttributesProjected(keys, accessPath, table);
         requireColumnsProjected(stmt, accessPath, table);
 
         Routing routing = routingOf(stmt.where(), keys, accessPath.partitionKeyName(), accessPath.sortKeyName());
         Supplier<JsonNode> startKey = () -> decodeNextToken(ctx.nextToken(), ctx.tokenBinding());
-        Page page = stmt.orderBy().isEmpty()
-                ? readPage(stmt, table, accessPath, routing, startKey, ctx.limit(), region)
-                : readOrdered(stmt, table, accessPath, routing, startKey.get(), ctx.limit(), region);
+        boolean descending = directionOf(stmt.orderBy(), accessPath.sortKeyName()).orElse(false);
+        Optional<List<Cond.Leaf>> sortKeyReads = routing.partition() == null
+                ? Optional.empty()
+                : keys.sortKeyReads(descending);
+        Page page;
+        if (sortKeyReads.isPresent()) {
+            if (!stmt.orderBy().isEmpty()) {
+                requireOrderByShape(stmt, accessPath);
+            }
+            page = readSortKeyReads(stmt, table, accessPath, routing.partition(), sortKeyReads.get(), descending,
+                    startKey.get(), ctx.limit(), region);
+        } else if (stmt.orderBy().isEmpty()) {
+            page = readPage(stmt, table, accessPath, routing, startKey, ctx.limit(), region);
+        } else {
+            page = readOrdered(stmt, table, accessPath, routing, startKey.get(), ctx.limit(), region);
+        }
         List<JsonNode> items = page.items();
         JsonNode lastEvaluatedKey = page.lastEvaluatedKey();
 
@@ -135,7 +149,9 @@ class DynamoDbPartiQLHandler {
     private static DynamoDbWriteCapacity.Cost readCapacity(Stmt.Select stmt, TableDefinition table,
                                                            DynamoDbAccessPath accessPath, Page page,
                                                            boolean consistentRead) {
-        double units = NativeDynamoDbJsonHandler.readCapacityUnits(page.scannedBytes(), consistentRead);
+        double units = page.readBytes().stream()
+                .mapToDouble(bytes -> NativeDynamoDbJsonHandler.readCapacityUnits(bytes, consistentRead))
+                .sum();
         if (!accessPath.isIndex()) {
             return new DynamoDbWriteCapacity.Cost(units, Map.of(), Map.of());
         }
@@ -190,7 +206,8 @@ class DynamoDbPartiQLHandler {
         return new Routing(pkEq, skCond, filterConds, null);
     }
 
-    private record Page(List<JsonNode> items, JsonNode lastEvaluatedKey, long scannedBytes,
+    // readBytes holds the bytes of each read DynamoDB charges on its own.
+    private record Page(List<JsonNode> items, JsonNode lastEvaluatedKey, List<Long> readBytes,
                         List<JsonNode> scannedItems) {}
 
     private Page readPage(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
@@ -226,7 +243,8 @@ class DynamoDbPartiQLHandler {
             List<JsonNode> matching = partialProjection
                     ? matchingIndexView(result.items(), scanFilters, accessPath, table)
                     : result.items();
-            return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
+            return new Page(matching, result.lastEvaluatedKey(), List.of(result.scannedBytes()),
+                    result.scannedItems());
         }
         if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
                 && skCond == null && filterConds.isEmpty()) {
@@ -234,13 +252,14 @@ class DynamoDbPartiQLHandler {
             key.set(pkName, toTypedNode(pkEq.val()));
             JsonNode item = service.getItem(stmt.table(), key, region);
             if (item == null) {
-                return new Page(Collections.emptyList(), null, 0, List.of());
+                return new Page(Collections.emptyList(), null, List.of(0L), List.of());
             }
-            return new Page(List.of(item), null, DynamoDbItemSize.billedItemSize(table, item), List.of(item));
+            return new Page(List.of(item), null, List.of((long) DynamoDbItemSize.billedItemSize(table, item)),
+                    List.of(item));
         }
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-        String kce = buildKce(pkEq, skCond, pkName, skName, eav, ean);
+        String kce = buildKce(pkEq.val(), skCond, pkName, skName, eav, ean);
         String fe = buildFe(filterConds, eav, ean);
         JsonNode exclusiveStartKey = startKey.get();
         DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
@@ -248,20 +267,73 @@ class DynamoDbPartiQLHandler {
                 stmt.table(), null, eav.toNode(mapper), kce, fe,
                 limit, null, accessPath.indexName(), exclusiveStartKey,
                 ean.isEmpty() ? null : ean.toNode(mapper), region);
-        return new Page(result.items(), result.lastEvaluatedKey(), result.scannedBytes(), result.scannedItems());
+        return new Page(result.items(), result.lastEvaluatedKey(), List.of(result.scannedBytes()),
+                result.scannedItems());
     }
 
     private Page readPartition(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                                Routing routing, Supplier<JsonNode> startKey, Integer limit, String region) {
         ExprAttrBuilder eav = new ExprAttrBuilder();
         ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
-        String kce = ean.alias(accessPath.partitionKeyName()) + " = " + eav.add(toTypedNode(routing.partition()));
+        String kce = buildKce(routing.partition(), null, accessPath.partitionKeyName(), accessPath.sortKeyName(),
+                eav, ean);
         JsonNode exclusiveStartKey = startKey.get();
         DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
         DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
                 limit, null, accessPath.indexName(), exclusiveStartKey, ean.toNode(mapper), region);
         List<JsonNode> matching = matchingIndexView(result.items(), routing.filterConds(), accessPath, table);
-        return new Page(matching, result.lastEvaluatedKey(), result.scannedBytes(), result.items());
+        return new Page(matching, result.lastEvaluatedKey(), List.of(result.scannedBytes()), result.items());
+    }
+
+    // DynamoDB reads each sort-key branch of one partition as a Query of its own, in key order, and
+    // charges each read on its own. The token names the read to go on with, and the key to resume
+    // from when the page stopped inside it.
+    private Page readSortKeyReads(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
+                                  PVal partition, List<Cond.Leaf> reads, boolean descending, JsonNode cursor,
+                                  Integer limit, String region) {
+        int read = cursor == null ? 0 : readIndex(cursor, reads.size());
+        JsonNode exclusiveStartKey = cursor == null ? null : cursor.get("k");
+        List<JsonNode> rows = new ArrayList<>();
+        List<Long> readBytes = new ArrayList<>();
+        List<JsonNode> scannedItems = new ArrayList<>();
+        for (; read < reads.size(); read++) {
+            ExprAttrBuilder eav = new ExprAttrBuilder();
+            ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+            String kce = buildKce(partition, reads.get(read), accessPath.partitionKeyName(),
+                    accessPath.sortKeyName(), eav, ean);
+            DynamoDbAccessPathValidator.validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
+            Integer remaining = limit == null ? null : limit - scannedItems.size();
+            DynamoDbService.QueryResult result = service.query(stmt.table(), null, eav.toNode(mapper), kce, null,
+                    remaining, !descending, accessPath.indexName(), exclusiveStartKey, ean.toNode(mapper), region);
+            exclusiveStartKey = null;
+            readBytes.add(result.scannedBytes());
+            scannedItems.addAll(result.items());
+            rows.addAll(matchingIndexView(result.items(), stmt.where(), accessPath, table));
+            if (result.lastEvaluatedKey() != null) {
+                return new Page(rows, readCursor(read, result.lastEvaluatedKey()), readBytes, scannedItems);
+            }
+            if (limit != null && scannedItems.size() >= limit) {
+                JsonNode next = read + 1 < reads.size() ? readCursor(read + 1, null) : null;
+                return new Page(rows, next, readBytes, scannedItems);
+            }
+        }
+        return new Page(rows, null, readBytes, scannedItems);
+    }
+
+    private static int readIndex(JsonNode cursor, int reads) {
+        JsonNode read = cursor.get("r");
+        if (read == null || !read.isInt() || read.intValue() < 0 || reads <= read.intValue()) {
+            throw new AwsException("ValidationException", "Invalid NextToken", 400);
+        }
+        return read.intValue();
+    }
+
+    private ObjectNode readCursor(int read, JsonNode exclusiveStartKey) {
+        ObjectNode cursor = mapper.createObjectNode().put("r", read);
+        if (exclusiveStartKey != null) {
+            cursor.set("k", exclusiveStartKey);
+        }
+        return cursor;
     }
 
     // The WHERE clause of an index read sees only what the index stores, so an
@@ -298,7 +370,7 @@ class DynamoDbPartiQLHandler {
             JsonNode from = lastKey;
             Page page = readPage(stmt, table, accessPath, routing, () -> from, null, region);
             rows.addAll(page.items());
-            scannedBytes += page.scannedBytes();
+            scannedBytes += page.readBytes().stream().mapToLong(Long::longValue).sum();
             scannedItems.addAll(page.scannedItems());
             lastKey = page.lastEvaluatedKey();
         } while (lastKey != null);
@@ -311,9 +383,9 @@ class DynamoDbPartiQLHandler {
                 start++;
             }
         }
-        int end = limit == null ? rows.size() : Math.min(rows.size(), start + limit);
+        int end = limit == null ? rows.size() : start + Math.min(rows.size() - start, limit);
         JsonNode resumeAfter = start < end && end < rows.size() ? orderingKey(rows.get(end - 1), accessPath, table) : null;
-        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, scannedBytes, scannedItems);
+        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, List.of(scannedBytes), scannedItems);
     }
 
     private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath) {
@@ -343,12 +415,23 @@ class DynamoDbPartiQLHandler {
         }
     }
 
+    // An OR reads one partition per branch only when every branch names one.
     private static int hashKeyConditionCount(Cond cond, String pkName) {
         return switch (cond) {
             case Cond.Eq eq when isKeyCondition(eq, pkName) -> 1;
             case Cond.In in when isKeyCondition(in, pkName) -> in.values().size();
-            case Cond.Or or when or.operands().stream()
-                    .allMatch(o -> o instanceof Cond.Eq && isKeyCondition(o, pkName)) -> or.operands().size();
+            case Cond.And and -> and.operands().stream().mapToInt(o -> hashKeyConditionCount(o, pkName)).sum();
+            case Cond.Or or -> {
+                int total = 0;
+                for (Cond operand : or.operands()) {
+                    int count = hashKeyConditionCount(operand, pkName);
+                    if (count == 0) {
+                        yield 0;
+                    }
+                    total += count;
+                }
+                yield total;
+            }
             default -> 0;
         };
     }
@@ -437,12 +520,12 @@ class DynamoDbPartiQLHandler {
         return payload.get("k");
     }
 
-    private String buildKce(Cond.Eq pkEq, Cond skCond, String pkName, String skName,
+    private String buildKce(PVal partition, Cond skCond, String pkName, String skName,
                              ExprAttrBuilder eav, ExprAttrNameBuilder ean) {
         // Query branch: callers only reach this with a partition-key equality
         // in the WHERE clause; every other shape routes to the scan branch.
         String pkAlias = ean.alias(pkName);
-        String pkPlaceholder = eav.add(toTypedNode(pkEq.val()));
+        String pkPlaceholder = eav.add(toTypedNode(partition));
         StringBuilder kce = new StringBuilder(pkAlias).append(" = ").append(pkPlaceholder);
         if (skCond != null) {
             kce.append(" AND ").append(buildCondExpr(skCond, eav, ean));

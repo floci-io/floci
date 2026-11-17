@@ -197,15 +197,16 @@ final class EmrServiceFixture {
     /** Makes no image: answers {@link #IMAGE} for each, or throws {@link #failure} when it is set. */
     static final class RecordingReleaseImages implements ReleaseImages {
         static final String IMAGE = "sha256:" + "3".repeat(64);
-        // Each image asked for: its release, then the two it is made of, then whether it has Hive.
+        // Each image asked for: its release, then the two it is made of, then whether it has Hive, and Pig.
         final List<List<String>> asked = new ArrayList<>();
         // Each image released, by id.
         final List<String> released = new ArrayList<>();
         RuntimeException failure;
 
         @Override
-        public String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive) {
-            asked.add(List.of(releaseLabel, sparkImage, hiveImage, String.valueOf(withHive)));
+        public String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive,
+                            boolean withPig) {
+            asked.add(List.of(releaseLabel, sparkImage, hiveImage, String.valueOf(withHive), String.valueOf(withPig)));
             if (failure != null) {
                 throw failure;
             }
@@ -329,9 +330,22 @@ final class EmrServiceFixture {
                 iam);
     }
 
+    /**
+     * A new service on the same storage and clock, as {@link #restart} builds, with Floci's Pig on, its steps' threads
+     * this fixture's, and its events not delivered.
+     */
+    EmrService withPig() {
+        EmulatorConfig config = config(false);
+        when(config.services().emr().pig().enabled()).thenReturn(true);
+        return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                iam);
+    }
+
     private EmulatorConfig config(boolean reconcile) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().emr().defaultReleaseLabel()).thenReturn("emr-7.5.0");
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566/");
         when(config.services().emr().clusterStartupDelaySeconds()).thenReturn(durations[0]);
         when(config.services().emr().stepDurationSeconds()).thenReturn(durations[1]);
         when(config.services().emr().clusterTerminationDelaySeconds()).thenReturn(durations[2]);

@@ -372,7 +372,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
     monkeypatch.setattr(r, "MEASURED", {})
-    monkeypatch.setattr(r, "FORWARDED", {})
+    monkeypatch.setattr(r, "STATEMENT_SOURCES", {})
     return monkeypatch
 
 
@@ -1233,7 +1233,7 @@ def forwarding_documents(tmp_path, record_member: str = "KeysKeyId", listed: boo
 
 
 def test_a_forwarded_operation_is_also_checked_as_the_action_on_what_its_record_holds(isolated, tmp_path):
-    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    isolated.setattr(r, "MEASURED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
     document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
     # The member is the record's, named after the action's namespace and its type's variable, whatever its case.
     assert document["operations"]["svc:GetThing"]["forwarded"] == [
@@ -1266,14 +1266,14 @@ def test_a_forwarded_operation_is_also_checked_as_the_action_on_what_its_record_
 def test_a_forwarded_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say_and_is_read(
         isolated, tmp_path, forwarded, change, problem):
     (action, of), evidence = forwarded
-    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": action, "of": of}], evidence)})
+    isolated.setattr(r, "MEASURED", {"svc:GetThing": ([{"action": action, "of": of}], evidence)})
     with pytest.raises(ValueError, match=problem):
         r.build(forwarding_documents(tmp_path, **change), "test", tmp_path, "botocore test")
 
 
 def test_a_forwarded_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
-    isolated.setattr(r, "FORWARDED", {"svc:Gone": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
-    with pytest.raises(ValueError, match="FORWARDED gives svc:Gone, which the file does not read"):
+    isolated.setattr(r, "MEASURED", {"svc:Gone": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    with pytest.raises(ValueError, match="MEASURED gives svc:Gone, which the file does not read"):
         r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
 
 
@@ -1304,7 +1304,7 @@ def test_a_malformed_forwarded_entry_is_rejected(change, problem):
 
 
 def test_verify_fails_when_aws_changes_what_it_gives_a_forwarded_action_or_lists_it_for_the_operation(isolated):
-    isolated.setattr(r, "FORWARDED", {"svc:A": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    isolated.setattr(r, "MEASURED", {"svc:A": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
     document = forwarding_document()
     documents = [reference("svc", {"A": ["thing"]}, {"thing": FORMATS["thing"]}), keys_reference()]
     assert r.verify_forwarded(document, documents) == []
@@ -1313,16 +1313,16 @@ def test_verify_fails_when_aws_changes_what_it_gives_a_forwarded_action_or_lists
         '{"type": "key", "format": "' + KEY_FORMAT + '", "viaService": "keys:ViaService"}']
     documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
     assert r.verify_forwarded(document, documents) == [
-        "AWS now lists ['keys:Decrypt'] for svc:A: a rule reads those, so FORWARDED should not give them"]
+        "AWS now lists ['keys:Decrypt'] for svc:A: a rule reads those, so MEASURED should not give them"]
 
 
 def test_check_fails_when_the_file_records_other_forwarded_actions_than_forwarded_names(isolated, tmp_path):
-    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    isolated.setattr(r, "MEASURED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
     document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
-    isolated.setattr(r, "FORWARDED", {})
+    isolated.setattr(r, "MEASURED", {})
     document["operations"]["svc:GetThing"].pop("forwarded")
     assert r.derive(document, tmp_path) == [
-        "the file records ['keys:Decrypt'] as forwarded actions, FORWARDED names []"]
+        "the file records ['keys:Decrypt'] as forwarded actions, MEASURED names []"]
 
 
 def test_a_variable_no_member_fills_takes_the_one_value_of_its_enum_the_operations_name_gives():
@@ -2254,6 +2254,58 @@ def test_eip_operations_read_scalar_targets_from_models(operation, members, kind
     assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]
 
 
+@pytest.mark.parametrize("documentation,expected", [
+    ("<p>The resource to tag. This value is an Amazon Resource Name (ARN).</p>", True),
+    ("<p>This value is an Amazon Resource Name (ARN).</p>", True),
+    ("<p>The resource to tag. This value is an Amazon Resource Name (ARN) or a name.</p>", False),
+    ("<p>The resource to tag. This value can be an Amazon Resource Name (ARN).</p>", False),
+    ("<p>The resource to tag. Its parent is an Amazon Resource Name (ARN).</p>", False),
+])
+def test_an_explicit_arn_value_sentence_identifies_the_request_resource(documentation, expected):
+    modeled = model({"AddTagsToResource": {"ResourceName": "String"}}, protocol="query")
+    modeled["shapes"]["AddTagsToResourceIn"]["members"]["ResourceName"]["documentation"] = documentation
+    result = r.with_documented("svc:AddTagsToResource", ["thing", "pool"], FORMATS, {"svc": modeled}, [])
+    assert result == ([{"types": ["thing", "pool"], "arn": "ResourceName"}] if expected else [])
+
+
+def test_a_creates_subject_can_be_its_sole_arn_variable_for_an_abbreviated_type():
+    formats = {"db": "arn:${Partition}:svc:${Region}:${Account}:db:${DbInstanceName}",
+               "pg": "arn:${Partition}:svc:${Region}:${Account}:pg:${ParameterGroupName}"}
+    database = {"type": "db", "fill": {"DbInstanceName": "DBInstanceIdentifier"}}
+    group = {"type": "pg", "fill": {"ParameterGroupName": "DBParameterGroupName"}}
+    assert r.with_made([database, group], "svc:CreateDBInstance", formats) == [dict(database, made=True), group]
+    assert r.with_made([database, group], "svc:ModifyDBInstance", formats) == [database, group]
+
+
+def test_resource_type_tag_prefixes_require_the_documented_namespace_and_type():
+    formats = {"rds": {"pg": "arn:${Partition}:rds:${Region}:${Account}:pg:${PgName}"}}
+    documents = [{"Name": "rds", "Resources": [{"Name": "pg", "ConditionKeys": [
+        "aws:ResourceTag/${TagKey}", "rds:pg-tag/${TagKey}", "rds:pg-tag/tag-key",
+        "rds:req-tag/${TagKey}", "rds:db-tag/${TagKey}", "other:pg-tag/${TagKey}", "rds:pg-tag/Owner"]}]}]
+    assert r.resource_tag_keys(documents, formats) == {"rds": {"pg": ["aws:ResourceTag/", "rds:pg-tag/"]}}
+
+
+def test_distinct_qualified_parameter_groups_do_not_collapse_to_one_ambiguous_member():
+    formats = {"cluster-pg": "arn:${Partition}:rds:${Region}:${Account}:cluster-pg:${ClusterParameterGroupName}",
+               "pg": "arn:${Partition}:rds:${Region}:${Account}:pg:${ParameterGroupName}"}
+    assert r.resources_for("rds:ModifyDBCluster", ["cluster-pg", "pg"], formats,
+            members("DBClusterParameterGroupName", "DBInstanceParameterGroupName")) == [
+        {"type": "cluster-pg", "fill": {"ClusterParameterGroupName": "DBClusterParameterGroupName"}},
+        {"type": "pg", "fill": {"ParameterGroupName": "DBInstanceParameterGroupName"}}]
+    assert r.resources_for("rds:ModifyDBCluster", ["cluster-pg", "pg"], formats,
+            members("DBClusterParameterGroupName")) == [
+        {"type": "cluster-pg", "fill": {"ClusterParameterGroupName": "DBClusterParameterGroupName"}}]
+
+
+def test_a_shorter_member_is_not_reserved_for_a_more_qualified_variable():
+    formats = {"subnet": "arn:${Partition}:ec2:${Region}:${Account}:subnet/${SubnetId}",
+               "secondary-subnet": "arn:${Partition}:ec2:${Region}:${Account}:secondary-subnet/${SecondarySubnetId}"}
+    assert r.resources_for("ec2:RunInstances", ["subnet", "secondary-subnet"], formats,
+            members("SubnetId", "SecondarySubnetId")) == [
+        {"type": "subnet", "fill": {"SubnetId": "SubnetId"}},
+        {"type": "secondary-subnet", "fill": {"SecondarySubnetId": "SecondarySubnetId"}}]
+
+
 QUALIFIED_FORMATS = {"function": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}",
                      "function alias": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Alias}",
                      "function version": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Version}"}
@@ -2368,3 +2420,233 @@ def test_clients_sharing_an_endpoint_keep_every_type_an_arn_member_may_name_and_
     assert r.narrowed(resources, set(), tags, "TagResource", formats) == [
         {"types": ["eventSourceMapping", "function"], "arn": "Resource"}]
     assert r.narrowed(resources, set(), tags, "TagResource", formats, arn_types=False) == resources
+
+
+def test_input_and_list_suffixes_stem_away_like_the_others():
+    # Glue names what a create makes in a `<Type>Input` structure, and a batch's names in a `<Type>NameList`.
+    assert r.stem("DatabaseInput") == "database"
+    assert r.stem("ConnectionNameList") == "connection"
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingNameList[]")) == [
+        {"type": "thing", "fill": {"ThingName": "ThingNameList[]"}}]
+
+
+def test_a_list_whose_botocore_shape_is_named_after_the_type_fills_it():
+    # Glue's BatchDeleteTable names its tables by TablesToDelete, a BatchDeleteTableNameList.
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingsToDelete[]"),
+                           shapes={"ThingsToDelete": "BatchDeleteThingNameList"}) == [
+        {"type": "thing", "fill": {"ThingName": "ThingsToDelete[]"}}]
+    # A list whose shape is named after nothing the action acts on names nothing.
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingsToDelete[]"),
+                           shapes={"ThingsToDelete": "BatchDeleteNameList"}) == []
+
+
+def test_a_type_of_no_variables_stays_beside_a_creates_own_unnamed_type():
+    # Glue's CreateDatabase names its database only in a field the documented rule reads; the account's catalog,
+    # of no variables, is checked all the same rather than dropped as its alternative.
+    assert r.resources_for("svc:CreatePool", ["catalog", "pool"], FORMATS, members("Description")) == [
+        {"type": "catalog", "fill": {}}]
+
+
+def test_being_ends_a_types_name_in_documentation():
+    # "Name of the workflow being run", Glue's GetWorkflowRun's Name.
+    formats = {"workflow": "arn:${Partition}:svc:${Region}:${Account}:workflow/${WorkflowName}"}
+    assert r.doc_names("name of the workflow being run", "workflow", formats)
+    assert not r.doc_names("name of the workflowrun being run", "workflow", formats)
+
+
+def widget_model(tags: bool) -> dict:
+    """A create whose action acts on the widget's kind alone, naming the widget it makes in `WidgetInput.Name`, and
+    carrying tags when asked, as Glue's CreateConnection does."""
+    service = model({"CreateWidget": {"KindName": "String"}})
+    service["shapes"]["WidgetInput"] = {"type": "structure", "members": {
+        "Name": {"shape": "String", "documentation": "<p>The name of the widget.</p>"},
+        "Description": {"shape": "String", "documentation": "<p>The description of the widget.</p>"}}}
+    service["shapes"]["Tags"] = {"type": "map", "key": {"shape": "String"}, "value": {"shape": "String"}}
+    service["shapes"]["CreateWidgetIn"]["members"]["WidgetInput"] = {"shape": "WidgetInput"}
+    if tags:
+        service["shapes"]["CreateWidgetIn"]["members"]["Tags"] = {"shape": "Tags"}
+    return {"svc": service}
+
+
+def test_a_create_acting_on_other_types_alone_tags_what_it_makes_when_it_names_it_in_full():
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}",
+               "kind": "arn:${Partition}:svc:${Region}:${Account}:kind/${KindName}"}
+    made = r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True))
+    assert made == [{"type": "widget", "fill": {"WidgetName": "WidgetInput.Name"}}]
+    # Without tags, what it makes is not needed; and a create acting on the type it makes is checked on it.
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(False)) == []
+    assert r.makes_for("svc:CreateWidget", ["widget"], formats, members("KindName"), models=widget_model(True)) == []
+    # One whose request does not name every variable of what it makes leaves it to the action's own resources.
+    formats["widget"] = "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}/${WidgetId}"
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True)) == []
+
+
+def test_an_arn_identifying_a_type_is_not_read_as_its_name():
+    modeled = model({"RemoveFromPool": {"ThingIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["RemoveFromPoolIn"]["members"]["ThingIdentifier"]["documentation"] = (
+        "<p>The Amazon Resource Name (ARN) identifying the thing that was detached from the pool.</p>")
+    result = r.with_documented("svc:RemoveFromPool", ["thing"], FORMATS, {"svc": modeled}, [])
+    assert result == [{"types": ["thing"], "arn": "ThingIdentifier"}]
+
+
+def test_a_name_documented_as_an_identifier_finds_a_generated_id():
+    formats = {"proxy": "arn:${Partition}:svc:${Region}:${Account}:proxy:${ProxyId}"}
+    modeled = model({"ModifyProxy": {"ProxyName": "String"}}, protocol="query")
+    modeled["shapes"]["ModifyProxyIn"]["members"]["ProxyName"]["documentation"] = (
+        "<p>The identifier for the proxy to modify.</p>")
+    assert r.with_documented("svc:ModifyProxy", ["proxy"], formats, {"svc": modeled}, []) == [
+        {"type": "proxy", "fill": {}, "find": ["ProxyName"]}]
+
+
+def test_an_arn_identifying_a_type_replaces_the_identifier_name_mapping():
+    modeled = model({"RemoveFromPool": {"ThingIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["RemoveFromPoolIn"]["members"]["ThingIdentifier"]["documentation"] = (
+        "<p>The Amazon Resource Name (ARN) identifying the thing that was detached from the pool.</p>")
+    modeled["shapes"]["RemoveFromPoolIn"]["required"] = ["ThingIdentifier"]
+    assert r.read_resources("svc:RemoveFromPool", ["thing"], FORMATS, {"svc": modeled}) == [
+        {"types": ["thing"], "arn": "ThingIdentifier"}]
+
+
+def test_a_found_child_name_is_scoped_by_its_records_associated_parent():
+    formats = {"group": "arn:${Partition}:svc:${Region}:${Account}:group:${GroupId}"}
+    modeled = model({"ModifyGroup": {"ProxyName": "String", "GroupName": "String"}}, protocol="query")
+    modeled["shapes"]["ProxyGroup"] = {"type": "structure", "members": {
+        "GroupName": {"shape": "String"}, "ProxyName": {"shape": "String", "documentation":
+            "<p>The identifier for the proxy associated with this group.</p>"}}}
+    modeled["shapes"]["ModifyGroupIn"]["required"] = ["GroupName", "ProxyName"]
+    resources = [{"type": "group", "fill": {}, "find": ["GroupName"]}]
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == [
+        {"type": "group", "fill": {}, "find": ["ProxyName", "GroupName"]}]
+    modeled["shapes"]["ModifyGroupIn"]["required"] = ["ProxyName"]
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == [
+        {"type": "group", "fill": {}, "find": ["ProxyName", "GroupName"], "unless": {"GroupName": [None]}},
+        {"type": "group", "fill": {}, "find": ["ProxyName"], "when": {"GroupName": [None]}}]
+    # A fully named record, such as a proxy endpoint, already has its independent key.
+    modeled["shapes"]["ProxyGroup"]["members"]["ProxyGroupName"] = {"shape": "String"}
+    independently_named = [{"type": "group", "fill": {}, "find": ["ProxyGroupName"]}]
+    assert r.with_find_scope(independently_named, {"svc": modeled}, "ModifyGroup", formats) == independently_named
+    modeled["shapes"]["OtherGroup"] = modeled["shapes"].pop("ProxyGroup")
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == resources
+
+
+def test_a_task_identifier_reaches_the_source_arn_its_record_documents():
+    modeled = model({"DescribeExports": {"ExportTaskIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["ExportTask"] = {"type": "structure", "members": {
+        "ExportTaskIdentifier": {"shape": "String"}, "SourceArn": {"shape": "String", "documentation":
+            "<p>The Amazon Resource Name (ARN) of the thing that was exported to storage.</p>"}}}
+    assert r.read_resources("svc:DescribeExports", ["thing"], FORMATS, {"svc": modeled}) == [
+        {"types": ["thing"], "through": "ExportTaskIdentifier"}]
+
+
+GLUE_FORMATS = {
+    "catalog": "arn:${Partition}:glue:${Region}:${Account}:catalog/${CatalogName}",
+    "rootcatalog": "arn:${Partition}:glue:${Region}:${Account}:catalog",
+    "database": "arn:${Partition}:glue:${Region}:${Account}:database/${DatabaseName}",
+    "table": "arn:${Partition}:glue:${Region}:${Account}:table/${DatabaseName}/${TableName}",
+}
+EXAMPLE = "arn:aws:glue:us-east-1:123456789012:"
+
+
+def statement_source(**statements) -> dict:
+    """A vendored statement source as the fetch script writes it: the page's example names and each statement's
+    sentence and example policy."""
+    return {"_source": {"page": "https://example.com/page", "fetcher": "fetch.py"},
+            "examples": {"example_db": "database", "test": "table"},
+            "statements": {name.replace("_", " "): {"text": text, "policy": policy}
+                           for name, (text, policy) in statements.items()}}
+
+
+def allow(actions: list[str], resources: list[str]) -> dict:
+    return {"Effect": "Allow", "Action": actions, "Resource": [EXAMPLE + resource for resource in resources]}
+
+
+GLUE_ACTIONS = {"glue:GetDatabase": ["catalog", "database", "rootcatalog"],
+                "glue:GetTable": ["catalog", "database", "rootcatalog", "table"],
+                "glue:DeleteTable": ["catalog", "database", "rootcatalog", "table"],
+                "glue:GetPartitions": ["catalog", "database", "rootcatalog", "table"]}
+
+
+def test_a_statement_makes_each_action_of_its_policy_on_each_resource_of_its_statement_the_reference_has_it_act_on():
+    source = statement_source(
+        DROP_TABLE=("Allows you to drop a partitioned table named test in the example_db database. If your table does "
+                    "not have partitions, do not include partition actions.",
+                    [allow(["glue:GetDatabase"], ["catalog", "database/example_db"]),
+                     allow(["glue:GetTable", "glue:DeleteTable", "glue:GetPartitions"],
+                           ["catalog", "database/example_db", "table/example_db/test"])]),
+        SHOW_TABLES=("Allows you to list all tables in the example_db database.",
+                     [allow(["glue:GetDatabase", "glue:GetTable"],
+                            ["catalog", "database/example_db", "table/example_db/*"])]))
+    root = {"type": "rootcatalog", "fill": {}}
+    database = {"type": "database", "fill": {"DatabaseName": "database"}}
+    table = {"type": "table", "fill": {"DatabaseName": "database", "TableName": "table"}}
+    assert r.statement_requests(source, GLUE_ACTIONS, {"glue": GLUE_FORMATS}) == {
+        # Each action on the resources of its own policy statement, the catalog by the bare format it matches.
+        "DROP TABLE": [{"action": "glue:GetDatabase", "resources": [root, database]},
+                       {"action": "glue:GetTable", "resources": [root, database, table]},
+                       {"action": "glue:DeleteTable", "resources": [root, database, table]},
+                       # The sentence says a table without partitions needs no partition action.
+                       {"action": "glue:GetPartitions", "resources": [root, database, table], "partitioned": True}],
+        # A wildcard leaves its variable open, and an action is not checked on a type it does not act on.
+        "SHOW TABLES": [{"action": "glue:GetDatabase", "resources": [root, database]},
+                        {"action": "glue:GetTable", "resources": [
+                            root, database, {"type": "table", "fill": {"DatabaseName": "database"}}]}],
+    }
+
+
+@pytest.mark.parametrize("policy, problem", [
+    # An ARN of no type's format, or of a name the page does not say stands for anything.
+    ([allow(["glue:GetTable"], ["function/f"])], "is no resource type's ARN format"),
+    ([allow(["glue:GetTable"], ["database/default"])], "whose default the page does not say stands for anything"),
+    # An action granted on no resource of a type the reference gives it.
+    ([allow(["glue:GetDatabase"], ["table/example_db/test"])], "grants glue:GetDatabase on no resource"),
+])
+def test_a_statement_policy_the_reference_cannot_read_is_refused(policy, problem):
+    with pytest.raises(ValueError, match=problem):
+        r.statement_requests(statement_source(DROP_TABLE=("Drops it.", policy)), GLUE_ACTIONS,
+                             {"glue": GLUE_FORMATS})
+
+
+def test_the_statement_actions_are_the_types_the_reference_gives_each_and_an_unlisted_one_is_refused():
+    glue = reference("glue", {"GetDatabase": ["catalog", "database", "rootcatalog"]}, GLUE_FORMATS)
+    source = statement_source(CREATE_DATABASE=("Creates it.", [allow(["glue:GetDatabase"], ["catalog"])]))
+    assert r.statement_actions([glue], {"svc:A": source}) == {"glue:GetDatabase": ["catalog", "database", "rootcatalog"]}
+    unlisted = statement_source(CREATE_DATABASE=("Creates it.", [allow(["glue:CreateDatabase"], ["catalog"])]))
+    with pytest.raises(ValueError, match="names glue:CreateDatabase, which the Service Reference does not list"):
+        r.statement_actions([glue], {"svc:A": unlisted})
+
+
+def test_the_statements_are_built_checked_offline_and_verified_against_aws_and_the_page(isolated, tmp_path, monkeypatch):
+    isolated.setattr(r, "NAMESPACES", ("svc", "glue"))
+    source = statement_source(CREATE_DATABASE=("Creates the example_db database.",
+                                               [allow(["glue:GetDatabase"], ["catalog", "database/example_db"])]))
+    path = tmp_path / "source.json"
+    path.write_text(json.dumps(source), encoding="utf-8")
+    isolated.setattr(r, "STATEMENT_SOURCES", {"svc:GetThing": path})
+    glue = reference("glue", {"GetDatabase": ["catalog", "database", "rootcatalog"]}, GLUE_FORMATS)
+    glue["Operations"] = []
+    documents = [*forwarding_documents(tmp_path), glue]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["statementActions"] == {"glue:GetDatabase": ["catalog", "database", "rootcatalog"]}
+    assert document["statements"] == {"svc:GetThing": {"CREATE DATABASE": [{"action": "glue:GetDatabase", "resources": [
+        {"type": "rootcatalog", "fill": {}}, {"type": "database", "fill": {"DatabaseName": "database"}}]}]}}
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    assert json.loads(r.render(document)) == document
+
+    # A statement edited by hand, or a source changed without a sync, fails the offline check.
+    edited = json.loads(json.dumps(document))
+    edited["statements"]["svc:GetThing"]["CREATE DATABASE"][0]["resources"].pop()
+    assert any("statements differ from what its sources give" in problem for problem in r.derive(edited, tmp_path))
+    edited["statements"]["svc:GetThing"]["CREATE DATABASE"][0]["action"] = "glue:GetTable"
+    assert any("something other than requests of statementActions" in problem for problem in r.validate(edited))
+
+    # Online, the types AWS gives each action and the page itself are checked.
+    page = {"https://example.com/page": "the page"}
+    monkeypatch.setattr(r.fetch_athena_glue_ddl_permissions, "fetch_url", lambda url: page[url])
+    monkeypatch.setattr(r.fetch_athena_glue_ddl_permissions, "stale", lambda vendored, text: text != "the page")
+    assert r.verify_statements(document, documents) == []
+    narrower = reference("glue", {"GetDatabase": ["database"]}, GLUE_FORMATS)
+    assert r.verify_statements(document, [*documents[:-1], narrower]) == [
+        "AWS gives glue:GetDatabase the resource types ['database'], not ['catalog', 'database', 'rootcatalog']"]
+    page["https://example.com/page"] = "a changed page"
+    assert r.verify_statements(document, documents) == [
+        "https://example.com/page no longer gives what source.json holds for svc:GetThing: run fetch.py"]

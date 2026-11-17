@@ -98,6 +98,9 @@ class CfnReplacementIntegrationTest {
 
     private static final String PROFILE = profileProperties(APP_REF, "");
 
+    /** The two topics the SNS subscription rows point at. */
+    private static final String SNS_TOPICS = json("'TopicA': {'Type': 'AWS::SNS::Topic'}, 'TopicB': {'Type': 'AWS::SNS::Topic'}");
+
     /** The cluster names a subnet group whose own name comes from a parameter that changes in the update. */
     private static final Row SUBNET_GROUP_REPLACED = createOnlyRow("ElastiCache cluster in a replaced subnet group",
             json(vpcAndSubnet("10.73")
@@ -112,6 +115,9 @@ class CfnReplacementIntegrationTest {
 
     private static final String SQS_TYPE = "AWS::SQS::Queue";
     private static final String S3_TYPE = "AWS::S3::Bucket";
+    private static final String DDB_KEYS = "\"BillingMode\": \"PAY_PER_REQUEST\","
+            + " \"KeySchema\": [{\"AttributeName\": \"id\", \"KeyType\": \"HASH\"}],"
+            + " \"AttributeDefinitions\": [{\"AttributeName\": \"id\", \"AttributeType\": \"S\"}]";
 
     /**
      * A {@code type} whose {@code nameProperty} is {@code name} by {@code Fn::If} on {@code Named}, which is
@@ -156,13 +162,13 @@ class CfnReplacementIntegrationTest {
                 SUBNET_GROUP_REPLACED,
                 createOnlyRow("SQS queue explicit QueueName removed", "", "", SQS_TYPE,
                         "\"QueueName\": \"repl-q-removed\"", "\"VisibilityTimeout\": 30", "True", false, null),
-                new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue",
+                new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue, beside an updatable change",
                         namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"x\"]"),
                         namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"y\"]"),
                         "Subject", "True", true, null),
                 createOnlyRow("S3 bucket explicit BucketName removed", "", "", S3_TYPE,
                         "\"BucketName\": \"repl-s3-removed\"", "", "True", false, null),
-                new Row("S3 bucket BucketName dropped by Fn::If choosing AWS::NoValue",
+                new Row("S3 bucket BucketName dropped by Fn::If choosing AWS::NoValue, beside an updatable change",
                         namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"x\"]"),
                         namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"y\"]"),
                         "Subject", "True", true, null),
@@ -173,6 +179,70 @@ class CfnReplacementIntegrationTest {
                         "Subject", "True", true, null),
                 createOnlyRow("ECR repository RepositoryName removed", "", "", "AWS::ECR::Repository",
                         "\"RepositoryName\": \"repl-ecr-named\"", "", "True", false, null),
+                createOnlyRow("DynamoDB table explicit TableName removed", "", "", "AWS::DynamoDB::Table",
+                        DDB_KEYS + ", \"TableName\": \"repl-ddb-removed\"", DDB_KEYS, "True", false, null),
+                new Row("log group given a Properties block that sets its name",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"LogGroupName\": \"repl-added-properties\"}}}}",
+                        "Subject", "True", true, null),
+                new Row("log group given a Properties block with only an updatable property",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "Subject", "False", false, null),
+                new Row("log group whose existing Properties block gains its name",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7,"
+                                + " \"LogGroupName\": \"repl-added-name\"}}}}",
+                        "Subject", "True", true, null),
+                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue, beside an updatable change",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 14,"
+                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-novalue\","
+                                + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
+                        "Subject", "False", false, null),
+                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue while a tag reads another stack's output",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 14,"
+                                + " \"Tags\": [{\"Key\": \"source\", \"Value\": {\"Fn::GetStackOutput\":"
+                                + " {\"StackName\": \"" + OUTPUT_SOURCE + "\", \"OutputName\": \"Out\"}}}],"
+                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-output\","
+                                + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
+                        "Subject", "False", false, stack -> createOutputSource()),
+                createOnlyRow("SNS topic TopicName removed", "", "", "AWS::SNS::Topic",
+                        "\"TopicName\": \"repl-sns-named\"", "\"DisplayName\": \"unnamed\"",
+                        "True", false, null),
+                createOnlyRow("SNS topic FifoTopic switched on", "", "", "AWS::SNS::Topic",
+                        "\"FifoTopic\": false", "\"FifoTopic\": true", "True", false, null),
+                createOnlyRow("SNS subscription Endpoint", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription Protocol", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email-json\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription TopicArn", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicB\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
@@ -188,6 +258,7 @@ class CfnReplacementIntegrationTest {
                         "Subject", "True", true, null));
     }
 
+    private static final String OUTPUT_SOURCE = "repl-output-source";
     private static final String HOSTED = "hosted";
     private static final String REF_A = "{\"Ref\": \"NameA\"}";
     private static final String REF_B = "{\"Ref\": \"NameB\"}";
@@ -203,6 +274,9 @@ class CfnReplacementIntegrationTest {
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
             CfnStackWaits.createStack(client, stack, row.before(), "CREATE_COMPLETE");
             String before = physicalId(client, stack, "Subject");
+            if (row.afterCreate() != null) {
+                row.afterCreate().accept(stack);
+            }
 
             createUpdateChangeSet(client, stack, "change", row.after());
             assertEquals(List.of(row.preview()), replacement(client, stack, "change", "Subject"), row.label());
@@ -221,6 +295,18 @@ class CfnReplacementIntegrationTest {
             }
         } finally {
             CfnStackWaits.deleteStack(stack);
+            if (row.afterCreate() != null) {
+                CfnStackWaits.deleteStack(OUTPUT_SOURCE);
+            }
+        }
+    }
+
+    private static void createOutputSource() {
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, OUTPUT_SOURCE, "{\"Resources\": {\"Source\": {\"Type\":"
+                    + " \"AWS::SSM::Parameter\", \"Properties\": {\"Type\": \"String\", \"Value\": \"v\"}}},"
+                    + " \"Outputs\": {\"Out\": {\"Value\": \"output-value\"}}}", "CREATE_COMPLETE");
         }
     }
 

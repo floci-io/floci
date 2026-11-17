@@ -13,7 +13,7 @@ public class Activity {
     private String activityArn;
     private String name;
     private double creationDate;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public Activity() {
         this.creationDate = EpochSeconds.fromMillis(System.currentTimeMillis());

@@ -78,10 +78,16 @@ capped at 4096 bytes. Oversized answers are truncated at whole-record boundaries
 and carry the DNS truncation flag. The embedded server remains UDP-only; TCP
 retry is not implemented.
 
-Two limits are worth knowing. `HTTP` namespaces do not resolve, matching AWS,
-where they are reachable only through `DiscoverInstances`. The embedded DNS server only runs
-when Floci itself runs inside Docker, so name resolution is available to
-containers, not to processes on the host.
+`HTTP` namespaces do not resolve, matching AWS, where they are reachable only
+through `DiscoverInstances`.
+
+When Floci itself runs in Docker, the containers it launches resolve these names
+through it, and publishing the Floci container's port 53/udp lets the host's
+resolver use it too. When Floci runs natively, the containers it launches resolve
+them through a listener on the Docker bridge, which needs a Linux host and
+permission to bind port 53, and the host's own resolver can be pointed at a
+listener on `127.0.0.1` set with `FLOCI_DNS_HOST_PORT`. See
+[DNS](../configuration/environment-variables.md#dns) for both.
 
 ## Supported Operations
 

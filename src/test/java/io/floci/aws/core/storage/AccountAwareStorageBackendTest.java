@@ -29,9 +29,32 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class AccountAwareStorageBackendTest {
+
+    @Test
+    void keysIncludingLegacyFiltersOwnershipWithoutReadingOrMigratingValues() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<>());
+        String account = "000000000000";
+        String other = "111111111111";
+        String shared = "rule:us-east-1:default/old/name";
+        raw.put(shared, "legacy");
+        raw.put(account + "/" + shared, "explicit");
+        raw.put(other + "/rule:us-east-1:default/foreign", "foreign");
+        raw.put("unrelated", "unrelated");
+        Set<String> before = raw.keys();
+        clearInvocations(raw);
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, account);
+
+        assertEquals(Set.of(shared), storage.keysIncludingLegacyForAccount(account, key -> key.startsWith("rule:")));
+        assertEquals(Set.of("rule:us-east-1:default/foreign"),
+                storage.keysIncludingLegacyForAccount(other, key -> key.startsWith("rule:")));
+        verify(raw, times(2)).keys();
+        verifyNoMoreInteractions(raw);
+        assertEquals(before, raw.keys());
+    }
 
     @Test
     void getInAccountReadsTheNamedAccountOutsideAnyRequest() {
@@ -447,6 +470,40 @@ class AccountAwareStorageBackendTest {
 
         assertEquals(Set.of("000000000000/us-east-1::default", "123456789012/us-east-1::account"),
                 Set.copyOf(raw.keys()));
+    }
+
+    /**
+     * A legacy entry is copied to each other Region its account's resources name it in, keeping a record already
+     * there, and then moves to the default Region; one no resource names moves only. The default Region named too
+     * gets the moved entry, not a copy.
+     */
+    @Test
+    void migrateLegacyEntriesToRegionsCopiesEachToTheRegionsUsingItThenMovesItToTheDefaultRegion() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("123456789012/used", "used");
+        raw.put("123456789012/unused", "unused");
+        raw.put("123456789012/eu-west-1::used", "already there");
+        raw.put("gen0", "default-account");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        List<String> asked = new ArrayList<>();
+
+        storage.migrateLegacyEntriesToRegions(key -> !key.contains("::"), "us-east-1",
+                (account, value) -> {
+                    asked.add(account + " " + value);
+                    return value.equals("used") ? Set.of("us-east-1", "eu-central-1", "eu-west-1") : Set.of();
+                },
+                (region, value) -> region + "::" + value, value -> value + " (copy)");
+
+        assertEquals(List.of("000000000000 default-account", "123456789012 unused", "123456789012 used"),
+                asked.stream().sorted().toList());
+        assertEquals(Map.of(
+                        "123456789012/us-east-1::used", "used",
+                        "123456789012/eu-central-1::used", "used (copy)",
+                        "123456789012/eu-west-1::used", "already there",
+                        "123456789012/us-east-1::unused", "unused",
+                        "000000000000/us-east-1::default-account", "default-account"),
+                raw.keys().stream().collect(Collectors.toMap(key -> key, key -> raw.get(key).orElseThrow())));
     }
 
     /**

@@ -5,10 +5,10 @@ import java.util.Set;
 import java.util.function.BooleanSupplier;
 
 /**
- * Runs a cluster's bootstrap actions in the EMR {@code docker} runner mode: one after the other, in one
- * container of the release's image, which is then kept as the image the cluster's steps run in. The
- * service calls it off the request thread; {@link EmrBootstrapRunner} is the Docker implementation, and a
- * test supplies its own.
+ * Runs a cluster's bootstrap actions on one of its nodes in the EMR {@code docker} runner mode: one after the other,
+ * in a container of the release's image, which is then kept as the image that node runs from, the primary node's being
+ * the one the cluster's steps run in. The service calls it off the request thread; {@link EmrBootstrapRunner} is the
+ * Docker implementation, and a test supplies its own.
  */
 public interface BootstrapRunner {
 
@@ -19,7 +19,7 @@ public interface BootstrapRunner {
      */
     Outcome run(Bootstrap bootstrap, BooleanSupplier cancelled);
 
-    /** Stops the bootstrap of {@code clusterId}, now or as soon as its container is up. */
+    /** Stops each bootstrap of {@code clusterId}, its primary node's and its other nodes', now or once it is up. */
     void stop(String clusterId);
 
     /**
@@ -35,35 +35,53 @@ public interface BootstrapRunner {
     void removeImages(Set<String> kept);
 
     /**
-     * A cluster's bootstrap: its id, which names its container and its image; its account and Region; its
-     * release, and the image template and Docker network to run it in (a null template is the release's
-     * public EMR Serverless image, a null network the global default); the role of its EC2 instance profile,
-     * whose credentials the actions get; its actions; and the S3 folder their logs go to, ending in a slash
-     * (null for none), each action's in a folder of its own named by its number.
+     * A cluster's bootstrap on one of its nodes: its cluster's id, which with the node names its container and its
+     * image; its account and Region; its release, and the image template and Docker network to run it in (a null
+     * template is the release's public EMR Serverless image, a null network the global default); the role of its EC2
+     * instance profile, whose credentials the actions get; its actions; the S3 folder their logs go to, ending in a
+     * slash (null for none), each action's in a folder of its own named by its number; where its instance metadata is
+     * served; and the node it runs on, null for the primary node, else a core or task node's id as
+     * {@link ClusterStorage.Node#id} has it, with that node's instance role, MASTER, CORE or TASK.
      */
     record Bootstrap(String clusterId, String accountId, String region, String releaseLabel, String imageTemplate,
                      String dockerNetwork, String role, List<Action> actions, String logFolder,
-                     String metadataNetwork, String metadataAddress) {
+                     String metadataNetwork, String metadataAddress, String node, String instanceRole) {
 
+        /** The primary node's bootstrap. */
         Bootstrap(String clusterId, String accountId, String region, String releaseLabel, String imageTemplate,
                   String dockerNetwork, String role, List<Action> actions, String logFolder) {
             this(clusterId, accountId, region, releaseLabel, imageTemplate, dockerNetwork, role, actions, logFolder,
-                    null, null);
+                    null, null, null, "MASTER");
         }
 
         /** This bootstrap, run in {@code image}. */
         Bootstrap inImage(String image) {
             return new Bootstrap(clusterId, accountId, region, releaseLabel, image, dockerNetwork, role, actions,
-                    logFolder, metadataNetwork, metadataAddress);
+                    logFolder, metadataNetwork, metadataAddress, node, instanceRole);
         }
 
         /**
          * This bootstrap, its container on {@code network}, its cluster's own, at {@code address}, a link-local one,
-         * where its cluster's instance metadata relay answers it as the primary node, and on its steps' network too.
+         * where its cluster's instance metadata relay answers it as its node, and on its steps' network too.
          */
         Bootstrap onMetadata(String network, String address) {
             return new Bootstrap(clusterId, accountId, region, releaseLabel, imageTemplate, dockerNetwork, role,
-                    actions, logFolder, network, address);
+                    actions, logFolder, network, address, node, instanceRole);
+        }
+
+        /**
+         * This bootstrap on the cluster's core or task node {@code id}, of instance role {@code nodeRole}, its logs in
+         * {@code folder}, as on that node's own instance, before the relay is told where it is (see
+         * {@link #onMetadata}).
+         */
+        Bootstrap onNode(String id, String nodeRole, String folder) {
+            return new Bootstrap(clusterId, accountId, region, releaseLabel, imageTemplate, dockerNetwork, role,
+                    actions, folder, null, null, id, nodeRole);
+        }
+
+        /** What tells this bootstrap's container, image and session from its cluster's others. */
+        String name() {
+            return node == null ? clusterId : clusterId + "-" + node;
         }
     }
 

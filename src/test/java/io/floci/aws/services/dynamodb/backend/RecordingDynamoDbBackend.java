@@ -170,6 +170,12 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public Map<String, String> storedTags(String arn) {
+        invocations.add(new Invocation("storedTags", null, null));
+        return Map.of();
+    }
+
+    @Override
     public TableDefinition applyReplicaUpdates(Scope scope, String tableName, List<String> addRegions,
                                                List<String> removeRegions) {
         return record("applyReplicaUpdates", scope);

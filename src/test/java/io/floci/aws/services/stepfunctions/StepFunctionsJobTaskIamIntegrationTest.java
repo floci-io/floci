@@ -2,7 +2,6 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -33,6 +32,8 @@ import java.util.stream.Stream;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.StepFunctionsTestClient.LAMBDA_TRUST;
 import static io.floci.aws.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.floci.aws.testing.StepFunctionsTestClient.allow;
+import static io.floci.aws.testing.StepFunctionsTestClient.policy;
 import static io.floci.aws.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -998,27 +999,13 @@ class StepFunctionsJobTaskIamIntegrationTest {
         return task;
     }
 
-    private static String allow(String resource, String... actions) {
-        return policy(List.of(Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", List.of(resource))));
-    }
-
-    private static String policy(List<Map<String, Object>> statements) {
-        try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", statements));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
-
     private static void assertFailed(Response completed, String error) {
         assertEquals("FAILED", completed.jsonPath().getString("status"), completed.asString());
         assertEquals(error, completed.jsonPath().getString("error"), completed.asString());
     }
 
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-jobs-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-jobs-", trust, policy);
     }
 
     private String machine(Map<String, Object> task, String role) throws Exception {

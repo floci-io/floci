@@ -9,14 +9,17 @@ import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.account.model.AccountInformation;
 import io.floci.aws.services.account.model.AlternateContact;
 import io.floci.aws.services.account.model.ContactInformation;
+import io.floci.aws.services.organizations.AccountPlacementListener;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.organizations.model.Organization;
 import io.floci.aws.services.organizations.model.OrganizationAccount;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -24,14 +27,19 @@ import java.util.Optional;
 import java.util.Set;
 
 @ApplicationScoped
-public class AccountService implements Resettable, StoredResourceArns {
+public class AccountService implements Resettable, StoredResourceArns, AccountPlacementListener {
     private static final String ACCOUNT_MANAGEMENT_SERVICE_PRINCIPAL = ServicePrincipals.of("account");
     private static final Set<String> COUNTRIES_REQUIRING_STATE_OR_REGION =
             Set.of("US", "CA", "GB", "DE", "JP", "IN", "BR");
     private static final String PRIMARY_CONTACT_KEY = "primary";
+    private static final String ACCOUNT_NAME_KEY = "name";
+    private static final String ACCOUNT_STATE_ACTIVE = "ACTIVE";
+    private static final String JOINED_METHOD_CREATED = "CREATED";
+    private static final String ORGANIZATIONS_STATUS_PENDING_CLOSURE = "PENDING_CLOSURE";
 
     private final AccountAwareStorageBackend<AlternateContact> contacts;
     private final AccountAwareStorageBackend<ContactInformation> contactInformation;
+    private final AccountAwareStorageBackend<String> accountNames;
     private final OrganizationsService organizationsService;
 
     @Inject
@@ -40,6 +48,8 @@ public class AccountService implements Resettable, StoredResourceArns {
                 new TypeReference<Map<String, AlternateContact>>() {});
         this.contactInformation = storageFactory.create("account", "account-contact-information.json",
                 new TypeReference<Map<String, ContactInformation>>() {});
+        this.accountNames = storageFactory.create("account", "account-names.json",
+                new TypeReference<Map<String, String>>() {});
         this.organizationsService = organizationsService;
     }
 
@@ -107,6 +117,50 @@ public class AccountService implements Resettable, StoredResourceArns {
                 .orElseThrow(AccountService::contactInformationNotFound);
     }
 
+    public AccountInformation getAccountInformation(String callerAccountId, JsonNode request) {
+        AccountRequestShapes.check("GetAccountInformation", request);
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        return organizationsService.findAccount(targetAccountId)
+                .map(AccountService::informationOf)
+                .orElseGet(() -> new AccountInformation(targetAccountId,
+                        accountNames.getForAccount(targetAccountId, ACCOUNT_NAME_KEY).orElse(null),
+                        null, ACCOUNT_STATE_ACTIVE));
+    }
+
+    public void putAccountName(String callerAccountId, JsonNode request) {
+        AccountRequestShapes.check("PutAccountName", request);
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        String name = text(request, "AccountName");
+        // Kept for the account as well, so the name outlives its organization.
+        accountNames.putForAccount(targetAccountId, ACCOUNT_NAME_KEY, name);
+        organizationsService.renameAccount(targetAccountId, name);
+    }
+
+    /**
+     * Keeps the Organizations name of an account created in or invited into an organization, which
+     * {@code GetAccountInformation} answers once the account leaves it. A name the account already has stays.
+     */
+    @Override
+    public void accountPlacementChanged(String managementAccountId, String accountId) {
+        if (accountNames.getForAccount(accountId, ACCOUNT_NAME_KEY).isPresent()) {
+            return;
+        }
+        organizationsService.findAccount(accountId)
+                .ifPresent(account -> accountNames.putForAccount(accountId, ACCOUNT_NAME_KEY, account.getName()));
+    }
+
+    private static AccountInformation informationOf(OrganizationAccount account) {
+        // An invited account existed before it joined, so its JoinedTimestamp is not its creation date.
+        Instant created = JOINED_METHOD_CREATED.equals(account.getJoinedMethod())
+                ? account.getJoinedTimestamp()
+                : null;
+        // Account Management has no PENDING_CLOSURE, and such an account is still usable.
+        String state = ORGANIZATIONS_STATUS_PENDING_CLOSURE.equals(account.getStatus())
+                ? ACCOUNT_STATE_ACTIVE
+                : account.getStatus();
+        return new AccountInformation(account.getId(), account.getName(), created, state);
+    }
+
     private String resolveTargetAccount(String callerAccountId, JsonNode request) {
         String requestedAccountId = text(request, "AccountId");
         if (requestedAccountId == null) {
@@ -151,6 +205,7 @@ public class AccountService implements Resettable, StoredResourceArns {
     public void clear() {
         contacts.clear();
         contactInformation.clear();
+        accountNames.clear();
     }
 
     /** The namespace of the resource types this service finds, as the request-resources table names it. */

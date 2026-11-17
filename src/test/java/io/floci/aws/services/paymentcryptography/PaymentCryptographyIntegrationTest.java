@@ -59,10 +59,18 @@ class PaymentCryptographyIntegrationTest {
             .when().post("/");
     }
 
-    private static final String CREATE_KEY = """
+    private static final String CREATE_KEY_BODY = """
             {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
              "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
              "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
+             "Exportable":true%s}""";
+
+    private static final String CREATE_KEY = CREATE_KEY_BODY.formatted("");
+
+    private static final String CREATE_WRAPPING_KEY = """
+            {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+             "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+             "KeyModesOfUse":{"Wrap":true,"Unwrap":true}},
              "Exportable":true}""";
 
     private static final String CREATE_KEY_PAIR = """
@@ -184,17 +192,10 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void anImportedKeyCarriesTheEnabledFlagAndTheTags() {
         // The import names the key's state and its tags, and the key comes back that way.
-        String wrapping = call("CreateKey", """
-                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
-                 "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
-                 "KeyModesOfUse":{"Wrap":true,"Unwrap":true}},
-                 "Exportable":true}
-                """)
+        String wrapping = call("CreateKey", CREATE_WRAPPING_KEY)
                 .then().statusCode(200)
                     .extract().path("Key.KeyArn");
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
         String block = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn
                 + "\",\"KeyMaterial\":{\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\""
                 + wrapping + "\"}}}")
@@ -218,9 +219,7 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void aRequestNamingTwoFormsIsRefused() {
         // The union holds one form per request, and naming two is not naming one.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\"" + arn + "\"},"
@@ -234,9 +233,7 @@ class PaymentCryptographyIntegrationTest {
     void theTr34FormIsServed() {
         // The TR-34 form is one the service makes now, so a request that names one is
         // refused for what it is missing and not for naming an unserved form.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"Tr34KeyBlock\":{\"WrappingKeyCertificate\":\"x\","
@@ -250,9 +247,7 @@ class PaymentCryptographyIntegrationTest {
     void theAs2805FormIsServed() {
         // The AS2805 form is one the service makes now, so a request that names one is
         // refused for what it is missing and not for naming an unserved form.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"As2805KeyCryptogram\":{\"As2805KeyVariant\":"
@@ -267,9 +262,7 @@ class PaymentCryptographyIntegrationTest {
     void aRequestNamingNoFormIsRefused() {
         // Every form the model names is one the service makes now, so a request that
         // names none of them names no form at all.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{}}")
                 .then().statusCode(400)
@@ -284,9 +277,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void theModelCheckRefusesAnExportWithoutAWrappingKeyCertificate() {
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"KeyCryptogram\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\"}}}");
@@ -385,6 +376,15 @@ class PaymentCryptographyIntegrationTest {
         assertTheModelRefused(answer, "KeyDerivationHashAlgorithm");
     }
 
+    /**
+     * The body of a request that creates a key replicated to the regions the member names.
+     *
+     * @param regions the member that names the regions, as the request spells it
+     */
+    private static String createReplicatedKeyBody(String regions) {
+        return CREATE_KEY_BODY.formatted(",\"ReplicationRegions\":" + regions);
+    }
+
     /** The ARN of a key the request may name. */
     private static String keyArn() {
         return call("CreateKey", CREATE_KEY).then().statusCode(200)
@@ -404,9 +404,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void theModelCheckRefusesATr34ExportWithoutItsWrappingKeyCertificate() {
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\","
@@ -496,8 +494,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void theKeysOfARegionAreListed() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ListKeys", "{}")
                 .then().statusCode(200)
@@ -509,8 +506,7 @@ class PaymentCryptographyIntegrationTest {
     void aListedKeyIsItsSummary() {
         // A list carries the key's summary and not the whole key: the identifier, the state,
         // the attributes, the check value and the two flags.
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ListKeys", "{}")
                 .then().statusCode(200)
@@ -527,13 +523,82 @@ class PaymentCryptographyIntegrationTest {
                     // key, which the list does not carry.
                     .body("Keys.find { it.KeyArn == '" + arn + "' }.CreateTimestamp", nullValue())
                     .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyOrigin", nullValue())
-                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue());
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue())
+                    // A key that replicates nowhere is not a multi-region key, so the summary
+                    // says nothing about where it stands.
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.MultiRegionKeyType", nullValue());
+    }
+
+    @Test
+    void aReplicaAnswersWithTheKindOfTheKeyAndItsPrimaryRegion() {
+        // The replication status and the defaults flag are the primary's alone, as the
+        // reference's own answer shows.
+        String arn = call("CreateKey", createReplicatedKeyBody("[\"us-west-2\"]"))
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("Key.MultiRegionKeyType", equalTo("PRIMARY"))
+                .body("Key.PrimaryRegion", equalTo("us-east-1"))
+                .body("Key.ReplicationStatus.'us-west-2'.Status", equalTo("SYNCHRONIZED"))
+                .body("Key.UsingDefaultReplicationRegions", equalTo(false));
+
+        String replicaArn = arn.replace(":us-east-1:", ":us-west-2:");
+        callIn("us-west-2", "GetKey", "{\"KeyIdentifier\":\"" + replicaArn + "\"}")
+                .then().statusCode(200)
+                .body("Key.MultiRegionKeyType", equalTo("REPLICA"))
+                .body("Key.PrimaryRegion", equalTo("us-east-1"))
+                .body("Key.ReplicationStatus", nullValue())
+                .body("Key.UsingDefaultReplicationRegions", nullValue());
+    }
+
+    @Test
+    void aReplicationRegionThatIsNotANameIsRefused() {
+        // The replication regions are names, so a request that names something else is
+        // refused rather than answered as if it had named no region at all. The shape check
+        // settles that the member is a list of names, so the refusal is the model's own.
+        String arn = keyArn();
+
+        call("CreateKey", createReplicatedKeyBody("[123]"))
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+
+        call("AddKeyReplicationRegions",
+                "{\"KeyIdentifier\":\"" + arn + "\",\"ReplicationRegions\":[null]}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+    }
+
+    @Test
+    void aReplicationRegionThatIsNotAListIsRefused() {
+        call("CreateKey", createReplicatedKeyBody("\"us-west-2\""))
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+    }
+
+    @Test
+    void aReplicationRegionOfAnotherPartitionIsRefused() {
+        // A key is replicated within the partition it is in, as the reference says, so a
+        // Region of another partition is refused.
+        call("CreateKey", createReplicatedKeyBody("[\"cn-north-1\"]"))
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("cn-north-1"));
+
+        call("EnableDefaultKeyReplicationRegions", """
+                {"ReplicationRegions":["us-gov-west-1"]}""")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("us-gov-west-1"));
     }
 
     @Test
     void anAliasIsCreatedAndListed() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("CreateAlias", "{\"AliasName\":\"alias/team/card-key\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -551,8 +616,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void anAliasNameIsUniqueInARegion() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         call("CreateAlias", "{\"AliasName\":\"alias/team/duplicate\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);
 
@@ -563,8 +627,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aKeyIsTaggedAndUntagged() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("TagResource", "{\"ResourceArn\":\"" + arn + "\","
                 + "\"Tags\":[{\"Key\":\"Origin\",\"Value\":\"PRIMARY\"}]}")
@@ -594,8 +657,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aKeyIsDeleted() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(200);
@@ -682,8 +744,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aDeletedKeyIsAnsweredWithTheKey() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -700,8 +761,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aWaitingPeriodOutsideTheServiceRangeIsRefused() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":1}")
                 .then().statusCode(400)
@@ -716,8 +776,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void theKeysAreListedByTheirState() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ListKeys", "{\"KeyState\":\"CREATE_COMPLETE\"}")
                 .then().statusCode(200)
@@ -736,8 +795,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void anAliasIsDetachedFromItsKeyByAnUpdateNamingNoKey() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         call("CreateAlias", "{\"AliasName\":\"alias/team/detached\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);
 
@@ -761,8 +819,7 @@ class PaymentCryptographyIntegrationTest {
                     .body("Key.Enabled", equalTo(false))
                     .body("Key.Exportable", equalTo(false));
 
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -771,10 +828,8 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aTaggingRequestNamesItsKeyInResourceArnOnly() {
-        String named = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
-        String other = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String named = keyArn();
+        String other = keyArn();
 
         // The request names one key and another besides it. The change follows the member
         // the operation names its key in, which is the member the permission check reads.
@@ -796,8 +851,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aKeyIsNamedByItsArnOrByAnAliasAndNotByABareId() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         String id = arn.substring(arn.lastIndexOf('/') + 1);
         call("CreateAlias", "{\"AliasName\":\"alias/team/named\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);
@@ -825,8 +879,7 @@ class PaymentCryptographyIntegrationTest {
                     .body("message", containsString("You can't create an alias without a key."));
 
         // The name was not taken by the refused request.
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         call("CreateAlias", "{\"AliasName\":\"alias/team/reserved\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
                     .body("Alias.AliasName", equalTo("alias/team/reserved"))
@@ -876,8 +929,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aTaggingRequestNamingItsKeyByAnIdOrAnAliasIsRefused() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         String id = arn.substring(arn.lastIndexOf('/') + 1);
         call("CreateAlias", "{\"AliasName\":\"alias/team/tagged\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);

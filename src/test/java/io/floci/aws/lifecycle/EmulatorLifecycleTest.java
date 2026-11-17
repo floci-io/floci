@@ -43,6 +43,7 @@ import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
+import io.floci.aws.testutil.LogCapture;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -62,14 +63,9 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
-import java.text.MessageFormat;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.logging.Handler;
-import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -190,6 +186,27 @@ class EmulatorLifecycleTest {
                 dynamoDbRuntime, redshiftZeroEtlConsumer, eksService, codeArtifactService);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(Collections.emptyIterator());
+    }
+
+    @Test
+    void preparesContainerOwnersBeforeRetiringSharedCredentials() {
+        ContainerTeardown first = Mockito.mock(ContainerTeardown.class);
+        ContainerTeardown second = Mockito.mock(ContainerTeardown.class);
+        when(containerTeardowns.iterator()).thenReturn(List.of(first, second).iterator());
+        when(ecsTaskRoleCredentialsConfig.enabled()).thenReturn(true);
+
+        emulatorLifecycle.onStop(new ShutdownEvent());
+
+        InOrder order = Mockito.inOrder(first, second, storageFactory, ecsTaskRoleCredentialsServer);
+        order.verify(storageFactory).flushAll();
+        order.verify(first).beginTeardown();
+        order.verify(second).beginTeardown();
+        order.verify(ecsTaskRoleCredentialsServer).stop();
+        order.verify(first).stopManagedContainers();
+        order.verify(second).stopManagedContainers();
+        order.verify(storageFactory).shutdownAll();
+        verify(first).beginTeardown();
+        verify(second).beginTeardown();
     }
 
     private void stubStorageConfig() {
@@ -786,32 +803,7 @@ class EmulatorLifecycleTest {
 
     /** Collects the messages EmulatorLifecycle logs while {@code action} runs. */
     private List<String> lifecycleLogMessages(Runnable action) {
-        Logger logger = Logger.getLogger(EmulatorLifecycle.class.getName());
-        List<String> messages = new CopyOnWriteArrayList<>();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                Object[] parameters = logRecord.getParameters();
-                messages.add(parameters == null || parameters.length == 0
-                        ? logRecord.getMessage()
-                        : MessageFormat.format(logRecord.getMessage(), parameters));
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        try {
-            action.run();
-        } finally {
-            logger.removeHandler(handler);
-        }
-        return messages;
+        return LogCapture.capture(EmulatorLifecycle.class, action).stream().map(LogCapture::formatted).toList();
     }
 
     @Test

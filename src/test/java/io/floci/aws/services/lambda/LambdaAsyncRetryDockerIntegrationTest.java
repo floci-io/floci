@@ -3,6 +3,7 @@ package io.floci.aws.services.lambda;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.SqsTestQueue;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -10,13 +11,8 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -167,15 +163,8 @@ class LambdaAsyncRetryDockerIntegrationTest {
         given().when().delete(BASE_PATH + "/functions/" + functionName);
     }
 
-    private static String failingZipBase64() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async () => { throw new Error('boom'); };\n"
-                    .getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
+    private static String failingZipBase64() {
+        return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => { throw new Error('boom'); };\n");
     }
 
     private boolean isDockerAvailable() {

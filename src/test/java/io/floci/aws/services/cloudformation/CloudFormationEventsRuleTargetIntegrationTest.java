@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -7,6 +8,11 @@ import io.restassured.path.json.JsonPath;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.kinesis.KinesisClient;
+import software.amazon.awssdk.services.kinesis.model.Record;
+import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -82,6 +88,52 @@ class CloudFormationEventsRuleTargetIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void ruleTargetKeepsKinesisPartitionKeyPath() {
+        String stack = "cfn-rule-targets-kinesis";
+        String stream = "cfn-rule-targets-kinesis";
+        String template = """
+                {"Resources": {"Rule": {"Type": "AWS::Events::Rule", "Properties": {
+                  "Name": "cfn-rule-targets-kinesis",
+                  "EventPattern": {"source": ["cfn.rule.targets.kinesis"]},
+                  "Targets": [{
+                    "Id": "Stream",
+                    "Arn": "arn:aws:kinesis:us-east-1:000000000000:stream/cfn-rule-targets-kinesis",
+                    "KinesisParameters": {"PartitionKeyPath": "$.detail.orderId"}
+                  }]}}}}
+                """;
+        try (KinesisClient kinesis = AwsTestClients.create(KinesisClient.builder(),
+                "000000000000", Region.US_EAST_1);
+             EventBridgeClient events = AwsTestClients.create(EventBridgeClient.builder(),
+                     "000000000000", Region.US_EAST_1)) {
+            kinesis.createStream(request -> request.streamName(stream).shardCount(1));
+            try {
+                given().contentType("application/x-www-form-urlencoded")
+                        .formParam("Action", "CreateStack")
+                        .formParam("StackName", stack)
+                        .formParam("TemplateBody", template)
+                        .when().post("/").then().statusCode(200);
+                assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
+
+                events.putEvents(request -> request.entries(entry -> entry.source("cfn.rule.targets.kinesis")
+                        .detailType("Order").detail("{\"orderId\":\"order-7\"}")));
+                String shard = kinesis.describeStream(request -> request.streamName(stream))
+                        .streamDescription().shards().getFirst().shardId();
+                String iterator = kinesis.getShardIterator(request -> request.streamName(stream)
+                        .shardId(shard).shardIteratorType(ShardIteratorType.TRIM_HORIZON)).shardIterator();
+                List<Record> records = kinesis.getRecords(request -> request.shardIterator(iterator)).records();
+                assertEquals(1, records.size());
+                assertEquals("\"order-7\"", records.getFirst().partitionKey());
+
+                listTargets("cfn-rule-targets-kinesis", "default")
+                        .body("Targets[0].KinesisParameters.PartitionKeyPath", equalTo("$.detail.orderId"));
+            } finally {
+                deleteStack(stack);
+                kinesis.deleteStream(request -> request.streamName(stream));
+            }
+        }
     }
 
     @Test

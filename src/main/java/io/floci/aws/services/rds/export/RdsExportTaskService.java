@@ -332,6 +332,17 @@ public class RdsExportTaskService implements Resettable {
         }
     }
 
+    /** The source a stored export names, without migration, worker scheduling or status changes. */
+    public Optional<String> storedSourceArn(String taskId, String region) {
+        String account = regionResolver.getAccountId();
+        String effectiveRegion = effectiveRegion(region);
+        String key = key(effectiveRegion, taskId);
+        Optional<ExportTask> task = tasks instanceof AccountAwareStorageBackend<ExportTask> aware
+                ? aware.getForAccount(account, key).or(() -> aware.getLegacyForAccount(account, key)) : tasks.get(key);
+        return task.filter(value -> account.equals(value.getAccountId()) && effectiveRegion.equals(value.getRegion()))
+                .map(ExportTask::getSourceArn);
+    }
+
     private ExportTask requireTask(String region, String taskId) {
         return tasks.get(key(region, taskId))
                 .orElseThrow(() -> new AwsException("ExportTaskNotFound",

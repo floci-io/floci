@@ -1,6 +1,8 @@
 package io.floci.aws.services.eventbridge;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.eventbridge.model.RedshiftDataParameters;
 import io.floci.aws.services.eventbridge.model.Rule;
@@ -9,22 +11,34 @@ import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.redshiftdata.RedshiftDataService;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.vertx.core.Handler;
+import io.vertx.core.Vertx;
 import jakarta.inject.Inject;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
 class EventBridgeRedshiftDataAccountIntegrationTest {
 
     @Inject
-    RuleScheduler scheduler;
+    EmulatorConfig config;
+
+    @Inject
+    ObjectMapper objectMapper;
+
+    @Inject
+    TargetDispatcher dispatcher;
 
     @Inject
     RegionResolver regionResolver;
@@ -65,9 +79,15 @@ class EventBridgeRedshiftDataAccountIntegrationTest {
         }
         target.setRedshiftDataParameters(parameters);
 
+        Vertx vertx = mock(Vertx.class);
+        ArgumentCaptor<Handler<Long>> fire = ArgumentCaptor.captor();
+        when(vertx.setPeriodic(eq(60_000L), fire.capture())).thenReturn(1L);
+        RuleScheduler scheduler = new RuleScheduler(vertx, config, objectMapper, dispatcher);
         try {
             scheduler.startScheduler(rule.getArn(), "rate(1 minute)",
                     () -> new RuleScheduler.ScheduleData(rule, List.of(target)));
+            assertNull(executionAccount.get());
+            fire.getValue().handle(1L);
             assertEquals("111122223333", executionAccount.get());
             assertEquals(previousAccount, regionResolver.getAccountId());
         } finally {

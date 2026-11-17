@@ -186,6 +186,8 @@ AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::S3Vectors::Index	S3VectorsCfnProvisioner
 AWS::S3Vectors::VectorBucket	S3VectorsCfnProvisioner
+AWS::SES::ConfigurationSet	SesCfnProvisioner
+AWS::SES::ConfigurationSetEventDestination	SesEventDestinationCfnProvisioner
 AWS::SES::EmailIdentity	SesCfnProvisioner
 AWS::SES::ReceiptRule	SesReceiptRuleCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner

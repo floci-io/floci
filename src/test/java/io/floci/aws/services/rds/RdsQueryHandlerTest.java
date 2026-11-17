@@ -1,8 +1,11 @@
 package io.floci.aws.services.rds;
 
+import com.github.dockerjava.api.exception.DockerException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
 import io.floci.aws.services.rds.model.DatabaseEngine;
@@ -456,6 +459,23 @@ class RdsQueryHandlerTest {
         String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
 
         assertTrue(body.contains("<PubliclyAccessible>true</PubliclyAccessible>"), body);
+    }
+
+    @Test
+    void describeDbInstances_showsAnInstanceThatKeepsNoGroupsOnItsVpcsDefaultGroup() {
+        DbInstance own = makeInstance("own");
+        own.setVpcSecurityGroupIds(List.of("sg-own"));
+        DbInstance member = makeInstance("member");
+        DbInstance vpcGone = makeInstance("vpc-gone");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(own, member, vpcGone));
+        when(service.defaultVpcSecurityGroupIds(member)).thenReturn(List.of("sg-vpc-default"));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-own</VpcSecurityGroupId>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-vpc-default</VpcSecurityGroupId>"), body);
+        assertTrue(body.contains("<VpcSecurityGroupId>sg-00000000</VpcSecurityGroupId>"), body);
+        verify(service, never()).defaultVpcSecurityGroupIds(own);
     }
 
     @Test
@@ -913,6 +933,26 @@ class RdsQueryHandlerTest {
 
         String body = (String) response.getEntity();
         assertFalse(body.contains("<MasterUserSecret>"));
+    }
+
+    @Test
+    void createDbClusterAnswersADockerRejectionWithANonRetryableCapacityError() {
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), anyBoolean()))
+                .thenThrow(new ContainerRejectedException(
+                        new DockerException("authorization denied by plugin: --mounts is not allowed", 403)));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        assertEquals(400, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Code>InsufficientDBInstanceCapacity</Code>"));
+        assertTrue(body.contains("--mounts is not allowed"));
     }
 
     @Test
@@ -3509,8 +3549,8 @@ class RdsQueryHandlerTest {
         group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
         group.setVpcId("vpc-default");
         group.setSubnetGroupStatus("Complete");
-        group.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
-        group.setSubnetAvailabilityZones(Map.of("subnet-default-a", "us-east-1a", "subnet-default-b", "us-east-1b"));
+        group.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
+        group.setSubnetAvailabilityZones(Map.of(Ec2Service.defaultSubnetId("us-east-1", "a"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b"), "us-east-1b"));
         return group;
     }
 

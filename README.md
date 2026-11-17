@@ -300,7 +300,7 @@ Floci supports local emulation for application services, data services, eventing
 | Events and workflows | EventBridge, EventBridge V2, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics, CloudWatch OAM, CloudWatch RUM, X-Ray, Managed Prometheus (AMP) |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, Cognito Identity, ACM, Route53, Route 53 Resolver, Cloud Map, Global Accelerator |
 | Containers and compute | ECS, EC2, EC2 Instance Connect, Lightsail, EKS, MWAA, ECR, EFS, CodeBuild, CodeDeploy, CodePipeline, CodeGuru Reviewer, CodeArtifact, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2, ELB Classic |
-| Data, analytics, and AI | Athena, Glue, Lake Formation, EMR, EMR Serverless, Redshift, Redshift Data API, Redshift Serverless, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Comprehend, Rekognition, Translate, Bedrock, Bedrock Runtime, Bedrock AgentCore, Bedrock AgentCore Control, Amazon SageMaker, QuickSight |
+| Data, analytics, and AI | Athena, Glue, Lake Formation, EMR, EMR on EKS, EMR Serverless, Redshift, Redshift Data API, Redshift Serverless, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Comprehend, Rekognition, Translate, Bedrock, Bedrock Runtime, Bedrock AgentCore, Bedrock AgentCore Control, Amazon SageMaker, QuickSight |
 | Databases and caching | Aurora DSQL, RDS, RDS Data API, Neptune, DocumentDB, DMS, MemoryDB, ElastiCache, Timestream for InfluxDB |
 | Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family, DataSync, IoT Core, Amazon Connect, Amazon AppIntegrations |
 | Security and governance | AWS Signer, AWS Network Firewall, AWS RAM, Service Quotas, WAF v2, GuardDuty, Amazon Inspector, CloudTrail, CloudFront, AWS Resource Groups, Resource Groups Tagging API, Resource Explorer 2, CloudHSM v2, Organizations, AWS Account Management, IAM Access Analyzer, IAM Identity Center (SSO Admin, OIDC, Access Portal, SCIM), Identity Store, Amazon Macie, Amazon Detective, Security Hub, Amazon Verified Permissions, Control Catalog, Control Tower, Service Catalog, AWS Marketplace |
@@ -354,6 +354,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets (including resizing), bootstrap actions, steps, security configurations, scaling and termination policies, block public access, tagging |
+| EMR on EKS | In-process | Virtual clusters, job runs through their states, job templates with parameters, managed endpoints, security configurations, tagging; no Spark on Kubernetes |
 | Data Firehose | In-process | Streaming delivery, buffered flush to S3 with GZIP/ZIP/Snappy compression |
 | Managed Service for Apache Flink | Real Docker | Kinesis Analytics V2 control plane; StartApplication runs a real Flink cluster (JobManager + TaskManager, image per RuntimeEnvironment), pulls the application JAR from local S3, and submits the job |
 | ECS | Real Docker | Clusters, task definitions, tasks, services, capacity providers, task sets |
@@ -442,6 +443,16 @@ docker run -d --name floci \
   -u root \
   floci/floci:latest
 ```
+
+### Security group enforcement
+
+By default, security groups on EC2 instances and ECS `awsvpc` tasks are stored, returned and used to decide which ports to publish, but they do not filter traffic. With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci gives each Docker-backed instance and `awsvpc` task its own network namespace with an nftables default-deny policy, and filters new connections between Floci-managed containers by the sender's egress rules and the receiver's ingress rules, matched against the ENIs' own IPv4 and IPv6 addresses and group memberships. Replies to an allowed connection pass through connection tracking. It does not emulate VPC routing, network ACLs, NAT gateways or peering.
+
+- It needs rootful Docker running Linux containers. Rootless Docker and Windows containers are not supported.
+- Turn it on with `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`; it is off by default.
+- While it is on, SSH is published, and an application port is published on the host only when an ingress rule opens it to every address (`0.0.0.0/0` or `::/0`), at launch or later, and only on the host addresses of that rule's family. Docker can replace a host client's address, so a port that only a narrower CIDR, a prefix list or a referenced group opens is reachable only from the Floci-managed containers that rule admits, not from the host.
+
+See [Security Group Port Publishing](docs/services/ec2.md#security-group-port-publishing) for the details.
 
 ### Overriding default images
 

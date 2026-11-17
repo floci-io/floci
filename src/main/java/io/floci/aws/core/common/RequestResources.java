@@ -208,6 +208,43 @@ public final class RequestResources {
         return List.copyOf(found);
     }
 
+    /** A request a statement's run makes to another service as the caller: {@code action} on {@code resource}. */
+    public record StatementRequest(String action, String resource) {
+    }
+
+    /**
+     * The requests the operation's service makes to another service as the caller to run {@code statement}, as the
+     * table's {@code statements} give them, from the page of AWS's documentation vendored for them: each action on
+     * each of its resources, in the request's partition, Region and account, a variable taking what {@code names}
+     * gives the word the table fills it with ({@code database}, {@code table}) and open where it fills it with none. A
+     * table without partitions makes no partition request. None for a statement the table gives no requests.
+     */
+    public static List<StatementRequest> statementRequests(String operation, String statement,
+                                                           Map<String, String> names, boolean partitioned,
+                                                           String partition, String region, String accountId) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        List<StatementRequest> requests = new ArrayList<>();
+        for (RequestResourceMembers.StatementRequest request : table.statements()
+                .getOrDefault(operation, Map.of()).getOrDefault(statement, List.of())) {
+            if (request.partitioned() && !partitioned) {
+                continue;
+            }
+            Map<String, RequestResourceMembers.ArnFormat> formats = table.formats()
+                    .getOrDefault(request.action().substring(0, request.action().indexOf(':')), Map.of());
+            for (RequestResourceMembers.StatementResource resource : request.resources()) {
+                Map<String, String> filling = new HashMap<>();
+                resource.fill().forEach((variable, word) -> {
+                    if (names.get(word) != null) {
+                        filling.put(variable, names.get(word));
+                    }
+                });
+                requests.add(new StatementRequest(request.action(),
+                        render(formats.get(resource.type()).format(), filling, partition, region, accountId)));
+            }
+        }
+        return List.copyOf(requests);
+    }
+
     /** Whether the table holds the operation as one with no resource of its own, which is checked on {@code *}. */
     public static boolean actsOnNoResource(String operation) {
         return reads(operation) && !hasIndividualTargets(operation)
@@ -306,8 +343,9 @@ public final class RequestResources {
 
     /**
      * As {@link #created(String, ContainerRequestContext, String, String, String, Map)}, for a request whose tags need
-     * the {@code tagging} action: a create whose action acts on no resource type tags the resource it makes
-     * ({@code makes}) where that action acts on the resource's type, as AWS checks a tagging action on the resource
+     * the {@code tagging} action: a create whose action acts on no resource type, or on other types alone (Glue's
+     * {@code CreateConnection}), tags the resource it makes ({@code makes}) where that action acts on the resource's
+     * type, as AWS checks a tagging action on the resource
      * being tagged, and its tags go where the operation is checked otherwise (a Cloud Map namespace, whose
      * {@code TagResource} acts on no type, on {@code *}); a null {@code tagging}, or one the table does not hold, acts
      * on it.

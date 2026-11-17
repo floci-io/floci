@@ -61,7 +61,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `StopDBCluster` | Stop a cluster and its member instances |
 | `StartDBCluster` | Start a stopped cluster and its members |
 | `RebootDBCluster` | Restart a cluster's database and its members' proxies |
-| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
+| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL, MySQL or MariaDB instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
 | `PromoteReadReplica` | Detach a read replica into a standalone instance and turn automated backups on |
 | `SwitchoverReadReplica` | Refused with `InvalidDBInstanceState`: AWS supports switchover only for Oracle and SQL Server replicas, neither of which is emulated |
 | `PromoteReadReplicaDBCluster` | Refused with `InvalidDBClusterStateFault`: no cluster is created as a replica of an instance |
@@ -208,8 +208,10 @@ checked against the instance's other window. Modifications apply immediately —
     `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
     state (no real cross-account sharing). Available manual snapshots can be deleted, copied by
     identifier or ARN, and modified. Copies retain the source data and can copy source tags or add
-    request tags. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
-    the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
+    request tags. AWS doesn't document a `ModifyDBSnapshot` that names neither `EngineVersion` nor
+    `OptionGroupName`; Floci returns the snapshot unchanged, since the model requires only the
+    identifier and declares no fault for a request with nothing to change. Snapshots are
+    region-scoped like DB instances and clusters: `DBSnapshotArn` reflects the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
     for that same region. Cluster snapshots follow the same lifecycle: `CreateDBClusterSnapshot`
     dumps the cluster's database, `RestoreDBClusterFromSnapshot` loads it into a new cluster, and
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
@@ -256,6 +258,27 @@ Malformed reset flags leave saved parameter overrides unchanged. Malformed event
 flags leave the subscription and its topic, source type and event categories unchanged.
 Malformed restore flags are rejected before starting an instance or cluster restore.
 
+
+## Native EventBridge lifecycle notifications
+
+Completed `StopDBInstance`, `StartDBInstance`, `StopDBCluster` and `StartDBCluster`
+operations publish `aws.rds` notifications on the resource account and Region's default
+EventBridge bus. Cluster operations also notify their member instances. Instance events
+use `RDS DB Instance Event` and IDs `RDS-EVENT-0087` (stopped) and `RDS-EVENT-0088`
+(started); cluster events use `RDS DB Cluster Event` and `RDS-EVENT-0150` / `0151`.
+The resource ARN appears in both `resources` and `detail.SourceArn`, alongside
+`SourceType` (`DB_INSTANCE` for instances, `CLUSTER` for clusters),
+`SourceIdentifier`, `Date`, `Message`, `EventID` and
+`EventCategories: ["notification"]`, following the
+[AWS event examples](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Events.overview.html).
+The [Aurora cluster example](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_Events.overview.html)
+documents the cluster-specific source type.
+
+Events are emitted after the backend and proxies finish the operation. Rejected or failed
+operations do not emit success notifications. Delivery is best effort, with no replay after
+a restart; other RDS lifecycle events are not yet emitted. Metadata-only mock mode emits
+the same notifications. EventBridge rules can route these events independently of the
+SNS subscription actions below.
 
 ## Event notification subscriptions
 
@@ -372,9 +395,11 @@ services:
 
     Proxy and target-group settings are persisted and round-trip through the RDS Query API and
     CloudFormation. Pool sizing, borrow timeout, idle timeout, TLS, init-query, and session-pinning
-    settings are currently control-plane metadata; the TCP relay does not yet implement those data-plane
-    behaviors. `DefaultAuthScheme=IAM_AUTH` is supported for control-plane workflows, but a real-mode
-    proxy using that scheme cannot register a target until backend IAM authentication is implemented.
+    settings are currently control-plane metadata; the TCP relay does not yet implement those
+    data-plane behaviors. `SessionPinningFilters` is accepted and stored on every engine family; AWS
+    documents it as effective only for the MySQL engine family. `DefaultAuthScheme=IAM_AUTH` is
+    supported for control-plane workflows, but a real-mode proxy using that scheme cannot register a
+    target until backend IAM authentication is implemented.
     Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
     `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
     matching the RDS API contract.
@@ -456,6 +481,32 @@ wrong credentials also resumes the cluster.
 Not emulated: Data API requests to a paused cluster wait for the resume, as the Aurora user guide
 describes, and never fail with `DatabaseResumingException`; logical or binlog replication does not
 keep a cluster awake; and parameter group changes do not resume one.
+
+## VPC security groups
+
+`CreateDBInstance` and `ModifyDBInstance` check each id in `VpcSecurityGroupIds` against EC2 before
+anything is stored or a container starts, and refuse the request the way RDS does:
+
+- An id that names no security group of the account and Region fails with `InvalidParameterValue`
+  (`Invalid security group , groupId= sg-..., groupName=.`).
+- A group outside the VPC of the instance's DB subnet group fails with `InvalidParameterCombination`
+  (`The DB instance and EC2 security group are in different VPCs. ...`).
+
+A modify that also names a new `DBSubnetGroupName` checks the groups against that subnet group's VPC.
+Snapshot and point-in-time restores, read replicas, the green instance of a Blue/Green deployment and
+a CloudFormation update of `VPCSecurityGroups` are checked the same way. A request that names no groups
+is not checked.
+
+A standalone instance whose request names no groups gets the default security group of its VPC, as
+RDS documents for `CreateDBInstance` and `CreateDBInstanceReadReplica`. A same-Region read replica
+otherwise takes its source's groups, but only in the source's VPC: in another VPC it gets that VPC's
+default group. A modify that moves an instance to another VPC without naming groups puts it on the
+new VPC's default group, since the old VPC's groups cannot go with it. A cluster member's groups are
+its cluster's, which Floci does not keep, so it keeps none. `DescribeDBInstances` reports the VPC's
+default group for an instance that keeps none, such as a cluster member or an instance stored before
+these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
+before it changes anything, and a rollback leaves the groups of an instance the update moved to
+another VPC, which it does not move back.
 
 ## Modifying a DB instance
 
@@ -619,8 +670,10 @@ one only Aurora has, is skipped with a warning in the database log. A formula va
 `require_secure_transport` and `skip_grant_tables`, which would lock out Floci's proxy (it talks
 to the server without TLS). When the server refuses a value and stops, the instance, or every
 member of the cluster, reports `incompatible-parameters` and Floci logs the server's error; correct
-the group and reboot to start it again. PostgreSQL and SQL Server databases do not take parameter
-group values yet.
+the group and reboot to start it again. A PostgreSQL or Aurora PostgreSQL database takes one value
+from its groups, layered and applied the same way: `rds.logical_replication` of `1` starts the
+server with `wal_level=logical`, as on RDS. Its other parameter group values, and those of SQL
+Server, are not applied yet.
 
 ## Option Groups
 
@@ -698,11 +751,11 @@ and a `StatusInfos` entry of type `read replication`, the source lists it under
 it is the ARN. A `DBSubnetGroupName` with a source given by plain identifier is refused with
 `DBSubnetGroupNotAllowedFault`, as on AWS.
 
-The replica's database is initialised from a `pg_dumpall` of the source taken when the replica is
-created, the same mechanism `RestoreDBInstanceFromDBSnapshot` uses, so it holds the source's data
-as of that moment. Writes made to the source afterwards are not streamed to the replica. Because
-the copy is dump based, only PostgreSQL sources are accepted; MySQL and MariaDB sources are refused
-with `InvalidDBInstanceState`, although `CreateDBSnapshot` accepts them. A source with automated backups
+The replica's database is initialised from a dump of the source taken when the replica is
+created, the same mechanism `CreateDBSnapshot` and `RestoreDBInstanceFromDBSnapshot` use, so it
+holds the source's data as of that moment. Writes made to the source afterwards are not streamed to
+the replica. PostgreSQL, MySQL and MariaDB sources are accepted; other engines are refused with
+`InvalidDBInstanceState`. A source with automated backups
 off (`BackupRetentionPeriod` 0) is refused with the same error AWS uses.
 
 `PromoteReadReplica` clears the link on both ends, sets the requested `BackupRetentionPeriod`
@@ -1269,3 +1322,23 @@ PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=a
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
   --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```
+
+### IAM lifecycle resources and tags
+
+With IAM enforcement enabled, RDS request-resource mappings cover the complete
+namespace generated from AWS's Service Authorization Reference and pinned
+botocore models. Parameter groups, subnet groups, DB instances and DB clusters
+use their named ARNs. Stored proxy and endpoint identities are resolved from
+request names, and target group lookups include the owning proxy. ARN-valued
+members, including `RemoveFromGlobalCluster`'s `DbClusterIdentifier`, are checked
+as ARNs. Unfiltered describe requests continue to require a wildcard grant.
+
+For modeled taggable RDS resources (including endpoints and proxies) and
+DocumentDB clusters, instances and snapshots sharing the RDS ARN namespace,
+supported `aws:ResourceTag` and RDS resource-specific tag conditions read stored
+tags from the exact target ARN's account, Region and partition. IAM and tagging
+share resource lookup dispatch. IAM reads neither create defaults nor migrate
+legacy records; named lookups use direct account-scoped keys, and generated
+proxy identities only search their owning account. Create-time request tags
+remain separate from existing-resource tags. Resource types without modeled
+storage retain the generated wildcard fallback when no stored identity exists.

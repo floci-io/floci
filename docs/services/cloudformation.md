@@ -207,7 +207,7 @@ cross-resource references.
 | S3 Vectors | `VectorBucket`, `Index` |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
-| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment), `ReceiptRule` (stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery) |
+| SES | `ConfigurationSet` (only `Name` is supported; option and tag properties fail validation instead of being silently ignored; Ref returns the set name), `ConfigurationSetEventDestination`, `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment), `ReceiptRule` (stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery) |
 | DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one. `KinesisStreamSpecification` applied on create and update; with the DynamoDB Local backend, `StreamArn` is checked as on AWS but nothing is forwarded), `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `CodeSigningConfig`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint`, `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | Signer | `SigningProfile` (identifiers only; Floci has no Signer API) |
@@ -413,6 +413,25 @@ list-typed `Paths` holds a single entry; read it with `Fn::Select` as you would 
 
 Deleting the stack removes the resources in dependency order and finally the organization itself.
 Deleting a resource that is already gone is tolerated.
+
+## Auto Scaling Launch Configurations
+
+CloudFormation preserves an unchanged launch configuration and replaces it when its resolved
+properties change. An unnamed replacement receives a new name; replacing a custom-named
+configuration requires a new `LaunchConfigurationName`. The old configuration remains available
+until dependent groups switch and the stack update commits. A failed update restores the prior
+configuration. `BlockDeviceMappings` and `MetadataOptions` are passed to Auto Scaling.
+
+The shared CloudFormation change detector compares create-only properties using each stack
+version's parameters and resource references. This also covers configurations created before
+replacement support: unchanged references retain their identity, while added or changed values
+or a removed `InstanceId` require replacement. No separate launch-configuration input snapshot
+is needed.
+
+Group creation and updates coordinate with launch-configuration deletion, so a concurrent
+attachment cannot bypass the in-use check. A configuration already deleted cannot be attached.
+Out-of-band deletion remains stack drift; this replacement behavior does not promise automatic
+recreation under a missing configuration's former custom name.
 
 ## Auto Scaling Launch Template Resolution
 
@@ -742,6 +761,12 @@ resource schema declares (measured). Floci reads them the same way, before anyth
 - The schema's other constraints (allowed values, patterns, bounds) are not checked. AWS also
   records a warning event for a value that it does not convert itself and the handler does
   (`" 128"`, `"0128"`, `" true"`); Floci does not.
+
+`Volumes` and container `MountPoints` reach the registered ECS task definition and appear in
+`DescribeTaskDefinition`. EFS, host and ephemeral volumes use the existing ECS volume models;
+host source paths use the same allowlist check as `RegisterTaskDefinition`. Docker, FSx Windows
+File Server and S3 Files volume settings survive the describe round trip but have no local mount
+backend. EFS uses a local named volume rather than a real NFS data plane.
 
 ## Account-Aware Provisioning
 

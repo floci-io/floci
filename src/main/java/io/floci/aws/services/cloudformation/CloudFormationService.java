@@ -398,32 +398,6 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
-    /** The id of the stack a stack name or id names, as a request describing it finds it, reading only. */
-    public Optional<String> stackId(String stackNameOrId, String region) {
-        return Optional.ofNullable(resolveStackForDescribe(stackNameOrId, region)).map(Stack::getStackId);
-    }
-
-    /** The id of the stack holding the change set {@code changeSetArn} names, reading only. */
-    public Optional<String> stackIdOfChangeSet(String changeSetArn, String region) {
-        try {
-            return Optional.ofNullable(findStackForChangeSetArn(changeSetArn, region, currentAccount()))
-                    .map(Stack::getStackId);
-        } catch (AwsException expected) {
-            LOG.debugv("The change set ARN {0} names no change set: {1}", changeSetArn, expected.getMessage());
-            return Optional.empty();
-        }
-    }
-
-    /** The id of the stack that owns the resource {@code physicalResourceId} names, reading only. */
-    public Optional<String> stackIdOfResource(String physicalResourceId, String region) {
-        try {
-            return Optional.of(stackContaining(physicalResourceId, region).getStackId());
-        } catch (AwsException expected) {
-            LOG.debugv("No stack owns the resource {0}: {1}", physicalResourceId, expected.getMessage());
-            return Optional.empty();
-        }
-    }
-
     public List<Stack> describeStacks(String stackName, String region) {
         return describeStacks(stackName, region, currentAccount());
     }
@@ -449,6 +423,34 @@ public class CloudFormationService implements ResourceProvider {
      */
     public Optional<String> stackArn(String stackNameOrArn, String region) {
         return Optional.ofNullable(resolveStack(stackNameOrArn, region, currentAccount())).map(Stack::getStackId);
+    }
+
+    /**
+     * The tags of the live stack, or of the change set, stored under {@code arn} in the account and Region the ARN
+     * names, by key, which IAM gives a resource-tag condition; empty when there is none. Reads only, matching the
+     * stack's id or the change set's on the whole ARN.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cloudformation")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        if (resource.startsWith("stack/")) {
+            Stack stack = resolveStack(arn, parsed.region(), parsed.accountId());
+            return stack != null && arn.equals(stack.getStackId()) ? stack.tagsSnapshot() : Map.of();
+        }
+        if (!resource.startsWith("changeSet/")) {
+            return Map.of();
+        }
+        try {
+            Stack stack = findStackForChangeSetArn(arn, parsed.region(), parsed.accountId());
+            ChangeSet changeSet = stack == null ? null
+                    : stack.getChangeSets().get(resolveChangeSetName(arn, parsed.region(), parsed.accountId()));
+            return changeSet == null || changeSet.getTags() == null ? Map.of() : Map.copyOf(changeSet.getTags());
+        } catch (AwsException expected) {
+            return Map.of();
+        }
     }
 
     /**
@@ -1518,8 +1520,10 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
-            JsonNode oldProps = oldDef.path("Properties");
-            JsonNode newProps = newDef.path("Properties");
+            JsonNode oldBlock = withoutMissing(oldDef.path("Properties"), newDef.path("Properties"));
+            JsonNode newBlock = withoutMissing(newDef.path("Properties"), oldDef.path("Properties"));
+            JsonNode oldProps = withoutNoValue(logicalId, oldBlock, oldParams, oldConditions, oldTemplate);
+            JsonNode newProps = withoutNoValue(logicalId, newBlock, newParams, newConditions, newTemplate);
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
                     changedConditions);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
@@ -1536,6 +1540,30 @@ public class CloudFormationService implements ResourceProvider {
                         ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             return resolved;
+        }
+
+        /** The block as written with every AWS::NoValue member left out, by the side's own conditions. */
+        private JsonNode withoutNoValue(String logicalId, JsonNode block, Map<String, String> params,
+                                        Map<String, Boolean> conditions, JsonNode template) {
+            try {
+                JsonNode omitted = engineOver(ownerAccount(stack), params, Map.of(), Map.of(), conditions, template)
+                        .omitNoValue(block);
+                return omitted.isMissingNode() ? block : omitted;
+            } catch (RuntimeException e) {
+                if (warned.add(logicalId)) {
+                    LOG.warnv("AWS::NoValue members of {0} could not be left out for the diff; the preview "
+                            + "compares the block as written: {1}", logicalId, e.getMessage());
+                }
+                return block;
+            }
+        }
+
+        /**
+         * A missing Properties block counts as an empty one when the other side has a block, as adding or
+         * dropping every property in it does.
+         */
+        private JsonNode withoutMissing(JsonNode block, JsonNode other) {
+            return block.isMissingNode() && other.isObject() ? objectMapper.createObjectNode() : block;
         }
 
         private static boolean holdsDynamicReference(JsonNode subtree) {
@@ -1555,12 +1583,15 @@ public class CloudFormationService implements ResourceProvider {
             }
             JsonNode before = compared[0].path(logicalId).path("Properties");
             JsonNode after = compared[1].path(logicalId).path("Properties");
+            JsonNode comparedBefore = withoutMissing(before, after);
+            after = withoutMissing(after, before);
+            before = comparedBefore;
             if (!before.isObject() || !after.isObject()) {
                 return false;
             }
             JsonNode digestedBefore = digested(before);
             JsonNode digestedAfter = digested(after);
-            for (String pointer : CfnCreateOnlyProperties.getCreateOnlyProperties(resourceType)) {
+            for (String pointer : CfnCreateOnlyProperties.replacementPointers(resourceType)) {
                 boolean changed = noEvidence(pointer, before)
                         ? writtenPointerChanged(pointer, oldProps, newProps)
                         : CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, digestedBefore, digestedAfter);
@@ -1631,9 +1662,9 @@ public class CloudFormationService implements ResourceProvider {
                 String accountId = ownerAccount(stack);
                 return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
                         engineOver(accountId, oldParams, physicalIds, attributes, oldConditions, oldTemplate)
-                                .resolveNode(oldProps),
+                                .resolveNodeOmittingNoValue(oldProps),
                         engineOver(accountId, newParams, physicalIds, attributes, newConditions, newTemplate)
-                                .resolveNode(newProps));
+                                .resolveNodeOmittingNoValue(newProps));
             } catch (RuntimeException e) {
                 if (warned.add(logicalId)) {
                     LOG.warnv("Create-only values of {0} ({1}) could not be resolved for the diff; "
@@ -1679,7 +1710,8 @@ public class CloudFormationService implements ResourceProvider {
         }
         try {
             return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
-                    previous.resolveNode(priorProps), current.resolveNode(props));
+                    previous.resolveNodeOmittingNoValue(priorProps),
+                    current.resolveNodeOmittingNoValue(props));
         } catch (RuntimeException e) {
             LOG.warnv("Resolved create-only values of {0} ({1}) could not be compared; the update adds no "
                     + "replacement beyond the engine's own decision: {2}", logicalId, resourceType, e.getMessage());
@@ -1689,15 +1721,10 @@ public class CloudFormationService implements ResourceProvider {
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
                                         Set<String> changedParams, Set<String> changedConditions) {
-        if (oldProps == null || oldProps.isMissingNode()) {
+        // The caller reads a dropped or an added Properties block as an empty one, so only a resource
+        // without a block on either side reaches here with a missing node.
+        if (oldProps == null || oldProps.isMissingNode() || newProps == null || newProps.isMissingNode()) {
             return false;
-        }
-        if (newProps == null || newProps.isMissingNode()) {
-            // A dropped Properties block removes every property in it, as removing them one by one does.
-            if (!oldProps.isObject()) {
-                return false;
-            }
-            newProps = objectMapper.createObjectNode();
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
             // The registry table names the exact pointers; only a value at one of them replaces.
@@ -1716,10 +1743,10 @@ public class CloudFormationService implements ResourceProvider {
             if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
                 JsonNode oldVal = oldProps.get(field);
                 JsonNode newVal = newProps.get(field);
-                if (oldVal != null && !oldVal.equals(newVal)) {
+                if (!newVal.equals(oldVal)) {
                     return true;
                 }
-                if (newVal != null && (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions))) {
+                if (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions)) {
                     return true;
                 }
             }
@@ -1770,6 +1797,24 @@ public class CloudFormationService implements ResourceProvider {
      * The execute {@code CreateStack} and {@code UpdateStack} run, as
      * {@link #executeChangeSet(String, String, String)}, for a request that carries a token.
      */
+    /**
+     * Records the permissions boundary a delegation registered for the caller asking for this
+     * deployment, so a role the stack provisions carries it. Provisioning runs after the request
+     * returns, so the cap cannot be read from the caller then and travels with the stack instead.
+     * Null leaves the stack as it was, which is every stack an ordinary caller deploys.
+     */
+    public void recordDelegatedRoleBoundary(String stackNameOrId, String region, String boundaryArn) {
+        if (boundaryArn == null) {
+            return;
+        }
+        Stack stack = resolveStackForDescribe(stackNameOrId, region);
+        if (stack == null) {
+            return;
+        }
+        stack.setDelegatedRoleBoundaryArn(boundaryArn);
+        persistStack(stack);
+    }
+
     public Future<?> executeChangeSetWithToken(String stackName, String changeSetName, String region,
                                                String clientRequestToken) {
         return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), false,
@@ -2897,7 +2942,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes);
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));

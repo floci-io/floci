@@ -10,11 +10,14 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.PerKeyContainerPool;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.inject.Named;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 /**
  * Starts and stops one Verdaccio container per CodeArtifact npm repository, unlike Reposilite's one
@@ -70,13 +73,15 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
     private final SidecarRepositoryLease lease;
+    private final RunLabelledContainers runContainers;
 
     @Inject
     public VerdaccioSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
-                                    EmulatorConfig config) {
+                                    EmulatorConfig config, @Named("codeartifact") RunLabelledContainers runContainers) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
+        this.runContainers = runContainers;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
         this.lease = new SidecarRepositoryLease("Verdaccio", pool);
     }
@@ -124,8 +129,9 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String npmRepositoryId, String publicUrl) {
         String image = config.services().codeartifact().npmImage();
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-verdaccio-" + npmRepositoryId);
-        lifecycleManager.removeIfExists(containerName);
+        runContainers.removeLeftovers();
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-verdaccio-" + npmRepositoryId
+                + "-" + UUID.randomUUID());
 
         // Loopback-only: this container has no auth of its own (open $all access, matching the
         // Maven proxy's own deliberate choice not to resolve upstreams), so the Bearer check in
@@ -134,6 +140,8 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
         // bypass that check entirely.
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("codeartifact", npmRepositoryId, null, null))
+                .withLabels(runContainers.labels())
                 .withEnv("VERDACCIO_PUBLIC_URL", publicUrl)
                 .withLoopbackPortBinding(VERDACCIO_PORT, 0)
                 .withDockerNetwork(config.services().dockerNetwork())

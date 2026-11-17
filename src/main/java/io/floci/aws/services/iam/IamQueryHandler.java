@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import io.floci.aws.core.common.*;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.iam.model.AccountPasswordPolicy;
@@ -102,6 +103,8 @@ public class IamQueryHandler {
     private final DelegationRequestService delegationRequestService;
     private final CentralRootAccess centralRootAccess;
     private final RegionResolver regionResolver;
+    /** The caller this request signed as, which says whether a delegation bounds what it creates. */
+    private final RequestContext requestContext;
     private final Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders;
     /** Signs each page's Marker, so only a marker this handler issued names an item. */
     private final SignedMarkers markers = new SignedMarkers(MARKER_MAX_LENGTH);
@@ -114,6 +117,7 @@ public class IamQueryHandler {
                            DelegationRequestService delegationRequestService,
                            CentralRootAccess centralRootAccess,
                            RegionResolver regionResolver,
+                           RequestContext requestContext,
                            Instance<ServerCertificateReferenceProvider> serverCertificateReferenceProviders) {
         this.iamService = iamService;
         this.policyEvaluator = policyEvaluator;
@@ -122,6 +126,7 @@ public class IamQueryHandler {
         this.serviceLastAccessedService = serviceLastAccessedService;
         this.organizationsAccessReportService = organizationsAccessReportService;
         this.delegationRequestService = delegationRequestService;
+        this.requestContext = requestContext;
         this.centralRootAccess = centralRootAccess;
         this.regionResolver = regionResolver;
         this.serverCertificateReferenceProviders = serverCertificateReferenceProviders;
@@ -1353,8 +1358,15 @@ public class IamQueryHandler {
         String description = getParam(params, "Description");
         int maxSession = getIntParam(params, "MaxSessionDuration", 3600);
         Map<String, String> tags = extractTags(params, true);
+        // A role created with delegated credentials carries the boundary the delegation request
+        // names, the guide's long-term permissions "limit[ing] the permissions of any roles that
+        // are created or managed through temporary access". It is a cap the customer registered
+        // rather than a choice of the caller, so it is the role's boundary wherever the request
+        // restricts one, and what the call asked for applies only when it does not.
+        String boundary = iamService.delegatedRoleBoundaryArn(requestContext.getAccessKeyId())
+                .orElseGet(() -> getParam(params, "PermissionsBoundary"));
         IamRole role = iamService.createRole(roleName, path, trustPolicy, description, maxSession, tags,
-                getParam(params, "PermissionsBoundary"));
+                boundary);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
         return Response.ok(AwsQueryResponse.envelope("CreateRole", AwsNamespaces.IAM, result)).build();
     }
@@ -2133,14 +2145,38 @@ public class IamQueryHandler {
     private Response handlePutRolePermissionsBoundary(MultivaluedMap<String, String> params) {
         String roleName = requireParam(params, "RoleName");
         String boundaryArn = requireParam(params, "PermissionsBoundary");
+        refuseLiftingADelegatedCap(roleName);
         iamService.putRolePermissionsBoundary(roleName, boundaryArn);
         return Response.ok(AwsQueryResponse.envelope("PutRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     private Response handleDeleteRolePermissionsBoundary(MultivaluedMap<String, String> params) {
         String roleName = requireParam(params, "RoleName");
+        refuseLiftingADelegatedCap(roleName);
         iamService.deleteRolePermissionsBoundary(roleName);
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
+    }
+
+    /**
+     * A delegation's cap stays on the role it capped. The guide says long-term permissions limit
+     * roles "that are created or managed through temporary access", and the boundary is registered
+     * out of band and immutable, so the credentials a delegation issued cannot replace or remove
+     * the boundary it gave a role: that would leave the role outside the cap by the same door it
+     * came through. No source gives a sentence for this refusal, so it is this emulator's own, and
+     * it reaches only a caller holding a delegated session whose registration the role carries.
+     */
+    private void refuseLiftingADelegatedCap(String roleName) {
+        String delegated = iamService.delegatedRoleBoundaryArn(requestContext.getAccessKeyId())
+                .orElse(null);
+        if (delegated == null) {
+            return;
+        }
+        String current = iamService.getValidatedRole(roleName).getPermissionsBoundaryArn();
+        if (delegated.equals(current)) {
+            throw new AwsException("AccessDenied", "The permissions boundary on role " + roleName
+                    + " was set by the delegation these credentials come from and cannot be changed"
+                    + " with them.", 403);
+        }
     }
 
     /**
@@ -2154,10 +2190,20 @@ public class IamQueryHandler {
         PolicyExclusions exclusions = PolicyExclusions.from(params);
         List<String> inputDocuments = readablePolicyInputList(params);
         String inputBoundary = inputBoundaryDocument(params);
-        CallerContext caller = withInputDocuments(
-                iamService.resolvePrincipalContext(policySourceArn, exclusions), inputDocuments, inputBoundary);
-        List<String> actionNames = requireActionNames(params);
+        // SCPs enter a simulation only when the call asks for them, the way the console includes
+        // them only when "AWS Organizations SCPs" is ticked, so the levels the call handed in are
+        // the whole of the organization the simulation runs against. They are read where the other
+        // handed-in documents are, ahead of the lookup, so a principal that does not exist cannot
+        // answer for an input this operation refuses: that is the rule above, and these two inputs
+        // live under it as well.
+        List<List<String>> scpLevels = organizationPolicyLevels(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        SimulationScenarios.requireScenarioResources(params.getFirst("ResourceHandlingOption"),
+                resourceArns);
+        CallerContext caller = withInputDocuments(
+                iamService.resolvePrincipalContext(policySourceArn, exclusions), inputDocuments, inputBoundary)
+                .withScpLevels(scpLevels);
+        List<String> actionNames = requireActionNames(params);
         // Keyed without regard to case, as the evaluator compares condition key names: a value
         // the call supplied has to shadow a populated one however the call spelled the key.
         Map<String, List<String>> context = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
@@ -2182,10 +2228,55 @@ public class IamQueryHandler {
     private Response handleSimulateCustomPolicy(MultivaluedMap<String, String> params) {
         List<String> policyInputList = requirePolicyInputList(params);
         List<String> actionNames = requireActionNames(params);
+        // Read before the scenario, as the principal simulation reads them, so a bad level and a
+        // bad scenario are answered in the same order whichever operation was called.
+        List<List<String>> scpLevels = organizationPolicyLevels(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
+        SimulationScenarios.requireScenarioResources(params.getFirst("ResourceHandlingOption"),
+                resourceArns);
         Map<String, List<String>> context = extractContextEntries(params);
-        CallerContext caller = new CallerContext(policyInputList, null, inputBoundaryDocument(params));
+        CallerContext caller = new CallerContext(policyInputList, null, inputBoundaryDocument(params),
+                scpLevels);
         return simulationResults("SimulateCustomPolicy", params, caller, actionNames, resourceArns, context);
+    }
+
+    /**
+     * The service control policies a simulation was handed, one list per level of an
+     * organization. The member's reference describes both the shape and the order: "An ordered
+     * list of service control policies (SCPs) to include in the simulation. Each element
+     * represents one level of an Organizations hierarchy, from the organization root to the
+     * account. The simulator evaluates SCPs in the order that you provide, consistent with how
+     * Organizations enforces SCPs." So the levels go to the evaluator as the caller's effective
+     * SCPs, which is the walk a live request already takes through them, in the order the request
+     * wrote. How many levels there may be is the model's to say, seven on this list, and the
+     * declared constraints are read ahead of this.
+     *
+     * <p>Each document is held to being a policy document, as the documents of the other input
+     * lists are, and a level naming none is no level: a request that carries the member and
+     * nothing in it simulates with no organization above it rather than with an empty root.
+     */
+    private List<List<String>> organizationPolicyLevels(MultivaluedMap<String, String> params) {
+        List<List<String>> levels = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember level
+                : AwsQueryLists.members(params, "OrderedOrganizationPolicyInputList", null)) {
+            List<String> documents = new ArrayList<>();
+            for (AwsQueryLists.IndexedMember document : AwsQueryLists.members(params,
+                    level.prefix() + ".ServiceControlPolicyInputList", null)) {
+                String policy = params.getFirst(document.prefix());
+                if (policy == null) {
+                    continue;
+                }
+                if (!policyEvaluator.readsAsPolicyDocument(policy)) {
+                    throw new AwsException("InvalidInput", "Ordered organization policy input list"
+                            + " item " + level.index() + " has invalid content", 400);
+                }
+                documents.add(policy);
+            }
+            if (!documents.isEmpty()) {
+                levels.add(List.copyOf(documents));
+            }
+        }
+        return levels.isEmpty() ? null : List.copyOf(levels);
     }
 
     /**
@@ -3143,13 +3234,14 @@ public class IamQueryHandler {
                 IamUser user = requireMatchingArn(iamService.getUser(parsed.name()).getArn(), arn,
                         iamService.getUser(parsed.name()));
                 // The report lists "every AWS service that the resource could access using
-                // permissions policies", so a permission the account applies to its users without
-                // attaching it counts: a user with no policies of their own still reaches IAM
-                // while the password policy allows self-service. It is added to the documents the
-                // service list is read from rather than to policiesForIdentity, since it is no
-                // policy of the user's and has no name or ARN to report as one.
+                // permissions policies", so a permission applied to a user without being attached
+                // counts: a user with no policies of their own still reaches IAM while the
+                // password policy allows self-service, and still reaches the delegation requests
+                // it owns. These are added to the documents the service list is read from rather
+                // than to policiesForIdentity, since they are no policies of the user's and have
+                // no name or ARN to report as one.
                 List<String> documents = new ArrayList<>(identityPolicyDocuments(accountId, arn));
-                documents.addAll(iamService.accountLevelUserGrants(accountId));
+                documents.addAll(iamService.implicitUserGrants(accountId, arn));
                 yield new AccessAdvisorTarget(documents, List.of(entityOf(user)));
             }
             case "role" -> {

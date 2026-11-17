@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.s3.S3Service;
@@ -46,10 +47,11 @@ public class S3TablesService {
                                          Object storageClassConfiguration, Map<String, String> tags, String region) {
         validateBucketName(name);
         String key = storageKey(region, name);
-        if (store.get(key).isPresent()) {
+        String arn = bucketArn(region, name);
+        if (findTableBucket(key, arn).isPresent()) {
             throw conflict("The table bucket " + name + " already exists.");
         }
-        TableBucket bucket = new TableBucket(name, bucketArn(region, name), now(), regionResolver.getAccountId(),
+        TableBucket bucket = new TableBucket(name, arn, now(), regionResolver.getAccountId(),
                 encryptionConfiguration, storageClassConfiguration, tags);
         store.put(key, bucket);
         LOG.infov("Created S3 Tables bucket {0} in region {1}", name, region);
@@ -58,12 +60,18 @@ public class S3TablesService {
 
     public synchronized TableBucket getTableBucket(String tableBucketArn, String region) {
         String name = resourceName(tableBucketArn, BUCKET_PREFIX);
-        TableBucket bucket = store.get(storageKey(region, name))
+        String key = storageKey(region, name);
+        TableBucket bucket = findTableBucket(key, tableBucketArn)
                 .orElseThrow(() -> notFound("The table bucket does not exist."));
         if (!bucket.getArn().equals(tableBucketArn)) {
             throw notFound("The table bucket does not exist.");
         }
         return bucket;
+    }
+
+    public synchronized Object getTableBucketEncryption(String tableBucketArn, String region) {
+        Object configuration = getTableBucket(tableBucketArn, region).getEncryptionConfiguration();
+        return configuration == null ? Map.of("sseAlgorithm", "AES256") : configuration;
     }
 
     public synchronized List<TableBucket> listTableBuckets(String prefix, String region) {
@@ -79,6 +87,11 @@ public class S3TablesService {
             throw conflict("The table bucket is not empty.");
         }
         store.delete(storageKey(region, bucket.getName()));
+    }
+
+    public synchronized Object getTableBucketStorageClass(String tableBucketArn, String region) {
+        Object configuration = getTableBucket(tableBucketArn, region).getStorageClassConfiguration();
+        return configuration == null ? Map.of("storageClass", "STANDARD") : configuration;
     }
 
     public synchronized Namespace createNamespace(String tableBucketArn, List<String> namespace, String region) {
@@ -185,6 +198,40 @@ public class S3TablesService {
             }
             return Optional.empty();
         }
+    }
+
+    /**
+     * The tags of the table bucket or the table stored under {@code arn}, in the account and Region the ARN names, by
+     * key, which IAM gives a resource-tag condition; empty when there is none. Reads that one bucket's entry, a
+     * pre-multi-account one of the default account in place, and matches the bucket, or a table of it, on the whole
+     * ARN, leaving both as they are.
+     */
+    public synchronized Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "s3tables")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.resource().startsWith(BUCKET_PREFIX)) {
+            return Map.of();
+        }
+        String rest = parsed.resource().substring(BUCKET_PREFIX.length());
+        String bucketName = rest.contains("/") ? rest.substring(0, rest.indexOf('/')) : rest;
+        TableBucket bucket = stored(parsed.accountId(), storageKey(parsed.region(), bucketName)).orElse(null);
+        if (bucket == null) {
+            return Map.of();
+        }
+        if (arn.equals(bucket.getArn())) {
+            return Map.copyOf(bucket.getTags());
+        }
+        if (!arn.startsWith(bucket.getArn() + TABLE_INFIX)) {
+            return Map.of();
+        }
+        return bucket.getNamespaces().values().stream()
+                .flatMap(namespace -> namespace.getTables().values().stream())
+                .filter(table -> arn.equals(table.getArn()))
+                .findFirst()
+                .<Map<String, String>>map(table -> Map.copyOf(table.getTags()))
+                .orElse(Map.of());
     }
 
     public synchronized List<S3Table> listTables(String tableBucketArn, String namespaceName, String prefix, String region) {
@@ -440,6 +487,22 @@ public class S3TablesService {
 
     private String storageKey(String region, String name) {
         return region + "::" + name;
+    }
+
+    private Optional<TableBucket> findTableBucket(String key, String tableBucketArn) {
+        if (store instanceof AccountAwareStorageBackend<TableBucket> aware) {
+            String accountId = regionResolver.getAccountId();
+            return aware.getForAccountMigratingLegacy(accountId, key,
+                    legacy -> accountId.equals(aware.defaultAccountId()) && tableBucketArn.equals(legacy.getArn()));
+        }
+        return store.get(key);
+    }
+
+    /** The bucket stored under {@code key} in the account, or the default account's legacy one, read only. */
+    private Optional<TableBucket> stored(String accountId, String key) {
+        return store instanceof AccountAwareStorageBackend<TableBucket> aware
+                ? aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key))
+                : store.get(key);
     }
 
     private String resourceName(String arn, String prefix) {

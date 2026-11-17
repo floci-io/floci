@@ -4,7 +4,7 @@
 **Endpoint:** `http://localhost:4566/`
 **Target prefix:** `X-Amz-Target: ElasticMapReduce.*`
 
-Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
+Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, Spark Connect sessions, EMR Studios and their session mappings, notebook executions, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
 
 ## Supported Actions
 
@@ -24,6 +24,30 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `DescribeStep` | Returns the detail and status of a single step |
 | `ListSteps` | Lists the steps of a cluster, filterable by state |
 | `CancelSteps` | Cancels pending steps |
+| `StartSession` | Starts a Spark Connect session on a cluster with sessions enabled; see [Sessions](#sessions) |
+| `GetSession` | Returns a session's state, times and configuration |
+| `ListSessions` | Lists a cluster's sessions, newest first, filterable by state |
+| `TerminateSession` | Terminates a session that has not ended |
+| `GetSessionEndpoint` | Returns a session's endpoint and an authentication token valid for an hour |
+| `CreateStudio` | Creates an EMR Studio in a VPC of Floci's EC2; see [Studios](#studios) |
+| `DescribeStudio` | Returns a Studio's configuration |
+| `ListStudios` | Lists the Region's Studios |
+| `UpdateStudio` | Changes a Studio's name, description, subnets, default S3 location or encryption key |
+| `DeleteStudio` | Deletes a Studio and its session mappings |
+| `CreateStudioSessionMapping` | Maps an IAM Identity Center user or group to a Studio, with a session policy |
+| `GetStudioSessionMapping` | Returns a user's or group's session mapping |
+| `ListStudioSessionMappings` | Lists the session mappings of a Studio, or of every Studio |
+| `UpdateStudioSessionMapping` | Changes a mapped user's or group's session policy |
+| `DeleteStudioSessionMapping` | Removes a user or group from a Studio |
+| `StartNotebookExecution` | Starts a notebook execution on a cluster; see [Notebook executions](#notebook-executions) |
+| `DescribeNotebookExecution` | Returns a notebook execution's status, times and configuration |
+| `StopNotebookExecution` | Stops a notebook execution that has not ended |
+| `ListNotebookExecutions` | Lists notebook executions, newest first, by editor, status, time and cluster |
+| `CreatePersistentAppUI` | Makes a cluster's persistent application UIs; see [Application UIs](#application-uis) |
+| `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
+| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
+| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, a page of Floci's |
+| `GetClusterSessionCredentials` | Returns temporary basic credentials for a runtime role enabled cluster; see [Application UIs](#application-uis) |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
 | `AddInstanceFleet` | Adds an instance fleet to a cluster |
@@ -72,6 +96,18 @@ them returns.
 adding that it "is idempotent but asynchronous". On an earlier release a `RUNNING` step answers `FAILED` with "Step
 is not in a cancellable state: RUNNING".
 
+The limits the API reference and the Management Guide give steps are checked, in each operation's own error code, in
+Floci's words, as no source gives AWS's: a `StepConcurrencyLevel` from 1 to 256 ("You can specify a minimum of 1 step
+and a maximum of 256 steps"), which `RunJobFlow` refuses with `ValidationException` and `ModifyCluster` with
+`InvalidRequestException`; at most 256 steps `PENDING` or `RUNNING` ("only 256 steps can be RUNNING or PENDING at any
+given time", a `CANCEL_PENDING` one counted as running), which `RunJobFlow` and `AddJobFlowSteps` refuse with
+`ValidationException`; no step with an `ActionOnFailure` other than `CONTINUE` added while the level is above 1 ("The
+step is not submitted and the action fails with a message that the ActionOnFailure setting is not valid"), which
+`AddJobFlowSteps` refuses with `ValidationException`, a step naming none taking `TERMINATE_CLUSTER`, as it is
+submitted, and so refused too; and `CancelSteps` "Available only
+in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0", with at most 256 steps a request, refused otherwise
+with `InvalidRequestException`.
+
 In the `docker` runner mode a cancelled `RUNNING` step is `CANCEL_PENDING` while its driver stops, and keeps its
 place among the running steps until the driver is gone: then it is `CANCELLED`, and the next `PENDING` step starts.
 That is Floci's reading of the Management Guide's "Canceling a running step does not allow a pending step to start
@@ -92,9 +128,20 @@ also applies when termination protection is enabled.
 `AddJobFlowSteps` rejects a `TERMINATING` or `TERMINATED` cluster without adding steps or changing its
 termination status, and answers an unknown cluster with `ValidationException` "Specified job flow ID
 does not exist.", as AWS does.
-Instance groups and fleets report `RUNNING` from the cluster's creation until it is `TERMINATED`. Then
-they report `TERMINATED` with zero running or provisioned capacity; their requested and target
-capacities remain recorded. `ListInstances` numbers the synthetic IDs and addresses of the `MASTER`
+Instance groups and fleets follow their cluster's state, Floci's reading, as no source says when theirs apply:
+`PROVISIONING` while it is `STARTING`, with nothing running or provisioned yet (the guide's events end an instance
+fleet's provisioning with "Provisioning for instance fleet ... is complete ... The instance fleet now has On-Demand
+capacity of Num"), `BOOTSTRAPPING` while it is, with every instance up for its bootstrap actions, `RUNNING` while it
+runs or waits, and `TERMINATING` as it ends; one added later takes the state the cluster's others are in. Once it is
+`TERMINATED` they report `TERMINATED` with zero running or provisioned capacity; their requested and target
+capacities remain recorded, and a group that ended while it was provisioned counts the instances it asked for as
+terminated, which `ListInstances` lists so, as an ended fleet's targets are. `ListInstances` gives each instance
+its group's or fleet's state, `PROVISIONING`,
+`BOOTSTRAPPING`, `RUNNING` (while its cluster ends too) or `TERMINATED`, lists one being provisioned though none runs
+yet, and its `InstanceStates` filter keeps the instances in the states it names. A cluster terminated while it is
+`STARTING` keeps the instances it was provisioning listed, still `PROVISIONING` and with none of them running, until
+it is `TERMINATED`, so the same instances are listed throughout. `ListInstances` numbers the
+synthetic IDs and addresses of the `MASTER`
 group's or fleet's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
 `DescribeCluster`'s `MasterPublicDnsName` says, while the others resize, and every other instance's private
 address is `10.<group>.0.<n>`, its group's or fleet's number in the cluster and its own in it, so it too stays while
@@ -158,6 +205,140 @@ still accepted.
 A state machine drives clusters and steps through the `elasticmapreduce:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR tasks](step-functions.md#amazon-emr-tasks).
 
+## Sessions
+
+A session is "a managed connection between your local PySpark client and a Spark Connect Server running on your Amazon
+EMR cluster" (Management Guide, "Interactive sessions"). Floci keeps a session and its lifecycle on its cluster, but
+starts no Spark Connect server for it, in either runner mode, so nothing answers Spark Connect at its endpoint.
+
+* **Starting**: `StartSession` needs a cluster created with `SessionEnabled` (which `DescribeCluster` reports), on
+  "release emr-spark-8.0.0 or later", with "The Spark application installed on the cluster", that is `RUNNING` or
+  `WAITING`. A cluster with more than one primary node is refused, as "High Availability (HA) clusters with multiple
+  primary nodes are not supported for Spark Connect sessions", and so is a session past a cluster's 1000 that have not
+  ended ("Amazon EMR enforces a limit of 1000 concurrent active sessions per cluster"). A request without a `Name` is
+  refused, as "The `--name` parameter is required and must be a non-empty value", and so is a
+  `SessionIdleTimeoutInMinutes` outside 1 to 1440, as the idle timeout has "a maximum of 24 hours". Each of these
+  refusals is `InvalidRequestException`, the one error the model declares, in Floci's own wording, as AWS's is not
+  recorded. A member of the wrong JSON type, such as `EngineConfigurations` that is not a list of configurations,
+  `Properties` that are not strings, a `MonitoringConfiguration` member that is not a structure, or a `ClusterId`
+  that is not a string, is refused with `SerializationException`, and the model's length and pattern constraints with
+  `ValidationException`. A retry with the same `ClientRequestToken` that asks for the same session answers as the
+  first call did, a member left out, empty or at its default counting as the same; the token reused for a different
+  session is refused with `InvalidRequestException`.
+* **States**: `StartSession` answers `SUBMITTED`, as "When a session is first created, it enters the SUBMITTED state",
+  and the session is `IDLE` from then on, with `StartedAt` and `IdleSince` its creation time. It is `TERMINATED` once
+  it has been idle for its `SessionIdleTimeoutInMinutes` (60 when not given: "The default timeout is 60 minutes"), when
+  `TerminateSession` ends it, or when its cluster shuts down, its `StateChangeReason` saying which. Floci never reports
+  `STARTING`, `STARTED`, `BUSY`, `TERMINATING` or `FAILED`.
+* **TerminateSession** ends a session at once as `TERMINATED`; AWS's passes through `TERMINATING` first. A session that
+  has already ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **GetSessionEndpoint** answers for a session that has not ended with an endpoint on Floci's own address
+  (`/_aws/emr/sessions/<clusterId>/<sessionId>`) and a fresh `AuthToken` that expires in an hour, as "Authentication
+  tokens expire after 1 hour". Nothing answers Spark Connect there, and no `Credentials` are given. A session that has
+  ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **ListSessions** returns the newest sessions first, as "Newer sessions are returned first", the later of two started
+  in the same millisecond first too, filtered by `SessionStates`, at most `MaxResults` (1 to 100, 100 by default) to a
+  page.
+* A session's `EngineConfigurations`, `MonitoringConfiguration` and `Tags` are kept as given and reported by
+  `GetSession`; none of them configures anything, and no session logs are written.
+
+## Studios
+
+An EMR Studio is kept with the network and identities it names, each checked against Floci's own EC2 and IAM Identity
+Center, but Floci serves no Studio: its `Url` is on Floci's own address (`/_aws/emr/studios/<studioId>`), where
+nothing answers.
+
+* **CreateStudio** refuses a request without one of the model's required members, or with an `AuthMode` or
+  `IdcUserAssignment` it does not name, with `ValidationException`, and a member of the wrong JSON type with
+  `SerializationException`. Then, each with `InvalidRequestException` in Floci's own wording, as AWS's is not recorded:
+  more than 5 subnets ("A Studio can have a maximum of 5 subnets"), none, a VPC, subnet or security group Floci's EC2
+  does not have, a subnet or security group outside the VPC ("The subnets must belong to the VPC specified by VpcId",
+  each security group "must be in the same VPC"), an `SSO` Studio without a `UserRole` ("When you use IAM Identity
+  Center authentication, you must specify a --user-role"), an `IAM` one with one ("Only specify a UserRole when you
+  use IAM Identity Center authentication"), an `SSO` one with `IdpAuthUrl` or `IdpRelayStateParameterName`, which are
+  for "when you use IAM authentication", and an `SSO` one when the account has no IAM Identity Center instance, or
+  not the one `IdcInstanceArn` names. An `SSO` Studio's `TrustedIdentityPropagationEnabled` is `false` unless given,
+  as "The default value is false". The Studio's id is `es-` and 25 letters and digits. A subnet named twice is kept
+  once.
+* **Tags**: `AddTags` and `RemoveTags` take a Studio's id as their `ResourceId`, which is "a cluster identifier or an
+  Amazon EMR Studio ID", and IAM's `aws:ResourceTag` conditions read a Studio's tags.
+* **UpdateStudio** changes what it is given. Its `SubnetIds` "can include new subnet IDs, but must also include all of
+  the subnet IDs previously associated with the Studio", at most 5, in the Studio's VPC; anything else is refused.
+* **DeleteStudio** removes the Studio and its session mappings. **ListStudios** lists the Region's Studios in the order
+  they were made, 50 to a page, after a `Marker`; no source gives AWS's order or page size.
+* **Session mappings** are for an `SSO` Studio, as "Use CreateStudioSessionMapping to assign users to a Studio when you
+  use IAM Identity Center authentication"; one on an `IAM` Studio is refused. A call names its user or group by
+  "Either IdentityName or IdentityId ... but not both", and the identity must be in the identity store of the
+  Studio's IAM Identity Center instance, a user by its `UserName` and a group by its `DisplayName`; a mapping reports
+  both. A user or group mapped twice, or not mapped, is refused, each with `InvalidRequestException` in Floci's own
+  wording. Getting, updating and removing a mapping finds it by the id or the name it was made with, so one whose
+  user or group has since been deleted can still be removed. The `SessionPolicyArn` is kept as given. `ListStudioSessionMappings` lists a Studio's mappings, or every
+  Studio's when it names none, filtered by `IdentityType`, in the order they were made, 50 to a page.
+
+## Notebook executions
+
+Floci keeps a notebook execution and its lifecycle, but runs no notebook, in either runner mode, and writes no output
+notebook.
+
+* **StartNotebookExecution** refuses a request without `ExecutionEngine.Id` or `ServiceRole`, or with an
+  `ExecutionEngine.Type` or `OutputNotebookFormat` the model does not name, with `ValidationException`, and a member of
+  the wrong JSON type with `SerializationException`. The cluster must be `RUNNING` or `WAITING` and meet the EMR
+  Notebooks cluster requirements: "Only clusters created using Amazon EMR release version 5.18.0 and later are
+  supported", "The cluster must be launched with Hadoop, Spark, and Livy" and, "For Amazon EMR release versions
+  5.32.0 and later, or 6.2.0 and later", Jupyter Enterprise Gateway too (the AWS runtime for Apache Spark's releases
+  name no Hadoop among their applications). An account runs at most 100 executions that have not ended in a Region,
+  as "A maximum of 100 concurrent executions are supported per AWS Region per account". A blank `ServiceRole` is
+  refused too. Each of these refusals is
+  `InvalidRequestException` in Floci's own wording. The editor, relative path, S3 locations and parameters are kept as
+  given. The execution's id is `ex-` and 29 letters and digits, and its `ExecutionEngine.Type` is `EMR` unless given.
+  IAM's `aws:ResourceTag` conditions read its tags.
+* **States**: an execution is `START_PENDING` as it starts, `RUNNING` from then on, and `FINISHED` once the cluster's
+  `step-duration-seconds` has passed (at once by default), with AWS's "Execution is finished for cluster ...". It is
+  `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An execution is terminated if it runs for
+  more than 30 days", in Floci's own wording.
+* **StopNotebookExecution** stops one that has not ended at once, `STOPPED` with AWS's "Execution is stopped for
+  cluster ...". One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **ListNotebookExecutions** lists the Region's executions that started from `From` (by default 30 days ago) to
+  `To` (by default now), filtered by `EditorId`, `Status` and `ExecutionEngineId`, newest first, at most 50 to a page
+  ("Returns a maximum of 50 notebook executions") after a `Marker`, which resumes only the listing it came from: the
+  same account, Region and filters.
+
+## Application UIs
+
+Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI, YARN timeline server
+or on-cluster UI: a presigned URL opens a page Floci serves at `/_aws/emr/app-ui` on its own address (`base-url`, or
+`hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for. The link is signed with a key
+Floci makes as it starts and lasts an hour, as no source gives AWS's; one changed, past its hour or given before
+Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
+
+* **CreatePersistentAppUI** takes an EMR cluster's ARN of the account in the Region as its `TargetResourceArn`; Floci
+  keeps none for an EMR on EKS virtual cluster. The persistent Spark History Server is there "Starting with Amazon
+  EMR version 5.25.0", and the "Tez UI and YARN timeline server persistent application interfaces are available
+  starting with Amazon EMR version 5.30.1": the UI's `PersistentAppUITypeList` names `SHS` for a cluster with Spark,
+  and, from 5.30.1, `TEZ` for one with Tez and `YTS` for one with Hadoop; a `ProfilerType` makes the one it names
+  (`TEZUI` the Tez UI) the UI's only type, and one the cluster has not is refused. A cluster with none of them, an earlier
+  release, a cluster with more than one primary node ("not available for EMR clusters with multiple master nodes"),
+  and a UI past the account's 200 active ones ("the default limit for active application UIs is 200": a UI whose
+  cluster has gone, or ended more than 30 days ago, as "The logs are available for 30 days after the application
+  ends", no longer counts) are refused, each with
+  `InvalidRequestException` in Floci's own wording. `RuntimeRoleEnabledCluster` is whether the cluster's security
+  configuration sets `AuthorizationConfiguration.IAMConfiguration.EnableApplicationScopedIAMRole`. The UI's id is
+  `p-` and 13 letters and digits, its `PersistentAppUIStatus` `ACTIVE` and its `AuthorId` the account, none of which
+  any source gives. A tag without its `Key`, "the minimum required information for a valid tag", is refused, as it is
+  for sessions, Studios and notebook executions.
+* **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
+  refused. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI, the `ResourceManager` by default, while
+  the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. Both are `PresignedURLReady` at once.
+* **GetClusterSessionCredentials** gives "temporary, HTTP basic credentials that are associated with a given runtime
+  IAM role and used by a cluster with fine-grained access control activated": a random username and password that
+  expire in an hour, as no source gives AWS's lifetime, for a `RUNNING` or `WAITING` cluster on `emr-6.11.0` or later
+  (from which a Workspace attaches to a cluster with a runtime role) whose security configuration sets
+  `EnableApplicationScopedIAMRole` as the cluster was created (deleting or reusing the configuration's name later
+  changes nothing, for this and for `RuntimeRoleEnabledCluster`). A request without an `ExecutionRoleArn`, which the
+  model leaves optional, is refused too, as the credentials are "associated with a given runtime IAM role". Anything
+  else is refused with `InvalidRequestException`, in Floci's own wording. Floci runs no endpoint that checks them, and
+  keeps none.
+
 ## Running steps
 
 With `runner-mode` set to `docker` (`FLOCI_SERVICES_EMR_RUNNER_MODE=docker`), a step runs. Floci starts
@@ -184,8 +365,9 @@ holding the driver and its executors, or a command or a script. The cluster itse
   runs in the release's image, and says what EMR's does without Hive, "Hive isn't installed.", and the step fails. An
   `emr-spark-*` release includes neither ("This release includes the following applications: AmazonCloudWatchAgent,
   Delta, Hudi, Iceberg, JupyterEnterpriseGateway, Livy, and Spark."), so a cluster of one has neither, whatever its
-  `Applications` name: no image with Hive, no metastore service. `pig-script`, which the image does not have, is
-  `FAILED` without running.
+  `Applications` name: no image with Hive, no metastore service. A Pig step runs only where Floci adds Pig (see
+  **Pig steps**); on a cluster that does not install it, EMR's `pig-script`, which the image has, says "Pig isn't
+  installed.", and the step fails.
 * **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
@@ -265,17 +447,20 @@ holding the driver and its executors, or a command or a script. The cluster itse
   service", as the Management Guide puts it, in the primary node's container, with a NodeManager beside it on a cluster
   created with no core node, which keeps it, and its DataNode, as core nodes are added, the blocks it holds staying in
   reach, and the cluster's Spark, MapReduce (see **Hadoop streaming and MapReduce**) and Hive's Tez (see **Hive steps**)
-  run on them. A
+  run on them. Beside them runs the MapReduce JobHistory server EMR's primary node runs too (a release's `mapred-site`
+  classification "Restarts Hadoop MapReduce-HistoryServer"), on Hadoop's own ports, 10020 and 19888 for its web
+  pages, from the jobs' history in the cluster's HDFS, and the node is ready once it answers. A
   Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
   mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
   mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's
   containers on the cluster's nodes; in cluster mode the driver runs on one of them too, its output in the application's
   container logs (see **Output**) and only the client's in the step's.
   A node needs Spark, Python and what the bootstrap actions installed, as an EMR cluster's nodes hold every
-  application it installs, so each runs from the image the steps run in: the bootstrap's, else the release's EMR
-  Serverless image with the HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with
-  Hive, which Floci makes the first time one of the release's clusters needs it (see **Hive steps**), and in which the
-  cluster's bootstrap actions run. An `emr-spark-*` release has no EMR Serverless Hive image, and `emr-7.5.0`'s HDFS and
+  application it installs, so each runs from the image the steps run in, the release's EMR Serverless image with the
+  HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with Hive, which Floci makes the
+  first time one of the release's clusters needs it (see **Hive steps**), or, on a cluster with bootstrap actions, from
+  the image its own bootstrap left on that image (see **Bootstrap actions**). An `emr-spark-*` release has no EMR
+  Serverless Hive image, and `emr-7.5.0`'s HDFS and
   YARN do not run on its newer Hadoop, so its image holds the whole of `emr-7.5.0`'s Hadoop in `/opt`, which only the
   node's daemons run from (see **Known limitations**). EMR sizes a NodeManager, and the executors' memory and cores ("determined by the
   core and task instance types"), by the instance type; Floci's node shares the machine it runs on, so its NodeManager
@@ -310,8 +495,10 @@ holding the driver and its executors, or a command or a script. The cluster itse
   application master and tasks in YARN's containers on the cluster's nodes. A step's `hadoop` command, and so
   `hadoop-streaming`, a `hadoop jar` and `hdfs dfs`, run from the nodes' Hadoop (`/usr/lib`, or the one an `emr-spark-*`
   release keeps in `/opt`), with a `mapred-site.xml` that names YARN, the nodes' folders and the step's AWS environment,
-  and an application master of 1 GB and tasks of 768 MB, which the cluster's `mapred-site` replaces. A custom JAR step's
-  MapReduce gets the same. Where the cluster runs no YARN, a step's `hadoop` command runs MapReduce in local mode, in
+  and an application master of 1 GB and tasks of 768 MB, which the cluster's `mapred-site` replaces, and that names the
+  JobHistory server, which a client asks about a job once its application master has ended, for its counters and
+  task reports as Pig does after each of its MapReduce jobs. A custom JAR step's MapReduce gets the same, and a Hive
+  step's settings name the server too, for a query whose `hive.execution.engine` is `mr`. Where the cluster runs no YARN, a step's `hadoop` command runs MapReduce in local mode, in
   its own JVM: the image has MapReduce only in Spark's shaded Hadoop client, which
   Floci makes the
   command's MapReduce home (`HADOOP_MAPRED_HOME`, unless a `spark-env` export names one), so it is on the
@@ -393,6 +580,37 @@ holding the driver and its executors, or a command or a script. The cluster itse
   the Glue Data Catalog. What the bootstrap actions installed is there for every step, Hive's included. A script or
   command that starts `hive` itself gets none of these settings: only a Hive step runs Hive. Hive's own log stays in
   the container.
+* **Pig steps**: no AWS image carries Pig, so Floci adds Apache Pig to a cluster whose `Applications` name it only
+  with `pig.enabled` on (`FLOCI_SERVICES_EMR_PIG_ENABLED=true`), off by default. The cluster's image (see **Hive
+  steps**) then gets the Tez of its EMR Serverless Hive image, which Pig runs its scripts on, with the HDFS, MapReduce
+  and YARN every cluster's has, and Apache Pig in `/usr/lib/pig`, where EMR keeps it, with a `/usr/bin/pig` that runs
+  it: Floci downloads Apache's binary distribution, about 470 MB, to a temporary file, from the first of `pig.urls`
+  that gives it whole with the checksum `pig.sha256` names, Apache's download CDN then its archive, a URL that cannot
+  be reached, answers otherwise, sends nothing for a minute or gives another checksum passing to the next. It then
+  writes the 200 MB Pig runs from into the image as it makes it, leaving out the docs, the sources and the jars of Pig
+  on Spark, and removes the file. No URL giving it fails the step that needed the image ("The step could not start:
+  Could not download Apache Pig: ...", with what each URL gave), and nothing goes into an image unchecked. The image's
+  name holds the checksum, so a cluster with Pig has an image of its own, made once for its release and kept, as one
+  with Hive has. EMR's releases ship Pig 0.17.0, whose Apache build is "compatible with Hadoop 2.5+ releases", so
+  Floci's default is Pig 0.18.0, whose `pig-0.18.0.tar.gz` "is compatible with Hadoop 3, Spark 3, Hive 3 and HBase 2",
+  the Hadoop the images hold; a script that relies on what changed between the two can behave otherwise. Pig runs on
+  the image's Tez, as EMR's runs on EMR's, in place of the Tez its distribution bundles, whose classes need another
+  protobuf. Then the AWS CLI's `Type=PIG` step, `command-runner.jar` running `pig-script --run-pig-script --args` and
+  the step's `Args`, runs EMR's own `pig-script`, which the image has: it runs `pig` with the arguments after
+  `--args`, as the image's `hadoop` user in `/home/hadoop`, on the cluster's storage, so `-f s3://...` reads its
+  script from Floci's S3 and `-p` sets its parameters. "Pig 0.16.0 and later use Apache Tez", so Pig runs on Tez, on
+  the cluster's YARN with the stock Tez classes and the sizes Hive's Tez gets (see **Hive steps**), or, where it runs
+  none, in local mode in its JVM; `-x mapreduce`, or `exectype=mapreduce` in `pig-properties`, as the Release Guide's
+  Pig considerations put it, runs MapReduce instead (see **Hadoop streaming and MapReduce**). Pig reads a
+  configuration of its own, a copy of its `conf` folder whose `pig.properties` ends with Floci's `exectype=tez` and
+  `mapreduce.job.working.dir=/user/${user.name}`, then the cluster's `tez-site` and `pig-properties`, a later key
+  winning, Pig passing the Hadoop and Tez ones on to its jobs. Pig sets the working directory of each input's file
+  system to it, which S3A, Floci's `s3://`, refuses when it names another file system, as Hadoop's own default, the
+  HDFS home with its scheme, does; without a scheme, it is the same HDFS folder. A `pig-log4j` adds its lines to the
+  `log4j.properties` Pig then reads, and the exports of `pig-env` start its `pig-env.sh`. Any command a step runs on
+  such a cluster, `command-runner.jar pig ...` or a script's, gets the same. With `pig.enabled` off, a Pig step on a
+  cluster whose `Applications` name Pig is `FAILED` without running ("Floci does not run this step: Pig is not in the
+  image steps run in. floci.services.emr.pig.enabled adds Apache Pig to it.").
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
@@ -452,9 +670,23 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `INTERNAL_ERROR`. `TerminateJobFlows` stops the actions at once, and a cluster Floci was bootstrapping
   when it stopped ends with `INTERNAL_ERROR` once Floci is back. With a `LogUri`, each action's output
   goes to `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/node/<instance-id>/bootstrap-actions/<n>/`,
-  as the Management Guide's bootstrap failure pages give the folder. The actions run once, as on the
-  master, and every node of the cluster runs from the image they leave, so each holds what they installed. Shutdown
-  actions do not run. A cluster a failed action ended has a `Status.ErrorDetails` entry in `DescribeCluster` and
+  as the Management Guide's bootstrap failure pages give the folder. Bootstrap actions "run on cluster after
+  Amazon EMR launches the instance", on each node: where a cluster's core and task nodes run in containers of their
+  own (see **YARN**), each runs them too, in a container of its own beside the primary node's, as that node, its files
+  saying so (see **Node files**), its instance metadata its own (see **Instance metadata**), its output under its own
+  instance id, and is kept as the image that node runs from, so it holds what its own actions installed. A node a
+  resize adds runs them before it starts, as "If you add nodes to a running cluster, bootstrap actions also run on
+  those nodes in the same way", and one that leaves keeps its image only until the cluster ends, so one added again
+  runs them again; a bootstrap that cannot run for the nodes a resize adds ends the cluster with `INTERNAL_ERROR`, as
+  at its start. The nodes' bootstraps stop as the cluster ends, or as the primary node's actions fail. AWS
+  terminates a node whose action fails, and "If too many instances fail their bootstrap actions, then Amazon EMR
+  terminates the cluster. If just a few instances fail, Amazon EMR attempts to reallocate the failed instances and
+  continue", with no number given: Floci runs a node's actions again once, in a fresh container, and a second failure
+  ends the cluster with `BOOTSTRAP_FAILURE` and, as no source gives AWS's words or an error code for a core or task
+  node, a message of Floci's after the primary node's, "On the core instance (i-00000000000000002), bootstrap action 1
+  returned a non-zero return code", with no `ErrorDetails`. Elsewhere the actions run once, as on the primary node, and
+  every node runs from the image they leave. Shutdown actions do not run. A cluster a failed action ended has a
+  `Status.ErrorDetails` entry in `DescribeCluster` and
   `ListClusters`, with the code and `ErrorData` keys of the Management Guide's error code pages:
   `BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE` with `primary-instance-id`, `bootstrap-action`, `return-code`,
   `amazon-s3-path` and `public-doc` for an action that exits with another code than 0, and
@@ -462,6 +694,15 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `ErrorData` is a list of maps, and no source shows how AWS spreads the keys over them: Floci gives one map holding
   them all. `ErrorMessage` is the reason's message and the error code's page, in Floci's words, as AWS advises
   against parsing that text. A cluster that ends with `INTERNAL_ERROR` has no `ErrorDetails`.
+* **Node files**: an EMR node's `/mnt/var/lib/info/instance.json` says whether it is the primary node, in its
+  `isMaster`, which the Management Guide's bootstrap action reads (`grep isMaster /mnt/var/lib/info/instance.json |
+  grep false` on any other node), and its `/mnt/var/lib/instance-controller/extraInstanceData.json` gives its
+  `instanceRole`, which AWS's Knowledge Center reads with `jq` and compares, lowercased, with `master`, `core` and
+  `task`. AWS documents nothing else in either file, so Floci writes those two fields alone: `{"isMaster": true}` and
+  `{"instanceRole": "MASTER"}` in the bootstrap actions' container and each step's, which run as on the primary node,
+  and in the primary node's own, and `false` with `CORE` or `TASK` in each core or task node's, the roles as the API's
+  `InstanceRoleType` names them, and in each core or task node's bootstrap container its own (see **Bootstrap
+  actions**). Files that cannot be written fail the bootstrap, the step or the node they are for.
 * **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
   unpacked; see [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md)). It is then
@@ -575,7 +816,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `container:<id>`, YARN's daemons would listen on every interface of the namespace, and with `none` the steps could not
   reach them, so the cluster's Spark runs in local mode.
 - **MapReduce and Tez in local mode where there is no YARN.** Only a cluster that runs YARN (see **YARN**) runs them on
-  it; on any other, `hadoop-streaming`, a custom JAR's MapReduce and Hive's Tez run in the step's container.
+  it; on any other, `hadoop-streaming`, a custom JAR's MapReduce and Hive's and Pig's Tez run in the step's
+  container.
+- **Pig is Apache's 0.18.0, and only with `pig.enabled`.** EMR's 7.x releases ship Pig 0.17.0, whose Apache build is
+  for Hadoop 2; no AWS image carries Pig, so Floci downloads Apache's 0.18.0, for Hadoop 3, when it is enabled, and
+  runs it on the image's Tez (see **Pig steps**).
 - **Tez's intermediate data is not compressed on YARN.** The images name the LZO codec for it, whose native library they
   lack, so Floci turns that compression off, which a `tez-site` classification can turn back on with a codec they have.
 - **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
@@ -639,6 +884,9 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_YARN_NODE_MEMORY_MB` | `4096` | The memory a `docker` cluster's NodeManager offers the YARN containers its Spark executors run in (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_YARN_NODE_VCORES` | `4` | The virtual cores it offers them |
 | `FLOCI_SERVICES_EMR_YARN_MAX_WORKER_NODES` | `4` | The most core and task nodes a `docker` cluster runs as containers of their own, core nodes first; 0 keeps a cluster on its primary node |
+| `FLOCI_SERVICES_EMR_PIG_ENABLED` | `false` | Add Apache Pig, downloaded once per release's image, to a `docker` cluster whose `Applications` name Pig, so its Pig steps run (see [Running steps](#running-steps)) |
+| `FLOCI_SERVICES_EMR_PIG_URLS` | `https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz` | Where Floci downloads Pig's binary distribution from, the first that answers; a mirror names its own |
+| `FLOCI_SERVICES_EMR_PIG_SHA256` | `6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a`, `pig-0.18.0.tar.gz`'s | The SHA-256 the download must have; set it with another distribution |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue

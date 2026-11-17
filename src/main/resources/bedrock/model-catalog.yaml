@@ -24,7 +24,7 @@ foundationModels:
   - modelId: amazon.nova-lite-v1:0
     modelName: Nova Lite
     providerName: Amazon
-    inputModalities: [TEXT, IMAGE]
+    inputModalities: [TEXT, IMAGE, VIDEO]
     outputModalities: [TEXT]
     responseStreamingSupported: true
     lifecycleStatus: ACTIVE

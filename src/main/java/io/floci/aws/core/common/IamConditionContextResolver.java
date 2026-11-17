@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
@@ -10,6 +11,7 @@ import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
 import io.floci.aws.services.dynamodb.DynamoDbConditionKeys;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
+import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.dynamodb.DynamoDbTableNames;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -51,6 +53,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Function;
@@ -79,6 +82,8 @@ public class IamConditionContextResolver {
     /** Set by {@code ResourceArnBuilder.readJsonBody}, which runs earlier in the same filter pass. */
     static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
     private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
+    /** Set on a request that carries none of its operation's members, see {@link #readNoMembers}. */
+    private static final String NO_MEMBERS = "floci.noRequestMembers";
     /** Prefixes the action whose numbered EC2 targets {@link #heldTargets} looked up for the request. */
     private static final String HELD_TARGETS = "floci.heldTargets.";
     private static final String REQUEST_TAG_PREFIX = "aws:RequestTag/";
@@ -203,7 +208,34 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * {@code context} with the condition keys {@link #resourceTags} read from a resource's stored tags, each in place of
+     * The condition keys the table reads from the record of the resource {@code resource} names for
+     * {@code action}: what the service holding that resource keeps in the member the table asks for
+     * ({@link StoredResourceArns#recorded}), by key. Null when the action takes none, the ARN is of no type the
+     * table gives such a key, or the record holds nothing there, which is every resource a request names before
+     * the value is set on it. Read for each ARN on its own, as the stored tags are, and
+     * {@link #withResourceTags} puts them in that ARN's context.
+     */
+    public Map<String, List<String>> resourceKeys(String action, String resource) {
+        Map<String, IamConditionKeys.Resource> keys = IamConditionKeys.resources(action);
+        if (keys.isEmpty() || !AwsArnUtils.isArn(resource)) {
+            return null;
+        }
+        StoredResourceArns stored = storedResourceArns(AwsArnUtils.parse(resource).service());
+        if (stored == null) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        keys.forEach((key, held) -> {
+            if (held.arn().matcher(resource).matches()) {
+                stored.recorded(resource, held.member()).ifPresent(value -> conditions.put(key, List.of(value)));
+            }
+        });
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    /**
+     * {@code context} with the condition keys read from a resource itself, its stored tags through
+     * {@link #resourceTags} or its record through {@link #resourceKeys}, each in place of
      * any key of the same name, case aside, the context held; {@code context} itself when there are none.
      */
     public static Map<String, List<String>> withResourceTags(Map<String, List<String>> context,
@@ -343,6 +375,17 @@ public class IamConditionContextResolver {
         return conditions;
     }
 
+    /** The condition key whose value a delegation can decide rather than the request. */
+    private static final String PERMISSIONS_BOUNDARY_KEY = "iam:PermissionsBoundary";
+
+    /** The boundary the caller's delegation registered, or empty for any other caller. */
+    private Optional<String> delegatedBoundary() {
+        if (iamService.isUnsatisfied() || requestContext == null) {
+            return Optional.empty();
+        }
+        return iamService.get().delegatedRoleBoundaryArn(requestContext.getAccessKeyId());
+    }
+
     private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
         Map<String, String> targets = IamConditionKeys.targets(action);
@@ -358,6 +401,13 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
+        // iam:PermissionsBoundary names the boundary the request will leave on the principal, so a
+        // role created under a delegation publishes the cap that delegation registered rather than
+        // whatever the call asked for: the write applies the cap, and a policy conditioned on the
+        // boundary has to be told the same value the role ends up with.
+        if (members.containsKey(PERMISSIONS_BOUNDARY_KEY) && "iam:CreateRole".equals(action)) {
+            delegatedBoundary().ifPresent(arn -> conditions.put(PERMISSIONS_BOUNDARY_KEY, List.of(arn)));
+        }
         targets.forEach((key, target) -> {
             if (key.contains("${TagKey}")) {
                 Map<String, String> tags = storedTargetValue(target, form.get(target), IamRole::getTags, IamUser::getTags);
@@ -1177,6 +1227,21 @@ public class IamConditionContextResolver {
     // ── Request body access ─────────────────────────────────────────────────────
 
     /**
+     * Has every reader of the request's members read none from it: its JSON body reads as one naming nothing, and its
+     * form, its raw body and a Query request's parameters as absent. A request a route AWS documents outside botocore
+     * takes is another API's, so a member its body gives was added by the caller, naming a resource or giving a
+     * condition key a value its handler never acts on.
+     */
+    static void readNoMembers(ContainerRequestContext ctx) {
+        ctx.setProperty(NO_MEMBERS, Boolean.TRUE);
+        ctx.setProperty(BUFFERED_JSON_BODY, JsonNodeFactory.instance.objectNode());
+    }
+
+    private static boolean carriesNoMembers(ContainerRequestContext ctx) {
+        return Boolean.TRUE.equals(ctx.getProperty(NO_MEMBERS));
+    }
+
+    /**
      * The decoded form parameters of a Query-protocol request, buffered once per request and
      * restored for the controller that reads the form next. A repeated key keeps its first
      * value, which is the value the Query handlers read through {@code getFirst}, so the
@@ -1184,6 +1249,9 @@ public class IamConditionContextResolver {
      */
     @SuppressWarnings("unchecked")
     static Map<String, String> formParameters(ContainerRequestContext ctx) {
+        if (carriesNoMembers(ctx)) {
+            return Map.of();
+        }
         if ("GET".equalsIgnoreCase(ctx.getMethod()) && IamActionRegistry.isQueryRequest(ctx)) {
             Map<String, String> parameters = new LinkedHashMap<>();
             ctx.getUriInfo().getQueryParameters().forEach((key, values) -> {
@@ -1223,8 +1291,14 @@ public class IamConditionContextResolver {
         return parameters;
     }
 
-    /** Reads the entity fully and puts an equivalent stream back for downstream readers. */
+    /**
+     * Reads the entity fully and puts an equivalent stream back for downstream readers; none for a request that
+     * carries no members, whose entity is left to its handler.
+     */
     static byte[] bufferEntity(ContainerRequestContext ctx) {
+        if (carriesNoMembers(ctx)) {
+            return null;
+        }
         InputStream in = ctx.getEntityStream();
         if (in == null) {
             return null;
@@ -1276,6 +1350,16 @@ public class IamConditionContextResolver {
         DynamoDbConditionKeys.Result keys = dynamoDbKeys(action, body, table, ctx);
 
         Map<String, List<String>> conditions = new LinkedHashMap<>();
+        putKeyConditions(conditions, keys);
+        List<String> returnValues = singleItemReturnValues(action, body);
+        if (!returnValues.isEmpty()) {
+            conditions.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
+        }
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    /** Adds the request-derived {@code LeadingKeys}, {@code Attributes} and {@code Select} that were resolved. */
+    private static void putKeyConditions(Map<String, List<String>> conditions, DynamoDbConditionKeys.Result keys) {
         if (!keys.leadingKeys().isEmpty()) {
             conditions.put("dynamodb:LeadingKeys", keys.leadingKeys());
         }
@@ -1285,11 +1369,6 @@ public class IamConditionContextResolver {
         if (keys.select() != null) {
             conditions.put("dynamodb:Select", List.of(keys.select()));
         }
-        List<String> returnValues = singleItemReturnValues(action, body);
-        if (!returnValues.isEmpty()) {
-            conditions.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
-        }
-        return conditions.isEmpty() ? null : conditions;
     }
 
     private static List<String> singleItemReturnValues(String action, JsonNode body) {
@@ -1317,6 +1396,9 @@ public class IamConditionContextResolver {
      */
     List<DynamoDbTransactionItem> dynamoDbTransactionItems(String action, ContainerRequestContext ctx,
                                                          String region, String accountId) {
+        if ("dynamodb:BatchExecuteStatement".equals(action) || "dynamodb:ExecuteTransaction".equals(action)) {
+            return dynamoDbStatementItems(action, ctx, region, accountId);
+        }
         boolean read = "dynamodb:TransactGetItems".equals(action);
         if (!read && !"dynamodb:TransactWriteItems".equals(action)) {
             return List.of();
@@ -1347,15 +1429,7 @@ public class IamConditionContextResolver {
                         : DynamoDbConditionKeys.extract(itemAction, request, table);
                 Map<String, List<String>> context = new LinkedHashMap<>();
                 context.put("dynamodb:EnclosingOperation", List.of(read ? "TransactGetItems" : "TransactWriteItems"));
-                if (!keys.leadingKeys().isEmpty()) {
-                    context.put("dynamodb:LeadingKeys", keys.leadingKeys());
-                }
-                if (!keys.attributes().isEmpty()) {
-                    context.put("dynamodb:Attributes", keys.attributes());
-                }
-                if (keys.select() != null) {
-                    context.put("dynamodb:Select", List.of(keys.select()));
-                }
+                putKeyConditions(context, keys);
                 if (!read && request.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
                     context.put("dynamodb:ReturnValues",
                             List.of(request.path("ReturnValuesOnConditionCheckFailure").asText()));
@@ -1363,6 +1437,38 @@ public class IamConditionContextResolver {
                 checks.add(new DynamoDbTransactionItem(itemAction,
                         ResourceArnBuilder.toDynamoDbTableArn(executionTable, region, accountId), context));
             }
+        }
+        return checks;
+    }
+
+    /**
+     * One check per PartiQL statement of a batch or transaction, on the statement's own PartiQL action and
+     * table, as a single ExecuteStatement is checked. A statement with no PartiQL action keeps the batch's
+     * own action, which no PartiQL grant covers. Statements of a transaction carry
+     * {@code dynamodb:EnclosingOperation} {@code ExecuteTransaction}.
+     */
+    private List<DynamoDbTransactionItem> dynamoDbStatementItems(String action, ContainerRequestContext ctx,
+                                                                 String region, String accountId) {
+        boolean transaction = "dynamodb:ExecuteTransaction".equals(action);
+        String operation = action.substring("dynamodb:".length());
+        List<DynamoDbTransactionItem> checks = new ArrayList<>();
+        for (JsonNode request : DynamoDbConditionKeys.partiQLStatementRequests(operation, bufferedJsonBody(ctx))) {
+            String statement = DynamoDbConditionKeys.partiQLStatement(request);
+            String statementAction = DynamoDbPartiQLParser.iamAction(statement);
+            String tableName = DynamoDbPartiQLParser.extractTable(statement);
+            String resource = tableName == null || tableName.isEmpty()
+                    ? "*" : ResourceArnBuilder.toDynamoDbTableArn(tableName, region, accountId);
+            Map<String, List<String>> context = new LinkedHashMap<>();
+            if (transaction) {
+                context.put("dynamodb:EnclosingOperation", List.of("ExecuteTransaction"));
+            }
+            if (statementAction == null) {
+                checks.add(new DynamoDbTransactionItem(action, resource, context));
+                continue;
+            }
+            putKeyConditions(context, DynamoDbConditionKeys.extract(statementAction, request,
+                    describeTargetTable(tableName)));
+            checks.add(new DynamoDbTransactionItem(statementAction, resource, context));
         }
         return checks;
     }
@@ -1404,15 +1510,7 @@ public class IamConditionContextResolver {
             DynamoDbConditionKeys.Result keys = dynamoDbKeys(
                     action, single, describeTargetTable(reference), ctx);
             Map<String, List<String>> conditions = new LinkedHashMap<>();
-            if (!keys.leadingKeys().isEmpty()) {
-                conditions.put("dynamodb:LeadingKeys", keys.leadingKeys());
-            }
-            if (!keys.attributes().isEmpty()) {
-                conditions.put("dynamodb:Attributes", keys.attributes());
-            }
-            if (keys.select() != null) {
-                conditions.put("dynamodb:Select", List.of(keys.select()));
-            }
+            putKeyConditions(conditions, keys);
             contexts.add(conditions);
         });
         return contexts.isEmpty() ? List.of(Map.of()) : contexts;

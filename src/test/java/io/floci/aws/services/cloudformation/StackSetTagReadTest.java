@@ -26,6 +26,17 @@ class StackSetTagReadTest {
         service.createStackSet(SET, "{\"Resources\":{}}", null, null, initialTags, null);
     }
 
+    /** The tags IAM gives a resource-tag condition: the stack set's, read on its ARN in the account it names. */
+    @Test
+    void storedTagsReadsTheStackSetItsArnNames() {
+        String arn = service.stackSetArn(SET, "us-east-1").orElseThrow();
+
+        assertEquals(initialTags, service.storedTags(arn));
+        assertEquals(Map.of(), service.storedTags(arn.replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), service.storedTags(arn.substring(0, arn.lastIndexOf(':')) + ":not-its-id"));
+        assertEquals(Map.of(), service.storedTags(arn.replace("stackset/", "stack/")));
+    }
+
     @Test
     void updatingTagsLeavesAnActiveReadOnItsOriginalMap() {
         Map<String, String> tagsBeingRead = service.describeStackSet(SET).getTags();

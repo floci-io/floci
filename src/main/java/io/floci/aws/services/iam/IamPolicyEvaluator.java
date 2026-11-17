@@ -435,10 +435,21 @@ public class IamPolicyEvaluator {
         List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
                 ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
 
+        // Organization levels gate a simulation the way they gate the call it stands for: the
+        // action must be allowed at every level and explicitly denied at none, before the input
+        // policies are consulted. This is the live path's own walk, so a simulation cannot answer
+        // differently from the request it models.
+        ScpWalk scp = scpWalk(caller.scpLevels(), loweredAction, resource, ctx);
+        if (scp.firstDeny() != null) {
+            return SimulationDecision.EXPLICIT_DENY;
+        }
         if (anyExplicitDeny(identityStmts, loweredAction, resource, ctx)
                 || (sessionStmts != null && anyExplicitDeny(sessionStmts, loweredAction, resource, ctx))
                 || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, loweredAction, resource, ctx))) {
             return SimulationDecision.EXPLICIT_DENY;
+        }
+        if (!scp.allows()) {
+            return SimulationDecision.IMPLICIT_DENY;
         }
         if (!anyExplicitAllow(identityStmts, loweredAction, resource, ctx)) {
             return SimulationDecision.IMPLICIT_DENY;

@@ -1,7 +1,10 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -13,6 +16,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.FunctionCode;
@@ -23,21 +27,20 @@ import software.amazon.awssdk.services.lambda.model.Runtime;
 import software.amazon.awssdk.services.lambda.model.VpcConfig;
 import software.amazon.awssdk.services.lambda.model.VpcConfigResponse;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 
 @QuarkusTest
 class LambdaVpcResourceValidationIntegrationTest {
@@ -54,6 +57,9 @@ class LambdaVpcResourceValidationIntegrationTest {
 
     @TestHTTPResource("/")
     URI endpoint;
+
+    @InjectSpy
+    Ec2Service ec2Service;
 
     @BeforeEach
     void createDeclaredNetworksAndRole() throws Exception {
@@ -72,13 +78,8 @@ class LambdaVpcResourceValidationIntegrationTest {
                 "Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
                 """)).role().arn();
         cleanup.add(() -> iam.deleteRole(r -> r.roleName(name)));
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async event => event;".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        code = FunctionCode.builder().zipFile(SdkBytes.fromByteArray(bytes.toByteArray())).build();
+        byte[] bytes = LambdaCodeFixtures.nodeJsZip("exports.handler = async event => event;");
+        code = FunctionCode.builder().zipFile(SdkBytes.fromByteArray(bytes)).build();
         cleanup.add(() -> {
             try {
                 lambda.deleteFunction(r -> r.functionName(name));
@@ -213,11 +214,61 @@ class LambdaVpcResourceValidationIntegrationTest {
                 && (current.vpcId() == null || current.vpcId().isEmpty())));
     }
 
+    /**
+     * A function, and a published version of it, hold the subnets their VpcConfig names, as their network interfaces
+     * do on AWS: DeleteSubnet is refused until neither names the subnet.
+     */
+    @Test
+    void aFunctionAndItsVersionsHoldTheSubnetsTheirVpcConfigNames() {
+        createFunction(first.config());
+        assertEquals("DependencyViolation", subnetDeletionError(first.subnet()));
+
+        String version = lambda.publishVersion(r -> r.functionName(name)).version();
+        lambda.updateFunctionConfiguration(r -> r.functionName(name).vpcConfig(second.config()));
+        assertEquals("DependencyViolation", subnetDeletionError(first.subnet()), "the version still names it");
+        assertEquals("DependencyViolation", subnetDeletionError(second.subnet()));
+
+        lambda.deleteFunction(r -> r.functionName(name).qualifier(version));
+        ec2.deleteSubnet(r -> r.subnetId(first.subnet()));
+    }
+
+    /**
+     * A DeleteSubnet that runs after CreateFunction validated its subnets but before it stored the function sees no
+     * function naming the subnet and deletes it. The function then infers no VPC from it, as from a subnet never
+     * created, rather than storing the VPC of a subnet that is gone.
+     */
+    @Test
+    void aSubnetDeletedWhileAFunctionIsCreatedLeavesItNoInferredVpc() {
+        doAnswer(invocation -> {
+            ec2.deleteSubnet(r -> r.subnetId(first.subnet()));
+            return invocation.callRealMethod();
+        }).when(ec2Service).runWithSubnetReferencesHeld(anyString(), any(Runnable.class));
+
+        createFunction(first.config());
+
+        assertEquals(List.of(first.subnet()), configuration().vpcConfig().subnetIds());
+        assertNull(configuration().vpcConfig().vpcId());
+    }
+
+    private String subnetDeletionError(String subnet) {
+        return assertThrows(Ec2Exception.class, () -> ec2.deleteSubnet(r -> r.subnetId(subnet)))
+                .awsErrorDetails().errorCode();
+    }
+
     private Network network(String prefix) {
         String vpc = ec2.createVpc(r -> r.cidrBlock(prefix + ".0.0/16")).vpc().vpcId();
         cleanup.add(() -> ec2.deleteVpc(r -> r.vpcId(vpc)));
         String subnet = ec2.createSubnet(r -> r.vpcId(vpc).cidrBlock(prefix + ".1.0/24")).subnet().subnetId();
-        cleanup.add(() -> ec2.deleteSubnet(r -> r.subnetId(subnet)));
+        cleanup.add(() -> {
+            try {
+                ec2.deleteSubnet(r -> r.subnetId(subnet));
+            } catch (Ec2Exception e) {
+                // A test may have deleted it already, once nothing held it.
+                if (!"InvalidSubnetID.NotFound".equals(e.awsErrorDetails().errorCode())) {
+                    throw e;
+                }
+            }
+        });
         String group = ec2.createSecurityGroup(
                 r -> r.vpcId(vpc).groupName(name).description("Declared Lambda network")).groupId();
         cleanup.add(() -> ec2.deleteSecurityGroup(r -> r.groupId(group)));

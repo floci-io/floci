@@ -10,16 +10,11 @@ import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 class BedrockGuardrailLifecycleConcurrencyTest {
@@ -54,41 +49,15 @@ class BedrockGuardrailLifecycleConcurrencyTest {
                 .put("blockedInputMessaging", "blocked").put("blockedOutputsMessaging", "blocked");
         Guardrail guardrail = service.createGuardrail(request, REGION);
         storage.parkNextWrite();
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        Thread writer = new Thread(() -> {
-            try {
-                if (operation == Write.UPDATE) {
-                    service.updateGuardrail(guardrail.getGuardrailId(), request.deepCopy().put("name", "changed"), REGION);
-                } else if (operation == Write.VERSION) {
-                    service.createGuardrailVersion(guardrail.getGuardrailId(), "snapshot", REGION);
-                } else {
-                    service.tagResource(guardrail.getGuardrailArn(), Map.of("owner", "test"), REGION);
-                }
-            } catch (Throwable e) {
-                failure.set(e);
+        assertOperationWaitsForParkedStore(storage, () -> {
+            if (operation == Write.UPDATE) {
+                service.updateGuardrail(guardrail.getGuardrailId(), request.deepCopy().put("name", "changed"), REGION);
+            } else if (operation == Write.VERSION) {
+                service.createGuardrailVersion(guardrail.getGuardrailId(), "snapshot", REGION);
+            } else {
+                service.tagResource(guardrail.getGuardrailArn(), Map.of("owner", "test"), REGION);
             }
-        });
-        Thread deletion = new Thread(() -> {
-            try {
-                service.deleteGuardrail(guardrail.getGuardrailId(), null, REGION);
-            } catch (Throwable e) {
-                failure.set(e);
-            }
-        });
-        writer.start();
-        try {
-            assertTrue(storage.awaitParked());
-            deletion.start();
-            await().atMost(Duration.ofSeconds(5)).until(() ->
-                    deletion.getState() == Thread.State.BLOCKED || deletion.getState() == Thread.State.TERMINATED);
-        } finally {
-            storage.release();
-            writer.join(Duration.ofSeconds(5));
-            deletion.join(Duration.ofSeconds(5));
-        }
-        assertFalse(writer.isAlive());
-        assertFalse(deletion.isAlive());
-        assertNull(failure.get());
+        }, () -> service.deleteGuardrail(guardrail.getGuardrailId(), null, REGION));
         AwsException missing = assertThrows(AwsException.class,
                 () -> service.getGuardrail(guardrail.getGuardrailId(), null, REGION));
         assertEquals("ResourceNotFoundException", missing.getErrorCode());

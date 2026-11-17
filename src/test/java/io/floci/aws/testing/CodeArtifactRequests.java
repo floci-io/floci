@@ -34,9 +34,21 @@ public final class CodeArtifactRequests {
     /** As above, with {@code distTagsJson} sent as the envelope's {@code dist-tags}; {@code null} leaves it out. */
     public static String npmPublishEnvelope(String name, String version, String filename, byte[] content,
             String distTagsJson) {
+        return npmPublishEnvelope(name, version, filename, content, distTagsJson, null);
+    }
+
+    /**
+     * As above, with {@code extraVersionFieldsJson} added to the version object ahead of its {@code
+     * dist} block: one or more JSON members without the surrounding braces, such as {@code
+     * "readme":"# v1"} or {@code "dependencies":{"left-pad":"^1.3.0"}}. {@code null} adds none.
+     */
+    public static String npmPublishEnvelope(String name, String version, String filename, byte[] content,
+            String distTagsJson, String extraVersionFieldsJson) {
         String distTags = distTagsJson == null ? "" : ",\"dist-tags\":" + distTagsJson;
+        String extraFields = extraVersionFieldsJson == null ? "" : extraVersionFieldsJson + ",";
         return "{\"name\":\"" + name + "\",\"versions\":{\"" + version + "\":{\"name\":\"" + name
-                + "\",\"version\":\"" + version + "\",\"dist\":{\"tarball\":\"http://ignored/" + filename
+                + "\",\"version\":\"" + version + "\"," + extraFields
+                + "\"dist\":{\"tarball\":\"http://ignored/" + filename
                 + "\",\"integrity\":\"" + npmIntegrity(content) + "\"}}}" + distTags + ",\"_attachments\":{\""
                 + filename + "\":{\"content_type\":\"application/octet-stream\","
                 + "\"data\":\"" + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length

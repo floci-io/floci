@@ -87,6 +87,11 @@ public class EcrRegistryManager {
             + AwsPartitions.dnsSuffixRegex() + "|" + FLOCI_REGISTRY_HOST + ")"
             + "|" + FLOCI_REGISTRY_HOST + "/[0-9]{12}/([a-z0-9-]+))/.+$");
 
+    /** The account, Region and path of an image in an ECR repository, in {@link #ECR_IMAGE_REGION}'s forms. */
+    private static final Pattern ECR_IMAGE_PARTS = Pattern.compile("^(?:([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.(?:"
+            + AwsPartitions.dnsSuffixRegex() + "|" + FLOCI_REGISTRY_HOST + ")"
+            + "|" + FLOCI_REGISTRY_HOST + "/([0-9]{12})/([a-z0-9-]+))/(.+)$");
+
     /**
      * The container name actually in use. Differs from {@link #registryContainerName()} only when
      * a legacy-named container surviving a pre-migration version was adopted.
@@ -221,6 +226,36 @@ public class EcrRegistryManager {
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }
+
+    /**
+     * The ECR repository an image URI names, in any of the forms {@link #imageRegion} reads, and the tag or digest it
+     * asks for, its tag {@code latest} where it names neither; empty for an image outside ECR.
+     */
+    public static Optional<EcrImage> ecrImage(String image) {
+        Matcher m = image != null ? ECR_IMAGE_PARTS.matcher(image) : null;
+        if (m == null || !m.matches()) {
+            return Optional.empty();
+        }
+        String path = m.group(5);
+        String digest = null;
+        int at = path.indexOf('@');
+        if (at >= 0) {
+            digest = path.substring(at + 1);
+            path = path.substring(0, at);
+        }
+        String tag = null;
+        int colon = path.lastIndexOf(':');
+        if (colon > path.lastIndexOf('/')) {
+            tag = path.substring(colon + 1);
+            path = path.substring(0, colon);
+        }
+        return Optional.of(new EcrImage(m.group(1) != null ? m.group(1) : m.group(3),
+                m.group(2) != null ? m.group(2) : m.group(4), path, digest == null && tag == null ? "latest" : tag,
+                digest));
+    }
+
+    /** An image in an ECR repository: its registry, Region and repository, and the tag or the digest asked for. */
+    public record EcrImage(String registryId, String region, String repository, String tag, String digest) {}
 
     /**
      * The Region of the ECR repository an image URI names, AWS-shaped or one Floci's ECR hands out; empty for an

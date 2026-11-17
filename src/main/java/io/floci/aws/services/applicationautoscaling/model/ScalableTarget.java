@@ -29,7 +29,7 @@ public class ScalableTarget {
     private String scalableTargetArn;
     private double creationTime;
     private SuspendedState suspendedState = new SuspendedState();
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public ScalableTarget() {}
 

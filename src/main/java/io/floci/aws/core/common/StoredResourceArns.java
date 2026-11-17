@@ -20,15 +20,31 @@ import java.util.Optional;
  * points at.
  *
  * <p>Implemented by the service that owns such resources or whose requests name them (EventBridge, for its
- * connections and API destinations; Application Auto Scaling, for its scalable targets; Redshift Data, for the
- * Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment Cryptography, for
- * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
- * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
- * invitations and shares of other accounts they act on; Secrets Manager, for the secret a name or an ARN names,
- * random suffix included, and its tags; EventBridge Scheduler, for its default schedule group; CloudFormation, for
- * the stack or the stack set a name names, whose id it minted); looked up lazily by {@code ResourceArnBuilder} and
- * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
- * ARN is of, so IAM never depends on that service directly.</p>
+ * connections and API destinations; Application Auto Scaling, for its scalable targets and their tags; Redshift
+ * Data, for the Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment
+ * Cryptography, for the key an alias names and the tags of a key; EMR, for the clusters of its instance groups and a
+ * tag call's resource and the tags of a cluster; IAM Identity Center, for the accounts its permission sets are
+ * provisioned to and the tags of an instance,
+ * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view and the tags
+ * of an index or a view; OAM and RAM, for the sinks, invitations and shares of other accounts they act on, OAM for
+ * the tags of a sink or a link, and RAM for the tags of a resource share;
+ * Secrets Manager, for the secret a name or an ARN names, random suffix included, and its tags; EventBridge
+ * Scheduler, for its default schedule group and its groups' tags;
+ * CloudFormation, for the stack or the stack set a name names, whose id it minted, and the tags of a stack, a stack set
+ * or a change set; S3 Tables, for the table a request names by its table bucket, namespace and name, and the tags of a
+ * table bucket or a table; Lambda, for the layer version a layer version ARN selects, the image of a MicroVM and the
+ * execution of a callback, and the tags of a function, an event source mapping, a web function, a MicroVM image or a
+ * network connector; Glue, for the tags of a resource it tags; Step Functions, for the tags of a state machine, its
+ * versions and executions, and an activity; CodeBuild, for the project a build belongs to and the tags of a project or
+ * a report group; Athena, for the workgroup and the data catalog a request naming none uses and the tags of a
+ * workgroup or a data catalog; Redshift Serverless, for the tags of a namespace, a workgroup or a snapshot; DynamoDB,
+ * for the tags of a table and its indexes; ECR, for the tags of a repository; Redshift, for the key a snapshot records
+ * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
+ * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
+ * another account an association runs and the tags of a parameter, a document or an association; CloudFront, for the
+ * key value store a name names and the tags of any resource it tags); looked up lazily by {@code ResourceArnBuilder}
+ * and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or
+ * an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

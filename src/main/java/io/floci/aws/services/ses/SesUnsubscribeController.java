@@ -1,6 +1,7 @@
 package io.floci.aws.services.ses;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Html;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
@@ -55,10 +56,10 @@ public class SesUnsubscribeController {
         String html = "<!doctype html>\n"
                 + "<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Unsubscribe</title></head>\n"
                 + "<body>\n"
-                + "<p>Unsubscribe " + htmlEscape(address) + " from " + htmlEscape(scopeLabel(topic))
-                + " on contact list &#39;" + htmlEscape(contactList) + "&#39;?</p>\n"
+                + "<p>Unsubscribe " + Html.escape(address) + " from " + Html.escape(scopeLabel(topic))
+                + " on contact list &#39;" + Html.escape(contactList) + "&#39;?</p>\n"
                 + "<form method=\"post\" action=\""
-                + htmlEscape(formAction(region, contactList, topic, address)) + "\">\n"
+                + Html.escape(formAction(region, contactList, topic, address)) + "\">\n"
                 // RFC 8058 one-click parameter, so the form's POST body matches the advertised
                 // List-Unsubscribe-Post: List-Unsubscribe=One-Click header.
                 + "<input type=\"hidden\" name=\"List-Unsubscribe\" value=\"One-Click\">\n"
@@ -113,10 +114,5 @@ public class SesUnsubscribeController {
 
     private static String enc(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
-    }
-
-    private static String htmlEscape(String value) {
-        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace("\"", "&quot;").replace("'", "&#39;");
     }
 }

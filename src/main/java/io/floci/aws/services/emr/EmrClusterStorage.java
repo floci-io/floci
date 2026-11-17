@@ -134,6 +134,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // The ResourceManager's cluster metrics on its web port, which say when the NodeManager has registered.
     private static final String RESOURCE_MANAGER_METRICS = "http://" + BIND + ":8088/ws/v1/cluster/metrics";
     private static final String RESOURCE_MANAGER_NODES = "http://" + BIND + ":8088/ws/v1/cluster/nodes?states=";
+    // The MapReduce JobHistory server's information on its web port, which says it has started.
+    private static final String JOB_HISTORY_INFO = "http://" + BIND + ":"
+            + EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT + "/ws/v1/history/info";
     // Where a NodeManager keeps its containers' logs, on the node's volume, as <application>/<container>/<file>.
     private static final String YARN_LOGS = "/mnt/yarn/logs";
     private static final int LOG_LISTING_SECONDS = 30;
@@ -166,12 +169,15 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             "  h=$" + HADOOP_FOLDER_VARIABLE,
             "  export HADOOP_HOME=$h/hadoop HADOOP_COMMON_HOME=$h/hadoop HADOOP_LIBEXEC_DIR=$h/hadoop/libexec"
                     + " HADOOP_HDFS_HOME=$h/hadoop-hdfs HADOOP_MAPRED_HOME=$h/hadoop-mapreduce"
-                    + " HADOOP_YARN_HOME=$h/hadoop-yarn PATH=$h/hadoop-hdfs/bin:$h/hadoop-yarn/bin:$h/hadoop/bin:$PATH",
+                    + " HADOOP_YARN_HOME=$h/hadoop-yarn"
+                    + " PATH=$h/hadoop-hdfs/bin:$h/hadoop-yarn/bin:$h/hadoop-mapreduce/bin:$h/hadoop/bin:$PATH",
             "fi");
-    // What every node of a cluster writes before its daemons start: the Hadoop configuration, its name among the
-    // nodes in HDFS's when it is given one, and the empty files listing the nodes being decommissioned.
+    // What every node of a cluster writes before its daemons start: the files that say which node it is, the Hadoop
+    // configuration, its name among the nodes in HDFS's when it is given one, and the empty files listing the nodes
+    // being decommissioned.
     private static final String NODE_SETUP = String.join("\n",
             "chown hadoop:hadoop /mnt || exit",
+            EmrServerlessSparkRunner.NODE_INFO,
             EmrServerlessSparkRunner.HIVE_ONE_SDK,
             "mkdir -p " + HDFS_CONF + " || exit",
             "printf '%s\\n' '<configuration>'"
@@ -225,6 +231,13 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     "yarn.scheduler.capacity.root.default.maximum-capacity", "100",
                     "yarn.scheduler.capacity.maximum-am-resource-percent", "0.5"))
                     + " '</configuration>' > " + HDFS_CONF + "/capacity-scheduler.xml || exit",
+            "  printf '%s\\n' '<configuration>'" + yarnProperties(List.of(
+                    "mapreduce.jobhistory.address", "$FLOCI_HDFS_HOST:" + EmrServerlessSparkRunner.JOB_HISTORY_PORT,
+                    "mapreduce.jobhistory.webapp.address",
+                    "$FLOCI_HDFS_HOST:" + EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT,
+                    "mapreduce.jobhistory.admin.address", "$FLOCI_HDFS_HOST:10033",
+                    "mapreduce.jobhistory.bind-host", "$FLOCI_HDFS_BIND"))
+                    + " '</configuration>' > " + HDFS_CONF + "/mapred-site.xml || exit",
             "fi",
             "printf '%s\\n' 'log4j.rootLogger=WARN,console' 'log4j.appender.console=org.apache.log4j.ConsoleAppender'"
                     + " 'log4j.appender.console.layout=org.apache.log4j.PatternLayout'"
@@ -237,26 +250,28 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // and a DataNode with their data in it, the NameNode formatted the first time, with one copy of each block and
     // without permissions, listening on FLOCI_HDFS_BIND: every address of the container, on the cluster's own network,
     // or, in a namespace the steps share, the host's or a container's, only its loopback, which its name leads to, so
-    // no other interface serves files anyone could change; in a container's, the hosts file the name goes in is the
-    // one the namespace's containers share, the steps' too. The other daemons start with them, as none needs the HDFS
-    // to start. With HIVE_METASTORE_VARIABLE set, Hive's metastore service does, with the Hive image's Hadoop
+    // no other interface serves files anyone could change; in a container's, the hosts file the name goes in is the one
+    // the namespace's containers share, the steps' too. The other daemons start with them, as none needs the HDFS to
+    // start. With HIVE_METASTORE_VARIABLE set, Hive's metastore service does, with the Hive image's Hadoop
     // configuration, which the node's image keeps at HIVE_HADOOP_CONF, as Hive steps run, its settings after it: "Hive
-    // records metastore information in a MySQL database on the primary node's file system", kept as a Derby database
-    // in /mnt, which only the service opens, so any number of steps share it, its log in /tmp, and its warehouse in
-    // the HDFS; the cluster's core-site and hive-site, last, replace any of them, as on EMR's primary node. With
+    // records metastore information in a MySQL database on the primary node's file system", kept as a Derby database in
+    // /mnt, which only the service opens, so any number of steps share it, its log in /tmp, and its warehouse in the
+    // HDFS; the cluster's core-site and hive-site, last, replace any of them, as on EMR's primary node. With
     // YARN_MEMORY_VARIABLE set, YARN does, as "the primary node runs the YARN ResourceManager service": a
     // ResourceManager and, as on a cluster of one node, a NodeManager, which offers that much memory and
     // YARN_VCORES_VARIABLE's cores to the containers it runs the steps' Spark executors in, its local and log folders
-    // in /mnt, Java 17 opening to both the packages they reach into. Where the cluster's core nodes hold them
-    // (NODE_WORKERS_VARIABLE), the node runs no DataNode or NodeManager, but a DataNode on a volume that holds one's
-    // data, so the blocks it kept stay in reach. Once the NameNode on its port is this container's own, its ClusterId
-    // the one its format gave it, rather than another cluster's in that namespace, the DataNode has joined and the
-    // NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the folders EMR's HDFS has
-    // for steps, /tmp and the hadoop user's home, are made, and the metastore's warehouse and HIVE_JARS, which Hive's
-    // exec jar goes in. HDFS_READY then says the node is ready, once the metastore takes connections and the
-    // NodeManager has registered. A daemon that exits, before or after, the metastore among them, ends the container,
-    // its readiness gone, so the next step starts it again on its data. With HADOOP_FOLDER_VARIABLE set, every daemon
-    // runs from the Hadoop in that folder.
+    // in /mnt, and the MapReduce JobHistory server EMR runs too (a release's mapred-site "Restarts Hadoop
+    // MapReduce-HistoryServer"), which a client asks about a MapReduce job whose application master has ended, the
+    // jobs' history in the HDFS; Java 17 opening to each the packages they reach into. Where the cluster's core nodes
+    // hold them (NODE_WORKERS_VARIABLE), the node runs no DataNode or NodeManager, but a DataNode on a volume that
+    // holds one's data, so the blocks it kept stay in reach. Once the NameNode on its port is this container's own, its
+    // ClusterId the one its format gave it, rather than another cluster's in that namespace, the DataNode has joined
+    // and the NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the folders EMR's
+    // HDFS has for steps, /tmp and the hadoop user's home, are made, and the metastore's warehouse and HIVE_JARS, which
+    // Hive's exec jar goes in. HDFS_READY then says the node is ready, once the metastore takes connections, the
+    // NodeManager has registered and the JobHistory server answers. A daemon that exits, before or after, the metastore
+    // among them, ends the container, its readiness gone, so the next step starts it again on its data. With
+    // HADOOP_FOLDER_VARIABLE set, every daemon runs from the Hadoop in that folder.
     // Where a node's daemons listen: FLOCI_HDFS_BIND, or, with SUBNET_VARIABLE set, the node's own address in that subnet,
     // its cluster's network, alone, so another network it joins does not reach its HDFS or its YARN; written to
     // BIND_FILE. Hive 3's metastore has no setting for the address it listens on, so it takes every one.
@@ -307,28 +322,25 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn resourcemanager & n=$((n + 1)); "
                     + "if [ -z \"$" + NODE_WORKERS_VARIABLE + "\" ]; then "
                     + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn nodemanager & n=$((n + 1)); fi; "
+                    + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" mapred historyserver & n=$((n + 1)); "
                     + "fi; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
-                    + " | grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "FSNamesystemState\""
-                    + " | grep -q \"\\\"NumLiveDataNodes\\\" : [1-9]\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
-                    + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + untilReady("curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
+                            + " | grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"")
+                    + untilReady("curl -sf -m 5 \"" + NAMENODE_JMX + "FSNamesystemState\""
+                            + " | grep -q \"\\\"NumLiveDataNodes\\\" : [1-9]\"")
+                    + untilReady("curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
+                            + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"")
                     + "hdfs dfs -mkdir -p $dirs || exit 1; "
                     + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
                     + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); "
                     + "hdfs dfs -put -f \"$jar\" " + HIVE_JARS
                     + "/$(basename \"$jar\" .jar)-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; "
-                    + "until (exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + untilReady("(exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null")
                     + "fi; "
                     + "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then "
-                    + "until curl -sf -m 5 " + RESOURCE_MANAGER_METRICS
-                    + " | grep -q \"\\\"activeNodes\\\":[1-9]\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + untilReady("curl -sf -m 5 " + RESOURCE_MANAGER_METRICS
+                            + " | grep -q \"\\\"activeNodes\\\":[1-9]\"")
+                    + untilReady("curl -sf -m 5 " + JOB_HISTORY_INFO + " | grep -q historyInfo")
                     + "fi; "
                     + "touch " + HDFS_READY + "; "
                     // Not wait -n: an emr-6.x image's bash, 4.2, does not have it.
@@ -344,13 +356,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             "exec setpriv --reuid=hadoop --regid=hadoop --clear-groups bash -c '"
                     + "n=1; if [ -n \"$" + NODE_CORE_VARIABLE + "\" ]; then hdfs datanode & n=2; fi; "
                     + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn nodemanager & "
-                    + "until curl -sf -m 5 \"http://$FLOCI_HDFS_HOST:8088/ws/v1/cluster/nodes?states=RUNNING\""
-                    + " | grep -q \"\\\"nodeHostName\\\":\\\"$" + NODE_HOST_VARIABLE + "\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + untilReady("curl -sf -m 5 \"http://$FLOCI_HDFS_HOST:8088/ws/v1/cluster/nodes?states=RUNNING\""
+                            + " | grep -q \"\\\"nodeHostName\\\":\\\"$" + NODE_HOST_VARIABLE + "\\\"\"")
                     + "if [ -n \"$" + NODE_CORE_VARIABLE + "\" ]; then "
-                    + "until curl -sf -m 5 \"http://$FLOCI_HDFS_HOST:9870/jmx?qry=Hadoop:service=NameNode,"
-                    + "name=NameNodeInfo\" | grep -q \"$" + NODE_HOST_VARIABLE + ":9866\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; fi; "
+                    + untilReady("curl -sf -m 5 \"http://$FLOCI_HDFS_HOST:9870/jmx?qry=Hadoop:service=NameNode,"
+                            + "name=NameNodeInfo\" | grep -q \"$" + NODE_HOST_VARIABLE + ":9866\"")
+                    + "fi; "
                     + "touch " + HDFS_READY + "; "
                     + "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done; rm -f " + HDFS_READY
                     + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
@@ -766,18 +777,18 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             changed |= leaving.remove(name) != null;
             Container container = present.get(name);
             if (container == null || !"running".equals(container.getState())
-                    || !request.imageId().equals(container.getImageId())
+                    || !imageOf(request, node).equals(container.getImageId())
                     || !joins(container.getNetworkSettings() != null ? container.getNetworkSettings().getNetworks()
                             : null, clusterSubnet(clusterId) != null ? request.joinedNetwork() : null)
                     || !metadataKnown(clusterId, name)) {
-                startNode(request, node.host(), node.core(), name, teardown);
+                startNode(request, node.host(), node.core(), imageOf(request, node), name, teardown);
             } else {
                 runningNodes.add(name);
             }
         }
         for (Map.Entry<String, Container> node : present.entrySet()) {
             if (!wanted.contains(node.getKey()) && !leaving.containsKey(node.getKey())) {
-                leaving.put(node.getKey(), draining(node.getValue().getLabels()));
+                leaving.put(node.getKey(), draining(node.getValue().getLabels(), node.getValue().getImageId()));
                 runningNodes.add(node.getKey());
                 changed = true;
             }
@@ -787,9 +798,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (wanted.contains(name) || present.containsKey(name) || leaving.containsKey(name)) {
                 continue;
             }
-            Draining node = draining(volume.getValue());
+            // Its container, and the image it ran, gone with a shutdown: it starts from the steps' image, which holds
+            // HDFS too, and runs only until HDFS has moved its blocks.
+            Draining node = draining(volume.getValue(), null);
             if (node.core()) {
-                startNode(request, node.host(), true, name, teardown);
+                startNode(request, node.host(), true, request.imageId(), name, teardown);
                 leaving.put(name, node);
                 changed = true;
             } else {
@@ -805,16 +818,23 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return wanted;
     }
 
-    // A node being decommissioned, as its container's or its volume's labels say, with an hour and a minute to go in.
-    private Draining draining(Map<String, String> labels) {
+    // A node being decommissioned, as its container's or its volume's labels say, with an hour and a minute to go in,
+    // and the image its container ran, null where it has none.
+    private Draining draining(Map<String, String> labels, String imageId) {
         Map<String, String> known = labels != null ? labels : Map.of();
         return new Draining(known.get(NODE_HOST_LABEL), Boolean.parseBoolean(known.get(NODE_CORE_LABEL)),
-                nanoTime.getAsLong() + GRACEFUL_DECOMMISSION.plus(DECOMMISSION_MARGIN).toNanos());
+                nanoTime.getAsLong() + GRACEFUL_DECOMMISSION.plus(DECOMMISSION_MARGIN).toNanos(), imageId);
     }
 
-    // A node's container, started on the data its volume keeps; one whose start a teardown passed goes, as the teardown's
-    // sweep may have looked before it was there.
-    private void startNode(NodeRequest request, String host, boolean core, String name, long teardown) {
+    // The image a node runs from: the one its own bootstrap left, else the steps'.
+    private static String imageOf(NodeRequest request, Node node) {
+        return node.image() != null ? node.image() : request.imageId();
+    }
+
+    // A node's container, started on the data its volume keeps, from imageId; one whose start a teardown passed goes,
+    // as the teardown's sweep may have looked before it was there.
+    private void startNode(NodeRequest request, String host, boolean core, String imageId, String name,
+                           long teardown) {
         String clusterId = request.clusterId();
         Yarn yarn = request.yarn();
         // Known before it starts, so a teardown while it starts removes it.
@@ -828,10 +848,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         Map<String, String> labels = labels(clusterId, request.accountId(), request.region(), NODE_COMPONENT);
         labels.put(NODE_HOST_LABEL, host);
         labels.put(NODE_CORE_LABEL, String.valueOf(core));
-        ContainerBuilder.Builder spec = containerBuilder.newContainer(request.imageId())
+        ContainerBuilder.Builder spec = containerBuilder.newContainer(imageId)
                 .withName(name)
                 .withUser("root")
                 .withEntrypoint(List.of("/bin/bash", "-c", NODE_SCRIPT))
+                .withEnv(EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE, core ? "CORE" : "TASK")
                 .withEnv("FLOCI_HDFS_HOST", request.host())
                 .withEnv("FLOCI_HDFS_BIND", "0.0.0.0")
                 .withEnv(NODE_HOST_VARIABLE, host)
@@ -1052,7 +1073,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
             LOG.infov("The core node {0} of EMR cluster {1} stopped before HDFS moved its blocks, and starts again on"
                     + " its data", node.host(), request.clusterId());
-            startNode(request, node.host(), true, name, teardown);
+            startNode(request, node.host(), true, node.imageId() != null ? node.imageId() : request.imageId(), name,
+                    teardown);
             return false;
         }
         return node.hdfsDone() && onPrimary(request.clusterId(), "curl -sf -m 5 \"" + RESOURCE_MANAGER_NODES
@@ -1114,13 +1136,15 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // A node being decommissioned, which goes anyway at the nanoTime deadline, its own, so one a later resize adds has
     // the whole time too. A core node goes to YARN's decommission only once HDFS has moved its blocks: a decommissioned
     // NodeManager exits, which ends its container, the DataNode with it.
-    private record Draining(String host, boolean core, boolean hdfsDone, long deadline) {
-        Draining(String host, boolean core, long deadline) {
-            this(host, core, !core, deadline);
+    // It starts again, where it must, from imageId, the image it ran, its own bootstrap's say, or the steps' where it
+    // is not known.
+    private record Draining(String host, boolean core, boolean hdfsDone, long deadline, String imageId) {
+        Draining(String host, boolean core, long deadline, String imageId) {
+            this(host, core, !core, deadline, imageId);
         }
 
         Draining hdfsDecommissioned() {
-            return new Draining(host, core, true, deadline);
+            return new Draining(host, core, true, deadline, imageId);
         }
     }
 
@@ -1201,6 +1225,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return properties.toString();
     }
 
+    // A node script's wait until condition holds, polled; one of its n daemons exiting meanwhile ends the node.
+    private static String untilReady(String condition) {
+        return "until " + condition + "; do [ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; ";
+    }
+
     // The JVM options that open to Hadoop's classes the packages its daemons reach into.
     private static String yarnOpens() {
         return EmrServerlessSparkRunner.yarnJavaOptions();
@@ -1247,6 +1276,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 .withName(name)
                 .withUser("root")
                 .withEntrypoint(List.of("/bin/bash", "-c", HDFS_SCRIPT))
+                .withEnv(EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE, "MASTER")
                 .withEnv("FLOCI_HDFS_HOST", host)
                 .withEnv("FLOCI_HDFS_BIND", shared ? LOOPBACK : "0.0.0.0")
                 .withEnv("HADOOP_CONF_DIR", HDFS_CONF)

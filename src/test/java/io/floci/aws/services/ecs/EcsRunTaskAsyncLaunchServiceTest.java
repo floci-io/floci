@@ -21,6 +21,8 @@ import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -315,8 +317,9 @@ class EcsRunTaskAsyncLaunchServiceTest {
         verify(containerManager, never()).startTask(any(), any(), any(), anyString());
     }
 
-    @Test
-    void teardownInterruptsAPullAndAfterResetLaunchesAgain() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void teardownInterruptsAPullAndAfterResetLaunchesAgain(boolean prepareOnly) throws Exception {
         doAnswer(invocation -> {
             startEntered.countDown();
             try {
@@ -333,7 +336,11 @@ class EcsRunTaskAsyncLaunchServiceTest {
         EcsTask response = run(service, "teardown");
         assertTrue(startEntered.await(5, TimeUnit.SECONDS));
 
-        assertTimeoutPreemptively(LAUNCH_BUDGET, service::stopManagedContainers);
+        assertTimeoutPreemptively(LAUNCH_BUDGET,
+                prepareOnly ? service::beginTeardown : service::stopManagedContainers);
+        if (prepareOnly) {
+            verify(containerManager, never()).stopTask(any());
+        }
 
         EcsTask stopped = describe(service, response);
         assertEquals("STOPPED", stopped.getLastStatus());

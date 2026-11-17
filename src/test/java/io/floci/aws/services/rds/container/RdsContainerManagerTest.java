@@ -172,6 +172,18 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void postgresLogicalReplicationParameterStartsTheServerWithLogicalWal() {
+        Map<String, String> overrides = new LinkedHashMap<>();
+        overrides.put("rds.logical_replication", "1");
+        overrides.put("max_connections", "500");
+
+        assertEquals(List.of("-c", "wal_level=logical"),
+                RdsContainerManager.buildContainerCmd(DatabaseEngine.POSTGRES, "postgres:16-alpine", overrides));
+        assertTrue(RdsContainerManager.engineParameterOptions(
+                DatabaseEngine.POSTGRES, Map.of("rds.logical_replication", "0")).isEmpty());
+    }
+
+    @Test
     void parameterGroupOverridesAreNotPassedToOtherEngines() {
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.POSTGRES, "postgres:18", Map.of("max_connections", "500")).isEmpty());

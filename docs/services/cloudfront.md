@@ -169,8 +169,10 @@ the path:
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current
   `ETag`. Response headers policies, public keys, and key groups distinguish a missing header
-  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Other CloudFront
-  resources currently return `InvalidIfMatchVersion` (400) for either case.
+  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Key-value-store
+  control-plane updates and deletes also return `PreconditionFailed` (412) for stale UUID versions
+  issued by Floci; missing or malformed versions return `InvalidIfMatchVersion` (400). Other
+  CloudFront resources currently return `InvalidIfMatchVersion` (400) for either case.
 - All `GET` and `POST` (create) responses include an `ETag` response header.
 - List operations emit the payload root declared by the CloudFront REST XML model (for example,
   `ListDistributions` returns `<DistributionList>`), with list contents represented by
@@ -426,8 +428,10 @@ and described through the CloudFront control plane, and its keys are managed thr
 - Every key write needs the store's current data plane ETag in `If-Match`, and rotates it. `UpdateKeys`
   applies its puts and deletes together (at most 50 entries and 3 MB per request), and changes nothing when any
   entry is invalid, including a put without a `Value`. A stale or missing ETag on the
-  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"), and on the
-  control plane an `InvalidIfMatchVersion`.
+  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"). Control-plane
+  update and delete return `PreconditionFailed` (412) for stale UUID versions issued by Floci, and
+  `InvalidIfMatchVersion` (400) for missing or malformed versions. Rejected requests preserve the store.
+  ETags retain Floci's existing UUID representation; this does not define an AWS version format.
 - The control plane and the data plane keep independent ETags: a comment update rotates only the control plane
   ETag, and a key write only the data plane ETag.
 - An account can hold at most 200 stores (`EntityLimitExceeded`), and a store can be associated with at most 100

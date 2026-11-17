@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -52,6 +54,21 @@ public class SessionCredential {
      * resolve it by name.
      */
     private String delegatedApproverArn;
+    /**
+     * The permissions boundaries the delegation request restricts a role to, which is the
+     * long-term half of temporary delegation: a role created with this session carries one.
+     */
+    private List<String> delegatedRoleBoundaryArns = new ArrayList<>();
+    /**
+     * When the identity behind these credentials last authenticated with an MFA device, which is
+     * what {@code aws:MultiFactorAuthAge} counts from and what makes
+     * {@code aws:MultiFactorAuthPresent} true. Null for a session minted without MFA, which is a
+     * different thing from a long-term key: that session publishes the key as false, where a
+     * long-term key publishes no key at all. A session assumed from an MFA session keeps the
+     * instant the device was used rather than the instant of the assume, so the age keeps
+     * counting from the authentication itself.
+     */
+    private Instant mfaAuthenticatedAt;
 
     public SessionCredential() {}
 
@@ -156,5 +173,20 @@ public class SessionCredential {
     public void setIssuerUserId(String issuerUserId) { this.issuerUserId = issuerUserId; }
 
     public String getDelegatedApproverArn() { return delegatedApproverArn; }
+
+    public List<String> getDelegatedRoleBoundaryArns() { return delegatedRoleBoundaryArns; }
+
+    public void setDelegatedRoleBoundaryArns(List<String> delegatedRoleBoundaryArns) {
+        this.delegatedRoleBoundaryArns = delegatedRoleBoundaryArns == null
+                ? new ArrayList<>() : new ArrayList<>(delegatedRoleBoundaryArns);
+    }
     public void setDelegatedApproverArn(String arn) { this.delegatedApproverArn = arn; }
+
+    public Instant getMfaAuthenticatedAt() {
+        return mfaAuthenticatedAt;
+    }
+
+    public void setMfaAuthenticatedAt(Instant mfaAuthenticatedAt) {
+        this.mfaAuthenticatedAt = mfaAuthenticatedAt;
+    }
 }

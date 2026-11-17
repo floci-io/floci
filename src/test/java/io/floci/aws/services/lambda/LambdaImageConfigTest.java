@@ -253,7 +253,8 @@ class LambdaImageConfigTest {
             ContainerReachableEndpoint reachableEndpoint =
                     new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
-            launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
+            launcher = new ContainerLauncher(containerBuilder, lifecycleManager, mock(DockerClient.class),
+                    logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
                     mock(LambdaLayerService.class), awsEnv,
                     mock(LambdaExecutionRoleCredentials.class), null);

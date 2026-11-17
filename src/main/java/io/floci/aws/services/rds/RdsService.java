@@ -94,6 +94,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -215,6 +216,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private final ResourceGroupsTaggingService taggingService;
     // Null when a test constructs the service without CloudWatch; auto-pause then reports no metrics.
     private final CloudWatchMetricsService metricsService;
+    private final RdsEventPublisher eventPublisher;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> reportedMemberRelayFailures = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
@@ -241,7 +243,6 @@ public class RdsService implements Resettable, ResourceProvider {
             "MYSQL_NATIVE_PASSWORD", "MYSQL_CACHING_SHA2_PASSWORD",
             "POSTGRES_SCRAM_SHA_256", "POSTGRES_MD5", "SQL_SERVER_AUTHENTICATION");
 
-    @Inject
     public RdsService(RdsContainerManager containerManager,
                       RdsProxyManager proxyManager,
                       Ec2Service ec2Service,
@@ -254,6 +255,25 @@ public class RdsService implements Resettable, ResourceProvider {
                       ResourceGroupsTaggingService taggingService,
                       KmsService kmsService,
                       CloudWatchMetricsService metricsService) {
+        this(containerManager, proxyManager, ec2Service, regionResolver, config, storageFactory,
+                secretsManagerService, dockerHostResolver, currentContainerNetworkResolver, taggingService,
+                kmsService, metricsService, null);
+    }
+
+    @Inject
+    public RdsService(RdsContainerManager containerManager,
+                      RdsProxyManager proxyManager,
+                      Ec2Service ec2Service,
+                      RegionResolver regionResolver,
+                      EmulatorConfig config,
+                      StorageFactory storageFactory,
+                      SecretsManagerService secretsManagerService,
+                      DockerHostResolver dockerHostResolver,
+                      CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                      ResourceGroupsTaggingService taggingService,
+                      KmsService kmsService,
+                      CloudWatchMetricsService metricsService,
+                      RdsEventPublisher eventPublisher) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -265,6 +285,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.taggingService = taggingService;
         this.metricsService = metricsService;
+        this.eventPublisher = eventPublisher;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.eventSubscriptions = storageFactory.create("rds", "rds-event-subscriptions.json",
@@ -418,6 +439,31 @@ public class RdsService implements Resettable, ResourceProvider {
                StorageBackend<String, OptionGroup> optionGroups,
                ResourceGroupsTaggingService taggingService,
                KmsService kmsService) {
+        this(containerManager, proxyManager, ec2Service, regionResolver, config, instances, clusters,
+                parameterGroups, clusterParameterGroups, subnetGroups, secretsManagerService, dockerHostResolver,
+                currentContainerNetworkResolver, proxies, proxyTargetGroups, optionGroups, taggingService,
+                kmsService, null);
+    }
+
+    RdsService(RdsContainerManager containerManager,
+               RdsProxyManager proxyManager,
+               Ec2Service ec2Service,
+               RegionResolver regionResolver,
+               EmulatorConfig config,
+               StorageBackend<String, DbInstance> instances,
+               StorageBackend<String, DbCluster> clusters,
+               StorageBackend<String, DbParameterGroup> parameterGroups,
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups,
+               SecretsManagerService secretsManagerService,
+               DockerHostResolver dockerHostResolver,
+               CurrentContainerNetworkResolver currentContainerNetworkResolver,
+               StorageBackend<String, DbProxy> proxies,
+               StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups,
+               StorageBackend<String, OptionGroup> optionGroups,
+               ResourceGroupsTaggingService taggingService,
+               KmsService kmsService,
+               RdsEventPublisher eventPublisher) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -437,6 +483,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.proxyTargetGroups = proxyTargetGroups;
         this.taggingService = taggingService;
         this.metricsService = null;
+        this.eventPublisher = eventPublisher;
         this.globalClusters = new InMemoryStorage<>();
         this.snapshots = new InMemoryStorage<>();
         this.clusterSnapshots = new InMemoryStorage<>();
@@ -856,6 +903,18 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
             }
         }
+        List<String> instanceSecurityGroupIds;
+        try {
+            RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds, placement.vpcId());
+            // A cluster member's groups are its cluster's.
+            instanceSecurityGroupIds = isBlank(dbClusterIdentifier)
+                    ? RdsSecurityGroups.orVpcDefault(ec2Service, effectiveRegion, vpcSecurityGroupIds,
+                            placement.vpcId())
+                    : vpcSecurityGroupIds;
+        } catch (RuntimeException | Error failure) {
+            releaseProxyPort(proxyPort);
+            throw failure;
+        }
 
         DbEndpoint endpoint;
         DbInstance instance;
@@ -873,7 +932,7 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setDockerVolumeName(instanceDockerVolumeName);
             instance.setContainerStorageResourceId(instanceStorageResourceId);
             instance.setTags(tags);
-            instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+            instance.setVpcSecurityGroupIds(instanceSecurityGroupIds);
             instance.setDbSubnetGroupName(placement.dbSubnetGroupName());
             instance.setVpcId(placement.vpcId());
             instance.setAvailabilityZone(placement.availabilityZone());
@@ -1332,11 +1391,6 @@ public class RdsService implements Resettable, ResourceProvider {
         if (!"available".equalsIgnoreCase(snapshot.getStatus())) {
             throw new AwsException("InvalidDBSnapshotState",
                     "DBSnapshot " + snapshotId + " is not in an available state.", 400);
-        }
-        if ((engineVersion == null || engineVersion.isBlank())
-                && (optionGroupName == null || optionGroupName.isBlank())) {
-            throw new AwsException("InvalidParameterCombination",
-                    "At least one snapshot attribute must be specified.", 400);
         }
         if (engineVersion != null && !engineVersion.isBlank()) {
             snapshot.setEngineVersion(engineVersion);
@@ -2186,8 +2240,11 @@ public class RdsService implements Resettable, ResourceProvider {
                     + "automated backups, use ModifyDBInstance to set the backup retention period "
                     + "to a non-zero value.", 400);
         }
-        if (source.getEngine() != DatabaseEngine.POSTGRES) {
-            // CreateDBSnapshot draws the same line: the point-in-time copy is pg_dumpall based.
+        boolean mysqlFamily = source.getEngine() == DatabaseEngine.MYSQL
+                || source.getEngine() == DatabaseEngine.MARIADB;
+        if (!READ_REPLICA_ENGINES.contains(source.getEngine().name().toLowerCase(Locale.ROOT))) {
+            // The copy is dump based: pg_dumpall for PostgreSQL, mysqldump or mariadb-dump for
+            // MySQL and MariaDB. No dump path exists for the other engines.
             throw new AwsException("InvalidDBInstanceState",
                     "Operation CreateDBInstanceReadReplica is not supported for engine "
                     + source.getEngine() + ".", 400);
@@ -2210,9 +2267,13 @@ public class RdsService implements Resettable, ResourceProvider {
                 request.optionGroupName(), sameRegion ? source.getOptionGroupName() : null);
         String dbSubnetGroupName = firstNonBlank(
                 request.dbSubnetGroupName(), sameRegion ? source.getDbSubnetGroupName() : null);
+        // The source's groups belong to its VPC, so a replica placed in another one gets that VPC's
+        // default group instead.
+        boolean inSourceVpc = sameRegion && (isBlank(request.dbSubnetGroupName()) || Objects.equals(
+                getDbSubnetGroup(request.dbSubnetGroupName(), effectiveRegion).getVpcId(), source.getVpcId()));
         List<String> vpcSecurityGroupIds = request.vpcSecurityGroupIds() != null
                 ? request.vpcSecurityGroupIds()
-                : sameRegion ? source.getVpcSecurityGroupIds() : List.of();
+                : inSourceVpc ? source.getVpcSecurityGroupIds() : List.of();
         boolean autoMinorVersionUpgrade = request.autoMinorVersionUpgrade() != null
                 ? request.autoMinorVersionUpgrade() : source.isAutoMinorVersionUpgrade();
         // Backups stay off on a replica; the source's windows carry over, and encryption follows
@@ -2238,10 +2299,18 @@ public class RdsService implements Resettable, ResourceProvider {
         if (!config.services().rds().mock()
                 && source.getContainerId() != null && replica.getContainerId() != null) {
             try {
-                String sqlDump = containerManager.createPostgresSnapshot(
-                        source.getContainerId(), source.getMasterUsername());
-                containerManager.restorePostgresSnapshot(
-                        replica.getContainerId(), replica.getMasterUsername(), sqlDump);
+                if (mysqlFamily) {
+                    String sqlDump = containerManager.createMysqlSnapshot(source.getEngine(),
+                            source.getContainerId(), source.getMasterUsername(), source.getMasterPassword());
+                    containerManager.restoreMysqlSnapshot(replica.getEngine(),
+                            replica.getContainerId(), replica.getMasterUsername(),
+                            replica.getMasterPassword(), sqlDump);
+                } else {
+                    String sqlDump = containerManager.createPostgresSnapshot(
+                            source.getContainerId(), source.getMasterUsername());
+                    containerManager.restorePostgresSnapshot(
+                            replica.getContainerId(), replica.getMasterUsername(), sqlDump);
+                }
             } catch (Exception e) {
                 try {
                     deleteDbInstance(id, effectiveRegion);
@@ -3074,6 +3143,106 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /** Stored tags are read by exact ARN, without resource creation or legacy-record migration. */
+    public Map<String, String> storedTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "rds")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        if (!regionResolver.partitionForRegion(arn.region()).equals(arn.partition())
+                || arn.resource().indexOf(':') < 0) {
+            return Map.of();
+        }
+        TagHandle handle = resolveTagHandle(resourceArn, arn.region(), true);
+        return handle == null ? Map.of() : new LinkedHashMap<>(handle.tags());
+    }
+
+    /** Finds generated identities by the names supplied in the generated request-resource table. */
+    public Optional<String> findStoredArn(String type, List<String> names, String region) {
+        if (names.isEmpty() || names.stream().anyMatch(name -> name == null || name.isBlank())) {
+            return Optional.empty();
+        }
+        String account = currentAccountId();
+        String effectiveRegion = effectiveRegion(region);
+        String selector = names.getFirst();
+        String snapshotName = AwsArnUtils.isArnFor(selector, "rds")
+                ? AwsArnUtils.parse(selector).resource().substring(AwsArnUtils.parse(selector).resource().indexOf(':') + 1)
+                : selector;
+        Optional<String> found = switch (type) {
+            case "proxy" -> names.size() == 1
+                    ? readScopedResource(proxies, account, effectiveRegion, names.getFirst()).map(DbProxy::getDbProxyArn)
+                    : Optional.empty();
+            case "proxy-endpoint" -> names.size() == 1
+                    ? readScopedResource(proxyEndpoints, account, effectiveRegion, names.getFirst())
+                            .map(DbProxyEndpoint::getDbProxyEndpointArn) : Optional.empty();
+            case "target-group" -> names.size() == 1 || names.size() == 2
+                    ? readScopedResource(proxyTargetGroups, account, effectiveRegion, names.getFirst())
+                            .filter(group -> (names.size() == 1 ? "default" : names.get(1)).equals(group.getTargetGroupName()))
+                            .map(DbProxyTargetGroup::getTargetGroupArn) : Optional.empty();
+            case "snapshot" -> names.size() == 1
+                    ? readScopedResource(clusterSnapshots, account, effectiveRegion, snapshotName)
+                            .map(DbClusterSnapshot::getDbClusterSnapshotArn)
+                            .or(() -> readScopedResource(snapshots, account, effectiveRegion, snapshotName)
+                                    .map(DbSnapshot::getDbSnapshotArn))
+                            .filter(value -> !AwsArnUtils.looksLikeArn(selector) || selector.equals(value))
+                    : Optional.empty();
+            default -> Optional.empty();
+        };
+        return found.filter(value -> AwsArnUtils.isArnFor(value, "rds"))
+                .filter(value -> {
+                    AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
+                    return account.equals(arn.accountId()) && effectiveRegion.equals(arn.region())
+                            && regionResolver.partitionForRegion(effectiveRegion).equals(arn.partition());
+                });
+    }
+
+    private <T> Optional<T> readScopedResource(StorageBackend<String, T> store, String account,
+                                              String region, String name) {
+        return readResourceKeys(store, account, List.of(dbResourceKey(region, name), name));
+    }
+
+    private <T> Optional<T> readResourceKeys(StorageBackend<String, T> store, String account, List<String> keys) {
+        for (String key : keys) {
+            Optional<T> found = store instanceof AccountAwareStorageBackend<T> aware
+                    ? aware.getForAccount(account, key).or(() -> aware.getLegacyForAccount(account, key))
+                    : store.get(key);
+            if (found.isPresent()) {
+                return found;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private <T> Optional<T> readTagResource(StorageBackend<String, T> store, String resourceArn,
+                                           String name, Function<T, String> identity) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        return readScopedResource(store, arn.accountId(), arn.region(), name)
+                .filter(value -> resourceArn.equals(identity.apply(value)));
+    }
+
+    private <T> Optional<T> readTagResource(StorageBackend<String, T> store, String resourceArn,
+                                           String name, Function<T, String> identity, String key) {
+        return readResourceKeys(store, AwsArnUtils.parse(resourceArn).accountId(), List.of(key, name))
+                .filter(value -> resourceArn.equals(identity.apply(value)));
+    }
+
+    private <T> Optional<T> readTagResourceByArn(StorageBackend<String, T> store, String resourceArn,
+                                                Function<T, String> name, Function<T, String> identity) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        Predicate<String> inRegion = key -> key.startsWith(arn.region() + "::") || !key.contains("::");
+        List<T> candidates;
+        if (store instanceof AccountAwareStorageBackend<T> aware) {
+            String prefix = arn.accountId() + "/";
+            candidates = aware.scanRaw(key -> key.startsWith(prefix) && inRegion.test(key.substring(prefix.length()))
+                    || arn.accountId().equals(defaultAccountId()) && !key.contains("/") && inRegion.test(key));
+        } else {
+            candidates = store.scan(inRegion);
+        }
+        return candidates.stream().filter(value -> resourceArn.equals(identity.apply(value)))
+                .map(value -> readTagResource(store, resourceArn, name.apply(value), identity))
+                .flatMap(Optional::stream).findFirst();
+    }
+
     public Map<String, String> listTagsForResource(String resourceName) {
         return listTagsForResource(resourceName, resourceRegionOrDefault(resourceName));
     }
@@ -3117,11 +3286,15 @@ public class RdsService implements Resettable, ResourceProvider {
      * A bare resource name (no ARN) is treated as a DB instance identifier for backwards compatibility.
      */
     private TagHandle resolveTagHandle(String resourceName, String region) {
+        return resolveTagHandle(resourceName, region, false);
+    }
+
+    private TagHandle resolveTagHandle(String resourceName, String region, boolean storedOnly) {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
 
-        String effectiveRegion = effectiveRegion(region);
+        String effectiveRegion = storedOnly ? region : effectiveRegion(region);
         String type = "db";
         String id = resourceName;
         if (AwsArnUtils.looksLikeArn(resourceName)) {
@@ -3141,7 +3314,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 throw new AwsException("InvalidParameterValue",
                         "ResourceName is not in region " + effectiveRegion + ": " + resourceName, 400);
             }
-            if (!Objects.equals(regionResolver.getAccountId(), arn.accountId())) {
+            if (!storedOnly && !Objects.equals(regionResolver.getAccountId(), arn.accountId())) {
                 throw new AwsException("InvalidParameterValue",
                         "ResourceName is not in the current account: " + resourceName, 400);
             }
@@ -3157,9 +3330,15 @@ public class RdsService implements Resettable, ResourceProvider {
         // A bare (non-ARN) resource name is treated as a DB instance identifier for backwards compatibility.
 
         String resourceId = id;
+        String targetArn = AwsArnUtils.isArn(resourceName) ? resourceName
+                : regionResolver.buildArn("rds", effectiveRegion, type + ":" + resourceId);
         return switch (type) {
             case "db" -> {
-                DbInstance instance = getDbInstance(resourceId, effectiveRegion);
+                DbInstance instance = readTagResource(instances, targetArn, resourceId, DbInstance::getDbInstanceArn)
+                        .orElseGet(() -> storedOnly ? null : getDbInstance(resourceId, effectiveRegion));
+                if (instance == null) {
+                    yield null;
+                }
                 yield new TagHandle(instance.getTags(), updated -> {
                     instance.setTags(updated);
                     putInstanceForScope(currentAccountId(), effectiveRegion,
@@ -3167,7 +3346,11 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "cluster" -> {
-                DbCluster cluster = getDbCluster(resourceId, effectiveRegion);
+                DbCluster cluster = readTagResource(clusters, targetArn, resourceId, DbCluster::getDbClusterArn)
+                        .orElseGet(() -> storedOnly ? null : getDbCluster(resourceId, effectiveRegion));
+                if (cluster == null) {
+                    yield null;
+                }
                 yield new TagHandle(cluster.getTags(), updated -> {
                     cluster.setTags(updated);
                     putClusterForScope(currentAccountId(), effectiveRegion,
@@ -3175,7 +3358,11 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "subgrp" -> {
-                DbSubnetGroup group = getDbSubnetGroup(resourceId, effectiveRegion);
+                DbSubnetGroup group = readTagResource(subnetGroups, targetArn, resourceId, DbSubnetGroup::getDbSubnetGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getDbSubnetGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putSubnetGroupForScope(
@@ -3183,24 +3370,39 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "cluster-snapshot" -> {
-                DbClusterSnapshot snapshot = requireClusterSnapshot(currentAccountId(), effectiveRegion, resourceId);
+                DbClusterSnapshot snapshot = readTagResource(clusterSnapshots, targetArn, resourceId,
+                        DbClusterSnapshot::getDbClusterSnapshotArn)
+                        .orElseGet(() -> storedOnly ? null
+                                : requireClusterSnapshot(currentAccountId(), effectiveRegion, resourceId));
+                if (snapshot == null) {
+                    yield null;
+                }
                 yield new TagHandle(snapshot.getTags(), updated -> {
                     snapshot.setTags(updated);
                     putClusterSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
             case "snapshot" -> {
-                DbSnapshot snapshot = Optional.ofNullable(
+                DbSnapshot snapshot = readTagResource(snapshots, targetArn, resourceId, DbSnapshot::getDbSnapshotArn)
+                        .orElseGet(() -> storedOnly ? null : Optional.ofNullable(
                         findSnapshotForScope(currentAccountId(), effectiveRegion, resourceId))
                         .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
-                                "DBSnapshot " + resourceId + " not found.", 404));
+                                "DBSnapshot " + resourceId + " not found.", 404)));
+                if (snapshot == null) {
+                    yield null;
+                }
                 yield new TagHandle(snapshot.getTags(), updated -> {
                     snapshot.setTags(updated);
                     putSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
             case "cluster-endpoint" -> {
-                DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, resourceId);
+                DbClusterEndpoint endpoint = readTagResource(clusterEndpoints, targetArn, resourceId,
+                        DbClusterEndpoint::getDbClusterEndpointArn, clusterEndpointKey(effectiveRegion, resourceId))
+                        .orElseGet(() -> storedOnly ? null : requireClusterEndpoint(effectiveRegion, resourceId));
+                if (endpoint == null) {
+                    yield null;
+                }
                 yield new TagHandle(endpoint.getTags(), updated -> {
                     endpoint.setTags(updated);
                     clusterEndpoints.put(clusterEndpointKey(effectiveRegion,
@@ -3208,43 +3410,55 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "es" -> {
-                EventSubscription subscription = eventSubscriptions
+                EventSubscription subscription = readTagResource(eventSubscriptions, targetArn, resourceId,
+                        EventSubscription::getEventSubscriptionArn, eventSubscriptionKey(effectiveRegion, resourceId))
+                        .orElseGet(() -> storedOnly ? null : eventSubscriptions
                         .get(eventSubscriptionKey(effectiveRegion, resourceId))
                         .orElseThrow(() -> new AwsException("SubscriptionNotFound",
-                                "Subscription " + resourceId + " not found.", 404));
+                                "Subscription " + resourceId + " not found.", 404)));
+                if (subscription == null) {
+                    yield null;
+                }
                 yield new TagHandle(subscription.getTags(), updated -> {
                     subscription.setTags(updated);
                     eventSubscriptions.put(eventSubscriptionKey(effectiveRegion, resourceId), subscription);
                 });
             }
             case "deployment" -> {
-                BlueGreenDeployment deployment = requireBlueGreenDeployment(effectiveRegion, resourceId);
+                BlueGreenDeployment deployment = readTagResource(blueGreenDeployments, targetArn, resourceId,
+                        BlueGreenDeployment::getBlueGreenDeploymentArn, blueGreenDeploymentKey(effectiveRegion, resourceId))
+                        .orElseGet(() -> storedOnly ? null : requireBlueGreenDeployment(effectiveRegion, resourceId));
+                if (deployment == null) {
+                    yield null;
+                }
                 yield new TagHandle(deployment.getTags(), updated -> {
                     deployment.setTags(updated);
                     blueGreenDeployments.put(blueGreenDeploymentKey(effectiveRegion, resourceId), deployment);
                 });
             }
             case "db-proxy-endpoint" -> {
-                DbProxyEndpoint endpoint = proxyEndpoints.scan(k -> k.startsWith(effectiveRegion + "::")).stream()
-                        .filter(candidate -> resourceName.equals(candidate.getDbProxyEndpointArn()))
-                        .findFirst()
-                        .orElseThrow(() -> proxyEndpointNotFound(resourceId));
+                DbProxyEndpoint endpoint = readTagResourceByArn(proxyEndpoints, targetArn,
+                        DbProxyEndpoint::getDbProxyEndpointName, DbProxyEndpoint::getDbProxyEndpointArn).orElse(null);
+                if (endpoint == null) {
+                    if (storedOnly) {
+                        yield null;
+                    }
+                    throw proxyEndpointNotFound(resourceId);
+                }
                 yield new TagHandle(endpoint.getTags(), updated -> {
                     endpoint.setTags(updated);
                     proxyEndpoints.put(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()), endpoint);
                 });
             }
             case "db-proxy" -> {
-                DbProxy proxy = proxies.scan(k -> true).stream()
-                        .filter(candidate -> effectiveRegion.equals(regionFromArn(candidate.getDbProxyArn())))
-                        .filter(candidate -> resourceName.equals(candidate.getDbProxyArn()))
-                        .findFirst()
-                        .orElseThrow(() -> new AwsException("DBProxyNotFoundFault",
-                                "DB proxy " + resourceId + " not found.", 404));
-                proxy = findDbProxy(proxy.getDbProxyName(), effectiveRegion)
-                        .filter(candidate -> resourceName.equals(candidate.getDbProxyArn()))
-                        .orElseThrow(() -> new AwsException("DBProxyNotFoundFault",
-                                "DB proxy " + resourceId + " not found.", 404));
+                DbProxy proxy = readTagResourceByArn(proxies, targetArn,
+                        DbProxy::getDbProxyName, DbProxy::getDbProxyArn).orElse(null);
+                if (proxy == null) {
+                    if (storedOnly) {
+                        yield null;
+                    }
+                    throw new AwsException("DBProxyNotFoundFault", "DB proxy " + resourceId + " not found.", 404);
+                }
                 DbProxy resolvedProxy = proxy;
                 yield new TagHandle(proxy.getTags(), updated -> {
                     DbProxy updatedProxy = copyDbProxy(resolvedProxy);
@@ -3253,43 +3467,53 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "pg" -> {
-                DbParameterGroup group = getDbParameterGroup(resourceId, effectiveRegion);
+                DbParameterGroup group = readTagResource(parameterGroups, targetArn, resourceId,
+                        DbParameterGroup::getDbParameterGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getDbParameterGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putParameterGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
             case "cluster-pg" -> {
-                DbClusterParameterGroup group =
-                        getDbClusterParameterGroup(resourceId, effectiveRegion);
+                DbClusterParameterGroup group = readTagResource(clusterParameterGroups, targetArn, resourceId,
+                        DbClusterParameterGroup::getDbClusterParameterGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getDbClusterParameterGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putClusterParameterGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
             case "og" -> {
-                if (managedOptionGroup(resourceId) != null) {
+                if (!storedOnly && managedOptionGroup(resourceId) != null) {
                     throw new AwsException("InvalidOptionGroupStateFault",
                             "The default option group " + resourceId + " cannot be tagged.", 400);
                 }
-                OptionGroup group = getOptionGroup(resourceId, effectiveRegion);
+                OptionGroup group = readTagResource(optionGroups, targetArn, resourceId, OptionGroup::getOptionGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getOptionGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putOptionGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
             case "target-group" -> {
-                DbProxyTargetGroup targetGroup = proxyTargetGroups.scan(k -> true).stream()
-                        .filter(candidate -> effectiveRegion.equals(
-                                regionFromArn(candidate.getTargetGroupArn())))
-                        .filter(candidate -> resourceName.equals(candidate.getTargetGroupArn()))
-                        .findFirst()
-                        .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
-                                "DB proxy target group " + resourceId + " not found.", 404));
-                targetGroup = findProxyTargetGroup(targetGroup.getDbProxyName(), effectiveRegion)
-                        .filter(candidate -> resourceName.equals(candidate.getTargetGroupArn()))
-                        .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
-                                "DB proxy target group " + resourceId + " not found.", 404));
+                DbProxyTargetGroup targetGroup = readTagResourceByArn(proxyTargetGroups, targetArn,
+                        DbProxyTargetGroup::getDbProxyName, DbProxyTargetGroup::getTargetGroupArn).orElse(null);
+                if (targetGroup == null) {
+                    if (storedOnly) {
+                        yield null;
+                    }
+                    throw new AwsException("DBProxyTargetGroupNotFoundFault", "DB proxy target group " + resourceId + " not found.", 404);
+                }
                 DbProxyTargetGroup resolvedTargetGroup = targetGroup;
                 yield new TagHandle(targetGroup.getTags(), updated -> {
                     DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(resolvedTargetGroup);
@@ -3302,8 +3526,13 @@ public class RdsService implements Resettable, ResourceProvider {
             // Valid RDS resource types Floci does not model yet (snapshot, ri, es, secgrp, ...):
             // taggable on real AWS, so the message states the Floci limitation rather than AWS
             // semantics.
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
+            default -> {
+                if (storedOnly) {
+                    yield null;
+                }
+                throw new AwsException("InvalidParameterValue",
+                        "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
+            }
         };
     }
 
@@ -3912,6 +4141,16 @@ public class RdsService implements Resettable, ResourceProvider {
             validateInstanceParameterGroup(dbParameterGroupName, engineName(instance),
                     instance.getEngineVersion(), effectiveRegion);
         }
+        // A new subnet group can move the instance to another VPC, so the groups are checked against that VPC.
+        DbSubnetGroup newSubnetGroup = isBlank(dbSubnetGroupName)
+                ? null : getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+        String vpcIdAfter = newSubnetGroup != null ? newSubnetGroup.getVpcId() : instance.getVpcId();
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds, vpcIdAfter);
+        // The old VPC's groups cannot follow the instance to another one, so it gets the groups the request
+        // names or that VPC's default group. Null keeps the groups it has.
+        List<String> securityGroupIdsAfter = !Objects.equals(vpcIdAfter, instance.getVpcId())
+                ? RdsSecurityGroups.orVpcDefault(ec2Service, effectiveRegion, vpcSecurityGroupIds, vpcIdAfter)
+                : vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty() ? null : vpcSecurityGroupIds;
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (changesParameterGroup) {
             instance.setParameterGroupName(dbParameterGroupName);
@@ -3947,12 +4186,12 @@ public class RdsService implements Resettable, ResourceProvider {
         if (iamEnabled != null) {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
-        if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
-            getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+        if (newSubnetGroup != null) {
             instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setVpcId(newSubnetGroup.getVpcId());
         }
-        if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
-            instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        if (securityGroupIdsAfter != null) {
+            instance.setVpcSecurityGroupIds(securityGroupIdsAfter);
         }
         if (autoMinorVersionUpgrade != null) {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
@@ -4068,6 +4307,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(instanceId, effectiveRegion);
         requireAvailableInstance(instance, instanceId);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, groupIds, instance.getVpcId());
         instance.setVpcSecurityGroupIds(groupIds);
         putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
         LOG.infov("DB instance {0} security groups set to {1}", instanceId, groupIds);
@@ -4075,19 +4315,50 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * The groups AWS's CloudFormation handler gives a standalone DB instance whose template stops
-     * declaring {@code VPCSecurityGroups}: the default security group of its VPC, or none when EC2
-     * has no default group for it.
+     * The default security group of {@code instance}'s VPC, which describe reports for an instance that
+     * keeps no groups: an Aurora member, whose groups are its cluster's, or one stored before RDS gave
+     * one. No group when its VPC is unknown or gone.
      */
-    public List<String> defaultVpcSecurityGroupIds(String region, String instanceId) {
-        String effectiveRegion = effectiveRegion(region);
-        String vpcId = getDbInstance(instanceId, effectiveRegion).getVpcId();
-        if (isBlank(vpcId)) {
+    public List<String> defaultVpcSecurityGroupIds(DbInstance instance) {
+        try {
+            return RdsSecurityGroups.vpcDefault(ec2Service, regionFromArn(instance.getDbInstanceArn()),
+                    instance.getVpcId());
+        } catch (AwsException e) {
+            LOG.debugv("No default security group to report for DB instance {0} in {1}: {2}",
+                    instance.getDbInstanceIdentifier(), instance.getVpcId(), e.getMessage());
             return List.of();
         }
-        return ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId)
-                .map(group -> List.of(group.getGroupId()))
-                .orElse(List.of());
+    }
+
+    /**
+     * The groups AWS's CloudFormation handler gives a standalone DB instance whose template stops
+     * declaring {@code VPCSecurityGroups}: the default security group of the VPC it is in once
+     * {@code dbSubnetGroupName}, when given, is its subnet group, or none when EC2 has no default group
+     * for it.
+     */
+    public List<String> defaultVpcSecurityGroupIds(String region, String instanceId, String dbSubnetGroupName) {
+        String effectiveRegion = effectiveRegion(region);
+        return RdsSecurityGroups.vpcDefault(ec2Service, effectiveRegion,
+                vpcIdAfter(instanceId, dbSubnetGroupName, effectiveRegion));
+    }
+
+    /**
+     * Refuses {@code groupIds} as {@code ModifyDBInstance} would for instance {@code instanceId} given
+     * {@code dbSubnetGroupName}, for CloudFormation, which changes the subnet group and the groups in
+     * separate steps and so checks the groups before the first one.
+     */
+    public void requireVpcSecurityGroupsFit(String region, String instanceId, String dbSubnetGroupName,
+                                            List<String> groupIds) {
+        String effectiveRegion = effectiveRegion(region);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, groupIds,
+                vpcIdAfter(instanceId, dbSubnetGroupName, effectiveRegion));
+    }
+
+    /** The VPC instance {@code instanceId} is in once {@code dbSubnetGroupName}, when given, is its subnet group. */
+    private String vpcIdAfter(String instanceId, String dbSubnetGroupName, String effectiveRegion) {
+        return isBlank(dbSubnetGroupName)
+                ? getDbInstance(instanceId, effectiveRegion).getVpcId()
+                : getDbSubnetGroup(dbSubnetGroupName, effectiveRegion).getVpcId();
     }
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
@@ -4359,7 +4630,17 @@ public class RdsService implements Resettable, ResourceProvider {
         return stopDbInstance(id, snapshotId, regionResolver.getDefaultRegion());
     }
 
-    public synchronized DbInstance stopDbInstance(String id, String snapshotId, String region) {
+    public DbInstance stopDbInstance(String id, String snapshotId, String region) {
+        try {
+            synchronized (this) {
+                return doStopDbInstance(id, snapshotId, region);
+            }
+        } finally {
+            publishLifecycleEvents();
+        }
+    }
+
+    private DbInstance doStopDbInstance(String id, String snapshotId, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         DbInstance instance = getDbInstance(id, effectiveRegion);
@@ -4399,6 +4680,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         instance.setStatus(DbInstanceStatus.STOPPED);
         putInstanceForScope(accountId, effectiveRegion, id, instance);
+        queueLifecycleEvent(instance.getDbInstanceArn(), id, false, false);
         LOG.infov("DB instance {0} stopped", id);
         return response;
     }
@@ -4408,7 +4690,17 @@ public class RdsService implements Resettable, ResourceProvider {
         return startDbInstance(id, regionResolver.getDefaultRegion());
     }
 
-    public synchronized DbInstance startDbInstance(String id, String region) {
+    public DbInstance startDbInstance(String id, String region) {
+        try {
+            synchronized (this) {
+                return doStartDbInstance(id, region);
+            }
+        } finally {
+            publishLifecycleEvents();
+        }
+    }
+
+    private DbInstance doStartDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         DbInstance instance = getDbInstance(id, effectiveRegion);
@@ -4429,6 +4721,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         putInstanceForScope(accountId, effectiveRegion, id, instance);
+        queueLifecycleEvent(instance.getDbInstanceArn(), id, false, true);
         LOG.infov("DB instance {0} started", id);
         return response;
     }
@@ -4486,7 +4779,11 @@ public class RdsService implements Resettable, ResourceProvider {
      * every member's proxy with them, and all of them report "stopped" until StartDBCluster.
      */
     public DbCluster stopDbCluster(String id, String region) {
-        return withClusterPublication(id, region, () -> doStopDbCluster(id, region));
+        try {
+            return withClusterPublication(id, region, () -> doStopDbCluster(id, region));
+        } finally {
+            publishLifecycleEvents();
+        }
     }
 
     private DbCluster doStopDbCluster(String id, String region) {
@@ -4532,13 +4829,18 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         cluster.setStatus(DbInstanceStatus.STOPPED);
         putClusterForScope(accountId, effectiveRegion, id, cluster);
+        queueClusterLifecycleEvents(cluster, effectiveRegion, false);
         LOG.infov("DB cluster {0} stopped", id);
         return response;
     }
 
     /** Starts a stopped cluster and its members on the cluster's kept volume. */
     public DbCluster startDbCluster(String id, String region) {
-        return withClusterPublication(id, region, () -> doStartDbCluster(id, region));
+        try {
+            return withClusterPublication(id, region, () -> doStartDbCluster(id, region));
+        } finally {
+            publishLifecycleEvents();
+        }
     }
 
     private DbCluster doStartDbCluster(String id, String region) {
@@ -4559,8 +4861,33 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setStatus(DbInstanceStatus.AVAILABLE);
         putClusterForScope(accountId, effectiveRegion, id, cluster);
         restoreClusterMemberBackends(cluster, effectiveRegion, true);
+        queueClusterLifecycleEvents(cluster, effectiveRegion, true);
         LOG.infov("DB cluster {0} started", id);
         return response;
+    }
+
+    private void queueClusterLifecycleEvents(DbCluster cluster, String region, boolean started) {
+        String accountId = accountIdFromArn(cluster.getDbClusterArn());
+        DbInstanceStatus completed = started ? DbInstanceStatus.AVAILABLE : DbInstanceStatus.STOPPED;
+        for (String memberId : cluster.getDbClusterMembers()) {
+            DbInstance member = findInstanceForScope(accountId, region, memberId);
+            if (member != null && member.getStatus() == completed) {
+                queueLifecycleEvent(member.getDbInstanceArn(), memberId, false, started);
+            }
+        }
+        queueLifecycleEvent(cluster.getDbClusterArn(), cluster.getDbClusterIdentifier(), true, started);
+    }
+
+    private void queueLifecycleEvent(String arn, String id, boolean cluster, boolean started) {
+        if (eventPublisher != null) {
+            eventPublisher.queue(arn, id, cluster, started);
+        }
+    }
+
+    private void publishLifecycleEvents() {
+        if (eventPublisher != null) {
+            eventPublisher.publishQueued();
+        }
     }
 
     /** Reboots a cluster: its container and proxies go down and come back on the same volume. */
@@ -6261,6 +6588,9 @@ public class RdsService implements Resettable, ResourceProvider {
 
     // ── Global clusters (Aurora global databases) ─────────────────────────────
 
+    /** Engines CreateDBInstanceReadReplica copies; DescribeDBEngineVersions reports the same set. */
+    static final Set<String> READ_REPLICA_ENGINES = Set.of("postgres", "mysql", "mariadb");
+
     static final Set<String> GLOBAL_CLUSTER_ENGINES = Set.of("aurora-mysql", "aurora-postgresql");
 
     /**
@@ -7253,7 +7583,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbProxy proxy = getDbProxy(dbProxyName, effectiveRegion);
         DbProxyTargetGroup targetGroup = getDefaultProxyTargetGroup(
                 dbProxyName, targetGroupName, effectiveRegion);
-        validatePoolConfiguration(proxy, maxConnectionsPercent, maxIdleConnectionsPercent,
+        validatePoolConfiguration(maxConnectionsPercent, maxIdleConnectionsPercent,
                 connectionBorrowTimeout, sessionPinningFilters);
         DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(targetGroup);
         if (maxConnectionsPercent != null) {
@@ -7304,7 +7634,7 @@ public class RdsService implements Resettable, ResourceProvider {
         List<String> instanceIds = dbInstanceIdentifiers != null
                 ? dbInstanceIdentifiers : List.of();
         validateProxyTargetSelection(proxy, clusterIds, instanceIds, effectiveRegion);
-        validatePoolConfiguration(proxy, maxConnectionsPercent, maxIdleConnectionsPercent,
+        validatePoolConfiguration(maxConnectionsPercent, maxIdleConnectionsPercent,
                 connectionBorrowTimeout, sessionPinningFilters);
 
         DbProxyTarget currentTarget = original.getTargets().isEmpty()
@@ -7744,10 +8074,8 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setStatus("available");
         endpoint.setVpcId(vpcId);
         endpoint.setVpcSubnetIds(vpcSubnetIds);
-        endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()
-                ? ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId).map(sg -> List.of(sg.getGroupId()))
-                        .orElse(List.of())
-                : vpcSecurityGroupIds);
+        endpoint.setVpcSecurityGroupIds(
+                RdsSecurityGroups.orVpcDefault(ec2Service, effectiveRegion, vpcSecurityGroupIds, vpcId));
         endpoint.setCreatedDate(Instant.now());
         endpoint.setTargetRole(role);
         endpoint.setEndpointNetworkType(networkType);
@@ -9379,12 +9707,12 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void validatePoolConfiguration(Integer maxConnectionsPercent,
                                            Integer maxIdleConnectionsPercent) {
-        validatePoolConfiguration(null, maxConnectionsPercent, maxIdleConnectionsPercent,
+        validatePoolConfiguration(maxConnectionsPercent, maxIdleConnectionsPercent,
                 null, null);
     }
 
     private void validatePoolConfiguration(
-            DbProxy proxy, Integer maxConnectionsPercent, Integer maxIdleConnectionsPercent,
+            Integer maxConnectionsPercent, Integer maxIdleConnectionsPercent,
             Integer connectionBorrowTimeout, List<String> sessionPinningFilters) {
         if (maxConnectionsPercent != null) {
             validatePercent("MaxConnectionsPercent", maxConnectionsPercent, 1, 100);
@@ -9401,10 +9729,6 @@ public class RdsService implements Resettable, ResourceProvider {
             validatePercent("ConnectionBorrowTimeout", connectionBorrowTimeout, 0, 300);
         }
         if (sessionPinningFilters != null && !sessionPinningFilters.isEmpty()) {
-            if (proxy == null || !"MYSQL".equals(proxy.getEngineFamily())) {
-                throw new AwsException("InvalidParameterValue",
-                        "SessionPinningFilters are supported only for MYSQL DB proxies.", 400);
-            }
             if (sessionPinningFilters.stream()
                     .anyMatch(filter -> !"EXCLUDE_VARIABLE_SETS".equals(filter))) {
                 throw new AwsException("InvalidParameterValue",

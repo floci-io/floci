@@ -154,7 +154,7 @@ public class BedrockService implements ResourceProvider {
         this.kmsService = kmsService;
     }
 
-    public Guardrail createGuardrail(JsonNode request, String region) {
+    public synchronized Guardrail createGuardrail(JsonNode request, String region) {
         String name = requiredName(request);
         String description = boundedDescription(request);
         String blockedInputMessaging = requiredBlockedMessaging(request, "blockedInputMessaging");

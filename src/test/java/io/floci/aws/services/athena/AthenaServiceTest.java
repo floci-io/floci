@@ -1,12 +1,15 @@
 package io.floci.aws.services.athena;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.athena.model.CreateWorkGroupRequest;
 import io.floci.aws.services.athena.model.QueryExecutionState;
 import io.floci.aws.services.athena.model.ResultConfiguration;
 import io.floci.aws.services.athena.model.ResultSet;
+import io.floci.aws.services.athena.model.WorkGroupTag;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.s3.S3Service;
@@ -66,12 +69,32 @@ class AthenaServiceTest {
         when(athena.mock()).thenReturn(false);
 
         service = new AthenaService(storageFactory, duckClient, glueService, s3Service,
-                config, vertx, ddlBuilder, mock(RegionResolver.class));
+                config, vertx, ddlBuilder, mock(RegionResolver.class), mock(AthenaIcebergStatements.class),
+                mock(IamEnforcementFilter.class));
     }
 
     @AfterEach
     void tearDown() {
         vertx.close();
+    }
+
+    @Test
+    void storedTagsReadTheWorkgroupOrTheDataCatalogTheArnNamesInItsAccountAndRegion() {
+        CreateWorkGroupRequest request = new CreateWorkGroupRequest();
+        request.setName("analytics");
+        request.setTags(List.of(new WorkGroupTag("team", "data")));
+        service.createWorkGroup(request, "us-east-1");
+        service.createDataCatalog("us-east-1", "lake", "LAMBDA", null, null, List.of(new WorkGroupTag("team", "lake")));
+        String arn = "arn:aws:athena:us-east-1:000000000000:";
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn + "workgroup/analytics"));
+        assertEquals(Map.of("team", "lake"), service.storedTags(arn + "datacatalog/lake"));
+        assertEquals(Map.of(), service.storedTags(arn + "workgroup/primary"));
+        assertEquals(Map.of(), service.storedTags(arn + "datacatalog/AwsDataCatalog"));
+        assertEquals(Map.of(), service.storedTags(arn + "workgroup/analytics/session/s-1"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:athena:us-east-1:111111111111:workgroup/analytics"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:athena:us-west-2:000000000000:workgroup/analytics"));
+        assertEquals(Map.of(), service.storedTags("arn:aws-cn:athena:us-east-1:000000000000:workgroup/analytics"));
     }
 
     @Test
@@ -193,6 +216,36 @@ class AthenaServiceTest {
                         .map(ResultSet.ColumnInfo::getType).toList());
     }
 
+    /**
+     * Athena (engine v3) renders a timestamp column as {@code 2026-03-14 09:30:00.000}; DuckDB writes
+     * {@code 2026-03-14 09:30:00}. Every timestamp variant is padded to milliseconds, a longer
+     * fraction is kept, and other types, a timestamp with a time zone among them, are left alone.
+     */
+    @Test
+    void getQueryResultsRendersTimestampsWithAtLeastMilliseconds() throws Exception {
+        String query = "SELECT ts, ts_ms, ts_us, ts_tz, s FROM times";
+        when(duckClient.query(eq("DESCRIBE " + query), any(), any())).thenReturn(List.of(
+                Map.of("column_name", "ts", "column_type", "TIMESTAMP"),
+                Map.of("column_name", "ts_ms", "column_type", "TIMESTAMP_MS"),
+                Map.of("column_name", "ts_us", "column_type", "TIMESTAMP"),
+                Map.of("column_name", "ts_tz", "column_type", "TIMESTAMP WITH TIME ZONE"),
+                Map.of("column_name", "s", "column_type", "VARCHAR")));
+
+        ResultSet results = results(query, "ts,ts_ms,ts_us,ts_tz,s\n"
+                + "2026-03-14 09:30:00,2026-11-12 20:22:54.3,2026-11-12 20:22:54.385678,"
+                + "2026-03-14 09:30:00+00,2026-03-14 09:30:00\n"
+                + ",infinity,,,\n");
+
+        assertEquals(List.of(
+                List.of("ts", "ts_ms", "ts_us", "ts_tz", "s"),
+                List.of("2026-03-14 09:30:00.000", "2026-11-12 20:22:54.300", "2026-11-12 20:22:54.385678",
+                        "2026-03-14 09:30:00+00", "2026-03-14 09:30:00"),
+                List.of("", "infinity", "", "", "")),
+                results.getRows().stream()
+                        .map(row -> row.getData().stream().map(ResultSet.Datum::getVarCharValue).toList())
+                        .toList());
+    }
+
     @Test
     void getQueryResultsReportsVarcharWhenTheTypesCannotBeDescribed() throws Exception {
         when(duckClient.query(anyString(), any(), any())).thenThrow(new IllegalStateException("not describable"));
@@ -202,6 +255,10 @@ class AthenaServiceTest {
     }
 
     private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {
+        return results(query, csv).getMetadata().getColumnInfo();
+    }
+
+    private ResultSet results(String query, String csv) throws Exception {
         String id = service.startQueryExecution(query, "primary", null,
                 new ResultConfiguration("s3://athena-results/"));
         awaitState(id, QueryExecutionState.SUCCEEDED);
@@ -211,7 +268,7 @@ class AthenaServiceTest {
         when(s3Service.listObjects(eq("athena-results"), anyString(), any(), anyInt())).thenReturn(List.of(result));
         when(s3Service.getObject("athena-results", key)).thenReturn(result);
 
-        return service.getQueryResults(id).getMetadata().getColumnInfo();
+        return service.getQueryResults(id);
     }
 
     private void awaitState(String id, QueryExecutionState expected) throws InterruptedException {

@@ -29,6 +29,7 @@ public class Build {
     private Integer timeoutInMinutes;
     private Integer queuedTimeoutInMinutes;
     private String encryptionKey;
+    private Map<String, Object> vpcConfig;
 
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
@@ -83,4 +84,7 @@ public class Build {
 
     public String getEncryptionKey() { return encryptionKey; }
     public void setEncryptionKey(String encryptionKey) { this.encryptionKey = encryptionKey; }
+
+    public Map<String, Object> getVpcConfig() { return vpcConfig; }
+    public void setVpcConfig(Map<String, Object> vpcConfig) { this.vpcConfig = vpcConfig; }
 }

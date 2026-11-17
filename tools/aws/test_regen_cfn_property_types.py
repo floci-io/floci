@@ -68,6 +68,21 @@ def test_the_vendored_file_is_well_formed():
     assert r.validate(json.loads(r.OUTPUT.read_text(encoding="utf-8"))) == []
 
 
+def test_ses_event_destination_shape_preserves_nested_schema_constraints():
+    doc = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
+    type_name = "AWS::SES::ConfigurationSetEventDestination"
+    assert doc["operations"][type_name] == type_name
+
+    shapes = doc["shapes"]
+    assert shapes[type_name]["required"] == ["ConfigurationSetName", "EventDestination"]
+    destination = shapes[f"{type_name}/EventDestination"]
+    assert destination["required"] == ["MatchingEventTypes"]
+    assert destination["members"]["Name"] == "String"
+    assert destination["members"]["MatchingEventTypes"] == f"{type_name}/EventDestination.MatchingEventTypes"
+    assert shapes[f"{type_name}/SnsDestination"]["required"] == ["TopicARN"]
+    assert shapes[f"{type_name}/KinesisFirehoseDestination"]["required"] == ["IAMRoleARN", "DeliveryStreamARN"]
+
+
 def test_validate_names_a_missing_shape_and_a_broken_anchor():
     doc = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
     doc["shapes"]["AWS::Events::Rule/RetryPolicy"]["members"]["MaximumRetryAttempts"] = "String"

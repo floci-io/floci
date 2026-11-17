@@ -100,6 +100,15 @@ public class CodeArtifactService implements Resettable {
      * than silently 404ing the way an unimplemented capability elsewhere here might.
      */
     private static final Set<String> README_FORMATS = Set.of("npm", "pypi", "nuget");
+    /**
+     * Formats AWS documents as valid for {@code ListPackageVersionDependencies} specifically: the
+     * action's own request parameter doc gives "Valid Values: npm | pypi | maven | nuget",
+     * narrower than the shared eight-value {@code PackageFormat} wire enum every other
+     * package-version action here accepts. Generic, Ruby, Swift, and (despite its sparse index
+     * already carrying a real {@code deps} array) Cargo package versions are rejected outright for
+     * this action rather than silently 404ing or extending AWS's own documented scope.
+     */
+    private static final Set<String> DEPENDENCY_FORMATS = Set.of("npm", "pypi", "maven", "nuget");
     /** The real {@code PackageVersionStatus} wire enum, confirmed against {@code service-2.json}. */
     private static final Set<String> PACKAGE_VERSION_STATUSES =
             Set.of("Published", "Unfinished", "Unlisted", "Archived", "Disposed", "Deleted");
@@ -201,6 +210,10 @@ public class CodeArtifactService implements Resettable {
     public record AssetSummary(String name, long size, Map<String, String> hashes) {}
     public record PackageVersionAssetsListResult(String format, String namespace, String packageName,
             String version, String versionRevision, List<AssetSummary> assets, String nextToken) {}
+    public record PackageDependency(String namespace, String packageName, String dependencyType,
+            String versionRequirement) {}
+    public record PackageVersionDependenciesListResult(String format, String namespace, String packageName,
+            String version, String versionRevision, List<PackageDependency> dependencies, String nextToken) {}
     public record PackageVersionSummary(String version, String revision, String status, String originType,
             String externalConnectionName, String upstreamRepositoryName) {}
     public record ListPackageVersionsResult(String format, String namespace, String packageName,
@@ -1316,6 +1329,80 @@ public class CodeArtifactService implements Resettable {
         }
         return new PackageVersionAssetsListResult(format, namespace, packageName, version, revision, page.items(),
                 page.nextToken());
+    }
+
+    /**
+     * Lists the direct dependencies of one package version, extracted from that format's own
+     * metadata file (the POM for Maven, {@code package.json} for npm, the wheel/sdist metadata for
+     * pypi, the {@code .nuspec} for NuGet). AWS documents this action for exactly those 4 formats
+     * ({@link #DEPENDENCY_FORMATS}), narrower than {@link #CONTAINER_BACKED_FORMATS}: generic and
+     * Cargo are rejected here even though Cargo's own sparse index already carries a real {@code
+     * deps} array, since AWS's own request parameter doc does not list Cargo as a valid format for
+     * this specific action.
+     */
+    public PackageVersionDependenciesListResult listPackageVersionDependencies(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String nextToken) {
+        if (format == null || !DEPENDENCY_FORMATS.contains(format)) {
+            throw validation("format must be one of " + DEPENDENCY_FORMATS + ".");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        requireNonBlank(version, "packageVersion");
+        validatePackageToken("packageVersion", version);
+        validatePackageCoordinates(format, namespace, packageName, "listing the dependencies of");
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+        try {
+            if (!manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version)) {
+                throw notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version");
+            }
+            List<PackageDependency> dependencies;
+            try {
+                dependencies = manager.listPackageVersionDependencies(repoId, domain, repository, namespace,
+                        packageName, version);
+            } catch (UnsupportedOperationException e) {
+                throw new AwsException("InternalServerException", "Listing a " + format + " package version's "
+                        + "dependencies is not yet supported by this emulator.", 500);
+            }
+            List<IndexedDependency> indexed = new ArrayList<>(dependencies.size());
+            for (int i = 0; i < dependencies.size(); i++) {
+                indexed.add(new IndexedDependency(i, dependencies.get(i)));
+            }
+            PaginatedResult<IndexedDependency> page = Pagination.paginate(indexed, this::dependencyCursor, null,
+                    nextToken, 100, 1000, "ValidationException");
+            String revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format,
+                    namespace, packageName, version, repoId).revision();
+            return new PackageVersionDependenciesListResult(format, namespace, packageName, version, revision,
+                    page.items().stream().map(IndexedDependency::dependency).toList(), page.nextToken());
+        } finally {
+            endSidecarUse(manager, repoId);
+        }
+    }
+
+    private record IndexedDependency(int index, PackageDependency dependency) {}
+
+    /**
+     * A stable, always-unique pagination cursor for {@link #listPackageVersionDependencies}:
+     * every field folded in, plus the entry's own original-list index as a final tiebreaker, so
+     * two byte-for-byte identical dependencies (e.g. the same NuGet package id declared under two
+     * different target-framework groups with the same version requirement) never share a cursor.
+     * Without the index, {@link Pagination#slice}'s own "resume strictly after this cursor" logic
+     * would skip every entry sharing the boundary cursor when a page happens to end on one of them.
+     */
+    private String dependencyCursor(IndexedDependency indexed) {
+        PackageDependency dependency = indexed.dependency();
+        return (dependency.namespace() == null ? "" : dependency.namespace()) + "\u0000"
+                + dependency.packageName() + "\u0000"
+                + (dependency.dependencyType() == null ? "" : dependency.dependencyType()) + "\u0000"
+                + (dependency.versionRequirement() == null ? "" : dependency.versionRequirement()) + "\u0000"
+                + String.format("%010d", indexed.index());
     }
 
     /**
