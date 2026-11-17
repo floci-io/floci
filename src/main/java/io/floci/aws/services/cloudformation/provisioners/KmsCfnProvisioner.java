@@ -212,7 +212,6 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
         boolean rotationNow = key.isKeyRotationEnabled();
         String descriptionNow = key.getDescription();
         String policyNow = key.getPolicy();
-        Map<String, String> tagsNow = new HashMap<>(key.getTags());
         boolean enabled = wantEnabled == null ? enabledNow : wantEnabled;
         boolean rotation = wantRotation == null ? rotationNow : wantRotation;
         if (description != null && !Objects.equals(description, descriptionNow)) {
@@ -235,15 +234,8 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
         if (!enabled && enabledNow) {
             kmsService.disableKey(keyId, region);
         }
-        List<String> dropped = managedTagKeys.stream()
-                .filter(name -> !tags.containsKey(name) && tagsNow.containsKey(name))
-                .toList();
-        if (!dropped.isEmpty()) {
-            kmsService.untagResource(keyId, dropped, region);
-        }
-        if (!tags.isEmpty()) {
-            kmsService.tagResource(keyId, tags, region);
-        }
+        CfnRollback.reconcileTags(managedTagKeys, tags, dropped -> kmsService.untagResource(keyId, dropped, region),
+                added -> kmsService.tagResource(keyId, added, region));
     }
 
     /**
