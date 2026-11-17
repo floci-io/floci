@@ -1343,6 +1343,12 @@ conditioned on MFA reads:
   the session then carries differs by operation, as it does on AWS: a `GetSessionToken` session is
   MFA-authenticated on its own requests, while an assumed-role session is not, "once the user has
   assumed the role, no further MFA checks are made".
+- **A device decides what a session token may reach.** Under enforcement a `GetSessionToken` session
+  calls IAM only where a device minted it, "you cannot call any IAM API operations unless MFA
+  authentication information is included in the request", and reaches no STS operation but
+  `AssumeRole` and `GetCallerIdentity` either way. The refusal names the operation and what the
+  credentials do not carry; see [STS MFA](sts.md#mfa). An assumed-role session carries no such
+  limit.
 
 What a device still does not reach is the console sign-in AWS also gates on one, there being no
 sign-in here, and the hardware and FIDO device types above, so the device behind a session is

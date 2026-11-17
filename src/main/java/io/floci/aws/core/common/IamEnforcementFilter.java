@@ -79,7 +79,10 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>Authenticated temporary callers of {@code sts:GetFederationToken} are refused here with
- * the same operation-specific error as the handler, before policy evaluation.
+ * the same operation-specific error as the handler, before policy evaluation. A
+ * {@code GetSessionToken} session is refused the same way for an operation its credentials cannot
+ * reach at all: any IAM operation when no MFA device minted the session, and any STS operation but
+ * {@code AssumeRole} and {@code GetCallerIdentity}.
  *
  * <p>Evaluates the caller's identity policies, optional session policy, and optional
  * permissions boundary, as well as applicable resource policies via {@link ResourcePolicyProvider}.
@@ -460,6 +463,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
         if ("sts:GetFederationToken".equals(action) && IamService.isTemporaryAccessKey(akid)) {
             ctx.abortWith(queryXmlAccessDenied(IamService.FEDERATION_TOKEN_SESSION_MESSAGE));
+            return;
+        }
+
+        // What a GetSessionToken session may reach is narrower than its policies, and the refusal
+        // is the credential's rather than any statement's. Only IAM and STS actions can earn it,
+        // and both services answer in the Query envelope.
+        Optional<String> sessionTokenRefusal = iamService.sessionTokenRefusal(akid, action);
+        if (sessionTokenRefusal.isPresent()) {
+            LOG.debugv("Rejecting {0} signed with a session token that cannot reach it: {1}", action, akid);
+            ctx.abortWith(queryXmlAccessDenied(sessionTokenRefusal.get()));
             return;
         }
 
