@@ -1,10 +1,8 @@
 package io.floci.aws.services.emrserverless;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -44,7 +42,6 @@ import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -134,7 +131,7 @@ public class EmrServerlessJobRunService implements Resettable {
     // The EMR Serverless 7.11.0 release notes: for BATCH job runs the maximum "is 7 days from this release
     // onwards", and the timeout "can no longer be set to 0".
     private static final long MAX_BATCH_EXECUTION_TIMEOUT_MINUTES = 10_080;
-    private static final Pattern RELEASE_LABEL = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})(?:\\..*)?");
+    static final Pattern RELEASE_LABEL = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})(?:\\..*)?");
     // The AWS runtime for Apache Spark, emr-spark-8.0.0 on (and emr-spark-8.0-preview).
     private static final Pattern SPARK_RUNTIME_RELEASE_LABEL =
             Pattern.compile("emr-spark-(\\d{1,6})\\.(\\d{1,6})(?:[.-].*)?");
@@ -273,8 +270,9 @@ public class EmrServerlessJobRunService implements Resettable {
         StartJobRunRequest body = request != null ? request : new StartJobRunRequest();
         validate(body);
         applications.getApplication(applicationId);
-        JsonNode original = requestOf(applicationId, body);
-        JobRunRecord existing = runWithClientToken(body.getClientToken());
+        JsonNode original = EmrServerlessService.retriedRequest(objectMapper, applicationId, body);
+        JobRunRecord existing = EmrServerlessService.startedWithClientToken(store.scan(key -> true),
+                body.getClientToken(), JobRunRecord::getClientToken, record -> inRequestRegion(record.getJobRun()));
         if (existing != null) {
             if (!original.equals(existing.getRequest())) {
                 throw new AwsException("ConflictException", "Request did not match the original", 409);
@@ -285,7 +283,8 @@ public class EmrServerlessJobRunService implements Resettable {
         if (body.getTags() != null) {
             EmrServerlessService.validateTags(body.getTags());
         }
-        JobRunRecord record = applications.admitJobRun(applicationId, app -> checkBatchTimeout(app, body), app -> {
+        JobRunRecord record = applications.admit(applicationId, "a job run is submitted",
+                app -> checkBatchTimeout(app, body), app -> {
             JobRunRecord admitted = newRun(app, body, original);
             if (sparkRunner != null) {
                 launch(admitted, app);
@@ -376,14 +375,8 @@ public class EmrServerlessJobRunService implements Resettable {
     public synchronized PaginatedResult<JobRunSummary> listJobRuns(String applicationId, List<String> states,
                                                                    Instant createdAtAfter, Instant createdAtBefore,
                                                                    String mode, Integer maxResults, String nextToken) {
-        List<String> violations = new ArrayList<>();
-        if (maxResults != null) {
-            String violation = SmithyValidationErrors.outOfRange("maxResults", maxResults, 1, MAX_LIST_RESULTS);
-            if (violation != null) {
-                violations.add(violation);
-            }
-        }
-        violations.addAll(EmrServerlessService.statesViolations(states, STATES, MAX_FILTER_STATES));
+        List<String> violations = EmrServerlessService.listViolations(maxResults, MAX_LIST_RESULTS, states, STATES,
+                MAX_FILTER_STATES);
         if (mode != null && !MODES.contains(mode)) {
             violations.add(SmithyValidationErrors.notInEnum(mode, "mode", MODES));
         }
@@ -391,7 +384,6 @@ public class EmrServerlessJobRunService implements Resettable {
             throw SmithyValidationErrors.validationException(violations);
         }
         List<JobRunRecord> matching = new ArrayList<>();
-        Map<String, String> cursors = new HashMap<>();
         for (JobRunRecord record : store.scan(key -> true)) {
             JobRun run = record.getJobRun();
             if (!applicationId.equals(run.getApplicationId()) || !inRequestRegion(run)) {
@@ -404,18 +396,15 @@ public class EmrServerlessJobRunService implements Resettable {
                     || (mode != null && !mode.equals(run.getMode() != null ? run.getMode() : MODE_BATCH))) {
                 continue;
             }
-            int group = states == null || states.isEmpty() ? 0 : states.indexOf(run.getState());
-            cursors.put(run.getJobRunId(), String.format("%02d%020d%s", group,
-                    Long.MAX_VALUE - run.getCreatedAt().toEpochMilli(), run.getJobRunId()));
             matching.add(record);
         }
         String namespace = String.join("|", "ListJobRuns", applicationId,
                 String.valueOf(states != null ? states : List.of()), String.valueOf(createdAtAfter),
                 String.valueOf(createdAtBefore), String.valueOf(mode));
-        PaginatedResult<JobRunRecord> page = Pagination.paginate(matching,
-                record -> cursors.get(record.getJobRun().getJobRunId()),
-                maxResults != null ? maxResults : MAX_LIST_RESULTS, nextToken, namespace,
-                token -> new AwsException("ValidationException", "Invalid nextToken.", 400));
+        PaginatedResult<JobRunRecord> page = EmrServerlessService.pageByState(matching,
+                record -> record.getJobRun().getJobRunId(), record -> record.getJobRun().getState(),
+                record -> record.getJobRun().getCreatedAt(), states, maxResults, MAX_LIST_RESULTS, nextToken,
+                namespace);
         return new PaginatedResult<>(page.items().stream().map(EmrServerlessJobRunService::toSummary).toList(),
                 page.nextToken());
     }
@@ -522,7 +511,8 @@ public class EmrServerlessJobRunService implements Resettable {
         run.setName(request.getName());
         run.setArn(AwsArnUtils.Arn.of("emr-serverless", applicationArn.region(), applicationArn.accountId(),
                 applicationArn.resource() + "/jobruns/" + jobRunId).toString());
-        run.setCreatedBy(createdBy(applicationArn.accountId()));
+        run.setCreatedBy(EmrServerlessService.createdBy(iamService, requestContext, regionResolver,
+                applicationArn.accountId()));
         run.setCreatedAt(now);
         run.setUpdatedAt(now);
         run.setExecutionRole(request.getExecutionRoleArn());
@@ -1258,39 +1248,6 @@ public class EmrServerlessJobRunService implements Resettable {
                 .orElseThrow(() -> EmrServerlessService.resourceNotFound(resource.arn()));
     }
 
-    private JobRunRecord runWithClientToken(String clientToken) {
-        for (JobRunRecord record : store.scan(key -> true)) {
-            if (clientToken.equals(record.getClientToken()) && inRequestRegion(record.getJobRun())) {
-                return record;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * What a retry must repeat: the application and every member of the body but the token itself.
-     * Read back from its JSON text, so that its numbers compare equal to those of a stored request
-     * once storage has written and read it.
-     */
-    private JsonNode requestOf(String applicationId, StartJobRunRequest request) {
-        ObjectNode node;
-        try {
-            node = (ObjectNode) objectMapper.readTree(objectMapper.writeValueAsString(request));
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot serialize a StartJobRun request", e);
-        }
-        node.remove("clientToken");
-        node.put("applicationId", applicationId);
-        return node;
-    }
-
-    // The caller, as GetCallerIdentity reports it; the account root for a key IAM does not know.
-    private String createdBy(String accountId) {
-        String accessKeyId = requestContext != null ? requestContext.getAccessKeyId() : null;
-        return iamService.resolveCallerArn(accessKeyId)
-                .orElseGet(() -> regionResolver.buildGlobalArn("iam", accountId, "root"));
-    }
-
     private boolean inRequestRegion(JobRun run) {
         return regionResolver.getRegion().equals(AwsArnUtils.parse(run.getArn()).region());
     }
@@ -1305,11 +1262,9 @@ public class EmrServerlessJobRunService implements Resettable {
         if (request.getClientToken() == null) {
             violations.add(SmithyValidationErrors.notNull("clientToken"));
         }
-        if (request.getExecutionRoleArn() == null) {
-            violations.add(SmithyValidationErrors.notNull("executionRoleArn"));
-        } else if (!ROLE_ARN.matcher(request.getExecutionRoleArn()).matches()) {
-            violations.add("Value at 'executionRoleArn' failed to satisfy constraint: "
-                    + "Member must satisfy regular expression pattern: " + ROLE_ARN_PATTERN);
+        String roleViolation = executionRoleViolation(request.getExecutionRoleArn());
+        if (roleViolation != null) {
+            violations.add(roleViolation);
         }
         if (request.getMode() != null && !MODES.contains(request.getMode())) {
             violations.add(SmithyValidationErrors.notInEnum(request.getMode(), "mode", MODES));
@@ -1344,6 +1299,16 @@ public class EmrServerlessJobRunService implements Resettable {
         if (driver == null || (driver.getSparkSubmit() == null) == (driver.getHive() == null)) {
             throw new AwsException("ValidationException", "jobDriver must contain exactly one union member", 400);
         }
+    }
+
+    /** What is wrong with a request's {@code executionRoleArn}, which the model requires: null when nothing is. */
+    static String executionRoleViolation(String executionRoleArn) {
+        if (executionRoleArn == null) {
+            return SmithyValidationErrors.notNull("executionRoleArn");
+        }
+        return ROLE_ARN.matcher(executionRoleArn).matches() ? null
+                : "Value at 'executionRoleArn' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: " + ROLE_ARN_PATTERN;
     }
 
     /**
@@ -1390,12 +1355,12 @@ public class EmrServerlessJobRunService implements Resettable {
 
     // A release of the AWS runtime for Apache Spark, which starts at emr-spark-8.0-preview and comes after EMR
     // Serverless 7.14.0 in the release list.
-    private static boolean sparkRuntime(String releaseLabel) {
+    static boolean sparkRuntime(String releaseLabel) {
         return releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 0);
     }
 
     // Whether releaseLabel is of the family labelPattern matches, at major.minor or later.
-    private static boolean releaseAtLeast(Pattern labelPattern, String releaseLabel, int major, int minor) {
+    static boolean releaseAtLeast(Pattern labelPattern, String releaseLabel, int major, int minor) {
         Matcher matcher = labelPattern.matcher(releaseLabel != null ? releaseLabel : "");
         if (!matcher.matches()) {
             return false;

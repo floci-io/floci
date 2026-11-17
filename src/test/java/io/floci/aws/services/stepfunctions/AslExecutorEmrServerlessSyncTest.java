@@ -9,6 +9,7 @@ import io.floci.aws.services.emrserverless.EmrServerlessController;
 import io.floci.aws.services.emrserverless.EmrServerlessDashboards;
 import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
 import io.floci.aws.services.emrserverless.EmrServerlessService;
+import io.floci.aws.services.emrserverless.EmrServerlessSessionService;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.stepfunctions.model.Execution;
@@ -58,6 +59,7 @@ class AslExecutorEmrServerlessSyncTest {
     private final AtomicLong testNanos = new AtomicLong();
     private EmrServerlessService applications;
     private EmrServerlessJobRunService jobRuns;
+    private EmrServerlessSessionService sessions;
     private StepFunctionsService sfnService;
     private AslExecutor executor;
     private List<HistoryEvent> history;
@@ -67,6 +69,7 @@ class AslExecutorEmrServerlessSyncTest {
     void setUp() {
         applications = mock(EmrServerlessService.class);
         jobRuns = mock(EmrServerlessJobRunService.class);
+        sessions = mock(EmrServerlessSessionService.class);
         when(jobRuns.startJobRun(eq(APPLICATION_ID), any())).thenReturn(jobRun("RUNNING"));
         when(applications.createApplication(any())).thenReturn(application("CREATING"));
         sfnService = mock(StepFunctionsService.class);
@@ -79,8 +82,8 @@ class AslExecutorEmrServerlessSyncTest {
                 .sfnService(instance)
                 .customResourceLiveness(null)
                 .emrServerlessTaskInvoker(new EmrServerlessTaskInvoker(
-                        new EmrServerlessController(applications, jobRuns, mock(EmrServerlessDashboards.class),
-                                mock(RegionResolver.class)), objectMapper))
+                        new EmrServerlessController(applications, jobRuns, sessions,
+                                mock(EmrServerlessDashboards.class), mock(RegionResolver.class)), objectMapper))
                 .nanoTime(testNanos::get)
                 .sleeper(testNanos::addAndGet)
                 .build();
@@ -226,7 +229,7 @@ class AslExecutorEmrServerlessSyncTest {
         run(task("startApplication.sync"), APPLICATION);
 
         verify(applications).startApplication(APPLICATION_ID);
-        verify(jobRuns).stopApplication(APPLICATION_ID);
+        verify(sessions).stopApplication(APPLICATION_ID);
         assertEquals(List.of(), history.stream().map(HistoryEvent::getType)
                 .filter(type -> type.equals("TaskFailed") || type.equals("TaskSucceeded")).toList());
     }
@@ -238,7 +241,7 @@ class AslExecutorEmrServerlessSyncTest {
         Execution execution = run(timingOut("stopApplication.sync"), APPLICATION);
 
         assertEquals("States.Timeout", execution.getError());
-        verify(jobRuns).stopApplication(APPLICATION_ID);
+        verify(sessions).stopApplication(APPLICATION_ID);
         verify(applications, never()).startApplication(anyString());
         verify(applications, never()).deleteApplication(anyString());
     }

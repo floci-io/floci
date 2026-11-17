@@ -39,8 +39,38 @@ class EmrServerlessDashboardsTest {
         assertEquals("2", query.get("attempt"));
         // "The URL is valid for one hour after you generate it."
         assertEquals(String.valueOf(NOW.plus(Duration.ofHours(1)).getEpochSecond()), query.get("expires"));
-        assertEquals(new EmrServerlessDashboards.Link("123456789012", "eu-west-1", "00fabcd", "00frun", 2,
+        assertEquals(new EmrServerlessDashboards.Link("123456789012", "eu-west-1", "00fabcd", "00frun", null, 2,
                 NOW.plus(Duration.ofHours(1)).getEpochSecond()), verified(query));
+    }
+
+    @Test
+    void aSessionsLinkNamesTheSessionWithNoAttempt() {
+        Map<String, String> query = query(dashboards.sessionUrl("123456789012", "eu-west-1", "00fabcd", "00fsession"));
+
+        assertEquals("00fsession", query.get("session"));
+        assertNull(query.get("jobRun"));
+        assertNull(query.get("attempt"));
+        assertEquals(new EmrServerlessDashboards.Link("123456789012", "eu-west-1", "00fabcd", null, "00fsession", 0,
+                NOW.plus(Duration.ofHours(1)).getEpochSecond()), verified(query));
+    }
+
+    @Test
+    void aSessionsLinkDoesNotOpenAsARunsOfTheSameIdNorTheOtherWayRound() {
+        Map<String, String> session = query(dashboards.sessionUrl("123456789012", "us-east-1", "app", "same"));
+        Map<String, String> asRun = new LinkedHashMap<>(session);
+        asRun.put("jobRun", asRun.remove("session"));
+        asRun.put("attempt", "0");
+        assertNull(verified(asRun));
+
+        Map<String, String> run = query(dashboards.url("123456789012", "us-east-1", "app", "same", 1));
+        Map<String, String> asSession = new LinkedHashMap<>(run);
+        asSession.put("session", asSession.remove("jobRun"));
+        asSession.remove("attempt");
+        assertNull(verified(asSession));
+
+        Map<String, String> both = new LinkedHashMap<>(session);
+        both.put("jobRun", "same");
+        assertNull(verified(both));
     }
 
     @Test
@@ -82,7 +112,8 @@ class EmrServerlessDashboardsTest {
 
     private EmrServerlessDashboards.Link verified(Map<String, String> query) {
         return dashboards.verified(query.get("account"), query.get("region"), query.get("application"),
-                query.get("jobRun"), query.get("attempt"), query.get("expires"), query.get("signature"));
+                query.get("jobRun"), query.get("session"), query.get("attempt"), query.get("expires"),
+                query.get("signature"));
     }
 
     private static Map<String, String> query(String url) {

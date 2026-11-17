@@ -12,6 +12,9 @@ import io.floci.aws.services.emrserverless.model.DeleteApplicationResponse;
 import io.floci.aws.services.emrserverless.model.GetApplicationResponse;
 import io.floci.aws.services.emrserverless.model.GetDashboardForJobRunResponse;
 import io.floci.aws.services.emrserverless.model.GetJobRunResponse;
+import io.floci.aws.services.emrserverless.model.GetResourceDashboardResponse;
+import io.floci.aws.services.emrserverless.model.GetSessionEndpointResponse;
+import io.floci.aws.services.emrserverless.model.GetSessionResponse;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
 import io.floci.aws.services.emrserverless.model.JobRunSummary;
@@ -19,10 +22,16 @@ import io.floci.aws.services.emrserverless.model.ListApplicationsRequest;
 import io.floci.aws.services.emrserverless.model.ListApplicationsResponse;
 import io.floci.aws.services.emrserverless.model.ListJobRunAttemptsResponse;
 import io.floci.aws.services.emrserverless.model.ListJobRunsResponse;
+import io.floci.aws.services.emrserverless.model.ListSessionsResponse;
+import io.floci.aws.services.emrserverless.model.Session;
+import io.floci.aws.services.emrserverless.model.SessionSummary;
 import io.floci.aws.services.emrserverless.model.StartApplicationResponse;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
 import io.floci.aws.services.emrserverless.model.StartJobRunResponse;
+import io.floci.aws.services.emrserverless.model.StartSessionRequest;
+import io.floci.aws.services.emrserverless.model.StartSessionResponse;
 import io.floci.aws.services.emrserverless.model.StopApplicationResponse;
+import io.floci.aws.services.emrserverless.model.TerminateSessionResponse;
 import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.UpdateApplicationResponse;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -48,14 +57,17 @@ public class EmrServerlessController {
 
     private final EmrServerlessService service;
     private final EmrServerlessJobRunService jobRuns;
+    private final EmrServerlessSessionService sessions;
     private final EmrServerlessDashboards dashboards;
     private final RegionResolver regionResolver;
 
     @Inject
     public EmrServerlessController(EmrServerlessService service, EmrServerlessJobRunService jobRuns,
-                                   EmrServerlessDashboards dashboards, RegionResolver regionResolver) {
+                                   EmrServerlessSessionService sessions, EmrServerlessDashboards dashboards,
+                                   RegionResolver regionResolver) {
         this.service = service;
         this.jobRuns = jobRuns;
+        this.sessions = sessions;
         this.dashboards = dashboards;
         this.regionResolver = regionResolver;
     }
@@ -127,7 +139,7 @@ public class EmrServerlessController {
     @POST
     @Path("/{applicationId}/stop")
     public StopApplicationResponse stopApplication(@PathParam("applicationId") String applicationId) {
-        jobRuns.stopApplication(applicationId);
+        sessions.stopApplication(applicationId);
         StopApplicationResponse response = new StopApplicationResponse();
         return response;
     }
@@ -213,6 +225,86 @@ public class EmrServerlessController {
         CancelJobRunResponse response = new CancelJobRunResponse();
         response.setApplicationId(run.getApplicationId());
         response.setJobRunId(run.getJobRunId());
+        return response;
+    }
+
+    @POST
+    @Path("/{applicationId}/sessions")
+    public StartSessionResponse startSession(@PathParam("applicationId") String applicationId,
+                                             StartSessionRequest request) {
+        Session session = sessions.startSession(applicationId, request);
+        StartSessionResponse response = new StartSessionResponse();
+        response.setApplicationId(session.getApplicationId());
+        response.setSessionId(session.getSessionId());
+        response.setArn(session.getArn());
+        return response;
+    }
+
+    @GET
+    @Path("/{applicationId}/sessions")
+    public ListSessionsResponse listSessions(@PathParam("applicationId") String applicationId,
+                                             @QueryParam("states") List<String> states,
+                                             @QueryParam("createdAtAfter") String createdAtAfter,
+                                             @QueryParam("createdAtBefore") String createdAtBefore,
+                                             @QueryParam("maxResults") String maxResults,
+                                             @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<SessionSummary> page = sessions.listSessions(applicationId, states,
+                EmrServerlessJobRunService.parseTimestamp(createdAtAfter, "createdAtAfter"),
+                EmrServerlessJobRunService.parseTimestamp(createdAtBefore, "createdAtBefore"),
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken);
+        ListSessionsResponse response = new ListSessionsResponse();
+        response.setSessions(page.items());
+        response.setNextToken(page.nextToken());
+        return response;
+    }
+
+    @GET
+    @Path("/{applicationId}/sessions/{sessionId}")
+    public GetSessionResponse getSession(@PathParam("applicationId") String applicationId,
+                                         @PathParam("sessionId") String sessionId) {
+        GetSessionResponse response = new GetSessionResponse();
+        response.setSession(sessions.getSession(applicationId, sessionId));
+        return response;
+    }
+
+    @DELETE
+    @Path("/{applicationId}/sessions/{sessionId}")
+    public TerminateSessionResponse terminateSession(@PathParam("applicationId") String applicationId,
+                                                     @PathParam("sessionId") String sessionId) {
+        Session session = sessions.terminateSession(applicationId, sessionId);
+        TerminateSessionResponse response = new TerminateSessionResponse();
+        response.setApplicationId(session.getApplicationId());
+        response.setSessionId(session.getSessionId());
+        return response;
+    }
+
+    @GET
+    @Path("/{applicationId}/sessions/{sessionId}/endpoint")
+    public GetSessionEndpointResponse getSessionEndpoint(@PathParam("applicationId") String applicationId,
+                                                         @PathParam("sessionId") String sessionId) {
+        EmrServerlessSessionService.Endpoint endpoint = sessions.sessionEndpoint(applicationId, sessionId);
+        GetSessionEndpointResponse response = new GetSessionEndpointResponse();
+        response.setApplicationId(applicationId);
+        response.setSessionId(sessionId);
+        response.setEndpoint(endpoint.url());
+        response.setAuthToken(endpoint.authToken());
+        response.setAuthTokenExpiresAt(endpoint.authTokenExpiresAt());
+        return response;
+    }
+
+    /**
+     * The link to a session's application UI ({@link EmrServerlessDashboards}). {@code accessSystemProfileLogs} is for
+     * sessions on Lake Formation, which Floci runs none of, so it changes nothing.
+     */
+    @GET
+    @Path("/{applicationId}/dashboard")
+    public GetResourceDashboardResponse getResourceDashboard(@PathParam("applicationId") String applicationId,
+                                                             @QueryParam("resourceId") String resourceId,
+                                                             @QueryParam("resourceType") String resourceType) {
+        Session session = sessions.dashboardResource(applicationId, resourceId, resourceType);
+        GetResourceDashboardResponse response = new GetResourceDashboardResponse();
+        response.setUrl(dashboards.sessionUrl(regionResolver.getAccountId(), regionResolver.getRegion(),
+                applicationId, session.getSessionId()));
         return response;
     }
 }
