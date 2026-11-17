@@ -128,6 +128,31 @@ class ExternalDsqlBackendIntegrationTest {
     }
 
     @Test
+    void aSessionOpenWhenTheRolesAreListedCannotCreateARoleTheDeletionWouldMiss() throws Exception {
+        String id = "pppppqqqqqrrrrrsssssttttto";
+        String admin = "d" + id + "_admin";
+        ExternalDsqlBackend backend = new ExternalDsqlBackend(config());
+        DsqlCluster cluster = cluster(id);
+        DsqlDatabases.Backend started = backend.start(cluster);
+        try (Connection open = DriverManager.getConnection(started.jdbcUrl(), admin,
+                started.credentials().passwordFor(admin)); Statement statement = open.createStatement()) {
+            List<String> roles = backend.rolesToDrop(cluster);
+            cluster.setPendingBackendRoles(roles);
+
+            // A statement of a session that was already open, arriving after the roles were listed.
+            assertThrows(SQLException.class,
+                    () -> statement.execute("CALL sys.run_role_ddl($$CREATE ROLE d" + id + "_late$$)"),
+                    "listing the roles ended the sessions on the database, so none can add one after it");
+        } finally {
+            backend.stop(cluster, true);
+        }
+
+        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
+                + "%' OR rolname IN ('dsqlowner_" + id + "', 'dsqlconnect_" + id + "')"),
+                "no role of the cluster is left on the server");
+    }
+
+    @Test
     void aFailedStartLeavesARoleItDidNotCreate() throws Exception {
         String id = "zyxwvutsrqponmlkjihgfedcba";
         String owner = "dsqlowner_" + id;

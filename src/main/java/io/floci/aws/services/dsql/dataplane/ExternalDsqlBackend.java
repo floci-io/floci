@@ -66,6 +66,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
      * database: far longer than any of them takes on a server that works.
      */
     static final Duration SOCKET_TIMEOUT = Duration.ofSeconds(120);
+    /** How long ending a session on a cluster's database waits for it to be gone. */
+    private static final Duration SESSION_END_WAIT = Duration.ofSeconds(5);
 
     private final EmulatorConfig config;
     private final Duration readyTimeout;
@@ -173,7 +175,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
     /**
      * The cluster's recorded roles brought up to date, its own roles first, then its admin, its
      * connect role, and its owner last. With the database gone, the roles an earlier deletion saved,
-     * or else the admin, connect role and owner, the three roles a cluster always has.
+     * or else the admin, connect role and owner, the three roles a cluster always has. Only a
+     * deletion asks for them, so the sessions still on the database are ended first.
      */
     @Override
     public List<String> rolesToDrop(DsqlCluster cluster) throws SQLException {
@@ -192,6 +195,9 @@ public class ExternalDsqlBackend implements DsqlBackend {
                         + " no roles are listed from it", names.database(), cluster.getIdentifier());
                 return names.always();
             }
+            // The endpoint no longer serves the cluster, so no new session reaches the database; ending
+            // the ones still there before the roles are read means none creates a role the list misses.
+            endSessions(server, names);
         }
         List<String> roles = new ArrayList<>();
         try (Connection database = connect(names.database())) {
@@ -445,12 +451,21 @@ public class ExternalDsqlBackend implements DsqlBackend {
     }
 
     private static void dropDatabase(Connection server, Names names) throws SQLException {
-        try (PreparedStatement terminate = server.prepareStatement("SELECT pg_terminate_backend(pid)"
+        endSessions(server, names);
+        execute(server, "DROP DATABASE IF EXISTS " + quote(names.database()) + " WITH (FORCE)");
+    }
+
+    /**
+     * Ends every other session on the cluster's database, waiting up to {@link #SESSION_END_WAIT}
+     * for each to be gone, so a statement it was running is rolled back or committed by then.
+     */
+    private static void endSessions(Connection server, Names names) throws SQLException {
+        try (PreparedStatement terminate = server.prepareStatement("SELECT pg_terminate_backend(pid, ?)"
                 + " FROM pg_stat_activity WHERE datname = ? AND pid <> pg_backend_pid()")) {
-            terminate.setString(1, names.database());
+            terminate.setLong(1, SESSION_END_WAIT.toMillis());
+            terminate.setString(2, names.database());
             terminate.execute();
         }
-        execute(server, "DROP DATABASE IF EXISTS " + quote(names.database()) + " WITH (FORCE)");
     }
 
     /** Opens a connection to the server. */
