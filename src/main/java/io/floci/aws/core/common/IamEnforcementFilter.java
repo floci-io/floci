@@ -2,12 +2,12 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.RequestOperationResolver.ResolvedOperation;
 import io.floci.aws.services.cloudtrail.CloudTrailService;
 import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
 import io.floci.aws.services.iam.IamActionRegistry;
-import io.floci.aws.services.iam.IamAuthorizedActions;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -218,6 +218,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final Clock clock;
     private final ResourceInfo resourceInfo;
     private final Instance<S3Service> s3ServiceProvider;
+    private final RequestOperationResolver operationResolver;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -258,6 +259,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.clock = clock;
         this.resourceInfo = resourceInfo;
         this.s3ServiceProvider = s3ServiceProvider;
+        this.operationResolver =
+                new RequestOperationResolver(actionRegistry, queryServiceResolver, arnBuilder, catalog);
     }
 
     /** Package-private constructor for callers predating s3ServiceProvider. */
@@ -353,7 +356,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
-        ProtocolClaim rpcV2Route = rpcV2RouteClaim(ctx);
+        ProtocolClaim rpcV2Route = operationResolver.rpcV2RouteClaim(ctx, resourceInfo);
         if (rpcV2Route != null) {
             // The claim filter runs before routing and can leave a call this endpoint serves
             // unclaimed, as an unrecognised smithy-protocol value does. Every check below that reads
@@ -397,9 +400,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // action rules, ARN building and condition keys all match the canonical name, so an
         // alias would resolve to no action and be allowed through without any policy check.
         String claimedScope = catalog.canonicalCredentialScope(rawScope);
-        ResolvedAuthorization resolvedAuthorization = resolveAuthorization(auth, claimedScope, ctx);
-        String credentialScope = resolvedAuthorization.credentialScope();
-        String action = resolvedAuthorization.action();
+        ResolvedOperation resolvedOperation = operationResolver.resolve(auth, claimedScope, ctx, resourceInfo);
+        String credentialScope = resolvedOperation.credentialScope();
+        String action = resolvedOperation.action();
         if (IamActionRegistry.takenByDocumentedRoute(credentialScope, ctx)) {
             // Another API's request (Glue's Iceberg REST endpoint takes Apache Iceberg's) carries none of the
             // operation's members, so none is read from it: not its resources, condition keys, tags or roles.
@@ -497,7 +500,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
 
         List<String> resources = resolveResourceArns(credentialScope,
-                targetResources(credentialScope, action, resolvedAuthorization.operation(), ctx, region, accountId));
+                targetResources(credentialScope, action, resolvedOperation.operation(), ctx, region, accountId));
 
         Optional<PresignedScope> presignedScope = iamService.presignedScope(akid);
         if (presignedScope.isPresent()) {
@@ -583,7 +586,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         // A create that carries tags is checked with them where its own action takes them, as the tagging
         // action it also needs is (see TagOnCreate); keys the service's own resolver gives are kept.
-        Optional<TagOnCreate.Tagging> tagOnCreate = TagOnCreate.of(resolvedAuthorization.operation(), ctx);
+        Optional<TagOnCreate.Tagging> tagOnCreate = TagOnCreate.of(resolvedOperation.operation(), ctx);
         List<Map<String, List<String>>> requestTags = tagOnCreate.filter(TagOnCreate.Tagging::requestTags)
                 .map(TagOnCreate::requestTagContexts).orElse(List.of());
         List<Map<String, List<String>>> targetContexts = withRequestTags(conditionContext, requestTags);
@@ -618,16 +621,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 region, accountId, akid)) {
             return;
         }
-        if (abortIfConnectorPassDenied(ctx, caller, callerArns.orElse(null), resolvedAuthorization.operation(),
+        if (abortIfConnectorPassDenied(ctx, caller, callerArns.orElse(null), resolvedOperation.operation(),
                 region, accountId, akid)) {
             return;
         }
         if (abortIfForwardedDenied(ctx, caller, principal, callerArns.orElse(null), action,
-                resolvedAuthorization.operation(), credentialScope, resources, region, accountId, akid)) {
+                resolvedOperation.operation(), credentialScope, resources, region, accountId, akid)) {
             return;
         }
         if (tagOnCreate.isPresent() && abortIfTagOnCreateDenied(ctx, caller, principal, callerArns.orElse(null),
-                action, resolvedAuthorization.operation(), tagOnCreate.get(), credentialScope, resources, region,
+                action, resolvedOperation.operation(), tagOnCreate.get(), credentialScope, resources, region,
                 accountId, akid)) {
             return;
         }
@@ -834,112 +837,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Resolves both the IAM namespace and action from the service that will actually handle the
-     * request. Query traffic shares the dispatch resolver with {@link AwsQueryController}; an RPC v2
-     * call takes the service and operation its route dispatches; REST traffic uses the JAX-RS
-     * resource class that won route matching.
-     */
-    private ResolvedAuthorization resolveAuthorization(String auth, String claimedScope,
-                                                        ContainerRequestContext ctx) {
-        Object claimValue = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY);
-        // Form POSTs are also recognized without a claim; GET dispatch requires the Query claim.
-        if (IamActionRegistry.isQueryRequest(ctx)) {
-            String queryAction = actionRegistry.queryAction(ctx);
-            if (queryAction == null || queryAction.isBlank()) {
-                return new ResolvedAuthorization(claimedScope, null);
-            }
-            String service = queryServiceResolver.resolve(auth, queryAction, actionRegistry.queryVersion(ctx));
-            String servingScope = catalog.byExternalKey(service)
-                    .map(descriptor -> iamServiceScope(descriptor, claimedScope))
-                    .orElseGet(() -> catalog.canonicalCredentialScope(service));
-            return new ResolvedAuthorization(servingScope,
-                    IamAuthorizedActions.actionFor(servingScope, queryAction), servingScope + ":" + queryAction);
-        }
-
-        // Read from the route rather than the claim: a path the claim filter takes for RPC v2 can
-        // reach another route, and an X-Amz-Target header names an operation this endpoint ignores.
-        ProtocolClaim rpcV2Route = rpcV2RouteClaim(ctx);
-        if (rpcV2Route != null) {
-            if (rpcV2Route.service() == null) {
-                return new ResolvedAuthorization(claimedScope, null); // no service: the endpoint answers 404
-            }
-            String servingScope = iamServiceScope(rpcV2Route.service(), claimedScope);
-            return new ResolvedAuthorization(servingScope,
-                    actionRegistry.resolveOperation(servingScope, rpcV2Route.operation(), ctx),
-                    servingScope + ":" + rpcV2Route.operation());
-        }
-
-        ResolvedAuthorization routeAuthorization = restRouteAuthorization(ctx);
-        if (routeAuthorization != null) {
-            return routeAuthorization;
-        }
-
-        // A REST request is authorized by its route alone, never by an X-Amz-Target it carries.
-        boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
-        String servingScope = servingCredentialScope(claimedScope, ctx);
-        if (rest) {
-            return authorizationForRoute(servingScope, ctx);
-        }
-        String targetOperation = IamActionRegistry.targetOperation(ctx);
-        String action = actionRegistry.resolve(servingScope, ctx);
-        return targetOperation == null ? new ResolvedAuthorization(servingScope, action)
-                : new ResolvedAuthorization(servingScope, action, servingScope + ":" + targetOperation);
-    }
-
-    /**
-     * The claim of a call JAX-RS routed to the Smithy RPC v2 endpoint, made from the service and
-     * operation in the route's path parameters, which are what that endpoint dispatches. Null for
-     * any other request.
-     */
-    private ProtocolClaim rpcV2RouteClaim(ContainerRequestContext ctx) {
-        if (resourceInfo == null || !AwsJsonCborController.class.equals(resourceInfo.getResourceClass())) {
-            return null;
-        }
-        return ProtocolClaimer.rpcV2RouteClaim(catalog, ctx.getUriInfo().getPathParameters());
-    }
-
-    /**
-     * The action a REST request's matched route maps to, read from the route alone. Null for any
-     * other request, and for a route no rule maps.
-     */
-    private ResolvedAuthorization restRouteAuthorization(ContainerRequestContext ctx) {
-        if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
-                || claim.protocol() != WireProtocol.REST
-                || resourceInfo == null || resourceInfo.getResourceClass() == null) {
-            return null;
-        }
-        Class<?> resourceClass = resourceInfo.getResourceClass();
-        if (SharedTagsController.class.equals(resourceClass) || V1TagsController.class.equals(resourceClass)) {
-            return taggedServiceAuthorization(ctx);
-        }
-        return catalog.byResourceClass(resourceClass)
-                .map(descriptor -> resolveRestAuthorization(descriptor, ctx))
-                .orElse(null);
-    }
-
-    /**
-     * A shared tagging route hands the request to the service its ARN names, so it is checked as that
-     * service whatever scope it is signed with. A service with no rule for the route leaves it unchecked, as
-     * any route no rule maps; an ARN naming no service Floci serves, which the controller refuses, is left
-     * to the signing scope.
-     */
-    private ResolvedAuthorization taggedServiceAuthorization(ContainerRequestContext ctx) {
-        String arn = arnBuilder.taggedArn(ctx);
-        if (!AwsArnUtils.isArn(arn)) {
-            return null;
-        }
-        String service = AwsArnUtils.parse(arn).service();
-        return catalog.byCredentialScope(service)
-                .map(descriptor -> {
-                    ResolvedAuthorization authorization = resolveRestAuthorization(descriptor, ctx);
-                    return authorization != null
-                            ? authorization
-                            : new ResolvedAuthorization(catalog.canonicalCredentialScope(service), null);
-                })
-                .orElse(null);
-    }
-
-    /**
      * Refuses a request whose {@code Authorization} header this filter cannot read a credential
      * from: an empty one, one naming no access key (a Bearer token, SigV2, a credential without the
      * SigV4 scheme or without its key, see {@link AccountResolver#extractAccessKeyId}), or a SigV4
@@ -966,7 +863,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 && servesWithoutCredentials(claim, ctx)) {
             return;
         }
-        ResolvedAuthorization routeAuthorization = claimsSigV4(auth) ? restRouteAuthorization(ctx) : null;
+        ResolvedOperation routeAuthorization =
+                claimsSigV4(auth) ? operationResolver.restRoute(ctx, resourceInfo) : null;
         if (routeAuthorization == null && !isRpcCall(ctx)) {
             return;
         }
@@ -1007,39 +905,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return IamActionRegistry.isQueryRequest(ctx)
                 || ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
                         && claim.protocol() != WireProtocol.REST;
-    }
-
-    private String routeAction(String scope, ContainerRequestContext ctx) {
-        String matched = actionRegistry.resolveMatchedRoute(scope, resourceInfo);
-        return matched != null ? matched : actionRegistry.resolveRoute(scope, ctx);
-    }
-
-    private ResolvedAuthorization resolveRestAuthorization(ServiceDescriptor descriptor,
-                                                            ContainerRequestContext ctx) {
-        return descriptor.credentialScopes().stream()
-                .map(catalog::canonicalCredentialScope)
-                .distinct()
-                .sorted()
-                .map(scope -> authorizationForRoute(scope, ctx))
-                .filter(authorization -> authorization.action() != null)
-                .findFirst()
-                .orElse(null);
-    }
-
-    private ResolvedAuthorization authorizationForRoute(String scope, ContainerRequestContext ctx) {
-        String action = routeAction(scope, ctx);
-        return new ResolvedAuthorization(scope, action, actionRegistry.operationForRoute(scope, action, ctx));
-    }
-
-    /**
-     * The scope and action a request is authorized as, and the operation it calls as
-     * {@code <namespace>:<Operation>}, which differs from the action for one AWS authorizes under another name.
-     * A modeled REST route retains its operation when AWS authorizes it under another action name.
-     */
-    private record ResolvedAuthorization(String credentialScope, String action, String operation) {
-        ResolvedAuthorization(String credentialScope, String action) {
-            this(credentialScope, action, action);
-        }
     }
 
     /** Floci's account-root principal, which is both the caller and the request's aws:PrincipalArn. */
@@ -1412,49 +1277,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
         return false;
-    }
-
-    /**
-     * The scope of the service that will actually serve this request, which is not always the one
-     * the caller signed for. Everything keyed by scope (the action, its ARNs, its condition keys)
-     * has to describe the service that runs, or a policy naming that service never matches.
-     *
-     * <p>Only the claim decides this, never {@code X-Amz-Target} read directly: the target routes
-     * a request solely under the conditions {@link ProtocolClaimer} applies, and reading it here
-     * would let a header attached to, say, an S3 request move the authorization to another
-     * service while S3 still served it.
-     *
-     * <p>{@link WireProtocol#AWS_QUERY} is resolved before this method by
-     * {@link #resolveAuthorization(String, String, ContainerRequestContext)}, which shares
-     * {@link AwsQueryServiceResolver} with the controller so IAM enforcement follows the service
-     * that will handle the request.
-     */
-    private String servingCredentialScope(String claimedScope, ContainerRequestContext ctx) {
-        if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
-                && claim.service() != null
-                && claim.protocol() != WireProtocol.AWS_QUERY) {
-            return iamServiceScope(claim.service(), claimedScope);
-        }
-        return claimedScope;
-    }
-
-    /** The descriptor's own scope, keeping {@code claimedScope} when the descriptor accepts it. */
-    private String iamServiceScope(ServiceDescriptor descriptor, String claimedScope) {
-        if (descriptor.credentialScopes().contains(claimedScope)) {
-            return claimedScope;
-        }
-        // The service's own key, not just any scope it signs under: pricing accepts both
-        // "pricing" and "api.pricing", and only the former is the namespace its policies name.
-        // Sorting the rest keeps the choice stable, since credentialScopes is a Set.of whose
-        // iteration order changes per JVM run.
-        if (descriptor.credentialScopes().contains(descriptor.externalKey())) {
-            return catalog.canonicalCredentialScope(descriptor.externalKey());
-        }
-        return descriptor.credentialScopes().stream()
-                .filter(scope -> scope.equals(catalog.canonicalCredentialScope(scope)))
-                .sorted()
-                .findFirst()
-                .orElse(catalog.canonicalCredentialScope(descriptor.externalKey()));
     }
 
     /** The same contexts with every object-tag key removed, keeping the principal and global keys. */
