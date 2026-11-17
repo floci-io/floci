@@ -78,6 +78,7 @@ public class TlsConfigSource implements ConfigSource {
                 "*.execute-api.localhost.floci.io",
                 "*.execute-api.localhost.localstack.cloud",
                 "*.cloudfront.localhost.floci.io", "*.cloudfront.localhost",
+                "*.emrappui.localhost.floci.io", "*.emrappui.localhost",
                 "host.docker.internal"));
         for (String region : AwsRegions.KNOWN_IDS.stream().sorted().toList()) {
             sans.add("*.dkr.ecr." + region + ".localhost.floci.io");

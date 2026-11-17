@@ -3909,13 +3909,28 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         return encoded.toString();
     }
 
+    // An upload over the limit is refused from its Base64 length, before it is decoded, so it takes no more memory
+    // than it came in.
     private void extractZipCode(LambdaFunction fn, String zipFileBase64, String region) {
+        if (decodedLength(zipFileBase64) > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
+            throw tooLargeUpload();
+        }
         byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
         if (zipBytes.length > ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES) {
-            throw new AwsException("RequestEntityTooLargeException",
-                    "Request must be smaller than 52428800 bytes.", 413);
+            throw tooLargeUpload();
         }
         extractZipCodePackage(fn, DeploymentPackage.of(zipBytes), region);
+    }
+
+    // The bytes Base64 text decodes to: three for every four characters, its padding, which may be left out, aside.
+    static long decodedLength(String base64) {
+        int padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+        return (long) (base64.length() - padding) * 3 / 4;
+    }
+
+    private static AwsException tooLargeUpload() {
+        return new AwsException("RequestEntityTooLargeException", "Request must be smaller than 52428800 bytes.",
+                413);
     }
 
     private void extractZipCodePackage(LambdaFunction fn, DeploymentPackage zip, String region) {

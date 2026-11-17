@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
@@ -98,6 +99,8 @@ final class EmrServiceFixture {
         final List<List<String>> relays = new ArrayList<>();
         final List<Instance> given = new ArrayList<>();
         final List<String> released = new ArrayList<>();
+        // Where each port of a primary node's web interfaces is reached, once the node is ready.
+        final Map<Integer, ContainerLifecycleManager.EndpointInfo> webInterfaces = new HashMap<>();
         // How each cluster's nodes are known as EC2 instances.
         final Map<String, Function<String, Instance>> identities = new HashMap<>();
 
@@ -149,6 +152,11 @@ final class EmrServiceFixture {
         @Override
         public boolean ownNetwork(String dockerNetwork) {
             return ownNetwork;
+        }
+
+        @Override
+        public Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+            return Optional.ofNullable(webInterfaces.get(port));
         }
 
         @Override
