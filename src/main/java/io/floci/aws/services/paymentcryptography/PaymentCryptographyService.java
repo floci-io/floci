@@ -92,6 +92,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
     private final PaymentCryptographyRequestContext requestContext;
+    /** The service's notion of time, the one every moment it records is taken from. */
+    private final Clock clock;
 
     @Inject
     public PaymentCryptographyService(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -166,6 +168,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         this.exchange = new PaymentCryptographyKeyExchange(this, certificates, clock);
         this.secureRandom = secureRandom;
         this.requestContext = requestContext;
+        this.clock = clock;
     }
 
     // ---- keys ---------------------------------------------------------------
@@ -292,7 +295,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                 }
             }
         }
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         key.setCreateTimestamp(now);
         key.setUsageStartTimestamp(now);
         keyStore.put(storageKey(region, key.getKeyId()), key);
@@ -372,7 +375,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized PaymentCryptographyKey deleteKey(PaymentCryptographyKey key) {
         // A replica is read-only: only the primary may be deleted.
         requireNotReplica(key, "only the primary may be deleted");
-        long now = Instant.now().getEpochSecond();
+        long now = clock.instant().getEpochSecond();
         key.setKeyState("DELETE_PENDING");
         key.setEnabled(false);
         key.setDeletePendingTimestamp(now);
@@ -397,8 +400,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /**
      * Starts the use of a key, and answers with the key as it now stands.
      *
-     * <p>The moment the use starts is now, and a key that had been stopped is usable again:
-     * the stop moment is cleared, because a key that is in use has no such moment.
+     * <p>The moment the use starts is the moment the key became active, so a key that is
+     * already in use keeps the moment it became active and a request that names it changes
+     * nothing. A key that had been stopped is usable again: the stop moment is cleared,
+     * because a key that is in use has no such moment.
      *
      * <p>A replica is read-only, so the change is made on the primary, and it reaches the
      * replicas, as the reference says it does.
@@ -407,7 +412,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
         current.setEnabled(true);
-        current.setUsageStartTimestamp(Instant.now().getEpochSecond());
+        current.setUsageStartTimestamp(clock.instant().getEpochSecond());
         current.setUsageStopTimestamp(0);
         storeKey(current);
         refreshReplicas(current, current.getReplicationRegions());
@@ -420,6 +425,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * <p>A stopped key stays readable, and its material stays where it is: only the use of
      * it stops, so a key may be started again.
      *
+     * <p>The moment the use stops is the moment the key became inactive, so a key that is
+     * already stopped keeps the moment it stopped and a request that names it changes
+     * nothing.
+     *
      * <p>A replica is read-only, so the change is made on the primary, and it reaches the
      * replicas, as the reference says it does.
      */
@@ -427,7 +436,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
         current.setEnabled(false);
-        current.setUsageStopTimestamp(Instant.now().getEpochSecond());
+        current.setUsageStopTimestamp(clock.instant().getEpochSecond());
         storeKey(current);
         refreshReplicas(current, current.getReplicationRegions());
         return current;
