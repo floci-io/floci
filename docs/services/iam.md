@@ -3099,8 +3099,40 @@ floci populates:
     `GenerateOrganizationsAccessReport`.
   - `iam:DelegationRequestOwner` from `OwnerId` on `ListDelegationRequests`, which is how the
     owner grant scopes a holder's listing to its own requests. The seven other delegation
-    actions the Service Reference lists the key on read it from the stored request rather than
-    from a parameter, so they stay in `notRead`.
+    actions take the key from the request they name rather than from a parameter, which the
+    `fromResource` entries below do.
+
+  The table's `fromResource` entries read a key the Service Reference publishes on a resource
+  type rather than on an action, which makes its value the stored resource's rather than the
+  request's. One key is published that way: `iam:DelegationRequestOwner`, on
+  `delegation-request`, for `AcceptDelegationRequest`, `AssociateDelegationRequest`,
+  `CreateDelegationRequest`, `GetDelegationRequest`, `GetHumanReadableSummary`,
+  `RejectDelegationRequest` and `SendDelegationToken`. Each entry carries the type, the member
+  of its record the value is read from and the type's ARN format, so the enforcement filter
+  asks the service holding the resource an ARN names for what its record keeps there, the same
+  per-resource read that gives a resource its tags. Which member carries the owner is the one
+  thing neither botocore nor the Service Reference says, so the generator states it under the
+  rules it states anything by hand: AWS's own word, quoted and linked. The
+  [IAM guide](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_iam-condition-keys.html)
+  says the key "Filters access based on the AWS identity or principal that owns the delegation
+  request" and that "The owner of a delegation request is the AWS identity or principal in the
+  customer account that initiated or received the delegation request", which is the `OwnerId`
+  botocore's record of the type holds, and writes the example as `"ArnEquals":
+  {"iam:DelegationRequestOwner": "${aws:PrincipalArn}"}` so that "you allow users to manage only
+  delegation requests that they own".
+
+  A request that names no delegation request carries no value for the key, so a conditioned
+  allow does not match and a conditioned deny does not apply. That covers
+  `CreateDelegationRequest`, whose request does not exist yet while it is authorized, and any
+  request still unclaimed, which records no owner until it is. The owner is answered to the
+  account that owns the request and to no other, the line the service itself draws when it
+  reads one request by id.
+
+  Floci differs from AWS on one action here: the same guide page lists
+  `UpdateDelegationRequest` among the operations the key supports, and the Service Reference
+  does not publish it on that action or on a resource type it acts on. The generated reading is
+  what Floci follows, so a policy conditioning `UpdateDelegationRequest` on the key matches
+  nothing here while AWS evaluates it.
 
   The table's `fromTarget` entries read `iam:PermissionsBoundary` from the role or user the
   request names in `RoleName` or `UserName`: its stored boundary, on the 15 actions on an
