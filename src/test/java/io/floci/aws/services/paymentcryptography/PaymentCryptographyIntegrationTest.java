@@ -12,16 +12,23 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
@@ -1088,10 +1095,28 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void theKeysAreListedByTheirState() {
         String arn = keyArn();
-
-        call("ListKeys", "{\"KeyState\":\"CREATE_COMPLETE\"}")
-                .then().statusCode(200)
-                    .body("Keys.KeyArn", hasItem(equalTo(arn)));
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200));
+        String secondArn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + secondArn + "\"}")
+                .then().statusCode(200));
+        List<String> listedArns = new ArrayList<>();
+        Map<String, Object> request = new HashMap<>(Map.of("KeyState", "CREATE_COMPLETE", "MaxResults", 1));
+        Set<String> seenTokens = new HashSet<>();
+        String nextToken;
+        do {
+            Response page = call("ListKeys", PaymentCryptographyTestFixtures.request(request).toString())
+                    .then().statusCode(200)
+                        .body("Keys.KeyState", everyItem(equalTo("CREATE_COMPLETE")))
+                        .extract().response();
+            listedArns.addAll(page.jsonPath().getList("Keys.KeyArn", String.class));
+            nextToken = page.path("NextToken");
+            if (nextToken != null) {
+                assertThat("ListKeys must advance its continuation token", seenTokens.add(nextToken), equalTo(true));
+            }
+            request.put("NextToken", nextToken);
+        } while (nextToken != null);
+        assertThat(listedArns, hasItems(arn, secondArn));
         call("ListKeys", "{\"KeyState\":\"DELETE_PENDING\"}")
                 .then().statusCode(200)
                     .body("Keys", hasSize(0));

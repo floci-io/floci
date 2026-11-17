@@ -111,8 +111,7 @@ import java.util.stream.Stream;
 @ApplicationScoped
 public class IamService implements SessionAccountLookup, ResourceProvider {
 
-    public static final String FEDERATION_TOKEN_SESSION_MESSAGE =
-            "Cannot call GetFederationToken with session credentials";
+    public static final String FEDERATION_TOKEN_SESSION_MESSAGE = sessionCredentialRefusal("GetFederationToken");
 
     private static final int USER_INLINE_POLICY_SIZE_LIMIT = 2_048;
     private static final int GROUP_INLINE_POLICY_SIZE_LIMIT = 5_120;
@@ -132,6 +131,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private static final String FEDERATED_USER_SESSION_LIMITS =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":[\"iam:*\",\"sts:*\"],\"Resource\":\"*\"}]}";
+    /**
+     * The STS operations a GetSessionToken session reaches, every other one being refused whatever
+     * its policies allow: "You cannot call any AWS STS API except AssumeRole or GetCallerIdentity"
+     * (STS API Reference, GetSessionToken, "Permissions"). GetCallerIdentity is named here for the
+     * reading rather than for the filter, which answers it before it reads a policy at all.
+     */
+    private static final Set<String> STS_ACTIONS_A_SESSION_TOKEN_REACHES =
+            Set.of("sts:AssumeRole", "sts:GetCallerIdentity");
+    /** What the IAM half of that refusal adds, naming what the credentials do not carry. */
+    private static final String WITHOUT_MFA_INFORMATION = " that include no MFA information";
     /**
      * What the account password policy's {@code AllowUsersToChangePassword} authorizes. The guide:
      * the option "gives users access to the iam:ChangePassword action for only their user and to
@@ -5115,7 +5124,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * Stores an assumed-role session so the enforcement filter can resolve its policies.
      */
     public void registerSession(String sessionAccessKeyId, String roleArn, Instant expiration) {
-        sessions.put(sessionAccessKeyId, new SessionCredential(sessionAccessKeyId, roleArn, expiration));
+        sessions.put(sessionAccessKeyId, issuedNow(new SessionCredential(sessionAccessKeyId, roleArn, expiration)));
     }
 
     /**
@@ -5124,7 +5133,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerSession(String sessionAccessKeyId, String roleArn, Instant expiration,
                                 String sessionPolicyDocument) {
         sessions.put(sessionAccessKeyId,
-                new SessionCredential(sessionAccessKeyId, roleArn, expiration, sessionPolicyDocument));
+                issuedNow(new SessionCredential(sessionAccessKeyId, roleArn, expiration, sessionPolicyDocument)));
     }
 
     /**
@@ -5140,8 +5149,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
                                 String roleArn, Instant expiration, String sessionPolicyDocument) {
         sessions.put(sessionAccessKeyId,
-                new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
-                        expiration, sessionPolicyDocument));
+                issuedNow(new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken, roleArn,
+                        expiration, sessionPolicyDocument)));
     }
 
     /**
@@ -5172,7 +5181,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 roleArn, expiration, sessionPolicyDocument, originAccountId);
         session.setRoleSessionName(roleSessionName);
         session.setAssumedRoleId(assumedRoleId);
-        sessions.put(sessionAccessKeyId, session);
+        sessions.put(sessionAccessKeyId, issuedNow(session));
     }
 
     /**
@@ -5202,7 +5211,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         } else if (issuingAccessKeyId == null || !holdsKey(issuingAccessKeyId)) {
             session.setIssuerArn(regionResolver.buildGlobalArn("iam", originAccountId, "root"));
         }
-        sessions.put(sessionAccessKeyId, session);
+        sessions.put(sessionAccessKeyId, issuedNow(session));
     }
 
     /**
@@ -5243,7 +5252,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 null, expiration, sessionPolicyDocument, ownerAccountId);
         session.setDelegatedApproverArn(delegatedApproverArn);
         session.setDelegatedRoleBoundaryArns(roleBoundaryArns);
-        sessions.put(sessionAccessKeyId, session);
+        sessions.put(sessionAccessKeyId, issuedNow(session));
     }
 
     /**
@@ -5296,7 +5305,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 sessionAccessKeyId, secretAccessKey, sessionToken, roleArn, expiration, sessionPolicyDocument,
                 accountId);
         session.setRoleSessionName(roleSessionName);
-        putSessionForAccount(accountId, sessionAccessKeyId, session);
+        putSessionForAccount(accountId, sessionAccessKeyId, issuedNow(session));
     }
 
     /** An internal URL credential with both a session policy and an exact action/resource guard. */
@@ -5310,7 +5319,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 accessKeyId, secretAccessKey, sessionToken, null, expiration, policyDocument, accountId);
         session.setPresignedAction(action);
         session.setPresignedResourceArn(resourceArn);
-        putSessionForAccount(accountId, accessKeyId, session);
+        putSessionForAccount(accountId, accessKeyId, issuedNow(session));
+    }
+
+    /**
+     * Records that {@code session} is issued now, which is its {@code aws:TokenIssueTime}: "the
+     * exact time at which the temporary security credentials were created" (IAM User Guide,
+     * revoking role sessions).
+     */
+    private SessionCredential issuedNow(SessionCredential session) {
+        session.setIssuedAt(clock.instant());
+        return session;
     }
 
     private void putSessionForAccount(String accountId, String sessionAccessKeyId, SessionCredential session) {
@@ -5378,6 +5397,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         session.setLambdaExecutionRole(true);
         session.setRoleSessionName(roleSessionName);
         session.setAssumedRoleId(assumedRoleId);
+        issuedNow(session);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(accountId, sessionAccessKeyId, session);
         } else {
@@ -5393,6 +5413,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 || session.getEc2InstanceId() == null || session.getEc2InstanceId().isBlank()) {
             throw new IllegalArgumentException("EC2 session account and instance ID must not be blank");
         }
+        issuedNow(session);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(session.getOriginAccountId(), session.getAccessKeyId(), session);
         } else {
@@ -5420,6 +5441,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 || session.getEcsTaskArn() == null || session.getEcsTaskArn().isBlank()) {
             throw new IllegalArgumentException("ECS task session account and task ARN must not be blank");
         }
+        issuedNow(session);
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             aware.putForAccount(session.getOriginAccountId(), session.getAccessKeyId(), session);
         } else {
@@ -5595,6 +5617,73 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 ? aware.getForAccount(AwsArnUtils.parse(issuerArn).accountId(), userName)
                 : users.get(userName);
         return user.filter(candidate -> issuerUserId.equals(candidate.getUserId()));
+    }
+
+    /**
+     * The sentence a {@code GetSessionToken} session is refused with for an operation its
+     * credentials cannot reach, whatever its policies allow, and empty for every other credential.
+     * AWS limits them twice over (STS API Reference, GetSessionToken, "Permissions"): "You cannot
+     * call any IAM API operations unless MFA authentication information is included in the
+     * request", and "You cannot call any AWS STS API except AssumeRole or GetCallerIdentity".
+     *
+     * <p>The MFA half reads the device the session was minted behind rather than this request,
+     * which is where AWS puts it: such credentials reach IAM "only if you include MFA information
+     * in the request for credentials". The STS half is not conditioned on a device, the reference
+     * publishing the two bullets apart, so AssumeRole and GetCallerIdentity are reachable either
+     * way and no other STS operation is.
+     *
+     * <p>Asked only about the two namespaces it can refuse, so no request on another service pays
+     * for the session read. {@code sts:GetSessionToken} and {@code sts:GetFederationToken} are
+     * refused ahead of this, by the operations themselves and with the same sentence, whichever
+     * temporary credential calls them.
+     */
+    public Optional<String> sessionTokenRefusal(String accessKeyId, String action) {
+        if (action == null || !isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
+        int namespaceEnd = action.indexOf(':');
+        if (namespaceEnd <= 0) {
+            return Optional.empty();
+        }
+        String namespace = action.substring(0, namespaceEnd);
+        boolean iamAction = "iam".equals(namespace);
+        if (!iamAction && !"sts".equals(namespace)) {
+            return Optional.empty();
+        }
+        if (!iamAction && STS_ACTIONS_A_SESSION_TOKEN_REACHES.contains(action)) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> session = findSessionForCallerContext(accessKeyId)
+                .filter(IamService::isSessionTokenSession);
+        if (session.isEmpty() || (iamAction && session.get().getMfaAuthenticatedAt() != null)) {
+            return Optional.empty();
+        }
+        String operation = action.substring(namespaceEnd + 1);
+        return Optional.of(iamAction
+                ? sessionCredentialRefusal(operation) + WITHOUT_MFA_INFORMATION
+                : sessionCredentialRefusal(operation));
+    }
+
+    /**
+     * What Floci refuses a session credential an operation does not take with. AWS publishes no
+     * sentence for any of these, and they are one rule: an operation a session token cannot reach,
+     * whether that is {@code GetSessionToken} itself, {@code GetFederationToken}, or another the
+     * reference keeps from it.
+     */
+    public static String sessionCredentialRefusal(String operation) {
+        return "Cannot call " + operation + " with session credentials";
+    }
+
+    /**
+     * A session {@code GetSessionToken} minted, which acts as the identity whose long-term key
+     * minted it: nothing in the role ARN slot, so neither a role session nor the federated user
+     * {@code GetFederationToken} writes there, no delegation approver, and not one Floci minted
+     * for a presigned URL of its own.
+     */
+    private static boolean isSessionTokenSession(SessionCredential session) {
+        return session.getDelegatedApproverArn() == null
+                && session.getRoleArn() == null
+                && session.getPresignedAction() == null;
     }
 
     /**
@@ -5806,13 +5895,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (isFederatedUserSession(session)) {
                 return withFederatedUserLimits(federatedUserContext(session));
             }
-            if (session.getRoleArn() == null) {
-                if (session.getPresignedAction() != null) {
-                    // A locally minted identity session can carry a restrictive session policy.
-                    return session.getSessionPolicyDocument() == null ? null
-                            : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
-                                    session.getSessionPolicyDocument(), null);
-                }
+            if (session.getRoleArn() == null && session.getPresignedAction() != null) {
+                // A locally minted identity session can carry a restrictive session policy.
+                return session.getSessionPolicyDocument() == null ? null
+                        : new CallerContext(List.of(SCOPED_IDENTITY_SESSION_BASE_POLICY),
+                                session.getSessionPolicyDocument(), null);
+            }
+            if (isSessionTokenSession(session)) {
                 return sessionTokenContext(session);
             }
             if (isAccountRootArn(session.getRoleArn())) {
@@ -5965,11 +6054,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * @param organization  the organization the principal's account belongs to, whose three keys go
      *                      onto the context beside the ones above, or null when the account is in
      *                      none and when Organizations is not deployed
+     * @param tokenIssueTime the request's {@code aws:TokenIssueTime}: when the temporary credentials
+     *                      the caller signed with were issued, or null for long-term credentials
      */
     public record CallerArns(String callerArn, String principalArn, String principalType,
                              String userId, String userName, boolean permissionsBoundary,
                              Map<String, String> principalTags, SessionMfa sessionMfa,
-                             PrincipalOrganization.OrganizationContext organization) {
+                             PrincipalOrganization.OrganizationContext organization,
+                             Instant tokenIssueTime) {
 
         public CallerArns {
             principalTags = Map.copyOf(principalTags);
@@ -5980,7 +6072,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                           String userId, String userName, boolean permissionsBoundary,
                           Map<String, String> principalTags, SessionMfa sessionMfa) {
             this(callerArn, principalArn, principalType, userId, userName, permissionsBoundary,
-                    principalTags, sessionMfa, null);
+                    principalTags, sessionMfa, null, null);
         }
 
         /**
@@ -5995,18 +6087,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         public record SessionMfa(boolean present, long authAgeSeconds) {
         }
 
-        /** A caller whose credentials say nothing about MFA, which is every long-term key. */
+        /**
+         * A caller signing with long-term credentials, whose credentials say nothing about MFA and
+         * carry no {@code aws:TokenIssueTime}.
+         */
         public CallerArns(String callerArn, String principalArn, String principalType,
                           String userId, String userName, boolean permissionsBoundary,
                           Map<String, String> principalTags) {
             this(callerArn, principalArn, principalType, userId, userName, permissionsBoundary,
-                    principalTags, null);
+                    principalTags, null, null, null);
         }
 
         /** Copy of this caller with what the session it signed with says about MFA. */
         public CallerArns withSessionMfa(SessionMfa mfa) {
             return new CallerArns(callerArn, principalArn, principalType, userId, userName,
-                    permissionsBoundary, principalTags, mfa, organization);
+                    permissionsBoundary, principalTags, mfa, organization, tokenIssueTime);
         }
 
         /**
@@ -6016,7 +6111,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
          */
         public CallerArns withOrganization(PrincipalOrganization.OrganizationContext context) {
             return context == null ? this : new CallerArns(callerArn, principalArn, principalType,
-                    userId, userName, permissionsBoundary, principalTags, sessionMfa, context);
+                    userId, userName, permissionsBoundary, principalTags, sessionMfa, context,
+                    tokenIssueTime);
+        }
+
+        /** The same caller, signing with temporary credentials issued at {@code issuedAt}. */
+        public CallerArns withTokenIssueTime(Instant issuedAt) {
+            return new CallerArns(callerArn, principalArn, principalType, userId, userName,
+                    permissionsBoundary, principalTags, sessionMfa, organization, issuedAt);
         }
 
         /** A caller without stored principal tags, including account-root and federated identities. */
@@ -6079,6 +6181,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
          * key left absent is what makes a policy that matches on it fail to match, which is the
          * behaviour AWS documents for a key with no value, so omitting it is the enforcement, not
          * a gap in it.
+         *
+         * <p>{@code aws:TokenIssueTime} follows the same rule: it is "included in the request
+         * context only when the principal uses temporary credentials to make the request" and "is
+         * not present in AWS CLI, AWS API, or AWS SDK requests that are made using access keys".
          */
         public void putPrincipalKeys(Map<String, List<String>> context) {
             context.put("aws:PrincipalArn", List.of(principalArn));
@@ -6095,6 +6201,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             principalTags.forEach((key, value) -> context.put("aws:PrincipalTag/" + key, List.of(value)));
             if (organization != null) {
                 organization.putOrganizationKeys(context);
+            }
+            if (tokenIssueTime != null) {
+                context.put("aws:TokenIssueTime", List.of(tokenIssueTime.toString()));
             }
         }
 
@@ -6212,11 +6321,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
-            // Whatever identity the session resolves to, the MFA state belongs to the credentials
-            // rather than to the identity, so it is attached once here instead of at each of the
-            // identities below.
+            // Whatever identity the session resolves to, the MFA state and the issue time belong
+            // to the credentials rather than to the identity, so they are attached once here
+            // instead of at each of the identities below.
             CallerArns.SessionMfa mfa = sessionMfa(session);
-            return callerForSession(session).map(caller -> caller.withSessionMfa(mfa));
+            return callerForSession(session)
+                    .map(caller -> caller.withSessionMfa(mfa).withTokenIssueTime(session.getIssuedAt()));
         }
 
         return Optional.empty();

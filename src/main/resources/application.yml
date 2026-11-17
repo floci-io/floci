@@ -393,6 +393,10 @@ floci:
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
     reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
+  request-log:
+    enabled: false                     # FLOCI_REQUEST_LOG_ENABLED: write every request and response as one JSON line (holds bodies, secrets included)
+    # file: ./floci-requests.jsonl     # FLOCI_REQUEST_LOG_FILE
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
@@ -661,7 +665,7 @@ floci:
       cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
       step-duration-seconds: 0              # 0 = a step completes as soon as it starts
       cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
-      runner-mode: immediate                # docker = run bootstrap actions, steps and sessions' servers in containers
+      runner-mode: immediate                # docker = run bootstrap actions, steps, sessions' servers and notebooks in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
