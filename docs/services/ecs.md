@@ -1006,6 +1006,12 @@ so Floci runs a small proxy container that holds that address on the task's netw
 in `169.254.0.0/16`, without which it would have no route to the endpoint at all. Docker only
 allows both of those on a user-defined network.
 
+A task under security-group enforcement gets its credentials the same way. Its containers share the
+helper's protected namespace, so the helper takes the one link-local address for the whole task, and
+the helper's ruleset always lets TCP to `169.254.170.2:80` through. AWS security groups do not
+filter traffic to the ECS task metadata endpoints either. The exception covers that one listener
+and nothing else on the network.
+
 ```bash
 docker network create floci-net
 
@@ -1023,7 +1029,7 @@ Credentials a task sets for itself always win. Floci drops only the baseline `AW
 environment credentials before the container endpoint and leaving them in place would silently
 shadow the role. Anything the task definition sets explicitly is left alone.
 
-In three cases a task that asks for a role gets none. It starts without the relative URI and keeps
+In two cases a task that asks for a role gets none. It starts without the relative URI and keeps
 whatever baseline credentials Floci would have injected anyway. Usually that is the emulator's
 default account, but if Floci itself was started with AWS credentials in its environment those are
 forwarded into the task instead, and Floci logs a warning once per process when it does that.
@@ -1036,9 +1042,6 @@ for reasons that have nothing to do with the role's policy.
   names a different account: Floci looks the role up in the account the request authenticated as
   and requires an exact ARN match, so a cross-account `taskRoleArn` never resolves.
 - **No user-defined Docker network is configured.** The endpoint has nowhere to listen.
-- **The task runs under security-group enforcement.** Its containers join an isolated helper
-  namespace rather than the shared network the proxy sits on, so the endpoint would not be
-  reachable.
 
 Each of these logs a warning naming the task and the role it asked for.
 

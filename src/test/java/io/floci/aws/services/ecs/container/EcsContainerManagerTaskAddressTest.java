@@ -140,7 +140,7 @@ class EcsContainerManagerTaskAddressTest {
     @Test
     void securityGroupProtectedTaskKeepsItsOwnNamespace() {
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new SecurityGroupFirewallManager.Namespace("helper-id", "10.0.0.5"));
         NetworkInterface eni = new NetworkInterface();
         eni.setNetworkInterfaceId("eni-1");

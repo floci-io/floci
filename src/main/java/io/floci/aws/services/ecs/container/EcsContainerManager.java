@@ -302,11 +302,10 @@ public class EcsContainerManager {
         }
 
         Map<String, ContainerOverride> overridesByName = overridesByName(containerOverrides);
-        // Both resolved before any environment is built: whether the task gets role credentials
-        // decides whether its containers may also carry Floci's baseline static credentials,
-        // which would otherwise win over the role in the SDK credential chain.
-        PreparedNetwork protectedNetwork = prepareNetwork(task, taskDef, region, taskId);
-        TaskRoleCredentialEndpoint taskRoleEndpoint = prepareTaskRoleCredentials(task, taskDef, protectedNetwork);
+        // Resolved before any environment is built: whether the task gets role credentials decides
+        // whether its containers may also carry Floci's baseline static credentials, which would
+        // otherwise win over the role in the SDK credential chain.
+        TaskRoleCredentialEndpoint taskRoleEndpoint = prepareTaskRoleCredentials(task, taskDef);
         Map<ContainerDefinition, List<String>> envVarsByContainer = new LinkedHashMap<>();
         // Resolved before any container is created, so a registry-startup failure can't leak one already started.
         Map<ContainerDefinition, String> imagesByContainer = new LinkedHashMap<>();
@@ -381,14 +380,21 @@ public class EcsContainerManager {
         String networkModeName = taskDef.getNetworkMode() != null
                 ? taskDef.getNetworkMode().name()
                 : NetworkMode.bridge.name();
+        PreparedNetwork protectedNetwork = null;
         SecurityGroupFirewallManager.Namespace sharedNamespace = null;
-        SecurityGroupFirewallManager.Namespace namespace = protectedNetwork == null ? null : protectedNetwork.namespace();
+        SecurityGroupFirewallManager.Namespace namespace = null;
         // The ENI a namespace helper is built around, which is how teardown finds the helper again.
-        String namespaceEniId = protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId();
+        String namespaceEniId = null;
 
         try {
-            if (protectedNetwork == null && sharesTaskNetwork(task, taskDef)) {
-                // Set before the helper starts, so launch cleanup removes one a failed start left behind.
+            // Either helper is started inside the launch cleanup, with the ENI id set before it starts, so
+            // a helper a failed start left behind is removed before the link-local address it holds is freed.
+            if (protectsTaskNetwork(taskDef)) {
+                namespaceEniId = task.getNetworkInterfaceId();
+                protectedNetwork = prepareNetwork(task, taskDef, region, taskId, taskRoleEndpoint);
+                namespaceEniId = protectedNetwork.eni().getNetworkInterfaceId();
+                namespace = protectedNetwork.namespace();
+            } else if (sharesTaskNetwork(task, taskDef)) {
                 namespaceEniId = task.getNetworkInterfaceId();
                 sharedNamespace = prepareSharedNetwork(task, taskDef, region, taskId, taskRoleEndpoint);
                 namespace = sharedNamespace;
@@ -437,7 +443,7 @@ public class EcsContainerManager {
                 // Its own address in the credential endpoint's range, so this container has a
                 // connected route to 169.254.170.2 at all. One per container, not per task: each
                 // has its own network namespace and so its own routing table. A task sharing one
-                // namespace has one address, which its helper holds.
+                // namespace, protected or not, has one address, which its helper holds.
                 if (taskRoleEndpoint.vending() && namespace == null) {
                     specBuilder.withLinkLocalIp(
                             linkLocalAddresses.allocate(taskRoleEndpoint.network(), task.getTaskArn()));
@@ -1347,11 +1353,18 @@ public class EcsContainerManager {
         }
     }
 
-    private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId) {
-        if (definition.getNetworkMode() != NetworkMode.awsvpc
-                || firewallManager == null || !firewallManager.enabled()) {
-            return null;
-        }
+    /** Whether this task's containers share a security-group protected namespace: awsvpc under enforcement. */
+    private boolean protectsTaskNetwork(TaskDefinition definition) {
+        return definition.getNetworkMode() == NetworkMode.awsvpc && firewallManager != null && firewallManager.enabled();
+    }
+
+    /**
+     * Builds an awsvpc task's protected namespace around its ENI. The helper holds the task's one link-local
+     * address when it gets role credentials: every container shares the helper's namespace, and the helper's
+     * ruleset always lets 169.254.170.2:80 through, as AWS security groups never filter that endpoint.
+     */
+    private PreparedNetwork prepareNetwork(EcsTask task, TaskDefinition definition, String region, String taskId,
+                                           TaskRoleCredentialEndpoint taskRoleEndpoint) {
         AwsVpcConfiguration awsvpc = task.getNetworkConfiguration() == null ? null
                 : task.getNetworkConfiguration().getAwsvpcConfiguration();
         if (awsvpc == null || awsvpc.getSubnets() == null || awsvpc.getSubnets().isEmpty()) {
@@ -1372,9 +1385,12 @@ public class EcsContainerManager {
                     containerDetector.isRunningInContainer(),
                     config.services().ecs().publishAwsvpcPortsToHost(),
                     config.services().ecs().dynamicAwsvpcHostPorts());
+            List<String> linkLocalIps = taskRoleEndpoint.vending()
+                    ? List.of(linkLocalAddresses.allocate(taskRoleEndpoint.network(), task.getTaskArn()))
+                    : List.of();
             namespace = firewallManager.createNamespace("ecs", taskId, regionResolver.getAccountId(),
                     region, config.services().ecs().dockerNetwork(), bindings, Map.of(RUN_LABEL, runId),
-                    hostPortBindAddress());
+                    hostPortBindAddress(), linkLocalIps);
             List<String> groupIds = eni.getGroups().stream().map(g -> g.getGroupId()).toList();
             List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
             if (groups.size() != groupIds.size()) {
@@ -1451,23 +1467,35 @@ public class EcsContainerManager {
     }
 
     /**
-     * Removes the helper of a task sharing one namespace, once its containers are gone. Throws when
-     * Docker keeps it, as the protected helper's removal does: the helper still holds the task's host
-     * ports and link-local address, which must not be handed on while it does. The handle then says the
-     * helper is pending, so the task's cleanup is retried, and the helper is taken off the VPC network
-     * so the ENI address it holds there is free when the ENI is released.
+     * Removes the helper holding a task's one namespace, protected or shared, once its containers are
+     * gone. Throws when Docker keeps it: the helper still holds the task's host ports and link-local
+     * address, which must not be handed on while it does. The handle then says the helper is pending, so
+     * the task's cleanup is retried. A shared helper is also taken off the VPC network, so the ENI address
+     * it holds there is free when the ENI is released.
      */
-    private void removeSharedNetwork(EcsTaskHandle handle) {
-        if (handle.getNetworkInterfaceId() == null || !sharedTaskNetworkOn()) {
+    private void removeNamespaceHelper(EcsTaskHandle handle) {
+        if (handle.getNetworkInterfaceId() == null || firewallManager == null) {
             return;
         }
+        boolean shared = sharedTaskNetworkOn();
         String taskId = extractTaskId(handle.getTaskArn());
         try {
-            firewallManager.removeSharedNamespaceStrict(taskId);
+            if (shared) {
+                firewallManager.removeSharedNamespaceStrict(taskId);
+            } else {
+                // The registered helper first, keeping its identity if Docker fails, then by its name one whose
+                // ENI was never registered or was already forgotten.
+                firewallManager.removeNamespaceStrict(handle.getNetworkInterfaceId());
+                if (firewallManager.enabled()) {
+                    firewallManager.removeProtectedNamespaceStrict(taskId);
+                }
+            }
             handle.recordNamespaceHelperPending(false);
         } catch (RuntimeException e) {
             handle.recordNamespaceHelperPending(true);
-            detachFromTaskVpc(handle, firewallManager.sharedNamespaceName(taskId));
+            if (shared) {
+                detachFromTaskVpc(handle, firewallManager.sharedNamespaceName(taskId));
+            }
             throw e;
         }
     }
@@ -1553,7 +1581,7 @@ public class EcsContainerManager {
         if (allRemoved) {
             removeTaskVolumes(handle);
             try {
-                removeSharedNetwork(handle);
+                removeNamespaceHelper(handle);
             } catch (RuntimeException e) {
                 // The handle now says the helper is pending, so the caller keeps it and the removal is
                 // retried; its address stays reserved until then, the cheaper mistake.
@@ -1650,11 +1678,9 @@ public class EcsContainerManager {
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
         try {
             if (handle.allContainersRemoved()) {
-                // Confirm the helper released its host ports before unregister forgets its identity.
-                if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
-                    firewallManager.removeNamespaceStrict(handle.getNetworkInterfaceId());
-                }
-                removeSharedNetwork(handle);
+                // Confirm the helper released its host ports and link-local address before unregister
+                // forgets its identity.
+                removeNamespaceHelper(handle);
                 cleanupProtectedNetwork(handle);
                 removeTaskVolumes(handle);
                 // Only now: a container that survived a failed removal still holds its address.
@@ -2020,15 +2046,13 @@ public class EcsContainerManager {
      * Issues the task's role credentials and makes sure the endpoint that serves them is up,
      * before any of its containers start.
      *
-     * <p>Empty when the task asks for no role, when the feature is off, when the role cannot be
-     * resolved, or when the task is security-group protected: those containers join an isolated
-     * helper namespace rather than the shared network the proxy holds its address on, so a proxy
-     * there would not be reachable and this refuses rather than handing out an endpoint the task
-     * cannot use. A proxy that cannot be established at all throws, since credentials whose
-     * endpoint is unreachable would fail later and further from the cause.
+     * <p>Empty when the task asks for no role, when the feature is off, or when the role cannot be
+     * resolved. A security-group protected task is served too: its helper joins the network the
+     * proxy holds its address on and takes the task's link-local address (see
+     * {@link #prepareNetwork}). A proxy that cannot be established at all throws, since credentials
+     * whose endpoint is unreachable would fail later and further from the cause.
      */
-    private TaskRoleCredentialEndpoint prepareTaskRoleCredentials(EcsTask task, TaskDefinition taskDef,
-                                                                  PreparedNetwork protectedNetwork) {
+    private TaskRoleCredentialEndpoint prepareTaskRoleCredentials(EcsTask task, TaskDefinition taskDef) {
         String taskRoleArn = taskDef.getTaskRoleArn();
         if (taskRoleArn == null || taskRoleArn.isBlank()) {
             return TaskRoleCredentialEndpoint.none();
@@ -2036,12 +2060,6 @@ public class EcsContainerManager {
         if (taskRoleCredentials == null || credentialsProxy == null
                 || !config.services().ecs().taskRoleCredentials().enabled()) {
             LOG.debugv("Task {0} asks for role {1}, but ECS task-role credentials are disabled",
-                    task.getTaskArn(), taskRoleArn);
-            return TaskRoleCredentialEndpoint.none();
-        }
-        if (protectedNetwork != null) {
-            LOG.warnv("Task {0} asks for role {1}, but its containers run in a security-group protected "
-                    + "namespace, which the task-role credential endpoint does not reach yet",
                     task.getTaskArn(), taskRoleArn);
             return TaskRoleCredentialEndpoint.none();
         }
