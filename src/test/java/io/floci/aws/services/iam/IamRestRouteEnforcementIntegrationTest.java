@@ -878,6 +878,31 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Access Analyzer holds on the analyzer a request names in its
+     * path, the ones it was created with, so an allow on one team's tag lets the caller read that team's analyzer and
+     * not another's.
+     */
+    @Test
+    void anAccessAnalyzerResourceTagConditionReadsTheTagsOfTheAnalyzer() {
+        String tagged = analyzer("data");
+        String other = analyzer("web");
+        String user = user("route-analyzer-tags");
+
+        policy(user, onTeam("Allow", "access-analyzer:GetAnalyzer", "data"));
+        as(user, "access-analyzer").get("/analyzer/" + tagged).then().statusCode(200);
+        refused(as(user, "access-analyzer").get("/analyzer/" + other).then(), "access-analyzer:GetAnalyzer");
+    }
+
+    /** The name of an organization analyzer an administrator creates tagged with the team, deleted after the test. */
+    private String analyzer(String team) {
+        String name = "route-tags-" + suffix();
+        accessAnalyzer().body("{\"analyzerName\":\"" + name + "\",\"type\":\"ORGANIZATION\",\"tags\":{\"team\":\""
+                + team + "\"}}").put("/analyzer").then().statusCode(200);
+        cleanup.register(() -> accessAnalyzer().delete("/analyzer/" + name));
+        return name;
+    }
+
+    /**
      * A Security Hub request is checked on the caller's hub in the Region it is signed for, {@code hub/default}, the
      * ARN Security Hub gives it, or on the hub its {@code HubArn} names: a caller with no grant is refused, a grant
      * scoped to the hub lets {@code DescribeStandards} through and {@code DescribeHub} reach Security Hub, which is
