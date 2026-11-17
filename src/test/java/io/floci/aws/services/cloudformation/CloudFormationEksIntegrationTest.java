@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.executeAndAwaitUpdate;
@@ -20,6 +21,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end check that CloudFormation provisions EKS resources for real (into EksService) rather
@@ -262,9 +264,61 @@ class CloudFormationEksIntegrationTest {
         }
     }
 
+    @Test
+    void aClusterHonoursItsVpcLoggingAndAccessSettings() {
+        String stack = "cfn-eks-cfg-" + Long.toString(System.nanoTime(), 36);
+        String template = "{\"Resources\": {"
+                + "\"Vpc\": {\"Type\": \"AWS::EC2::VPC\", \"Properties\": {\"CidrBlock\": \"10.7.0.0/16\"}},"
+                + subnet("SubA", "10.7.1.0/24", "us-east-1a") + subnet("SubB", "10.7.2.0/24", "us-east-1b")
+                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE
+                + vpcConfig("{\"Ref\": \"SubA\"}, {\"Ref\": \"SubB\"}") + ", " + SETTINGS + "}}}}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, template, "CREATE_COMPLETE");
+            JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+            assertEquals(false, cluster.getBoolean("cluster.resourcesVpcConfig.endpointPublicAccess"));
+            assertEquals(true, cluster.getBoolean("cluster.resourcesVpcConfig.endpointPrivateAccess"));
+            assertEquals(Stream.of(physicalId(client, stack, "SubA"), physicalId(client, stack, "SubB")).sorted().toList(),
+                    cluster.getList("cluster.resourcesVpcConfig.subnetIds").stream().sorted().toList());
+            assertEquals(List.of("api", "audit"), cluster.getList(
+                    "cluster.logging.clusterLogging.find { it.enabled == true }.types").stream().sorted().toList());
+            assertEquals("API", cluster.getString("cluster.accessConfig.authenticationMode"));
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aClusterNamingAMissingSubnetFailsTheStack() {
+        String stack = "cfn-eks-nosub-" + Long.toString(System.nanoTime(), 36);
+        String template = "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {"
+                + ROLE + vpcConfig("\"subnet-0000000000000000f\"") + "}}}}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            client.createStack(request -> request.stackName(stack).templateBody(template));
+            String status = CfnStackWaits.awaitTerminal(stack).status();
+            assertTrue(List.of("CREATE_FAILED", "ROLLBACK_COMPLETE").contains(status), status);
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
     private static final String ROLE = "\"RoleArn\": \"arn:aws:iam::000000000000:role/eks-set\", ";
     private static final String NETWORK = "\"KubernetesNetworkConfig\": {\"IpFamily\": \"ipv4\","
             + " \"ServiceIpv4Cidr\": \"172.20.0.0/16\"}";
+
+    private static final String SETTINGS = "\"Logging\": {\"ClusterLogging\": {\"EnabledTypes\": ["
+            + "{\"Type\": \"api\"}, {\"Type\": \"audit\"}]}}, \"AccessConfig\": {\"AuthenticationMode\": \"API\"}";
+
+    private static String subnet(String id, String cidr, String zone) {
+        return "\"" + id + "\": {\"Type\": \"AWS::EC2::Subnet\", \"Properties\": {\"VpcId\": {\"Ref\": \"Vpc\"},"
+                + " \"CidrBlock\": \"" + cidr + "\", \"AvailabilityZone\": \"" + zone + "\"}},";
+    }
+
+    private static String vpcConfig(String subnetIds) {
+        return "\"ResourcesVpcConfig\": {\"SubnetIds\": [" + subnetIds + "], \"EndpointPublicAccess\": false,"
+                + " \"EndpointPrivateAccess\": true}";
+    }
 
     private static String cluster(String role, String team) {
         return subjectStack("", "", "AWS::EKS::Cluster", "\"RoleArn\": \"arn:aws:iam::000000000000:role/" + role
