@@ -17,9 +17,21 @@ AWS::ApiGatewayV2::Stage	ApiId	create-only	a drop fails: the stage is not found
 AWS::ApiGatewayV2::Stage	AutoDeploy	default:false
 AWS::ApiGatewayV2::Stage	StageName	keep:the stage is found by its physical id
 AWS::ApiGatewayV2::Stage	StageVariables	clear	an empty map replaces them
+AWS::AppSync::Api	EventConfig	keep:the service requires an event config
+AWS::AppSync::Api	Name	keep:required
+AWS::AppSync::Api	OwnerContact	clear
+AWS::AppSync::Api	Tags	clear
 AWS::AppSync::ApiKey	ApiId	create-only
 AWS::AppSync::ApiKey	Description	clear
 AWS::AppSync::ApiKey	Expires	keep:the update parses a date, null is refused
+AWS::AppSync::ChannelNamespace	ApiId	create-only
+AWS::AppSync::ChannelNamespace	CodeHandlers	clear
+AWS::AppSync::ChannelNamespace	CodeS3Location	clear	not stored by the service; the provisioner refuses a value
+AWS::AppSync::ChannelNamespace	HandlerConfigs	clear
+AWS::AppSync::ChannelNamespace	Name	keep:required
+AWS::AppSync::ChannelNamespace	PublishAuthModes	clear	the namespace falls back to the API's default publish modes
+AWS::AppSync::ChannelNamespace	SubscribeAuthModes	clear	the namespace falls back to the API's default subscribe modes
+AWS::AppSync::ChannelNamespace	Tags	clear
 AWS::AppSync::DataSource	ApiId	create-only
 AWS::AppSync::DataSource	Description	clear
 AWS::AppSync::DataSource	DynamoDBConfig	clear

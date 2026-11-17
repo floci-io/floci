@@ -6,8 +6,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.appsync.AppSyncService;
 import io.floci.aws.services.appsync.AppSyncServiceFixture;
+import io.floci.aws.services.appsync.model.Api;
 import io.floci.aws.services.appsync.model.ApiKey;
 import io.floci.aws.services.appsync.model.AuthenticationType;
+import io.floci.aws.services.appsync.model.ChannelNamespace;
 import io.floci.aws.services.appsync.model.DataSource;
 import io.floci.aws.services.appsync.model.DataSourceType;
 import io.floci.aws.services.appsync.model.FunctionConfiguration;
@@ -41,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -1513,10 +1516,11 @@ class AppSyncCfnProvisionerTest {
     }
 
     @Test
-    void resourceTypesCoverTheSixAppSyncTypes() {
+    void resourceTypesCoverTheEightAppSyncTypes() {
         assertEquals(Set.of("AWS::AppSync::GraphQLApi", "AWS::AppSync::GraphQLSchema",
                         "AWS::AppSync::DataSource", "AWS::AppSync::FunctionConfiguration",
-                        "AWS::AppSync::Resolver", "AWS::AppSync::ApiKey"),
+                        "AWS::AppSync::Resolver", "AWS::AppSync::ApiKey", "AWS::AppSync::Api",
+                        "AWS::AppSync::ChannelNamespace"),
                 provisioner.resourceTypes());
     }
 
@@ -1544,5 +1548,240 @@ class AppSyncCfnProvisionerTest {
         assertTrue(checked > 0, "no AppSync rows in " + CfnDropPolicyTable.FILE);
         assertTrue(mismatched.isEmpty(), "Rows in " + CfnDropPolicyTable.FILE
                 + " that differ from AppSyncCfnProvisioner.dropPolicy: " + mismatched);
+    }
+
+    // ── Api (Events) and ChannelNamespace ────────────────────────────────────
+
+    private static final String EVENT_API_ID = "eventsapi000000000000000000";
+    private static final String EVENT_API_ARN = "arn:aws:appsync:eu-west-1:000000000000:apis/" + EVENT_API_ID;
+    private static final String NAMESPACE_ARN = EVENT_API_ARN + "/channelNamespace/v7-6-0";
+
+    private Api eventApi() {
+        Api api = new Api();
+        api.setApiId(EVENT_API_ID);
+        api.setName("live-events");
+        api.setApiArn(EVENT_API_ARN);
+        api.setDns(Map.of("HTTP", EVENT_API_ID + ".appsync-api.eu-west-1.amazonaws.com",
+                "REALTIME", EVENT_API_ID + ".appsync-realtime-api.eu-west-1.amazonaws.com"));
+        return api;
+    }
+
+    private ChannelNamespace namespace() {
+        ChannelNamespace ns = new ChannelNamespace();
+        ns.setApiId(EVENT_API_ID);
+        ns.setName("v7-6-0");
+        ns.setChannelNamespaceArn(NAMESPACE_ARN);
+        return ns;
+    }
+
+    private ObjectNode eventApiProps() throws Exception {
+        return (ObjectNode) mapper.readTree("""
+            {
+              "Name": "live-events",
+              "EventConfig": {
+                "AuthProviders": [
+                  {"AuthType": "AWS_IAM"},
+                  {"AuthType": "AWS_LAMBDA", "LambdaAuthorizerConfig": {
+                    "AuthorizerUri": "arn:aws:lambda:eu-west-1:000000000000:function:auth",
+                    "AuthorizerResultTtlInSeconds": 300}}
+                ],
+                "ConnectionAuthModes": [{"AuthType": "AWS_LAMBDA"}],
+                "DefaultPublishAuthModes": [{"AuthType": "AWS_IAM"}],
+                "DefaultSubscribeAuthModes": [{"AuthType": "AWS_LAMBDA"}],
+                "LogConfig": {"LogLevel": "ERROR",
+                  "CloudWatchLogsRoleArn": "arn:aws:iam::000000000000:role/logs"}
+              },
+              "Tags": [{"Key": "env", "Value": "local"}]
+            }
+            """);
+    }
+
+    /**
+     * The registry schema makes ApiArn the primary identifier, so Ref is the ARN, and the GetAtt
+     * attributes are ApiId, ApiArn and the dotted Dns.Http and Dns.Realtime.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventApiSetsTheArnPhysicalIdAndEveryGetAttAttribute() throws Exception {
+        when(appSync.createApi(any(), eq("eu-west-1"))).thenReturn(eventApi());
+        StackResource r = resource("AWS::AppSync::Api", "LiveEventsApi");
+
+        provisioner.provision(r, eventApiProps(), ctx());
+
+        assertEquals(EVENT_API_ARN, r.getPhysicalId());
+        assertEquals(EVENT_API_ID, r.getAttributes().get("ApiId"));
+        assertEquals(EVENT_API_ARN, r.getAttributes().get("ApiArn"));
+        assertEquals(EVENT_API_ID + ".appsync-api.eu-west-1.amazonaws.com", r.getAttributes().get("Dns.Http"));
+        assertEquals(EVENT_API_ID + ".appsync-realtime-api.eu-west-1.amazonaws.com",
+                r.getAttributes().get("Dns.Realtime"));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createApi(captor.capture(), eq("eu-west-1"));
+        Map<String, Object> eventConfig = (Map<String, Object>) captor.getValue().get("eventConfig");
+        List<Map<String, Object>> providers = (List<Map<String, Object>>) eventConfig.get("authProviders");
+        assertEquals("AWS_LAMBDA", providers.get(1).get("authType"));
+        Map<String, Object> lambda = (Map<String, Object>) providers.get(1).get("lambdaAuthorizerConfig");
+        assertEquals("arn:aws:lambda:eu-west-1:000000000000:function:auth", lambda.get("authorizerUri"));
+        assertEquals(300L, lambda.get("authorizerResultTtlInSeconds"));
+        assertEquals("ERROR", ((Map<String, Object>) eventConfig.get("logConfig")).get("logLevel"));
+        assertEquals(Map.of("env", "local"), captor.getValue().get("tags"));
+    }
+
+    @Test
+    void eventApiWithoutANameIsRefused() {
+        AwsException refused = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::AppSync::Api", "LiveEventsApi"), mapper.createObjectNode(), ctx()));
+
+        assertEquals("ValidationError", refused.getErrorCode());
+        verifyNoInteractions(appSync);
+    }
+
+    /**
+     * An update addresses the API by its recorded id, not by the ARN that is its physical id, and
+     * sets the template's tags in a call of its own, since UpdateApi takes none.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventApiUpdateGoesInPlaceByApiIdAndReplacesTheTags() throws Exception {
+        when(appSync.getApi(EVENT_API_ID)).thenReturn(eventApi());
+        when(appSync.updateApi(eq(EVENT_API_ID), any())).thenReturn(eventApi());
+        when(appSync.replaceApiTags(eq(EVENT_API_ID), any())).thenReturn(eventApi());
+        StackResource r = resource("AWS::AppSync::Api", "LiveEventsApi");
+        r.getAttributes().put("ApiId", EVENT_API_ID);
+        ObjectNode props = eventApiProps();
+        props.remove("Tags");
+
+        provisioner.provision(r, props, updateCtx(EVENT_API_ARN,
+                "{\"Name\": \"live-events\", \"OwnerContact\": \"team\"}"));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateApi(eq(EVENT_API_ID), captor.capture());
+        assertFalse(captor.getValue().containsKey("tags"));
+        assertTrue(captor.getValue().containsKey("ownerContact"), "a dropped OwnerContact is cleared");
+        assertNull(captor.getValue().get("ownerContact"));
+        verify(appSync).replaceApiTags(EVENT_API_ID, Map.of());
+        verify(appSync, never()).createApi(any(), anyString());
+        assertEquals(EVENT_API_ARN, r.getPhysicalId());
+    }
+
+    /** A failed stack update puts the API back from the snapshot taken before the update call. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventApiRollbackReplaysTheSnapshot() throws Exception {
+        Api before = eventApi();
+        before.setOwnerContact("before");
+        before.setTags(Map.of("env", "before"));
+        when(appSync.getApi(EVENT_API_ID)).thenReturn(before);
+        when(appSync.updateApi(eq(EVENT_API_ID), any())).thenReturn(eventApi());
+        when(appSync.replaceApiTags(eq(EVENT_API_ID), any())).thenReturn(eventApi());
+        StackResource r = resource("AWS::AppSync::Api", "LiveEventsApi");
+        r.getAttributes().put("ApiId", EVENT_API_ID);
+        provisioner.provision(r, eventApiProps(), updateCtx(EVENT_API_ARN));
+        clearInvocations(appSync);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateApi(eq(EVENT_API_ID), captor.capture());
+        assertEquals("before", captor.getValue().get("ownerContact"));
+        assertEquals("live-events", captor.getValue().get("name"));
+        verify(appSync).replaceApiTags(EVENT_API_ID, Map.of("env", "before"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void channelNamespaceSetsTheArnPhysicalIdAndSendsItsModes() throws Exception {
+        when(appSync.createChannelNamespace(eq(EVENT_API_ID), any())).thenReturn(namespace());
+        StackResource r = resource("AWS::AppSync::ChannelNamespace", "LiveEventsNamespace");
+
+        provisioner.provision(r, mapper.readTree("""
+            {"ApiId": "%s", "Name": "v7-6-0",
+             "PublishAuthModes": [{"AuthType": "AWS_IAM"}],
+             "Tags": [{"Key": "version", "Value": "7.6.0"}]}
+            """.formatted(EVENT_API_ID)), ctx());
+
+        assertEquals(NAMESPACE_ARN, r.getPhysicalId());
+        assertEquals(NAMESPACE_ARN, r.getAttributes().get("ChannelNamespaceArn"));
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createChannelNamespace(eq(EVENT_API_ID), captor.capture());
+        assertEquals("v7-6-0", captor.getValue().get("name"));
+        assertFalse(captor.getValue().containsKey("apiId"));
+        assertEquals(List.of(Map.of("authType", "AWS_IAM")), captor.getValue().get("publishAuthModes"));
+        assertEquals(Map.of("version", "7.6.0"), captor.getValue().get("tags"));
+    }
+
+    /** Same API and name: an in-place update, and a dropped mode list is cleared back to the API default. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void channelNamespaceUpdateInPlaceClearsADroppedModeList() throws Exception {
+        when(appSync.getChannelNamespace(EVENT_API_ID, "v7-6-0")).thenReturn(namespace());
+        when(appSync.replaceChannelNamespaceTags(eq(EVENT_API_ID), eq("v7-6-0"), any())).thenReturn(namespace());
+        StackResource r = resource("AWS::AppSync::ChannelNamespace", "LiveEventsNamespace");
+        r.getAttributes().put("ApiId", EVENT_API_ID);
+        r.getAttributes().put("Name", "v7-6-0");
+
+        provisioner.provision(r, mapper.readTree("{\"ApiId\": \"%s\", \"Name\": \"v7-6-0\"}"
+                .formatted(EVENT_API_ID)), updateCtx(NAMESPACE_ARN, """
+            {"ApiId": "%s", "Name": "v7-6-0", "PublishAuthModes": [{"AuthType": "AWS_IAM"}]}
+            """.formatted(EVENT_API_ID)));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateChannelNamespace(eq(EVENT_API_ID), eq("v7-6-0"), captor.capture());
+        assertTrue(captor.getValue().containsKey("publishAuthModes"));
+        assertNull(captor.getValue().get("publishAuthModes"));
+        assertFalse(captor.getValue().containsKey("name"));
+        verify(appSync).replaceChannelNamespaceTags(EVENT_API_ID, "v7-6-0", Map.of());
+        verify(appSync, never()).createChannelNamespace(anyString(), any());
+    }
+
+    @Test
+    void channelNamespaceRefusesCodeInS3() throws Exception {
+        AwsException refused = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::AppSync::ChannelNamespace", "Ns"), mapper.readTree(
+                        "{\"ApiId\": \"%s\", \"Name\": \"ns\", \"CodeS3Location\": \"s3://b/k.js\"}"
+                                .formatted(EVENT_API_ID)), ctx()));
+
+        assertEquals("ValidationError", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("CodeS3Location"), refused.getMessage());
+        verifyNoInteractions(appSync);
+    }
+
+    @Test
+    void eventApiAndNamespaceDeletesUseTheRecordedIdsAndTolerateAlreadyGone() {
+        StackResource api = resource("AWS::AppSync::Api", "LiveEventsApi");
+        api.setPhysicalId(EVENT_API_ARN);
+        api.getAttributes().put("ApiId", EVENT_API_ID);
+        StackResource ns = resource("AWS::AppSync::ChannelNamespace", "Ns");
+        ns.setPhysicalId(NAMESPACE_ARN);
+        ns.getAttributes().put("ApiId", EVENT_API_ID);
+        ns.getAttributes().put("Name", "v7-6-0");
+        doThrow(new AwsException("NotFoundException", "API not found", 404)).when(appSync).deleteApi(EVENT_API_ID);
+
+        provisioner.delete(ns, "eu-west-1");
+        provisioner.delete(api, "eu-west-1");
+
+        verify(appSync).deleteChannelNamespace(EVENT_API_ID, "v7-6-0");
+        verify(appSync).deleteApi(EVENT_API_ID);
+    }
+
+    /** A resource with no recorded ApiId still finds its API from the ARN physical id. */
+    @Test
+    void eventApiDeleteFallsBackToTheIdInTheArn() {
+        StackResource api = resource("AWS::AppSync::Api", "LiveEventsApi");
+        api.setPhysicalId(EVENT_API_ARN);
+
+        provisioner.delete(api, "eu-west-1");
+
+        verify(appSync).deleteApi(EVENT_API_ID);
+    }
+
+    @Test
+    void eventApiDeleteFailsOnAnythingButNotFound() {
+        StackResource api = resource("AWS::AppSync::Api", "LiveEventsApi");
+        api.setPhysicalId(EVENT_API_ARN);
+        api.getAttributes().put("ApiId", EVENT_API_ID);
+        doThrow(new AwsException("ConcurrentModificationException", "busy", 409)).when(appSync).deleteApi(EVENT_API_ID);
+
+        assertThrows(AwsException.class, () -> provisioner.delete(api, "eu-west-1"));
     }
 }

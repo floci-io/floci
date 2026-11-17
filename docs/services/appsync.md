@@ -607,6 +607,8 @@ Floci provisions these AppSync resource types:
 | `AWS::AppSync::FunctionConfiguration` | the function ARN | `FunctionArn`, `FunctionId`, `Name`, `DataSourceName` |
 | `AWS::AppSync::Resolver` | the resolver ARN | `ResolverArn`, `TypeName`, `FieldName` |
 | `AWS::AppSync::ApiKey` | the key id, `da2-...` (AWS: the key ARN) | `ApiKey`, `ApiKeyId`, `Arn` |
+| `AWS::AppSync::Api` | the Events API ARN | `ApiId`, `ApiArn`, `Dns.Http`, `Dns.Realtime` |
+| `AWS::AppSync::ChannelNamespace` | the channel namespace ARN | `ChannelNamespaceArn` |
 
 `GraphQLEndpointArn` returns
 `arn:<partition>:appsync:<region>:<account>:endpoints/graphql-api/<apiId>`. Use it to
@@ -643,8 +645,26 @@ A `GraphQLSchema` with `DefinitionS3Location` and no inline `Definition`, and `C
 a `Resolver` or `FunctionConfiguration`, fail the resource with `ValidationError`. Give the schema
 inline in `Definition` and the code inline in `Code`.
 
-`AWS::AppSync::Api`, `ApiCache`, `ChannelNamespace`, `DomainName`, `DomainNameApiAssociation`,
-`SourceApiAssociation` and `Type` are not provisioned. By default such a resource is stubbed: it
+### Events APIs
+
+`AWS::AppSync::Api` and `AWS::AppSync::ChannelNamespace` follow the type's registry schema: `Ref`
+returns the ARN, the schema's primary identifier, and the `Fn::GetAtt` attributes are the schema's
+read-only properties. These two types were checked against the registry schema and the
+CloudFormation documentation, not deployed to AWS.
+
+- An `Api` update is always in place, `Name` included: the API keeps its id, ARN and DNS hosts.
+  `EventConfig` is replaced as a whole. A template without `EventConfig` fails the resource, since
+  `CreateApi` requires one.
+- `ApiId` and `Name` of a `ChannelNamespace` are create-only, so changing either replaces the
+  namespace. Any other change is an in-place update, and dropping `PublishAuthModes` or
+  `SubscribeAuthModes` returns the namespace to the API's default modes.
+- `Tags` on both types are set to exactly the template's tags on every update.
+- `CodeS3Location` on a `ChannelNamespace` fails the resource with `ValidationError`; give the
+  handler code inline in `CodeHandlers`.
+- An `AWS::AppSync::ApiKey` whose `ApiId` names an Events API creates a key for that API.
+
+`AWS::AppSync::ApiCache`, `DomainName`, `DomainNameApiAssociation`, `SourceApiAssociation` and
+`Type` are not provisioned. By default such a resource is stubbed: it
 reaches `CREATE_COMPLETE` and nothing is created for it. Set
 `allow-stub-unsupported-resource-types` to `false` to fail it instead, see
 [CloudFormation](cloudformation.md#supported-resource-types).

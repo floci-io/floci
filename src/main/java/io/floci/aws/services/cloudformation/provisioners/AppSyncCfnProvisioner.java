@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.appsync.AppSyncService;
+import io.floci.aws.services.appsync.model.Api;
 import io.floci.aws.services.appsync.model.ApiKey;
+import io.floci.aws.services.appsync.model.ChannelNamespace;
 import io.floci.aws.services.appsync.model.DataSource;
 import io.floci.aws.services.appsync.model.FunctionConfiguration;
 import io.floci.aws.services.appsync.model.GraphqlApi;
@@ -35,7 +37,8 @@ import java.util.function.Supplier;
 
 /**
  * Provisions the AppSync resource types a GraphQL API is deployed from: the API itself, its schema,
- * data sources, pipeline functions, resolvers and API keys.
+ * data sources, pipeline functions, resolvers and API keys; and an Events API with its channel
+ * namespaces, whose API keys are the same {@code AWS::AppSync::ApiKey}.
  *
  * <p><b>Property names are translated, not passed through.</b> Unlike the services whose wire
  * protocol is already PascalCase, the AppSync control plane is REST-JSON with camelCase members, so
@@ -84,6 +87,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
     private static final String FUNCTION_CONFIGURATION = "AWS::AppSync::FunctionConfiguration";
     private static final String RESOLVER = "AWS::AppSync::Resolver";
     private static final String API_KEY = "AWS::AppSync::ApiKey";
+    private static final String EVENT_API = "AWS::AppSync::Api";
+    private static final String CHANNEL_NAMESPACE = "AWS::AppSync::ChannelNamespace";
 
     /** The service's own "already gone", tolerated on delete and nothing else. */
     private static final String NOT_FOUND = "NotFoundException";
@@ -117,7 +122,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             DATA_SOURCE, Set.of("Type"),
             FUNCTION_CONFIGURATION, Set.of("DataSourceName"),
             RESOLVER, Set.of("DataSourceName"),
-            API_KEY, Set.of("Expires"));
+            API_KEY, Set.of("Expires"),
+            EVENT_API, Set.of("EventConfig"));
 
     /**
      * What a dropped property goes back to where the service's update does not take null as a
@@ -151,7 +157,10 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             RESOLVER, List.of("dataSourceName", "functionId", "requestMappingTemplate",
                     "responseMappingTemplate", "kind", "code", "runtime", "cachingConfig",
                     "maxBatchSize", "metricsConfig", "pipelineConfig", "syncConfig"),
-            API_KEY, List.of("description"));
+            API_KEY, List.of("description"),
+            EVENT_API, List.of("name", "ownerContact", "eventConfig", "tags"),
+            CHANNEL_NAMESPACE, List.of("publishAuthModes", "subscribeAuthModes", "codeHandlers",
+                    "handlerConfigs", "tags"));
 
     /**
      * How long a stack resource waits for a schema to compile. Generous: the wait is bounded only so
@@ -170,7 +179,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(GRAPHQL_API, GRAPHQL_SCHEMA, DATA_SOURCE, FUNCTION_CONFIGURATION, RESOLVER, API_KEY);
+        return Set.of(GRAPHQL_API, GRAPHQL_SCHEMA, DATA_SOURCE, FUNCTION_CONFIGURATION, RESOLVER, API_KEY,
+                EVENT_API, CHANNEL_NAMESPACE);
     }
 
     @Override
@@ -184,6 +194,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             case FUNCTION_CONFIGURATION -> provisionFunction(r, props, ctx);
             case RESOLVER -> provisionResolver(r, props, ctx);
             case API_KEY -> provisionApiKey(r, props, ctx);
+            case EVENT_API -> provisionEventApi(r, props, ctx);
+            case CHANNEL_NAMESPACE -> provisionChannelNamespace(r, props, ctx);
             default -> throw new IllegalStateException(
                     "AppSyncCfnProvisioner cannot handle " + r.getResourceType());
         }
@@ -454,6 +466,118 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("ApiId", apiId);
     }
 
+    // ── Api (Events) ─────────────────────────────────────────────────────────
+
+    /**
+     * An Events API. Its registry schema makes {@code ApiArn} the primary identifier, so the physical
+     * id, and with it {@code Ref}, is the ARN; the API id it is addressed by on the control plane is
+     * the {@code ApiId} attribute. {@code Name} is not create-only, so every change is an in-place
+     * {@code UpdateApi}. UpdateApi takes no tags, so the template's tags are set in a call of their
+     * own.
+     */
+    private void provisionEventApi(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, Object> req = camelisedProperties(props, ctx);
+        req.remove("tags");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        if (blank(str(req.get("name")))) {
+            throw new AwsException("ValidationError", EVENT_API + " requires Name.", 400);
+        }
+        Api api;
+        if (ctx.isUpdate()) {
+            String priorApiId = eventApiId(r, ctx.priorPhysicalId());
+            clearDropped(req, props, ctx, EVENT_API);
+            snapshotBeforeUpdate(r, ctx, appSyncService.getApi(priorApiId), Map.of("apiId", priorApiId), req, null);
+            api = updateInPlace(r, ctx, () -> {
+                appSyncService.updateApi(priorApiId, req);
+                return appSyncService.replaceApiTags(priorApiId, tags);
+            });
+        } else {
+            if (!tags.isEmpty()) {
+                req.put("tags", tags);
+            }
+            api = appSyncService.createApi(req, ctx.region());
+        }
+
+        r.setPhysicalId(api.getApiArn());
+        r.getAttributes().put("ApiId", api.getApiId());
+        r.getAttributes().put("ApiArn", api.getApiArn());
+        Map<String, String> dns = api.getDns() == null ? Map.of() : api.getDns();
+        if (!blank(dns.get("HTTP"))) {
+            r.getAttributes().put("Dns.Http", dns.get("HTTP"));
+        }
+        if (!blank(dns.get("REALTIME"))) {
+            r.getAttributes().put("Dns.Realtime", dns.get("REALTIME"));
+        }
+    }
+
+    /**
+     * The API id of an Events API resource: the attribute recorded at create time, or, for a
+     * resource that has none, the id read off its ARN physical id ({@code ...:apis/<apiId>}).
+     */
+    private static String eventApiId(StackResource r, String physicalId) {
+        String recorded = attribute(r, "ApiId");
+        if (!blank(recorded)) {
+            return recorded;
+        }
+        if (!blank(physicalId) && AwsArnUtils.isArn(physicalId)) {
+            String resource = AwsArnUtils.parse(physicalId).resource();
+            if (resource.startsWith("apis/")) {
+                return resource.substring("apis/".length());
+            }
+        }
+        return physicalId;
+    }
+
+    // ── ChannelNamespace ─────────────────────────────────────────────────────
+
+    /**
+     * A channel namespace of an Events API. {@code ApiId} and {@code Name} are create-only, so a
+     * change to either is a replacement, and an update with both unchanged is an in-place
+     * {@code UpdateChannelNamespace}. The physical id is the {@code ChannelNamespaceArn}, the
+     * registry schema's primary identifier; the API id and name it is addressed by are recorded as
+     * attributes for update and delete.
+     */
+    private void provisionChannelNamespace(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, Object> req = camelisedProperties(props, ctx);
+        String apiId = requiredApiId(req, CHANNEL_NAMESPACE);
+        if (req.get("codeS3Location") != null) {
+            throw new AwsException("ValidationError", CHANNEL_NAMESPACE
+                    + " CodeS3Location is not supported by Floci; give the handler code inline in"
+                    + " CodeHandlers instead.", 400);
+        }
+        req.remove("codeS3Location");
+        String name = str(req.get("name"));
+        if (blank(name)) {
+            throw new AwsException("ValidationError", CHANNEL_NAMESPACE + " requires Name.", 400);
+        }
+        req.remove("tags");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+
+        boolean update = reusesEntity(r, ctx, apiId) && name.equals(attribute(r, "Name"));
+        ChannelNamespace ns;
+        if (update) {
+            req.remove("name");
+            clearDropped(req, props, ctx, CHANNEL_NAMESPACE);
+            req.remove("codeS3Location");
+            snapshotBeforeUpdate(r, ctx, appSyncService.getChannelNamespace(apiId, name),
+                    Map.of("apiId", apiId, "name", name), req, null);
+            ns = updateInPlace(r, ctx, () -> {
+                appSyncService.updateChannelNamespace(apiId, name, req);
+                return appSyncService.replaceChannelNamespaceTags(apiId, name, tags);
+            });
+        } else {
+            if (!tags.isEmpty()) {
+                req.put("tags", tags);
+            }
+            ns = appSyncService.createChannelNamespace(apiId, req);
+        }
+
+        r.setPhysicalId(ns.getChannelNamespaceArn());
+        r.getAttributes().put("ChannelNamespaceArn", ns.getChannelNamespaceArn());
+        r.getAttributes().put("ApiId", apiId);
+        r.getAttributes().put("Name", name);
+    }
+
     // ── Rollback ─────────────────────────────────────────────────────────────
 
     /**
@@ -590,6 +714,17 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
                 }
                 appSyncService.updateApiKey(apiId, keyId, members);
             }
+            case EVENT_API -> {
+                Object tags = members.remove("tags");
+                appSyncService.updateApi(apiId, members);
+                appSyncService.replaceApiTags(apiId, stringMap(tags));
+            }
+            case CHANNEL_NAMESPACE -> {
+                String name = str(snapshot.get("name"));
+                Object tags = members.remove("tags");
+                appSyncService.updateChannelNamespace(apiId, name, members);
+                appSyncService.replaceChannelNamespaceTags(apiId, name, stringMap(tags));
+            }
             default -> throw new IllegalStateException(
                     "AppSyncCfnProvisioner cannot restore " + r.getResourceType());
         }
@@ -627,6 +762,13 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
                             fieldName));
             case API_KEY -> deleteChild(r, apiId, "API key", physicalId,
                     keyId -> appSyncService.deleteApiKey(apiId, keyId));
+            case EVENT_API -> {
+                String eventApiId = eventApiId(r, physicalId);
+                CfnDeletes.safeDelete("AppSync Events API", eventApiId,
+                        () -> appSyncService.deleteApi(eventApiId), NOT_FOUND);
+            }
+            case CHANNEL_NAMESPACE -> deleteChild(r, apiId, "channel namespace", attribute(r, "Name"),
+                    name -> appSyncService.deleteChannelNamespace(apiId, name));
             default -> LOG.warnv("No delete implemented for {0}", r.getResourceType());
         }
     }

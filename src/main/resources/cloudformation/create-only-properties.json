@@ -85,8 +85,13 @@
   "AWS::AppConfig::Environment": [
     "ApplicationId"
   ],
+  "AWS::AppSync::Api": [],
   "AWS::AppSync::ApiKey": [
     "ApiId"
+  ],
+  "AWS::AppSync::ChannelNamespace": [
+    "ApiId",
+    "Name"
   ],
   "AWS::AppSync::DataSource": [
     "ApiId",

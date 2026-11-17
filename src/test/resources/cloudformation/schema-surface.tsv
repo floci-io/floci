@@ -24,7 +24,9 @@ AWS::AppConfig::Application	ApplicationId	Description,Name,Tags
 AWS::AppConfig::ConfigurationProfile	ConfigurationProfileId,KmsKeyArn	ApplicationId,DeletionProtectionCheck,Description,KmsKeyIdentifier,LocationUri,Name,RetrievalRoleArn,Tags,Type,Validators
 AWS::AppConfig::DeploymentStrategy	Id	DeploymentDurationInMinutes,Description,FinalBakeTimeInMinutes,GrowthFactor,GrowthType,Name,ReplicateTo,Tags
 AWS::AppConfig::Environment	EnvironmentId	ApplicationId,DeletionProtectionCheck,Description,Monitors,Name,Tags
+AWS::AppSync::Api	ApiArn,ApiId,Dns	EventConfig,Name,OwnerContact,Tags
 AWS::AppSync::ApiKey	ApiKey,ApiKeyId,Arn	ApiId,Description,Expires
+AWS::AppSync::ChannelNamespace	ChannelNamespaceArn	ApiId,CodeHandlers,CodeS3Location,HandlerConfigs,Name,PublishAuthModes,SubscribeAuthModes,Tags
 AWS::AppSync::DataSource	DataSourceArn	ApiId,Description,DynamoDBConfig,EventBridgeConfig,HttpConfig,LambdaConfig,MetricsConfig,Name,OpenSearchServiceConfig,RelationalDatabaseConfig,ServiceRoleArn,Type
 AWS::AppSync::FunctionConfiguration	FunctionArn,FunctionId	ApiId,Code,CodeS3Location,DataSourceName,Description,FunctionVersion,MaxBatchSize,Name,RequestMappingTemplate,RequestMappingTemplateS3Location,ResponseMappingTemplate,ResponseMappingTemplateS3Location,Runtime,SyncConfig
 AWS::AppSync::GraphQLApi	ApiId,Arn,GraphQLDns,GraphQLEndpointArn,GraphQLUrl,RealtimeDns,RealtimeUrl	AdditionalAuthenticationProviders,ApiType,AuthenticationType,EnhancedMetricsConfig,EnvironmentVariables,IntrospectionConfig,LambdaAuthorizerConfig,LogConfig,MergedApiExecutionRoleArn,Name,OpenIDConnectConfig,OwnerContact,QueryDepthLimit,ResolverCountLimit,Tags,UserPoolConfig,Visibility,XrayEnabled

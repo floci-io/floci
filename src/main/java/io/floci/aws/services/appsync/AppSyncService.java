@@ -317,6 +317,26 @@ public class AppSyncService {
         LOG.infov("Deleted Events API {0}", apiId);
     }
 
+    /**
+     * Sets an Events API's tags to exactly {@code tags}. UpdateApi takes no tags, so CloudFormation
+     * drives a stack's tag changes through this rather than through TagResource and UntagResource.
+     */
+    public synchronized Api replaceApiTags(String apiId, Map<String, String> tags) {
+        Api existing = copyOf(getApi(apiId), Api.class);
+        existing.setTags(tags == null || tags.isEmpty() ? null : new HashMap<>(tags));
+        eventApiStore.put(apiId, existing);
+        return existing;
+    }
+
+    /** Sets a channel namespace's tags to exactly {@code tags}; UpdateChannelNamespace takes no tags. */
+    public synchronized ChannelNamespace replaceChannelNamespaceTags(String apiId, String name,
+                                                                     Map<String, String> tags) {
+        ChannelNamespace existing = copyOf(getChannelNamespace(apiId, name), ChannelNamespace.class);
+        existing.setTags(tags == null || tags.isEmpty() ? null : new HashMap<>(tags));
+        channelNamespaceStore.put(apiKey(apiId, name), existing);
+        return existing;
+    }
+
     private String requireEventApiName(Object value) {
         String name = coerceString(value);
         if (name == null || name.isBlank()) {

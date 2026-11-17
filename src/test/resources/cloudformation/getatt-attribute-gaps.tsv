@@ -65,3 +65,4 @@ AWS::IAM::ManagedPolicy	PermissionsBoundaryUsageCount	not modeled: Floci does no
 AWS::IAM::ManagedPolicy	UpdateDate	not published: Floci does not surface the policy update date as an Fn::GetAtt value
 AWS::Lambda::Function	SnapStartResponse	not modeled: Floci does not emulate Lambda SnapStart, so it exposes no ApplyOn/OptimizationStatus response
 AWS::CloudFormation::CustomResource	Id	not published: Id is the primary identifier returned by Ref (the physical resource id); Floci does not expose it as a separate Fn::GetAtt attribute
+AWS::AppSync::Api	Dns	the dotted Dns.Http and Dns.Realtime are set instead, the form AWS GetAtt exposes for the nested object
