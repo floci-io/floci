@@ -559,11 +559,6 @@ public class DocDbService {
         }
     }
 
-    /** The region a record was created in, taken from its ARN; older records carry the default. */
-    private String regionOf(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
-    }
-
     /**
      * Whether an ARN names a DocumentDB cluster or instance, matched against the stored ARN.
      *
