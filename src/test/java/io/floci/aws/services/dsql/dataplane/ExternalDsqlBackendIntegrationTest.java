@@ -1,8 +1,14 @@
 package io.floci.aws.services.dsql.dataplane;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.dsql.DsqlPrincipals;
 import io.floci.aws.services.dsql.ExternalPostgresServer;
 import io.floci.aws.services.dsql.model.DsqlCluster;
+import io.floci.aws.services.iam.IamPolicyEvaluator;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.ResourcePolicyProvider;
+import io.floci.aws.services.iam.ScpProvider;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -15,10 +21,14 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -261,6 +271,42 @@ class ExternalDsqlBackendIntegrationTest {
                 statement.execute("DROP DATABASE IF EXISTS " + database + " WITH (FORCE)");
                 statement.execute("DROP ROLE IF EXISTS someone_else");
             }
+        }
+    }
+
+    @Test
+    void aLoginStillRecordsItsSessionWhenAnotherPurgesTheSameEndedOne() throws Exception {
+        String id = "stuvwxyzabcdefghijklmnopqr";
+        String database = "dsql_" + id;
+        ExternalDsqlBackend backend = new ExternalDsqlBackend(config());
+        DsqlCluster cluster = cluster(id);
+        DsqlDatabases.Backend started = backend.start(cluster);
+        @SuppressWarnings("unchecked")
+        Instance<ScpProvider> scpProvider = mock(Instance.class);
+        @SuppressWarnings("unchecked")
+        Instance<ResourcePolicyProvider> resourcePolicyProviders = mock(Instance.class);
+        DsqlEndpoint endpoint = new DsqlEndpoint(mock(DsqlTlsCertificates.class), mock(IamService.class),
+                mock(IamPolicyEvaluator.class), scpProvider, resourcePolicyProviders, mock(DsqlPrincipals.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), Clock.systemUTC());
+        try (Connection other = connect(database); Statement statement = other.createStatement()) {
+            // A session that has ended, which both logins purge.
+            statement.execute("INSERT INTO sys.session_identity VALUES (2147483000, 'ended', 'ended')");
+            other.setAutoCommit(false);
+            statement.execute("DELETE FROM sys.session_identity WHERE pid = 2147483000");
+
+            CompletableFuture<Boolean> recorded = CompletableFuture.supplyAsync(() ->
+                    endpoint.recordSession(started, 2147483001, "arn:aws:iam::111122223333:root", "s1"));
+            await().atMost(Duration.ofSeconds(30)).until(() -> "1".equals(single("postgres",
+                    "SELECT count(*)::text FROM pg_stat_activity WHERE datname = '" + database
+                            + "' AND wait_event_type = 'Lock'")));
+            other.commit();
+
+            assertTrue(recorded.get(30, TimeUnit.SECONDS), "the login's purge passes over the row already gone");
+            assertEquals("s1", single(database, "SELECT session_id FROM sys.session_identity WHERE pid = 2147483001"));
+        } finally {
+            endpoint.stop();
+            cluster.setPendingBackendRoles(backend.rolesToDrop(cluster));
+            backend.stop(cluster, true);
         }
     }
 
