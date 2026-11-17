@@ -269,6 +269,38 @@ class BackendAuthenticatorTest {
     }
 
     @Test
+    void aSecondSaslExchangeIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        authenticator.answer(auth(11, text(SERVER_FIRST)));
+        authenticator.answer(auth(12, text(SERVER_FINAL)));
+
+        IOException refused = assertThrows(IOException.class,
+                () -> authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256"))));
+        assertEquals("backend starts a second authentication exchange", refused.getMessage());
+    }
+
+    @Test
+    void aSaslExchangeAfterAPasswordIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("u", "secret");
+        authenticator.answer(auth(3));
+
+        assertThrows(IOException.class, () -> authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256"))));
+    }
+
+    @Test
+    void aRepeatedSaslContinueOrFinalIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+        authenticator.answer(auth(11, text(SERVER_FIRST)));
+        assertThrows(IOException.class, () -> authenticator.answer(auth(11, text(SERVER_FIRST))));
+
+        authenticator.answer(auth(12, text(SERVER_FINAL)));
+        IOException refused = assertThrows(IOException.class, () -> authenticator.answer(auth(12, text(SERVER_FINAL))));
+        assertEquals("unexpected SASL final from the backend", refused.getMessage());
+    }
+
+    @Test
     void unknownAuthenticationCodeFails() {
         assertThrows(IOException.class, () -> new BackendAuthenticator("u", "p").answer(auth(7)));
     }

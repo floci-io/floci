@@ -104,6 +104,10 @@ public final class BackendAuthenticator {
                 yield Optional.of(md5(body));
             }
             case 10 -> {
+                if (started) {
+                    // A second exchange would let the first one's verified signature vouch for it.
+                    throw new IOException("backend starts a second authentication exchange");
+                }
                 PostgresWire.Message initial = saslInitial(body);
                 started = true;
                 yield Optional.of(initial);
@@ -168,7 +172,7 @@ public final class BackendAuthenticator {
     }
 
     private PostgresWire.Message saslContinue(byte[] body) throws IOException {
-        if (clientFirstBare == null) {
+        if (clientFirstBare == null || serverSignature != null) {
             throw new IOException("unexpected SASL continue from the backend");
         }
         String serverFirst = new String(body, 4, body.length - 4, StandardCharsets.UTF_8);
@@ -239,6 +243,9 @@ public final class BackendAuthenticator {
 
     private void saslFinal(byte[] body) throws IOException {
         String serverFinal = new String(body, 4, body.length - 4, StandardCharsets.UTF_8);
+        if (scramVerified) {
+            throw new IOException("unexpected SASL final from the backend");
+        }
         if (serverSignature == null || !serverFinal.startsWith("v=")) {
             throw new IOException("backend server signature mismatch");
         }
