@@ -79,7 +79,25 @@ class SesTestRenderV2IntegrationTest {
             .post("/v2/email/templates/ghost/render")
         .then()
             .statusCode(404)
-            .body("__type", equalTo("NotFoundException"));
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", equalTo("Unable to find <ghost> for <000000000000>"));
+    }
+
+    @Test
+    @Order(3)
+    void testRenderEmailTemplate_unknownTemplateWithMalformedData_reportsTheData() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"TemplateData": "[1]"}
+                """)
+        .when()
+            .post("/v2/email/templates/ghost/render")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Template rendering data is invalid"));
     }
 
     @Test
@@ -95,7 +113,8 @@ class SesTestRenderV2IntegrationTest {
             .post("/v2/email/templates/v2-render-welcome/render")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Template rendering data is invalid"));
     }
 
     @Test
@@ -169,15 +188,15 @@ class SesTestRenderV2IntegrationTest {
             .statusCode(200)
             .extract().path("RenderedTemplate");
 
-        // RFC 1123 with UTC ends with "GMT"; non-UTC zones would render numeric offsets
+        String dateLine = rendered.split("\r\n", 2)[0];
         Assertions.assertTrue(
-                rendered.contains("Date: ") && rendered.split("\r\n", 2)[0].endsWith("GMT"),
-                "expected Date header in UTC/GMT form, got: " + rendered.split("\r\n", 2)[0]);
+                dateLine.matches("Date: \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z"),
+                "expected an ISO-8601 UTC Date header with milliseconds, got: " + dateLine);
     }
 
     @Test
     @Order(11)
-    void testRenderEmailTemplate_utf8Body_uses8bitEncoding() {
+    void testRenderEmailTemplate_utf8Body_isBase64WithAnEncodedSubject() {
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
@@ -207,8 +226,9 @@ class SesTestRenderV2IntegrationTest {
             .statusCode(200)
             .extract().path("RenderedTemplate");
 
-        Assertions.assertTrue(rendered.contains("Subject: 件名 太郎"));
-        Assertions.assertTrue(rendered.contains("Content-Transfer-Encoding: 8bit"));
-        Assertions.assertTrue(rendered.contains("こんにちは 太郎 さん"));
+        Assertions.assertTrue(rendered.contains("Subject: =?UTF-8?B?5Lu25ZCNIOWkqumDjg==?=\r\n"));
+        // A template with only a text part is a single-part message, not multipart.
+        Assertions.assertTrue(rendered.endsWith("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n"
+                + "Content-Transfer-Encoding: base64\r\n\r\n44GT44KT44Gr44Gh44GvIOWkqumDjiDjgZXjgpM="));
     }
 }

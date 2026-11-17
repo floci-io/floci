@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.ses.model.EmailContent;
 import io.floci.aws.services.ses.model.EmailTemplate;
 import io.floci.aws.services.ses.model.Tag;
 import io.floci.aws.testing.MutableClock;
@@ -17,7 +18,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Instant;
-import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -268,6 +268,13 @@ class SesTemplateServiceTest {
     }
 
     @Test
+    void tripleStashIsSubstitutedLikeTheDoubleForm() {
+        JsonNode data = MAPPER.createObjectNode().put("v", "<b>&</b>");
+        assertEquals("esc=<b>&</b> raw=<b>&</b>",
+                SesTemplateService.applyTemplateData("esc={{v}} raw={{{ v }}}", data));
+    }
+
+    @Test
     void emptyStringValue() {
         JsonNode data = MAPPER.createObjectNode().put("name", "");
         assertEquals("Hello ", SesTemplateService.applyTemplateData("Hello {{name}}", data));
@@ -275,45 +282,39 @@ class SesTemplateServiceTest {
 
     @Test
     void buildTestRenderMime_asciiBody_uses7bit() {
-        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("Hello", "Hi there", "<p>Hi</p>", date, "BOUND");
         assertTrue(mime.contains("Subject: Hello\r\n"));
-        assertTrue(mime.contains("Content-Type: multipart/alternative; boundary=\"BOUND\""));
-        assertTrue(mime.contains("Content-Transfer-Encoding: 7bit"));
+        assertTrue(mime.startsWith("Date: 2026-05-02T12:00:00.000Z\r\n"));
+        assertTrue(mime.contains("Content-Type: multipart/alternative; \r\n\tboundary=\"BOUND\"\r\n"));
+        assertTrue(mime.contains("Content-Transfer-Encoding: 7bit\r\n\r\nHi there\r\n--BOUND\r\n"));
         assertFalse(mime.contains("Content-Transfer-Encoding: 8bit"));
         assertTrue(mime.endsWith("--BOUND--\r\n"));
     }
 
     @Test
-    void buildTestRenderMime_utf8Body_uses8bit() {
-        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
+    void buildTestRenderMime_mostlyNonAsciiBody_usesBase64AndAnEncodedSubject() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("件名", "こんにちは", "<p>こんにちは</p>", date, "BOUND");
-        assertTrue(mime.contains("Subject: 件名\r\n"));
-        assertTrue(mime.contains("Content-Transfer-Encoding: 8bit"));
-        assertTrue(mime.contains("こんにちは"));
+        assertTrue(mime.contains("Subject: =?UTF-8?B?5Lu25ZCN?=\r\n"));
+        assertTrue(mime.contains("Content-Type: text/plain; charset=UTF-8\r\n"
+                + "Content-Transfer-Encoding: base64\r\n\r\n44GT44KT44Gr44Gh44Gv\r\n--BOUND\r\n"));
+        assertFalse(mime.contains("こんにちは"));
+    }
+
+    @Test
+    void buildTestRenderMime_mostlyAsciiBody_usesQuotedPrintablePerPart() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
+        String mime = SesTemplateService.buildTestRenderMime("S", "plain text", "<p>café</p>", date, "BOUND");
+        assertTrue(mime.contains("Content-Transfer-Encoding: 7bit\r\n\r\nplain text\r\n--BOUND\r\n"));
+        assertTrue(mime.contains("Content-Transfer-Encoding: quoted-printable\r\n\r\n<p>caf=C3=A9</p>\r\n--BOUND--\r\n"));
     }
 
     @Test
     void buildTestRenderMime_subjectStripsCRLF() {
-        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("Multi\r\nLine", "x", "x", date, "BOUND");
-        // CR and LF are both C0 controls and are replaced with spaces.
-        assertTrue(mime.contains("Subject: Multi  Line\r\n"));
-    }
-
-    @ParameterizedTest(name = "{0} -> {1}")
-    @MethodSource("pickTransferEncodingCases")
-    void pickTransferEncoding_returnsExpected(String body, String expected) {
-        assertEquals(expected, SesTemplateService.pickTransferEncoding(body));
-    }
-
-    static Stream<Arguments> pickTransferEncodingCases() {
-        return Stream.of(
-                Arguments.of("ASCII text", "7bit"),
-                Arguments.of("", "7bit"),
-                Arguments.of("こんにちは", "8bit"),
-                Arguments.of("café", "8bit")
-        );
+        assertTrue(mime.contains("Subject: Multi Line\r\n"));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -322,6 +323,19 @@ class SesTemplateServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> SesTemplateService.parseRenderingData(MAPPER, raw));
         assertEquals("InvalidRenderingParameter", ex.getErrorCode());
+    }
+
+    // probed: malformed JSON, a JSON array and an empty string all get this one message
+    @ParameterizedTest(name = "[{0}]")
+    @MethodSource("invalidRenderingDataCases")
+    void parseRenderingData_invalid_hasTheFixedMessage(String raw) {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesTemplateService.parseRenderingData(MAPPER, raw));
+        assertEquals("Template rendering data is invalid", ex.getMessage());
+    }
+
+    static Stream<String> invalidRenderingDataCases() {
+        return Stream.of("{\"v\": ", "[1]", "", "   ", "\"text\"");
     }
 
     static Stream<Arguments> parseRenderingDataInvalidCases() {
@@ -339,43 +353,95 @@ class SesTemplateServiceTest {
         assertTrue(SesTemplateService.parseRenderingData(MAPPER, "{}").isObject());
     }
 
-    @ParameterizedTest(name = "{0}")
-    @MethodSource("normalizeToCrlfCases")
-    void normalizeToCrlf_normalizesAllVariants(String label, String input, String expected) {
-        assertEquals(expected, SesTemplateService.normalizeToCrlf(input));
-    }
-
-    static Stream<Arguments> normalizeToCrlfCases() {
-        return Stream.of(
-                Arguments.of("LF only",       "a\nb\nc",       "a\r\nb\r\nc"),
-                Arguments.of("CR only",       "a\rb\rc",       "a\r\nb\r\nc"),
-                Arguments.of("already CRLF",  "a\r\nb\r\nc",   "a\r\nb\r\nc"),
-                Arguments.of("mixed",         "a\nb\rc\r\nd",  "a\r\nb\r\nc\r\nd")
-        );
-    }
-
     @Test
-    void buildTestRenderMime_bodyWithBareLf_normalizedToCrlf() {
-        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
+    void buildTestRenderMime_sevenBitBodyKeepsItsBareLf() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("S", "line1\nline2", "<p>x\ny</p>", date, "BOUND");
-        assertTrue(mime.contains("line1\r\nline2"));
-        assertTrue(mime.contains("x\r\ny"));
-        assertFalse(mime.contains("line1\nline2"));
+        assertTrue(mime.contains("\r\n\r\nline1\nline2\r\n--BOUND\r\n"));
+        assertTrue(mime.contains("\r\n\r\n<p>x\ny</p>\r\n--BOUND--\r\n"));
+    }
+
+    // Not probed directly: it follows from the CRLF that opens every boundary line, which the
+    // base64 case below shows is written whatever the part ends with.
+    @Test
+    void buildTestRenderMime_bodyEndingWithNewlineKeepsItBeforeTheBoundary() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
+        String mime = SesTemplateService.buildTestRenderMime("S", "hello\n", "<p>hi</p>\r\n", date, "BOUND");
+        assertTrue(mime.contains("\r\n\r\nhello\n\r\n--BOUND\r\n"));
+        assertTrue(mime.contains("\r\n\r\n<p>hi</p>\r\n\r\n--BOUND--\r\n"));
+    }
+
+    // probed: a base64 part that fills its last line ends in CRLF, so a blank line precedes the boundary
+    @Test
+    void buildTestRenderMime_base64PartFillingItsLastLineIsFollowedByABlankLine() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
+        String mime = SesTemplateService.buildTestRenderMime("S", "あ".repeat(19), "<p>x</p>", date, "BOUND");
+        assertTrue(mime.contains("Content-Transfer-Encoding: base64\r\n\r\n"
+                + "44GC".repeat(19) + "\r\n\r\n--BOUND\r\n"));
+    }
+
+    // probed: a template with one part is not multipart, and nothing follows its body
+    @Test
+    void buildTestRenderMime_textOnlyTemplateIsASinglePart() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
+        String mime = SesTemplateService.buildTestRenderMime("S", "hello x\n", null, date, "BOUND");
+        assertEquals("Date: 2026-05-02T12:00:00.000Z\r\nSubject: S\r\nMIME-Version: 1.0\r\n"
+                + "Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\nhello x\n", mime);
     }
 
     @Test
-    void buildTestRenderMime_bodyEndingWithNewline_noExtraBlankLine() {
-        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesTemplateService.buildTestRenderMime("S", "hello\n", "<p>hi</p>\n", date, "BOUND");
-        assertFalse(mime.contains("hello\r\n\r\n--BOUND"));
-        assertTrue(mime.contains("hello\r\n--BOUND"));
-        assertFalse(mime.contains("</p>\r\n\r\n--BOUND"));
-        assertTrue(mime.contains("</p>\r\n--BOUND"));
+    void buildTestRenderMime_htmlOnlyTemplateIsASinglePart() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
+        String mime = SesTemplateService.buildTestRenderMime("S", null, "<p>日本語のテスト</p>\r\n", date, "BOUND");
+        assertEquals("Date: 2026-05-02T12:00:00.000Z\r\nSubject: S\r\nMIME-Version: 1.0\r\n"
+                + "Content-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+                + "PHA+5pel5pys6Kqe44Gu44OG44K544OIPC9wPg0K", mime);
+    }
+
+    @Test
+    void renderTestTemplate_readsTheDataBeforeLookingUpTheTemplate() {
+        AwsException bothWrong = assertThrows(AwsException.class,
+                () -> service.renderTestTemplate("ghost", "{\"v\": ", REGION, "000000000000"));
+        assertEquals("InvalidRenderingParameter", bothWrong.getErrorCode());
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.renderTestTemplate("ghost", "{}", REGION, "000000000000"));
+        assertEquals("TemplateDoesNotExist", missing.getErrorCode());
+        assertEquals("Unable to find <ghost> for <000000000000>", missing.getMessage());
+    }
+
+    // probed: every spelling of the list-management placeholder renders as this sample link
+    @Test
+    void renderTestTemplate_showsASampleUnsubscribeLink() {
+        service.createTemplate(new EmailTemplate("unsub", "U",
+                "u={{amazonSESUnsubscribeUrl}} t={{{amazonSESUnsubscribeUrl}}} s={{ amazonSESUnsubscribeUrl }}",
+                null), REGION);
+        String mime = service.renderTestTemplate("unsub", "{}", REGION, "000000000000");
+        assertTrue(mime.endsWith("\r\n\r\nu=http://unsubscribe.example.com t=http://unsubscribe.example.com"
+                + " s=http://unsubscribe.example.com"));
+    }
+
+    @Test
+    void sendPathKeepsThePlaceholderInItsCanonicalForm() {
+        assertEquals("u={{amazonSESUnsubscribeUrl}} t={{amazonSESUnsubscribeUrl}} s={{amazonSESUnsubscribeUrl}}",
+                SesTemplateService.applyTemplateData(
+                        "u={{amazonSESUnsubscribeUrl}} t={{{amazonSESUnsubscribeUrl}}} s={{ amazonSESUnsubscribeUrl }}",
+                        MAPPER.createObjectNode()));
+    }
+
+    @Test
+    void sendPathRendersTheTripleStashInEveryPart() {
+        JsonNode data = MAPPER.createObjectNode().put("v", "<b>x</b>");
+        EmailContent.Simple rendered = SesTemplateService.render(new EmailContent.InlineTemplate(
+                "s {{{v}}}", "t {{{v}}}", "<p>{{{v}}}</p>", data, List.of()));
+        assertEquals("s <b>x</b>", rendered.subject());
+        assertEquals("t <b>x</b>", rendered.bodyText());
+        assertEquals("<p><b>x</b></p>", rendered.bodyHtml());
     }
 
     @Test
     void buildTestRenderMime_bodyWithoutTrailingNewline_addsCrlfBeforeBoundary() {
-        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
         String mime = SesTemplateService.buildTestRenderMime("S", "hello", "<p>hi</p>", date, "BOUND");
         assertTrue(mime.contains("hello\r\n--BOUND"));
         assertTrue(mime.contains("</p>\r\n--BOUND"));
@@ -392,23 +458,68 @@ class SesTemplateServiceTest {
         assertEquals(expected, SesTemplateService.sanitizeSubject(input));
     }
 
+    // probed, each row
     static Stream<Arguments> sanitizeSubjectCases() {
         return Stream.of(
-                Arguments.of("C0 controls SOH/US",  "a\u0001b\u001fc", "a b c"),
-                Arguments.of("CR and LF",           "x\ry\nz",          "x y z"),
-                Arguments.of("BEL",                 "a\u0007b",          "a b"),
-                Arguments.of("DEL",                 "a\u007fb",          "a b"),
-                Arguments.of("Unicode preserved",   "Hello 太郎",          "Hello 太郎"),
-                Arguments.of("printable preserved", "Hello!",             "Hello!")
+                Arguments.of("LF",                        "line1\nline2",   "line1 line2"),
+                Arguments.of("CRLF is one space",         "a\r\nb",        "a b"),
+                Arguments.of("space, LF and tab",         "x \nb\tc",      "x b c"),
+                Arguments.of("two line breaks",           "a\n\nb",        "a b"),
+                Arguments.of("plain spaces collapse too", "a  b",           "a b"),
+                Arguments.of("other controls are kept",   "a\u0001b",       "a\u0001b"),
+                Arguments.of("Unicode preserved",         "Hello 太郎",       "Hello 太郎")
         );
     }
 
     @Test
-    void buildTestRenderMime_subjectWithControlChars_replacedWithSpace() {
-        ZonedDateTime date = ZonedDateTime.parse("2026-05-02T12:00:00Z");
-        String mime = SesTemplateService.buildTestRenderMime(
-                "Hello\u0001World", "x", "x", date, "BOUND");
-        assertTrue(mime.contains("Subject: Hello World\r\n"));
-        assertFalse(mime.contains("\u0001"));
+    void buildTestRenderMime_subjectControlCharacterIsEncoded() {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
+        String mime = SesTemplateService.buildTestRenderMime("a\u0001b", "x", "x", date, "BOUND");
+        // probed
+        assertTrue(mime.contains("Subject: =?UTF-8?Q?a=01b?=\r\n"));
+    }
+
+    // The v1 response carries the message as XML character data and has no sanitizing step, so
+    // nothing outside printable ASCII, tab, CR and LF may ever reach the rendered message.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("hostileContentCases")
+    void buildTestRenderMime_isAlwaysXmlSafeAscii(String label, String value) {
+        Instant date = Instant.parse("2026-05-02T12:00:00Z");
+        List<String> rendered = List.of(
+                SesTemplateService.buildTestRenderMime(value, value, "<p>" + value + "</p>", date, "BOUND"),
+                SesTemplateService.buildTestRenderMime(value, value, null, date, "BOUND"),
+                SesTemplateService.buildTestRenderMime(value, null, "<p>" + value + "</p>", date, "BOUND"));
+        for (String mime : rendered) {
+            for (int i = 0; i < mime.length(); i++) {
+                char c = mime.charAt(i);
+                assertTrue(c == '\t' || c == '\r' || c == '\n' || (c >= 0x20 && c < 0x7F),
+                        "unexpected U+" + Integer.toHexString(c) + " at " + i + " in " + label);
+            }
+        }
+    }
+
+    static Stream<Arguments> hostileContentCases() {
+        return Stream.of(
+                Arguments.of("C0 control", "a\u0001b"),
+                Arguments.of("every C0 control and DEL", allC0ControlsAndDel()),
+                Arguments.of("controls in the majority", "\u0001\u0002\u0003a"),
+                Arguments.of("NUL", "a\u0000b"),
+                Arguments.of("non-ASCII", "こんにちは"),
+                Arguments.of("mostly ASCII with non-ASCII", "hello café"),
+                Arguments.of("emoji", "ok 😀"),
+                Arguments.of("lone high surrogate", "a\uD83Db"),
+                Arguments.of("lone low surrogate", "a\uDE00b"),
+                Arguments.of("U+FFFE and U+FFFF", "a\uFFFE\uFFFFb"),
+                Arguments.of("C1 control", "a\u0085b"),
+                Arguments.of("long line with a control", "a".repeat(1200) + "\u0001")
+        );
+    }
+
+    private static String allC0ControlsAndDel() {
+        StringBuilder out = new StringBuilder("text ");
+        for (char c = 0; c < 0x20; c++) {
+            out.append(c);
+        }
+        return out.append('\u007F').append(" text").toString();
     }
 }
