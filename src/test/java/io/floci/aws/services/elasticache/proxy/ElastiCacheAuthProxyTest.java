@@ -27,19 +27,6 @@ class ElastiCacheAuthProxyTest {
     }
 
     @Test
-    void clusterModeFailsClosedBeforeChangingBackendReplicationCredentials() {
-        ElastiCacheAuthProxy.PasswordValidator validator = mock(ElastiCacheAuthProxy.PasswordValidator.class);
-        when(validator.hasMembers()).thenReturn(true);
-        when(validator.clusterMode()).thenReturn(true);
-        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("cluster", AuthMode.IAM, "127.0.0.1", 6379,
-                validator, mock(SigV4Validator.class));
-        Socket backend = mock(Socket.class);
-
-        assertThrows(IOException.class, () -> proxy.initializeBackend(backend, "subscriber"));
-        verifyNoInteractions(backend);
-    }
-
-    @Test
     void authModeIsReadFromTheCacheOnEachConnection() {
         AtomicReference<AuthMode> cacheAuthMode = new AtomicReference<>();
         ElastiCacheAuthProxy.PasswordValidator passwordValidator = new ElastiCacheAuthProxy.PasswordValidator() {

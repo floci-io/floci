@@ -19,6 +19,7 @@ import io.floci.aws.services.memorydb.model.Cluster;
 import io.floci.aws.services.memorydb.model.ClusterStatus;
 import io.floci.aws.services.memorydb.model.Endpoint;
 import io.floci.aws.services.memorydb.model.User;
+import io.floci.aws.services.memorydb.proxy.MemoryDbAuthProxy;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -420,8 +421,7 @@ public class MemoryDbService {
                         cluster.setContainerPort(handle.getPort());
                         proxyManager.startProxy(identity, authRequired, cluster.getProxyPort(),
                                 handle.getHost(), handle.getPort(),
-                                (username, secret) -> authenticate(cluster.getName(), username, secret,
-                                        cluster.getRegion(), entry.accountId()));
+                                clusterAuthenticator(cluster, entry.accountId()));
                     } else {
                         LOG.warnv("MemoryDB cluster {0} restored as metadata only: no Docker daemon is reachable",
                                 ownerKey);
@@ -749,19 +749,10 @@ public class MemoryDbService {
         if (cluster == null) {
             return false;
         }
-        String aclName = cluster.getAclName();
-        if (DEFAULT_ACL.equals(aclName)) {
+        if (DEFAULT_ACL.equals(cluster.getAclName())) {
             return true;
         }
-        Acl acl = ownedResourceGet(acls, accountId, aclName, region).orElse(null);
-        if (acl == null) {
-            return false;
-        }
-        String target = (username == null || username.isEmpty()) ? DEFAULT_USER : username;
-        if (!acl.getUserNames().contains(target)) {
-            return false;
-        }
-        User user = resolveUser(target, region, accountId);
+        User user = aclMember(cluster, username, region, accountId);
         if (user == null) {
             return false;
         }
@@ -769,6 +760,51 @@ public class MemoryDbService {
             case IAM -> sigV4Validator.validate(secret, clusterName, user.getName());
             case PASSWORD -> user.getPasswords() != null && user.getPasswords().contains(secret);
             case NO_PASSWORD -> true;
+        };
+    }
+
+    /**
+     * The user of the cluster's ACL that {@code username} names, the {@code default} user for a blank
+     * name, or null when the ACL does not hold it.
+     */
+    private User aclMember(Cluster cluster, String username, String region, String accountId) {
+        Acl acl = ownedResourceGet(acls, accountId, cluster.getAclName(), region).orElse(null);
+        if (acl == null) {
+            return null;
+        }
+        String target = (username == null || username.isEmpty()) ? DEFAULT_USER : username;
+        if (!acl.getUserNames().contains(target)) {
+            return null;
+        }
+        return resolveUser(target, region, accountId);
+    }
+
+    /**
+     * Bound to the account that owns the cluster, since the proxy calls back on its own thread. A
+     * cluster cannot change its ACL, so whether access strings apply is fixed when the proxy starts.
+     */
+    private MemoryDbAuthProxy.AuthValidator clusterAuthenticator(Cluster cluster, String accountId) {
+        String name = cluster.getName();
+        String region = cluster.getRegion();
+        boolean ownAcl = !DEFAULT_ACL.equals(cluster.getAclName());
+        return new MemoryDbAuthProxy.AuthValidator() {
+            @Override
+            public boolean authenticate(String username, String secret) {
+                return MemoryDbService.this.authenticate(name, username, secret, region, accountId);
+            }
+
+            @Override
+            public boolean enforcesAccessStrings() {
+                return ownAcl;
+            }
+
+            @Override
+            public String accessString(String username) {
+                return ownedResourceGet(clusters, accountId, name, region)
+                        .map(current -> aclMember(current, username, region, accountId))
+                        .map(User::getAccessString)
+                        .orElse(null);
+            }
         };
     }
 
@@ -923,8 +959,7 @@ public class MemoryDbService {
 
                     proxyManager.startProxy(identity, authRequired, proxyPort,
                             handle.getHost(), handle.getPort(),
-                            (username, secret) -> authenticate(name, username, secret, cluster.getRegion(),
-                                    cluster.getAccountId()));
+                            clusterAuthenticator(cluster, cluster.getAccountId()));
                 } else {
                     LOG.warnv("MemoryDB cluster {0} created without a backing container: no Docker "
                             + "daemon is reachable. Metadata operations work; connections to the "
