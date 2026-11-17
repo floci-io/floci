@@ -53,12 +53,13 @@ public final class PublicAccessConditions {
         return value.indexOf('*') >= 0 || value.indexOf('?') >= 0;
     }
 
-    /** An ARN of six fields with a 12-digit account. */
+    /** An ARN of six fields with no wildcard, or with a 12-digit account when it has one. */
     public static boolean pinsAccount(String arn) {
-        return AwsArnUtils.isArn(arn) && ACCOUNT_ID.matcher(AwsArnUtils.parse(arn).accountId()).matches();
+        return AwsArnUtils.isArn(arn)
+                && (!hasWildcard(arn) || ACCOUNT_ID.matcher(AwsArnUtils.parse(arn).accountId()).matches());
     }
 
-    /** An ARN of six fields with a 12-digit account and no policy variable in it. */
+    /** An ARN that pins its account and has no policy variable in it. */
     public static boolean isFixedAccountArn(String arn) {
         return pinsAccount(arn) && !arn.contains("${");
     }

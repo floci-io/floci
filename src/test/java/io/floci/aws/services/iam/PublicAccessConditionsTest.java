@@ -24,6 +24,7 @@ class PublicAccessConditionsTest {
     @CsvSource(delimiter = '|', value = {
         "arn:aws:iam::123456789012:role/app|true",
         "arn:aws:iam::123456789012:role/*|true",
+        "arn:aws:s3:::my-bucket|true",
         "arn:aws:iam::*:role/app|false",
         "arn:aws:iam::12345678901?:root|false",
         "arn:aws:s3:::*|false",
@@ -37,6 +38,7 @@ class PublicAccessConditionsTest {
     @CsvSource(delimiter = '|', value = {
         "arn:aws:iam::123456789012:role/app|true",
         "arn:aws:iam::123456789012:role/*|true",
+        "arn:aws:s3:::my-bucket|true",
         "arn:aws:iam::123456789012:role/${aws:username}|false",
         "arn:aws:iam::*:role/app|false",
         "arn:aws:s3:::*|false",
