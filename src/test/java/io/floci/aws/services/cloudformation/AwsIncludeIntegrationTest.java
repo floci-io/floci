@@ -674,6 +674,68 @@ class AwsIncludeIntegrationTest {
             .body(containsString("<LogicalResourceId>DependentParam</LogicalResourceId>"));
     }
 
+    @Test
+    void fnSubLocationWithPseudoParameterMergesSnippetOnCreateStack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucketPrefix = "aws-include-sub-" + suffix;
+        String bucket = bucketPrefix + "-us-east-1";
+        String key = "names.yaml";
+        String stackName = "aws-include-sub-stack-" + suffix;
+        String expectedParamName = "/aws-include-it/sub-" + suffix;
+        stacksToDelete.add(stackName);
+
+        putSnippet(bucket, key, "Params:\n  Name: " + expectedParamName + "\n");
+
+        String template = """
+            {
+              "Mappings": {
+                "Names": {
+                  "Fn::Transform": {
+                    "Name": "AWS::Include",
+                    "Parameters": {
+                      "Location": {
+                        "Fn::Sub": "s3://%s-${AWS::Region}/%s"
+                      }
+                    }
+                  }
+                }
+              },
+              "Resources": {
+                "IncludedParam": {
+                  "Type": "AWS::SSM::Parameter",
+                  "Properties": {
+                    "Name": { "Fn::FindInMap": ["Names", "Params", "Name"] },
+                    "Type": "String",
+                    "Value": "from-fn-sub-include"
+                  }
+                }
+              }
+            }
+            """.formatted(bucketPrefix, key);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PhysicalResourceId>" + expectedParamName + "</PhysicalResourceId>"));
+    }
+
     private static String stateMachineTemplate(String stateMachineName, String location) {
         return """
             Resources:

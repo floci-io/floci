@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.s3.S3Service;
 
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 
@@ -50,26 +51,33 @@ class AwsIncludeProcessor {
      * treat an untouched template as changed.
      */
     JsonNode mergeIncludes(JsonNode template) {
+        return mergeIncludes(template, Map.of(), "", "", "", "");
+    }
+
+    JsonNode mergeIncludes(JsonNode template, Map<String, String> parameters, String region,
+                           String accountId, String stackName, String stackId) {
         if (!containsAwsInclude(template)) {
             return template;
         }
         JsonNode merged = template.deepCopy();
-        merge(merged);
+        merge(merged, merged, parameters, region, accountId, stackName, stackId);
         return merged;
     }
 
-    private void merge(JsonNode node) {
+    private void merge(JsonNode node, JsonNode root, Map<String, String> parameters,
+                       String region, String accountId, String stackName, String stackId) {
         if (node.isObject()) {
-            mergeObject((ObjectNode) node);
+            mergeObject((ObjectNode) node, root, parameters, region, accountId, stackName, stackId);
         } else if (node.isArray()) {
-            node.forEach(this::merge);
+            node.forEach(item -> merge(item, root, parameters, region, accountId, stackName, stackId));
         }
     }
 
-    private void mergeObject(ObjectNode obj) {
+    private void mergeObject(ObjectNode obj, JsonNode root, Map<String, String> parameters,
+                             String region, String accountId, String stackName, String stackId) {
         JsonNode transform = obj.get(FN_TRANSFORM);
         if (transform != null && AWS_INCLUDE.equals(transform.path("Name").asText(""))) {
-            spliceInclude(obj, transform);
+            spliceInclude(obj, transform, root, parameters, region, accountId, stackName, stackId);
         }
         // Walk every remaining field, including the snippet's own keys just merged in above:
         // spliceInclude already rejects a snippet carrying its own AWS::Include, so revisiting
@@ -77,12 +85,19 @@ class AwsIncludeProcessor {
         // elsewhere in the template.
         Iterator<Map.Entry<String, JsonNode>> fields = obj.fields();
         while (fields.hasNext()) {
-            merge(fields.next().getValue());
+            merge(fields.next().getValue(), root, parameters, region, accountId, stackName, stackId);
         }
     }
 
-    private void spliceInclude(ObjectNode obj, JsonNode transform) {
-        String location = describeLocation(transform);
+    private void spliceInclude(ObjectNode obj, JsonNode transform, JsonNode root,
+                               Map<String, String> parameters, String region,
+                               String accountId, String stackName, String stackId) {
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
+                accountId, region, stackName, stackId,
+                effectiveParameters(root, parameters),
+                Map.of(), Map.of(), Map.of(), CloudFormationService.templateMappings(root),
+                objectMapper, name -> null);
+        String location = describeLocation(transform, engine);
         S3Location s3Location = parseS3Location(location);
         JsonNode snippet = fetchSnippet(s3Location, location);
 
@@ -100,19 +115,19 @@ class AwsIncludeProcessor {
     }
 
     /**
-     * Renders {@code transform.Parameters.Location} for an error message. A well-formed
-     * {@code Location} is a plain string, but a node such as {@code {Ref: InputValue}}, the form
-     * AWS's own {@code Fn::Transform} documentation uses in its {@code AWS::Include} example, is a
-     * mapping. {@code Ref} resolution is not implemented here, so that mapping is serialized
-     * instead, and the rejection message names it. A {@code Parameters} that is not an object
-     * (missing, explicitly {@code null}, a scalar, or a list) names the whole {@code Fn::Transform}
-     * node instead, so the message never presents an unrelated value as the rejected
-     * {@code Location}. A {@code Location} missing from an object {@code Parameters} names the
-     * enclosing {@code Parameters} mapping. A {@code Location} present but blank, including
+     * Resolves or renders {@code transform.Parameters.Location}. A well-formed {@code Location} is
+     * a plain string or an {@code Fn::Sub} expression, while a node such as
+     * {@code {Ref: InputValue}}, the form AWS's own {@code Fn::Transform} documentation uses in its
+     * {@code AWS::Include} example, is a mapping whose resolution is not implemented here, so that
+     * mapping is serialized instead and the rejection message names it. A {@code Parameters} that
+     * is not an object (missing, explicitly {@code null}, a scalar, or a list) names the whole
+     * {@code Fn::Transform} node instead, so the message never presents an unrelated value as the
+     * rejected {@code Location}. A {@code Location} missing from an object {@code Parameters} names
+     * the enclosing {@code Parameters} mapping. A {@code Location} present but blank, including
      * whitespace only, is rendered as its quoted string, not elided, so the message never leaves an
      * empty tail.
      */
-    private String describeLocation(JsonNode transform) {
+    private String describeLocation(JsonNode transform, CloudFormationTemplateEngine engine) {
         JsonNode parameters = transform.path("Parameters");
         if (!parameters.isObject()) {
             return transform.toString();
@@ -121,8 +136,40 @@ class AwsIncludeProcessor {
         if (locationNode.isTextual() && !locationNode.asText().isBlank()) {
             return locationNode.asText();
         }
+        if (isResolvableSub(locationNode)) {
+            String resolved = engine.resolve(locationNode);
+            if (!resolved.isBlank()) {
+                return resolved;
+            }
+        }
         JsonNode described = locationNode.isMissingNode() || locationNode.isNull() ? parameters : locationNode;
         return described.toString();
+    }
+
+    private static boolean isResolvableSub(JsonNode locationNode) {
+        if (!locationNode.isObject() || locationNode.size() != 1 || !locationNode.has("Fn::Sub")) {
+            return false;
+        }
+        JsonNode sub = locationNode.get("Fn::Sub");
+        return sub.isTextual()
+                || (sub.isArray() && sub.size() == 2 && sub.get(0).isTextual() && sub.get(1).isObject());
+    }
+
+    private static Map<String, String> effectiveParameters(JsonNode template, Map<String, String> parameters) {
+        Map<String, String> resolved = new HashMap<>();
+        JsonNode declared = template.path("Parameters");
+        if (declared.isObject()) {
+            declared.properties().forEach(entry -> {
+                JsonNode defaultValue = entry.getValue().path("Default");
+                if (defaultValue.isValueNode() && !defaultValue.isNull()) {
+                    resolved.put(entry.getKey(), defaultValue.asText());
+                }
+            });
+        }
+        if (parameters != null) {
+            resolved.putAll(parameters);
+        }
+        return resolved;
     }
 
     /**
