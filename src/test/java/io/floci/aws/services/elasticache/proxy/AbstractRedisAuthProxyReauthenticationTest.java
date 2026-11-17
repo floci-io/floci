@@ -314,6 +314,8 @@ class AbstractRedisAuthProxyReauthenticationTest {
         Socket backend = backendServer.accept();
         backend.setSoTimeout(2_000);
         assertEquals("+OK", line(client));
+        // The AUTH reply is sent before the connection records its sign-in time.
+        assertOpen(client, backend);
         return backend;
     }
 
