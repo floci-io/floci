@@ -290,6 +290,8 @@ cluster drops its database and the roles it recorded, nothing else on the server
 database, owner, admin or connect role without the cluster's comment. A `FAILED`
 cluster is deleted even when the server cannot be cleaned up; Floci then logs the database and
 roles that may remain. With in-memory storage, Floci deletes its external clusters when it stops.
+A cluster still starting or being deleted then is waited for, up to 3 minutes, and goes as the
+others do; one still starting is never served once Floci has begun to stop.
 
 Docker Compose, with the server as another service:
 
