@@ -14,7 +14,6 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.RequestConstraintCheck;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.concurrent.KeyedWriteLocks;
 import io.floci.aws.core.resource.ExplorerResource;
@@ -782,16 +781,9 @@ public class EcrService implements ResourceProvider, Resettable {
         return identifiers;
     }
 
-    /** The {@code tagStatus} filter of ListImages and DescribeImages; absent means {@code ANY}. */
+    /** The {@code tagStatus} filter, already checked against the model by the handler; absent means {@code ANY}. */
     private static String normalizeTagStatus(String tagStatus) {
-        if (tagStatus == null) {
-            return "ANY";
-        }
-        if (!tagStatus.equals("TAGGED") && !tagStatus.equals("UNTAGGED") && !tagStatus.equals("ANY")) {
-            throw RequestConstraintCheck.standardMessages("InvalidParameterException")
-                    .enumValue("Request.filter.tagStatus", List.of("TAGGED", "UNTAGGED", "ANY"));
-        }
-        return tagStatus;
+        return tagStatus == null ? "ANY" : tagStatus;
     }
 
     /**
@@ -818,13 +810,7 @@ public class EcrService implements ResourceProvider, Resettable {
                 }
                 candidates.remove(http.headManifestDigestStrict(internal, tag, null));
             }
-            List<String> untagged = new ArrayList<>();
-            for (String digest : candidates) {
-                if (http.headManifestDigestStrict(internal, digest, null) != null) {
-                    untagged.add(digest);
-                }
-            }
-            refs.addAll(untagged);
+            refs.addAll(heldDigests(http, internal, candidates, Integer.MAX_VALUE));
         }
         return refs;
     }
@@ -2045,13 +2031,23 @@ public class EcrService implements ResourceProvider, Resettable {
      */
     private boolean holdsImage(String account, String region, String repositoryName, String internal)
             throws IOException, InterruptedException {
-        Set<String> digests = recordedDigests(account, region, repositoryName);
-        for (String digest : digests) {
-            if (registryManager.httpClient().headManifestDigestStrict(internal, digest, null) != null) {
-                return true;
+        return !heldDigests(registryManager.httpClient(), internal,
+                recordedDigests(account, region, repositoryName), 1).isEmpty();
+    }
+
+    /** The first {@code limit} candidates whose manifest the registry still holds. */
+    private static List<String> heldDigests(RegistryHttpClient http, String internal, Set<String> candidates,
+                                            int limit) throws IOException, InterruptedException {
+        List<String> held = new ArrayList<>();
+        for (String digest : candidates) {
+            if (held.size() == limit) {
+                break;
+            }
+            if (http.headManifestDigestStrict(internal, digest, null) != null) {
+                held.add(digest);
             }
         }
-        return false;
+        return held;
     }
 
     /** Digests the push records and the pending pushes name for one repository; candidates, not proof. */

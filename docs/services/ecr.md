@@ -68,6 +68,11 @@ requested images and does not apply `tagStatus`, because telling tagged from unt
 an explicit id would need the same walk of every tag. A registry error fails the call
 instead of returning an empty list.
 
+`ListImages` and `DescribeImages` requests are checked against the vendored model: an
+empty `imageIds` list, an unknown `tagStatus` or `imageStatus`, or a missing `repositoryName`
+is refused with the model's message, as AWS does. `imageStatus` and `DescribeImages`'
+`maxResults` and `nextToken` are accepted but not applied.
+
 ### Admin Endpoints
 
 | Endpoint | Description |

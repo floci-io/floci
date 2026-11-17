@@ -55,7 +55,8 @@ public class EcrJsonHandler {
             "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
             "BatchGetRepositoryScanningConfiguration",
             "CreateRepositoryCreationTemplate", "UpdateRepositoryCreationTemplate",
-            "DescribeRepositoryCreationTemplates", "DeleteRepositoryCreationTemplate");
+            "DescribeRepositoryCreationTemplates", "DeleteRepositoryCreationTemplate",
+            "ListImages", "DescribeImages");
 
     public Response handle(String action, JsonNode request, String region) {
         if (MODEL_CHECKED.contains(action)) {
