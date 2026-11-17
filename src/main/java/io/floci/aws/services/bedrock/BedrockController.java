@@ -8,6 +8,7 @@ import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.bedrock.model.ApplicationInferenceProfile;
 import io.floci.aws.services.bedrock.model.Guardrail;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -179,13 +180,13 @@ public class BedrockController {
                                           @QueryParam("nextToken") String nextToken,
                                           @Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
-        PaginatedResult<BedrockModelCatalog.InferenceProfile> page = bedrockService.listInferenceProfiles(typeEquals,
+        PaginatedResult<BedrockService.InferenceProfileView> page = bedrockService.listInferenceProfiles(typeEquals,
                 Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = response.putArray("inferenceProfileSummaries");
-        for (BedrockModelCatalog.InferenceProfile profile : page.items()) {
-            summaries.add(inferenceProfileNode(profile, region));
+        for (BedrockService.InferenceProfileView profile : page.items()) {
+            summaries.add(inferenceProfileNode(profile));
         }
         if (page.nextToken() != null) {
             response.put("nextToken", page.nextToken());
@@ -199,7 +200,31 @@ public class BedrockController {
                                         @Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
         return Response.ok(inferenceProfileNode(
-                bedrockService.getInferenceProfile(inferenceProfileIdentifier, region), region)).build();
+                bedrockService.getInferenceProfile(inferenceProfileIdentifier, region))).build();
+    }
+
+    @POST
+    @Path("/inference-profiles")
+    public Response createInferenceProfile(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode request = readTree(body);
+        ApplicationInferenceProfile profile = bedrockService.createApplicationInferenceProfile(
+                textOrNull(request, "inferenceProfileName"), textOrNull(request, "description"),
+                textOrNull(request.path("modelSource"), "copyFrom"),
+                applicationProfileTags(request.get("tags")),
+                textOrNull(request, "clientRequestToken"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("inferenceProfileArn", profile.getInferenceProfileArn());
+        response.put("status", "ACTIVE");
+        return Response.status(201).entity(response).build();
+    }
+
+    @DELETE
+    @Path("/inference-profiles/{inferenceProfileIdentifier: .+}")
+    public Response deleteInferenceProfile(@PathParam("inferenceProfileIdentifier") String identifier,
+                                           @Context HttpHeaders headers) {
+        bedrockService.deleteApplicationInferenceProfile(identifier, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     // Resource policies
@@ -312,7 +337,7 @@ public class BedrockController {
 
     private ObjectNode foundationModelNode(BedrockModelCatalog.FoundationModel model, String region) {
         ObjectNode node = objectMapper.createObjectNode();
-        node.put("modelArn", foundationModelArn(model.modelId(), region));
+        node.put("modelArn", bedrockService.foundationModelArn(model.modelId(), region));
         node.put("modelId", model.modelId());
         node.put("modelName", model.modelName());
         node.put("providerName", model.providerName());
@@ -328,25 +353,23 @@ public class BedrockController {
         return node;
     }
 
-    private ObjectNode inferenceProfileNode(BedrockModelCatalog.InferenceProfile profile, String region) {
+    private ObjectNode inferenceProfileNode(BedrockService.InferenceProfileView profile) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("inferenceProfileName", profile.inferenceProfileName());
-        node.put("inferenceProfileArn", regionResolver.buildArn("bedrock", region,
-                "inference-profile/" + profile.inferenceProfileId()));
+        node.put("inferenceProfileArn", profile.inferenceProfileArn());
         node.put("inferenceProfileId", profile.inferenceProfileId());
+        if (profile.description() != null) {
+            node.put("description", profile.description());
+        }
         node.put("createdAt", iso8601(profile.createdAt()));
-        node.put("updatedAt", iso8601(profile.createdAt()));
+        node.put("updatedAt", iso8601(profile.updatedAt()));
         ArrayNode models = node.putArray("models");
-        for (String destination : profile.routes().get(region)) {
-            models.addObject().put("modelArn", foundationModelArn(profile.modelId(), destination));
+        for (String modelArn : profile.models()) {
+            models.addObject().put("modelArn", modelArn);
         }
         node.put("status", "ACTIVE");
-        node.put("type", "SYSTEM_DEFINED");
+        node.put("type", profile.type());
         return node;
-    }
-
-    private String foundationModelArn(String modelId, String region) {
-        return regionResolver.buildArn("bedrock", region, "", "foundation-model/" + modelId);
     }
 
     private ObjectNode guardrailSummaryNode(Guardrail guardrail) {
@@ -389,5 +412,10 @@ public class BedrockController {
             return null;
         }
         return value.asText();
+    }
+
+    private static Map<String, String> applicationProfileTags(JsonNode tags) {
+        ApplicationInferenceProfileTagValidator.validate(tags, "key", "value", "ValidationException", "tags");
+        return BedrockService.parseTagList(tags);
     }
 }
