@@ -1,6 +1,5 @@
 package io.floci.aws.services.account;
 
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -10,7 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.floci.aws.services.account.AccountNameRequests.accountNameRequest;
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.account.AccountRequests.account;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
@@ -76,17 +75,11 @@ class AccountInformationIntegrationTest {
         return String.format("7310009000%02d", ACCOUNTS.incrementAndGet());
     }
 
-    private static ValidatableResponse put(String account, String body) {
-        return post(account, "/putAccountName", body);
+    private static ValidatableResponse put(String caller, String body) {
+        return account(caller, "/putAccountName", body);
     }
 
-    private static ValidatableResponse get(String account, String body) {
-        return post(account, "/getAccountInformation", body);
-    }
-
-    private static ValidatableResponse post(String account, String path, String body) {
-        return given().contentType("application/json")
-                .header("Authorization", EnforcementFixtures.auth(account, "account"))
-                .body(body).post(path).then();
+    private static ValidatableResponse get(String caller, String body) {
+        return account(caller, "/getAccountInformation", body);
     }
 }

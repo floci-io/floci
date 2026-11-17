@@ -554,11 +554,7 @@ public final class TestFixtures {
     }
 
     public static AccountClient accountClient() {
-        return AccountClient.builder()
-                .endpointOverride(ENDPOINT)
-                .region(REGION)
-                .credentialsProvider(CREDENTIALS)
-                .build();
+        return accountClient("test");
     }
 
     public static AccountClient accountClient(String accountId) {

@@ -694,11 +694,6 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         return requireAccount(requireOrganizationForCaller(callerAccountId), accountId);
     }
 
-    /** The record of an account in the organization that holds it, empty for an account in no organization. */
-    public Optional<OrganizationAccount> findAccount(String accountId) {
-        return findOrganizationForAccount(accountId).flatMap(organization -> accountIn(organization, accountId));
-    }
-
     /**
      * Renames an account in the organization that holds it, as Account Management's {@code PutAccountName} does,
      * so {@code DescribeAccount} and {@code ListAccounts} answer the new name. Does nothing for an account in no
@@ -712,7 +707,8 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
                 }));
     }
 
-    public Optional<OrganizationAccount> findAccountForPortal(String accountId) {
+    /** The record of an account in the organization that holds it, empty for an account in no organization. */
+    public Optional<OrganizationAccount> findAccount(String accountId) {
         if (accountId == null || !ACCOUNT_ID_PATTERN.matcher(accountId).matches()) {
             return Optional.empty();
         }

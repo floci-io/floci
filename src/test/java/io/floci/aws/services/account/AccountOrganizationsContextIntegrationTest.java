@@ -2,7 +2,6 @@ package io.floci.aws.services.account;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.OrganizationsRequests;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -14,9 +13,9 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 
 import static io.floci.aws.services.account.AccountNameRequests.accountNameRequest;
+import static io.floci.aws.services.account.AccountRequests.account;
 import static io.floci.aws.services.account.AlternateContactRequests.alternateContactRequest;
 import static io.floci.aws.services.account.ContactInformationRequests.contactInformationRequest;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -191,11 +190,5 @@ class AccountOrganizationsContextIntegrationTest {
 
     private static ValidatableResponse organizations(String action, String body) {
         return OrganizationsRequests.request(MANAGEMENT, action, body).when().post("/").then().statusCode(200);
-    }
-
-    private static ValidatableResponse account(String caller, String path, String body) {
-        return given().contentType("application/json")
-                .header("Authorization", EnforcementFixtures.auth(caller, "account"))
-                .body(body).post(path).then();
     }
 }
