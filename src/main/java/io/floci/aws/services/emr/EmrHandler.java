@@ -109,6 +109,7 @@ public class EmrHandler {
                 case "DescribePersistentAppUI" -> handleDescribePersistentAppUi(request);
                 case "GetPersistentAppUIPresignedURL" -> handleGetPersistentAppUiPresignedUrl(request);
                 case "GetOnClusterAppUIPresignedURL" -> handleGetOnClusterAppUiPresignedUrl(request);
+                case "GetClusterSessionCredentials" -> handleGetClusterSessionCredentials(request);
                 case "AddInstanceGroups" -> handleAddInstanceGroups(request);
                 case "ListInstanceGroups" -> handleListInstanceGroups(request);
                 case "AddInstanceFleet" -> handleAddInstanceFleet(request);
@@ -912,6 +913,17 @@ public class EmrHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("PresignedURLReady", true);
         putIfSet(response, "PresignedURL", url);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetClusterSessionCredentials(JsonNode request) {
+        EmrService.ClusterSessionCredentials credentials = service.clusterSessionCredentials(
+                string(request, "ClusterId"), string(request, "ExecutionRoleArn"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode usernamePassword = response.putObject("Credentials").putObject("UsernamePassword");
+        usernamePassword.put("Username", credentials.username());
+        usernamePassword.put("Password", credentials.password());
+        putEpoch(response, "ExpiresAt", credentials.expiresAt());
         return Response.ok(response).build();
     }
 

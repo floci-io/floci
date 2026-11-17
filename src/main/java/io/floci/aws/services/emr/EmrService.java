@@ -59,6 +59,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -105,6 +106,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final Logger LOG = Logger.getLogger(EmrService.class);
     private static final String UPPER_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final int SESSION_PASSWORD_BYTES = 24;
+    // No source gives how long GetClusterSessionCredentials' credentials last; Floci's expire in an hour.
+    private static final Duration SESSION_CREDENTIALS_VALIDITY = Duration.ofHours(1);
     // AWS's answer to a change on a terminated cluster, for AddJobFlowSteps and ModifyInstanceFleet; Floci
     // gives it to AddInstanceGroups and AddInstanceFleet too, for one shutting down.
     private static final String JOB_FLOW_SHUT_DOWN =
@@ -468,6 +472,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 throw new AwsException("ValidationException",
                         "Security configuration does not exist: " + cluster.getSecurityConfiguration(), 400);
             }
+            // A security configuration applies to the cluster as it is created: deleting or reusing its name later
+            // changes nothing about the cluster.
+            cluster.setRuntimeRoleEnabled(runtimeRoleEnabled(region, cluster.getSecurityConfiguration()));
             String id = "j-" + randomId(13);
             cluster.setId(id);
             cluster.setRegion(region);
@@ -1057,20 +1064,68 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * Whether the cluster's security configuration turns on runtime roles, its
-     * {@code AuthorizationConfiguration.IAMConfiguration.EnableApplicationScopedIAMRole}: false for a cluster with
-     * none, or whose configuration has since been deleted.
+     * Whether the cluster's security configuration turned on runtime roles as the cluster was created, its
+     * {@code AuthorizationConfiguration.IAMConfiguration.EnableApplicationScopedIAMRole}; for a cluster stored before
+     * Floci kept that, its configuration as it now stands. False for a cluster with none.
      */
     public boolean runtimeRoleEnabled(EmrCluster cluster) {
-        if (cluster.getSecurityConfiguration() == null) {
+        return cluster.getRuntimeRoleEnabled() != null ? cluster.getRuntimeRoleEnabled()
+                : runtimeRoleEnabled(regionOf(cluster), cluster.getSecurityConfiguration());
+    }
+
+    // Whether the named security configuration of the Region turns on runtime roles; false for none, or one deleted.
+    private boolean runtimeRoleEnabled(String region, String securityConfiguration) {
+        if (securityConfiguration == null) {
             return false;
         }
-        return secConfigStore.get(securityConfigurationKey(regionOf(cluster), cluster.getSecurityConfiguration()))
+        return secConfigStore.get(securityConfigurationKey(region, securityConfiguration))
                 .map(SecurityConfiguration::getSecurityConfiguration)
                 .map(EmrService::rawJson)
                 .map(json -> json.path("AuthorizationConfiguration").path("IAMConfiguration")
                         .path("EnableApplicationScopedIAMRole").asBoolean(false))
                 .orElse(false);
+    }
+
+    /**
+     * GetClusterSessionCredentials: "temporary, HTTP basic credentials that are associated with a given runtime IAM
+     * role and used by a cluster with fine-grained access control activated". The cluster must be RUNNING or WAITING,
+     * a runtime role enabled one ({@link #runtimeRoleEnabled}), on "Amazon EMR release 6.11 or higher", from which a
+     * Workspace attaches to a cluster with a runtime role. Each refusal is InvalidRequestException in Floci's own
+     * wording. Floci runs no endpoint that checks the credentials, and keeps none; no source gives how long AWS's
+     * last, and Floci's expire in an hour.
+     */
+    public ClusterSessionCredentials clusterSessionCredentials(String clusterId, String executionRoleArn) {
+        if (executionRoleArn != null && (executionRoleArn.length() < 20 || executionRoleArn.length() > 2048)) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.lengthOutOfRange("executionRoleArn", executionRoleArn, 20, 2048));
+        }
+        // The model leaves ExecutionRoleArn optional, but the credentials are "associated with a given runtime IAM
+        // role", and with none there is none to associate them with; AWS's answer is not recorded.
+        if (executionRoleArn == null) {
+            throw invalid("ExecutionRoleArn is required: the credentials are for a runtime role.");
+        }
+        return call(() -> {
+            EmrCluster cluster = settle(requireCluster(clusterId));
+            if (!runsOrWaits(cluster)) {
+                throw invalid("Cluster " + clusterId + " is " + cluster.getState()
+                        + ", and its endpoints are there only while it is RUNNING or WAITING.");
+            }
+            if (!releaseAtLeast(cluster.getReleaseLabel(), 6, 11, 0)) {
+                throw invalid("Cluster session credentials need a cluster of release emr-6.11.0 or later.");
+            }
+            if (!runtimeRoleEnabled(cluster)) {
+                throw invalid("Cluster " + clusterId + " is not a runtime role enabled cluster: its security"
+                        + " configuration does not turn on EnableApplicationScopedIAMRole.");
+            }
+            byte[] password = new byte[SESSION_PASSWORD_BYTES];
+            RANDOM.nextBytes(password);
+            return new ClusterSessionCredentials("emr-" + randomId(16).toLowerCase(),
+                    HexFormat.of().formatHex(password), now().plus(SESSION_CREDENTIALS_VALIDITY));
+        });
+    }
+
+    /** GetClusterSessionCredentials' username and password, and when they expire. */
+    public record ClusterSessionCredentials(String username, String password, Instant expiresAt) {
     }
 
     public SecurityConfiguration describeSecurityConfiguration(String name, String region) {
