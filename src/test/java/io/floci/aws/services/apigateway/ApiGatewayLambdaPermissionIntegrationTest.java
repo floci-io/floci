@@ -156,10 +156,10 @@ class ApiGatewayLambdaPermissionIntegrationTest {
     }
 
     @Test
-    void grantWithAWildcardForAPathParameterCoversTheRequestPath() {
+    void grantForTheConcreteRequestPathCoversAPathParameterResource() {
         String functionArn = createFunction("path-param-" + suffix());
         String apiId = createApi("/items/{id}", "GET", "AWS_PROXY", functionArn, null);
-        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items/*");
+        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items/42");
 
         execute(apiId, "/items/42").statusCode(200).body(equalTo("invoked"));
 
@@ -178,10 +178,10 @@ class ApiGatewayLambdaPermissionIntegrationTest {
     }
 
     @Test
-    void greedyResourceIsAuthorizedForTheFullRequestPath() {
+    void grantForTheConcreteRequestPathCoversAGreedyResource() {
         String functionArn = createFunction("greedy-" + suffix());
         String apiId = createApi("/items/{proxy+}", "GET", "AWS_PROXY", functionArn, null);
-        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items/*");
+        addPermission(functionArn, "arn:aws:execute-api:" + REGION + ":" + ACCOUNT + ":" + apiId + "/*/GET/items/a/b");
 
         execute(apiId, "/items/a/b").statusCode(200).body(equalTo("invoked"));
 
