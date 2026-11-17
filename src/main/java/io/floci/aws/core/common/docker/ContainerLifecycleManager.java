@@ -49,6 +49,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
@@ -1160,6 +1161,12 @@ public class ContainerLifecycleManager {
             LOG.warnv("Error removing network {0}: {1}", networkName, e.getMessage());
             return false;
         }
+    }
+
+    /** Lists all containers for caller-scoped reconciliation; an unavailable inventory is an error. */
+    public List<Container> listContainersForReconciliation() {
+        return Objects.requireNonNull(dockerClient.listContainersCmd().withShowAll(true).exec(),
+                "Missing Docker container inventory");
     }
 
     /**

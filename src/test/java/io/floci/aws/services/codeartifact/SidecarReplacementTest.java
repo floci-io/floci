@@ -1,5 +1,6 @@
 package io.floci.aws.services.codeartifact;
 
+import com.github.dockerjava.api.model.Container;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
@@ -8,12 +9,15 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -28,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
@@ -64,6 +69,36 @@ class SidecarReplacementTest {
                 config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class));
         Map<String, String> liveNames = new HashMap<>();
         Map<String, String> createdNames = new HashMap<>();
+        String service = switch (format) {
+            case PYPI -> "pypiserver";
+            case NPM -> "verdaccio";
+            case NUGET -> "bagetter";
+            case CARGO -> "kellnr";
+        };
+        String baseName = ContainerStorageHelper.dockerName(config, "floci-" + service + "-repository");
+        liveNames.put(baseName, "stale-fixed");
+        liveNames.put(baseName + "-11111111-1111-1111-1111-111111111111", "stale-unique");
+        liveNames.put(baseName + "-other-repository", "unrelated");
+        liveNames.put(baseName + "-22222222-2222-2222-2222-222222222222", "foreign-namespace");
+        when(lifecycle.listContainersForReconciliation()).thenAnswer(invocation -> {
+            List<Container> inventory = new ArrayList<>();
+            liveNames.forEach((name, id) -> {
+                Container container = mock(Container.class);
+                when(container.getId()).thenReturn(id);
+                when(container.getNames()).thenReturn(new String[]{"/" + name});
+                Map<String, String> labels = new HashMap<>(ContainerStorageHelper.defaultLabels(config));
+                if (id.equals("foreign-namespace")) {
+                    labels.put("floci_namespace", "other");
+                }
+                when(container.getLabels()).thenReturn(labels);
+                inventory.add(container);
+            });
+            return inventory;
+        });
+        doAnswer(invocation -> {
+            liveNames.values().remove(invocation.getArgument(0));
+            return null;
+        }).when(lifecycle).removeIfExistsStrict(anyString(), eq(true));
         AtomicInteger created = new AtomicInteger();
         when(lifecycle.create(any())).thenAnswer(invocation -> {
             ContainerSpec spec = invocation.getArgument(0);
@@ -98,6 +133,10 @@ class SidecarReplacementTest {
             manager.begin().accept("repository");
             admitted = true;
             String original = manager.ready().apply("repository", "http://localhost:4566");
+            assertFalse(liveNames.containsValue("stale-fixed"), "Interrupted fixed-name start must be reclaimed");
+            assertFalse(liveNames.containsValue("stale-unique"), "Interrupted UUID start must be reclaimed");
+            assertTrue(liveNames.containsValue("unrelated"));
+            assertTrue(liveNames.containsValue("foreign-namespace"));
             assertEquals(original, manager.ready().apply("repository", "http://localhost:4566"));
             assertEquals(1, created.get(), "Healthy reuse must not create a new container");
             healthy.set(false);
@@ -122,7 +161,9 @@ class SidecarReplacementTest {
                 replacement.stop(0);
             }
         }
-        assertTrue(liveNames.isEmpty(), "Teardown must remove the replacement by its owned id");
+        assertEquals(2, liveNames.size(), "Teardown must leave other repositories and namespaces alone");
+        assertTrue(liveNames.containsValue("unrelated"));
+        assertTrue(liveNames.containsValue("foreign-namespace"));
     }
 
     private static HttpServer healthServer(AtomicBoolean healthy) throws Exception {

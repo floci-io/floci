@@ -182,6 +182,16 @@ public class PerKeyContainerPool {
         }
     }
 
+    /** Checks ownership during a starter's per-key critical section, including admitted predecessors. */
+    public boolean tracksContainer(String key, String containerId) {
+        StartedContainer current = containers.get(key);
+        if (current != null && current.containerId().equals(containerId)) {
+            return true;
+        }
+        List<StartedContainer> retired = retiredContainers.get(key);
+        return retired != null && retired.stream().anyMatch(container -> container.containerId().equals(containerId));
+    }
+
     /**
      * Whether a container for {@code key} is currently tracked by this pool, without starting one
      * for a key that has none: a plain map read, never {@link #ensureReady}'s own health probe or

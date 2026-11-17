@@ -103,6 +103,8 @@ public class BagetterSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String nugetRepositoryId) {
         String image = config.services().codeartifact().nugetImage();
+        SidecarContainerReconciler.reconcile(config, lifecycleManager, pool,
+                nugetRepositoryId, "floci-bagetter-" + nugetRepositoryId);
         String containerName = ContainerStorageHelper.dockerName(config, "floci-bagetter-" + nugetRepositoryId
                 + "-" + UUID.randomUUID());
 

@@ -125,6 +125,8 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String npmRepositoryId, String publicUrl) {
         String image = config.services().codeartifact().npmImage();
+        SidecarContainerReconciler.reconcile(config, lifecycleManager, pool,
+                npmRepositoryId, "floci-verdaccio-" + npmRepositoryId);
         String containerName = ContainerStorageHelper.dockerName(config, "floci-verdaccio-" + npmRepositoryId
                 + "-" + UUID.randomUUID());
 

@@ -147,6 +147,8 @@ public class KellnrSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String cargoRepositoryId) {
         String image = config.services().codeartifact().cargoImage();
+        SidecarContainerReconciler.reconcile(config, lifecycleManager, pool,
+                cargoRepositoryId, "floci-kellnr-" + cargoRepositoryId);
         String containerName = ContainerStorageHelper.dockerName(config, "floci-kellnr-" + cargoRepositoryId
                 + "-" + UUID.randomUUID());
 

@@ -94,6 +94,8 @@ public class PypiserverSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String pypiRepositoryId) {
         String image = config.services().codeartifact().pypiImage();
+        SidecarContainerReconciler.reconcile(config, lifecycleManager, pool,
+                pypiRepositoryId, "floci-pypiserver-" + pypiRepositoryId);
         String containerName = ContainerStorageHelper.dockerName(config, "floci-pypiserver-" + pypiRepositoryId
                 + "-" + UUID.randomUUID());
 
