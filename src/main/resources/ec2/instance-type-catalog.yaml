@@ -1206,3 +1206,798 @@ instanceTypes:
     networkCards:
       - networkCardIndex: 0
         maximumNetworkInterfaces: 4
+
+# AMD and Intel metadata: EC2 DescribeInstanceTypes, us-east-1, 2026-11-17.
+  - instanceType: c7a.12xlarge
+    processorManufacturer: AMD
+    vcpu: 48
+    memoryMib: 98304
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: c7a.16xlarge
+    processorManufacturer: AMD
+    vcpu: 64
+    memoryMib: 131072
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: c7a.24xlarge
+    processorManufacturer: AMD
+    vcpu: 96
+    memoryMib: 196608
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: c7a.2xlarge
+    processorManufacturer: AMD
+    vcpu: 8
+    memoryMib: 16384
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: c7a.32xlarge
+    processorManufacturer: AMD
+    vcpu: 128
+    memoryMib: 262144
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: c7a.48xlarge
+    processorManufacturer: AMD
+    vcpu: 192
+    memoryMib: 393216
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: c7a.4xlarge
+    processorManufacturer: AMD
+    vcpu: 16
+    memoryMib: 32768
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: c7a.8xlarge
+    processorManufacturer: AMD
+    vcpu: 32
+    memoryMib: 65536
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: c7a.large
+    processorManufacturer: AMD
+    vcpu: 2
+    memoryMib: 4096
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 3
+  - instanceType: c7a.medium
+    processorManufacturer: AMD
+    vcpu: 1
+    memoryMib: 2048
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 4
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 2
+  - instanceType: c7a.xlarge
+    processorManufacturer: AMD
+    vcpu: 4
+    memoryMib: 8192
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: c7i.12xlarge
+    processorManufacturer: Intel
+    vcpu: 48
+    memoryMib: 98304
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: c7i.16xlarge
+    processorManufacturer: Intel
+    vcpu: 64
+    memoryMib: 131072
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: c7i.24xlarge
+    processorManufacturer: Intel
+    vcpu: 96
+    memoryMib: 196608
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: c7i.2xlarge
+    processorManufacturer: Intel
+    vcpu: 8
+    memoryMib: 16384
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: c7i.48xlarge
+    processorManufacturer: Intel
+    vcpu: 192
+    memoryMib: 393216
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: c7i.4xlarge
+    processorManufacturer: Intel
+    vcpu: 16
+    memoryMib: 32768
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: c7i.8xlarge
+    processorManufacturer: Intel
+    vcpu: 32
+    memoryMib: 65536
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: c7i.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 4096
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 3
+  - instanceType: c7i.xlarge
+    processorManufacturer: Intel
+    vcpu: 4
+    memoryMib: 8192
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m7a.12xlarge
+    processorManufacturer: AMD
+    vcpu: 48
+    memoryMib: 196608
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m7a.16xlarge
+    processorManufacturer: AMD
+    vcpu: 64
+    memoryMib: 262144
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: m7a.24xlarge
+    processorManufacturer: AMD
+    vcpu: 96
+    memoryMib: 393216
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: m7a.2xlarge
+    processorManufacturer: AMD
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m7a.32xlarge
+    processorManufacturer: AMD
+    vcpu: 128
+    memoryMib: 524288
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: m7a.48xlarge
+    processorManufacturer: AMD
+    vcpu: 192
+    memoryMib: 786432
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: m7a.4xlarge
+    processorManufacturer: AMD
+    vcpu: 16
+    memoryMib: 65536
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m7a.8xlarge
+    processorManufacturer: AMD
+    vcpu: 32
+    memoryMib: 131072
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m7a.large
+    processorManufacturer: AMD
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 3
+  - instanceType: m7a.medium
+    processorManufacturer: AMD
+    vcpu: 1
+    memoryMib: 4096
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 4
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 2
+  - instanceType: m7a.xlarge
+    processorManufacturer: AMD
+    vcpu: 4
+    memoryMib: 16384
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m7i.12xlarge
+    processorManufacturer: Intel
+    vcpu: 48
+    memoryMib: 196608
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m7i.16xlarge
+    processorManufacturer: Intel
+    vcpu: 64
+    memoryMib: 262144
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: m7i.24xlarge
+    processorManufacturer: Intel
+    vcpu: 96
+    memoryMib: 393216
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: m7i.2xlarge
+    processorManufacturer: Intel
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m7i.48xlarge
+    processorManufacturer: Intel
+    vcpu: 192
+    memoryMib: 786432
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 15
+  - instanceType: m7i.4xlarge
+    processorManufacturer: Intel
+    vcpu: 16
+    memoryMib: 65536
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m7i.8xlarge
+    processorManufacturer: Intel
+    vcpu: 32
+    memoryMib: 131072
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m7i.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 3
+  - instanceType: m7i.xlarge
+    processorManufacturer: Intel
+    vcpu: 4
+    memoryMib: 16384
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 15
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m8a.12xlarge
+    processorManufacturer: AMD
+    vcpu: 48
+    memoryMib: 196608
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 12
+  - instanceType: m8a.16xlarge
+    processorManufacturer: AMD
+    vcpu: 64
+    memoryMib: 262144
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 16
+  - instanceType: m8a.24xlarge
+    processorManufacturer: AMD
+    vcpu: 96
+    memoryMib: 393216
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 16
+  - instanceType: m8a.2xlarge
+    processorManufacturer: AMD
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 40
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m8a.48xlarge
+    processorManufacturer: AMD
+    vcpu: 192
+    memoryMib: 786432
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 24
+  - instanceType: m8a.4xlarge
+    processorManufacturer: AMD
+    vcpu: 16
+    memoryMib: 65536
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 40
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m8a.8xlarge
+    processorManufacturer: AMD
+    vcpu: 32
+    memoryMib: 131072
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 40
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 10
+  - instanceType: m8a.large
+    processorManufacturer: AMD
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 20
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 3
+  - instanceType: m8a.medium
+    processorManufacturer: AMD
+    vcpu: 1
+    memoryMib: 4096
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 4
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 2
+  - instanceType: m8a.xlarge
+    processorManufacturer: AMD
+    vcpu: 4
+    memoryMib: 16384
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 20
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m8i.12xlarge
+    processorManufacturer: Intel
+    vcpu: 48
+    memoryMib: 196608
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 12
+  - instanceType: m8i.16xlarge
+    processorManufacturer: Intel
+    vcpu: 64
+    memoryMib: 262144
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 16
+  - instanceType: m8i.24xlarge
+    processorManufacturer: Intel
+    vcpu: 96
+    memoryMib: 393216
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 16
+  - instanceType: m8i.2xlarge
+    processorManufacturer: Intel
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4
+  - instanceType: m8i.32xlarge
+    processorManufacturer: Intel
+    vcpu: 128
+    memoryMib: 524288
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 24
+  - instanceType: m8i.48xlarge
+    processorManufacturer: Intel
+    vcpu: 192
+    memoryMib: 786432
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 24
+  - instanceType: m8i.4xlarge
+    processorManufacturer: Intel
+    vcpu: 16
+    memoryMib: 65536
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 8
+  - instanceType: m8i.8xlarge
+    processorManufacturer: Intel
+    vcpu: 32
+    memoryMib: 131072
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 50
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 10
+  - instanceType: m8i.96xlarge
+    processorManufacturer: Intel
+    vcpu: 384
+    memoryMib: 1572864
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 64
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 24
+  - instanceType: m8i.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 20
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 3
+  - instanceType: m8i.xlarge
+    processorManufacturer: Intel
+    vcpu: 4
+    memoryMib: 16384
+    supportedArchitectures:
+    - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 30
+    networkCards:
+    - networkCardIndex: 0
+      maximumNetworkInterfaces: 4

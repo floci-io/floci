@@ -21,12 +21,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 @QuarkusTest
-class Ec2GravitonCatalogIntegrationTest {
+class Ec2InstanceMetadataIntegrationTest {
 
     @ParameterizedTest
-    @CsvFileSource(resources = "/ec2/graviton-instance-types.csv", numLinesToSkip = 1)
-    void gravitonMetadataAndOfferingsMatchAwsSnapshot(String name, int vcpus, long memoryMib,
-            int maxInterfaces, int ipv4PerInterface, boolean encryptionInTransit, boolean currentGeneration) {
+    @CsvFileSource(resources = {"/ec2/graviton-instance-types.csv", "/ec2/x86-instance-types.csv"}, numLinesToSkip = 1)
+    void metadataAndOfferingsMatchAwsSnapshot(String name, int vcpus, long memoryMib,
+            int maxInterfaces, int ipv4PerInterface, boolean encryptionInTransit, boolean currentGeneration,
+            String architecture, String manufacturer) {
         try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
             List<InstanceTypeInfo> types = ec2.describeInstanceTypes(r -> r.instanceTypesWithStrings(name)).instanceTypes();
             assertThat(types, hasSize(1));
@@ -34,7 +35,8 @@ class Ec2GravitonCatalogIntegrationTest {
             assertEquals(name, type.instanceTypeAsString());
             assertEquals(vcpus, type.vCpuInfo().defaultVCpus());
             assertEquals(memoryMib, type.memoryInfo().sizeInMiB());
-            assertThat(type.processorInfo().supportedArchitecturesAsStrings(), contains("arm64"));
+            assertThat(type.processorInfo().supportedArchitecturesAsStrings(), contains(architecture));
+            assertEquals(manufacturer, type.processorInfo().manufacturer());
             assertEquals(currentGeneration, type.currentGeneration());
             assertFalse(type.instanceStorageSupported());
             assertFalse(type.burstablePerformanceSupported());

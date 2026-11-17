@@ -118,7 +118,7 @@ starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/py
 # EmrFlociContainerNightlyIntegrationTest runs a cluster's steps in it from Floci in a container, and
 # EmrPigStepsNightlyIntegrationTest a cluster's Pig steps.
 starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrServerlessCustomImageNightlyIntegrationTest \
-    EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest \
+    EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrNotebookExecutionNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 # EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
@@ -127,6 +127,7 @@ starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest E
 # Hadoop comes from it too).
 starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerDockerIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrSessionServerNightlyIntegrationTest \
+    EmrNotebookExecutionNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
 # The nightly EmrServerlessSparkConnectNightlyIntegrationTest runs a session's Spark Connect server, and its client, in
 # the emr-7.13.0 image, 3.7 GB, the first release with sessions.

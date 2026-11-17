@@ -321,7 +321,6 @@ AWS::EKS::Nodegroup	NodeRepairConfig	accepted and ignored
 AWS::EKS::Nodegroup	ReleaseVersion	accepted and ignored
 AWS::EKS::Nodegroup	RemoteAccess	accepted and ignored
 AWS::EKS::Nodegroup	ScalingConfig	accepted and ignored
-AWS::EKS::Nodegroup	Tags	accepted and ignored
 AWS::EKS::Nodegroup	Taints	accepted and ignored
 AWS::EKS::Nodegroup	UpdateConfig	accepted and ignored
 AWS::EKS::Nodegroup	Version	accepted and ignored

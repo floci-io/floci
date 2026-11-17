@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -232,6 +233,8 @@ final class EmrServiceFixture {
     private final List<Runnable> deliveries = new ArrayList<>();
     // The docker runner mode's step threads, not yet run; a session server's thread may add one too.
     private final List<Runnable> stepThreads = new CopyOnWriteArrayList<>();
+    // Whether the pool refuses what it is handed, as a pool shut down does.
+    volatile boolean threadsRefused;
     private boolean waking;
     final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
@@ -314,9 +317,9 @@ final class EmrServiceFixture {
         };
         service = sessionProbe == null
                 ? new EmrService(storage, config(false), regionResolver, publisher, clock, recorded, runner, bootstrap,
-                        clusterStorage, releaseImages, stepThreads::add, iam)
+                        clusterStorage, releaseImages, this::handToThread, iam)
                 : new EmrService(storage, config(false), regionResolver, publisher, clock, recorded, runner, bootstrap,
-                        clusterStorage, releaseImages, stepThreads::add, iam,
+                        clusterStorage, releaseImages, this::handToThread, iam,
                         new SparkConnectServers(runner, task -> Thread.ofPlatform().daemon().start(task), null,
                                 sessionProbe, clock));
     }
@@ -338,7 +341,7 @@ final class EmrServiceFixture {
      */
     EmrService restartReconciling(SparkJobRunner runner, EmrService.Wakeups wakeups) {
         return new EmrService(storage, config(true), new RegionResolver(REGION, ACCOUNT), publisher, clock, wakeups,
-                runner, bootstrap, clusterStorage, releaseImages, stepThreads::add, iam);
+                runner, bootstrap, clusterStorage, releaseImages, this::handToThread, iam);
     }
 
     /**
@@ -349,7 +352,7 @@ final class EmrServiceFixture {
         EmulatorConfig config = config(false);
         when(config.services().emr().hiveImageTemplate()).thenReturn(Optional.of(hiveImageTemplate));
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
-                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);
     }
 
@@ -361,7 +364,7 @@ final class EmrServiceFixture {
         EmulatorConfig config = config(false);
         when(config.services().emr().pig().enabled()).thenReturn(true);
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
-                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);
     }
 
@@ -380,6 +383,13 @@ final class EmrServiceFixture {
         when(config.services().emr().yarnMaxWorkerNodes()).thenReturn(4);
         when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
         return config;
+    }
+
+    private void handToThread(Runnable task) {
+        if (threadsRefused) {
+            throw new RejectedExecutionException("The pool takes no more threads");
+        }
+        stepThreads.add(task);
     }
 
     /** Runs the oldest step thread not yet run, as the docker runner mode's pool would. */

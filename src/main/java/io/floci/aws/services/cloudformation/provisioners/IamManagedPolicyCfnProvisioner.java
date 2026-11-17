@@ -179,9 +179,9 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("ManagedPolicyRoleTargets", String.join("\n", roleNames));
         r.getAttributes().put("ManagedPolicyUserTargets", String.join("\n", userNames));
         r.getAttributes().put("ManagedPolicyGroupTargets", String.join("\n", groupNames));
-        putTargetIds(r, "ManagedPolicyRoleTargetIds", roleTargetIds);
-        putTargetIds(r, "ManagedPolicyUserTargetIds", userTargetIds);
-        putTargetIds(r, "ManagedPolicyGroupTargetIds", groupTargetIds);
+        setTargetAttribute(r, "ManagedPolicyRoleTargetIds", roleTargetIds);
+        setTargetAttribute(r, "ManagedPolicyUserTargetIds", userTargetIds);
+        setTargetAttribute(r, "ManagedPolicyGroupTargetIds", groupTargetIds);
 
         String policyArn = policy.getArn();
         // On adopt, attachments from the previous pass are not this attempt's to undo.
@@ -291,12 +291,12 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         if (cleanupSucceeded && createdPolicy) {
             r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
         } else if (cleanupSucceeded) {
-            restoreTargetAttribute(r, "ManagedPolicyRoleTargets", previousRoleTargets);
-            restoreTargetAttribute(r, "ManagedPolicyUserTargets", previousUserTargets);
-            restoreTargetAttribute(r, "ManagedPolicyGroupTargets", previousGroupTargets);
-            restoreTargetAttribute(r, "ManagedPolicyRoleTargetIds", previousRoleTargetIds);
-            restoreTargetAttribute(r, "ManagedPolicyUserTargetIds", previousUserTargetIds);
-            restoreTargetAttribute(r, "ManagedPolicyGroupTargetIds", previousGroupTargetIds);
+            setTargetAttribute(r, "ManagedPolicyRoleTargets", previousRoleTargets);
+            setTargetAttribute(r, "ManagedPolicyUserTargets", previousUserTargets);
+            setTargetAttribute(r, "ManagedPolicyGroupTargets", previousGroupTargets);
+            setTargetAttribute(r, "ManagedPolicyRoleTargetIds", previousRoleTargetIds);
+            setTargetAttribute(r, "ManagedPolicyUserTargetIds", previousUserTargetIds);
+            setTargetAttribute(r, "ManagedPolicyGroupTargetIds", previousGroupTargetIds);
             if (previousDefaultVersionId != null) {
                 r.getAttributes().put("DefaultVersionId", previousDefaultVersionId);
             }
@@ -312,11 +312,11 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private static void restoreTargetAttribute(StackResource resource, String key, String previousValue) {
-        if (previousValue == null) {
+    private static void setTargetAttribute(StackResource resource, String key, String value) {
+        if (value == null) {
             resource.getAttributes().remove(key);
         } else {
-            resource.getAttributes().put(key, previousValue);
+            resource.getAttributes().put(key, value);
         }
     }
 
@@ -326,14 +326,6 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
             return null;
         }
         return entities.stream().map(idGetter).collect(Collectors.joining("\n"));
-    }
-
-    private static void putTargetIds(StackResource resource, String key, String ids) {
-        if (ids == null) {
-            resource.getAttributes().remove(key);
-        } else {
-            resource.getAttributes().put(key, ids);
-        }
     }
 
     private static boolean attemptPrincipalCleanup(RuntimeException failure, String policyArn, String type,

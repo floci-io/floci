@@ -1,6 +1,7 @@
 package io.floci.aws.services.athena;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -26,6 +27,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -33,6 +35,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -252,6 +256,30 @@ class AthenaServiceTest {
 
         assertEquals(List.of("varchar", "varchar"), columnInfo("SELECT 1 AS a, 2 AS b", "a,b\n1,2\n").stream()
                 .map(ResultSet.ColumnInfo::getType).toList());
+    }
+
+    @Test
+    void aQueryHoldingASecondStatementIsRejectedBeforeAnExecutionExists() {
+        String twoInserts = "INSERT INTO t VALUES (3); INSERT INTO t VALUES (4)";
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> service.startQueryExecution(twoInserts, "primary", null, null));
+
+        assertEquals("InvalidRequestException", rejected.getErrorCode());
+        assertEquals("Only one sql statement is allowed. Got: " + twoInserts, rejected.getMessage());
+        assertEquals(Map.of("AthenaErrorCode", "MALFORMED_QUERY"), rejected.getExtendedData());
+        assertEquals(List.of(), service.listQueryExecutions());
+        verifyNoInteractions(duckClient);
+    }
+
+    @Test
+    void aQueryIsRecordedWithoutTheSemicolonsAroundItAndRunsWithItsLastLineEnded() throws Exception {
+        String id = service.startQueryExecution("\n;SELECT 1 AS a -- done\n;\n", "primary", null,
+                new ResultConfiguration("s3://athena-results/"));
+        awaitState(id, QueryExecutionState.SUCCEEDED);
+
+        assertEquals("SELECT 1 AS a -- done", service.getQueryExecution(id).getQuery());
+        verify(duckClient).execute(eq("SELECT 1 AS a -- done\n"), any(), any(), any());
     }
 
     private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {
