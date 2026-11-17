@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
-import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -290,19 +289,9 @@ public class EmrNotebookExecutionService {
         }
     }
 
-    /**
-     * The execution's cluster as it now stands, or null once it is gone, which DescribeCluster answers with
-     * InvalidRequestException; any other failure is the caller's, not the execution's.
-     */
+    // The execution's cluster as it now stands, or null once it is gone; any other failure is the caller's.
     private EmrCluster clusterOf(EmrNotebookExecution execution) {
-        try {
-            return clusters.describeCluster(execution.getEngineId());
-        } catch (AwsException e) {
-            if ("InvalidRequestException".equals(e.getErrorCode())) {
-                return null;
-            }
-            throw e;
-        }
+        return clusters.findDescribedCluster(execution.getEngineId()).orElse(null);
     }
 
     private void end(EmrNotebookExecution execution, String status, String reason, Instant at) {

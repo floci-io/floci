@@ -136,8 +136,8 @@ class EmrNotebookExecutionServiceTest {
         EmrCluster cluster = clusterSpec("emr-6.15.0", NOTEBOOK_APPS);
         cluster.setId("j-FAILING");
         cluster.setState("WAITING");
-        when(failing.describeCluster("j-FAILING")).thenReturn(cluster)
-                .thenThrow(new IllegalStateException("storage unavailable"));
+        when(failing.describeCluster("j-FAILING")).thenReturn(cluster);
+        when(failing.findDescribedCluster("j-FAILING")).thenThrow(new IllegalStateException("storage unavailable"));
         EmrNotebookExecutionService service = new EmrNotebookExecutionService(store, failing,
                 new RegionResolver(REGION, ACCOUNT), fixture.clock, RUN);
         String id = service.start(request("j-FAILING")).getId();

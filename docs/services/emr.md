@@ -43,6 +43,10 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `DescribeNotebookExecution` | Returns a notebook execution's status, times and configuration |
 | `StopNotebookExecution` | Stops a notebook execution that has not ended |
 | `ListNotebookExecutions` | Lists notebook executions, newest first, by editor, status, time and cluster |
+| `CreatePersistentAppUI` | Makes a cluster's persistent application UIs; see [Application UIs](#application-uis) |
+| `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
+| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
+| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, a page of Floci's |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
 | `AddInstanceFleet` | Adds an instance fleet to a cluster |
@@ -297,6 +301,33 @@ notebook.
   `To` (by default now), filtered by `EditorId`, `Status` and `ExecutionEngineId`, newest first, at most 50 to a page
   ("Returns a maximum of 50 notebook executions") after a `Marker`, which resumes only the listing it came from: the
   same account, Region and filters.
+
+## Application UIs
+
+Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI, YARN timeline server
+or on-cluster UI: a presigned URL opens a page Floci serves at `/_aws/emr/app-ui` on its own address (`base-url`, or
+`hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for. The link is signed with a key
+Floci makes as it starts and lasts an hour, as no source gives AWS's; one changed, past its hour or given before
+Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
+
+* **CreatePersistentAppUI** takes an EMR cluster's ARN of the account in the Region as its `TargetResourceArn`; Floci
+  keeps none for an EMR on EKS virtual cluster. The persistent Spark History Server is there "Starting with Amazon
+  EMR version 5.25.0", and the "Tez UI and YARN timeline server persistent application interfaces are available
+  starting with Amazon EMR version 5.30.1": the UI's `PersistentAppUITypeList` names `SHS` for a cluster with Spark,
+  and, from 5.30.1, `TEZ` for one with Tez and `YTS` for one with Hadoop; a `ProfilerType` makes the one it names
+  (`TEZUI` the Tez UI) the UI's only type, and one the cluster has not is refused. A cluster with none of them, an earlier
+  release, a cluster with more than one primary node ("not available for EMR clusters with multiple master nodes"),
+  and a UI past the account's 200 active ones ("the default limit for active application UIs is 200": a UI whose
+  cluster has gone, or ended more than 30 days ago, as "The logs are available for 30 days after the application
+  ends", no longer counts) are refused, each with
+  `InvalidRequestException` in Floci's own wording. `RuntimeRoleEnabledCluster` is whether the cluster's security
+  configuration sets `AuthorizationConfiguration.IAMConfiguration.EnableApplicationScopedIAMRole`. The UI's id is
+  `p-` and 13 letters and digits, its `PersistentAppUIStatus` `ACTIVE` and its `AuthorId` the account, none of which
+  any source gives. A tag without its `Key`, "the minimum required information for a valid tag", is refused, as it is
+  for sessions, Studios and notebook executions.
+* **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
+  refused. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI, the `ResourceManager` by default, while
+  the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. Both are `PresignedURLReady` at once.
 
 ## Running steps
 

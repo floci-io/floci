@@ -1113,7 +1113,7 @@ class EmrServiceContainerStepsTest {
         ObjectMapper objectMapper = new ObjectMapper();
 
         JsonNode answer = (JsonNode) new EmrHandler(service, mock(EmrStudioService.class),
-                mock(EmrNotebookExecutionService.class), objectMapper)
+                mock(EmrNotebookExecutionService.class), mock(EmrAppUiService.class), objectMapper)
                 .handle("DescribeStep", objectMapper.createObjectNode().put("ClusterId", cluster.getId())
                         .put("StepId", cluster.getSteps().get(0).getId()), REGION).getEntity();
 
@@ -2042,7 +2042,7 @@ class EmrServiceContainerStepsTest {
         String waitingId = bootstrapping.service.runJobFlow(cluster("waiting", true), REGION).getId();
         ObjectMapper objectMapper = new ObjectMapper();
         EmrHandler handler = new EmrHandler(bootstrapping.service, mock(EmrStudioService.class),
-                mock(EmrNotebookExecutionService.class), objectMapper);
+                mock(EmrNotebookExecutionService.class), mock(EmrAppUiService.class), objectMapper);
         String page = ERROR_CODE_PAGES + "BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE.html";
         JsonNode expected = objectMapper.readTree("""
                 [{"ErrorCode": "BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE",

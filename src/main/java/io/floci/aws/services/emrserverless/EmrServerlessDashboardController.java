@@ -86,19 +86,19 @@ public class EmrServerlessDashboardController {
         JobRun run = view.run();
         List<String> lines = new ArrayList<>();
         lines.add("<table>");
-        row(lines, "Application", run.getApplicationId());
-        row(lines, "Job run", run.getJobRunId());
-        row(lines, "Name", run.getName());
-        row(lines, "Attempt", run.getAttempt() != null ? String.valueOf(run.getAttempt()) : null);
-        row(lines, "State", run.getState());
-        row(lines, "State details", run.getStateDetails());
-        row(lines, "Release label", run.getReleaseLabel());
-        row(lines, "Created", run.getCreatedAt() != null ? run.getCreatedAt().toString() : null);
-        row(lines, "Updated", run.getUpdatedAt() != null ? run.getUpdatedAt().toString() : null);
-        row(lines, "Driver logs in S3", view.logs().s3Folder());
-        row(lines, "Driver logs in CloudWatch Logs", view.logs().logGroup());
-        row(lines, "Driver stdout stream", view.logs().stdoutStream());
-        row(lines, "Driver stderr stream", view.logs().stderrStream());
+        Html.row(lines, "Application", run.getApplicationId());
+        Html.row(lines, "Job run", run.getJobRunId());
+        Html.row(lines, "Name", run.getName());
+        Html.row(lines, "Attempt", run.getAttempt() != null ? String.valueOf(run.getAttempt()) : null);
+        Html.row(lines, "State", run.getState());
+        Html.row(lines, "State details", run.getStateDetails());
+        Html.row(lines, "Release label", run.getReleaseLabel());
+        Html.row(lines, "Created", run.getCreatedAt() != null ? run.getCreatedAt().toString() : null);
+        Html.row(lines, "Updated", run.getUpdatedAt() != null ? run.getUpdatedAt().toString() : null);
+        Html.row(lines, "Driver logs in S3", view.logs().s3Folder());
+        Html.row(lines, "Driver logs in CloudWatch Logs", view.logs().logGroup());
+        Html.row(lines, "Driver stdout stream", view.logs().stdoutStream());
+        Html.row(lines, "Driver stderr stream", view.logs().stderrStream());
         lines.add("</table>");
         lines.add("<p>" + Html.escape(NO_UI) + "</p>");
         return lines;
@@ -107,16 +107,16 @@ public class EmrServerlessDashboardController {
     private static List<String> body(Session session) {
         List<String> lines = new ArrayList<>();
         lines.add("<table>");
-        row(lines, "Application", session.getApplicationId());
-        row(lines, "Session", session.getSessionId());
-        row(lines, "Name", session.getName());
-        row(lines, "State", session.getState());
-        row(lines, "State details", session.getStateDetails());
-        row(lines, "Release label", session.getReleaseLabel());
-        row(lines, "Created", text(session.getCreatedAt()));
-        row(lines, "Started", text(session.getStartedAt()));
-        row(lines, "Idle since", text(session.getIdleSince()));
-        row(lines, "Ended", text(session.getEndedAt()));
+        Html.row(lines, "Application", session.getApplicationId());
+        Html.row(lines, "Session", session.getSessionId());
+        Html.row(lines, "Name", session.getName());
+        Html.row(lines, "State", session.getState());
+        Html.row(lines, "State details", session.getStateDetails());
+        Html.row(lines, "Release label", session.getReleaseLabel());
+        Html.row(lines, "Created", text(session.getCreatedAt()));
+        Html.row(lines, "Started", text(session.getStartedAt()));
+        Html.row(lines, "Idle since", text(session.getIdleSince()));
+        Html.row(lines, "Ended", text(session.getEndedAt()));
         lines.add("</table>");
         lines.add("<p>" + Html.escape(NO_SESSION_UI) + "</p>");
         return lines;
@@ -126,18 +126,7 @@ public class EmrServerlessDashboardController {
         return instant != null ? instant.toString() : null;
     }
 
-    // A row of the table, left out when the run or session has no such value.
-    private static void row(List<String> lines, String name, String value) {
-        if (value != null && !value.isEmpty()) {
-            lines.add("<tr><th>" + Html.escape(name) + "</th><td>" + Html.escape(value) + "</td></tr>");
-        }
-    }
-
     private static Response page(int status, String title, List<String> body) {
-        String html = "<!doctype html>\n"
-                + "<html lang=\"en\"><head><meta charset=\"utf-8\"><title>" + Html.escape(title)
-                + "</title></head>\n<body>\n<h1>" + Html.escape(title) + "</h1>\n"
-                + String.join("\n", body) + "\n</body></html>\n";
-        return Response.status(status).type(MediaType.TEXT_HTML).entity(html).build();
+        return Response.status(status).type(MediaType.TEXT_HTML).entity(Html.page(title, body)).build();
     }
 }

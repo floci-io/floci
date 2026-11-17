@@ -20,6 +20,7 @@ import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrNotebookExecution;
+import io.floci.aws.services.emr.model.EmrPersistentAppUi;
 import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emr.model.EmrStudio;
@@ -55,14 +56,16 @@ public class EmrHandler {
     private final EmrService service;
     private final EmrStudioService studios;
     private final EmrNotebookExecutionService notebookExecutions;
+    private final EmrAppUiService appUis;
     private final ObjectMapper objectMapper;
 
     @Inject
     public EmrHandler(EmrService service, EmrStudioService studios, EmrNotebookExecutionService notebookExecutions,
-                      ObjectMapper objectMapper) {
+                      EmrAppUiService appUis, ObjectMapper objectMapper) {
         this.service = service;
         this.studios = studios;
         this.notebookExecutions = notebookExecutions;
+        this.appUis = appUis;
         this.objectMapper = objectMapper;
     }
 
@@ -102,6 +105,10 @@ public class EmrHandler {
                 case "DescribeNotebookExecution" -> handleDescribeNotebookExecution(request);
                 case "StopNotebookExecution" -> handleStopNotebookExecution(request);
                 case "ListNotebookExecutions" -> handleListNotebookExecutions(request);
+                case "CreatePersistentAppUI" -> handleCreatePersistentAppUi(request);
+                case "DescribePersistentAppUI" -> handleDescribePersistentAppUi(request);
+                case "GetPersistentAppUIPresignedURL" -> handleGetPersistentAppUiPresignedUrl(request);
+                case "GetOnClusterAppUIPresignedURL" -> handleGetOnClusterAppUiPresignedUrl(request);
                 case "AddInstanceGroups" -> handleAddInstanceGroups(request);
                 case "ListInstanceGroups" -> handleListInstanceGroups(request);
                 case "AddInstanceFleet" -> handleAddInstanceFleet(request);
@@ -526,7 +533,10 @@ public class EmrHandler {
         }
     }
 
-    // A TagList member: each Tag's Key and Value strings.
+    /**
+     * A TagList member: each Tag's Key and Value strings. A tag without its Key, "the minimum required information for
+     * a valid tag", is refused, in Floci's own wording.
+     */
     private static Map<String, String> tagList(JsonNode value, String member) {
         Map<String, String> tags = new LinkedHashMap<>();
         if (value.isMissingNode() || value.isNull()) {
@@ -540,9 +550,10 @@ public class EmrHandler {
                 throw malformed(member + " must be a list of tags");
             }
             String key = string(tag, "Key");
-            if (key != null) {
-                tags.put(key, string(tag, "Value"));
+            if (key == null) {
+                throw new AwsException("InvalidRequestException", "A tag in " + member + " has no Key.", 400);
             }
+            tags.put(key, string(tag, "Value"));
         }
         return tags;
     }
@@ -846,6 +857,62 @@ public class EmrHandler {
             values.put(entry.getKey(), entry.getValue().asText());
         });
         return values;
+    }
+
+    // ──────────────────────────── Application UIs ────────────────────────────
+
+    private Response handleCreatePersistentAppUi(JsonNode request) {
+        JsonNode containers = request.path("EMRContainersConfig");
+        if (!containers.isMissingNode() && !containers.isNull()) {
+            requireStructure(containers, "EMRContainersConfig");
+            string(containers, "JobRunId");
+        }
+        string(request, "XReferer");
+        EmrAppUiService.Created created = appUis.create(string(request, "TargetResourceArn"),
+                string(request, "ProfilerType"), tagList(request.path("Tags"), "Tags"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("PersistentAppUIId", created.appUi().getId());
+        response.put("RuntimeRoleEnabledCluster", created.runtimeRoleEnabledCluster());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribePersistentAppUi(JsonNode request) {
+        EmrPersistentAppUi appUi = appUis.describe(string(request, "PersistentAppUIId"));
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("PersistentAppUIId", appUi.getId());
+        ArrayNode types = node.putArray("PersistentAppUITypeList");
+        appUi.getTypes().forEach(types::add);
+        node.put("PersistentAppUIStatus", appUi.getStatus());
+        node.put("AuthorId", appUi.getAuthorId());
+        putEpoch(node, "CreationTime", appUi.getCreationTime());
+        putEpoch(node, "LastModifiedTime", appUi.getLastModifiedTime());
+        putIfSet(node, "LastStateChangeReason", appUi.getLastStateChangeReason());
+        node.set("Tags", tagArray(appUi.getTags()));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("PersistentAppUI", node);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetPersistentAppUiPresignedUrl(JsonNode request) {
+        bool(request, "AuthProxyCall");
+        string(request, "ExecutionRoleArn");
+        return presignedUrl(appUis.persistentUrl(string(request, "PersistentAppUIId"),
+                string(request, "PersistentAppUIType"), string(request, "ApplicationId")));
+    }
+
+    private Response handleGetOnClusterAppUiPresignedUrl(JsonNode request) {
+        string(request, "ExecutionRoleArn");
+        Boolean dryRun = bool(request, "DryRun");
+        return presignedUrl(appUis.onClusterUrl(string(request, "ClusterId"), string(request, "OnClusterAppUIType"),
+                string(request, "ApplicationId"), Boolean.TRUE.equals(dryRun)));
+    }
+
+    // A presigned URL's answer: ready at once, and the URL, none for a dry run.
+    private Response presignedUrl(String url) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("PresignedURLReady", true);
+        putIfSet(response, "PresignedURL", url);
+        return Response.ok(response).build();
     }
 
     // ──────────────────────────── Instance groups / fleets ────────────────────────────
