@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -72,6 +73,66 @@ class MemoryDbAuthProxyTest {
         proxy.initializeBackend(socket, "default");
 
         verifyNoInteractions(socket);
+    }
+
+    @Test
+    void aSessionOfAClusterWithAnAclOfItsOwnSignsInAgainAsItsNewUsersBackendUser() throws Exception {
+        MemoryDbAuthProxy proxy = proxy(true, Map.of("reader", "on ~app:* -@all +get"));
+
+        List<String> credentials = proxy.backendCredentials("reader");
+
+        List<String> rules = backend.commands().get(3);
+        assertEquals(List.of("ACL", "SETUSER", "reader", "reset", "on", "~app:*", "-@all", "+get"), rules.subList(0, 8));
+        assertEquals(List.of("reader", rules.get(rules.indexOf("resetpass") + 1).substring(1)), credentials);
+    }
+
+    @Test
+    void aSessionOfAnOpenAccessClusterSignsInAgainAsTheBackendsOwnDefaultUser() throws Exception {
+        MemoryDbAuthProxy proxy = proxy(false, Map.of());
+
+        assertEquals("default", proxy.backendCredentials("reader").get(0));
+        assertEquals(List.of(), backend.commands());
+    }
+
+    @Test
+    void credentialsAreCheckedAfterSignInUnlessTheClusterIsOpenAccess() {
+        assertTrue(proxy(true, Map.of()).checksCredentials());
+        MemoryDbAuthProxy.AuthValidator passwordless = (username, secret) -> true;
+        assertFalse(new MemoryDbAuthProxy("open", false, "localhost", backend.port(), passwordless)
+                .checksCredentials());
+        MemoryDbAuthProxy ownAclWithoutPasswords = new MemoryDbAuthProxy("own", false, "localhost", backend.port(),
+                new MemoryDbAuthProxy.AuthValidator() {
+                    @Override
+                    public boolean authenticate(String username, String secret) {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean enforcesAccessStrings() {
+                        return true;
+                    }
+                });
+        assertTrue(ownAclWithoutPasswords.checksCredentials(),
+                "a user of an ACL without passwords can still sign in again as another user");
+    }
+
+    @Test
+    void theAclDecidesWhichUsersSignInWithIam() {
+        MemoryDbAuthProxy proxy = new MemoryDbAuthProxy("cluster", true, "localhost", backend.port(),
+                new MemoryDbAuthProxy.AuthValidator() {
+                    @Override
+                    public boolean authenticate(String username, String secret) {
+                        return true;
+                    }
+
+                    @Override
+                    public boolean signsInWithIam(String username) {
+                        return "iam-user".equals(username);
+                    }
+                });
+
+        assertTrue(proxy.signsInWithIam("iam-user"));
+        assertFalse(proxy.signsInWithIam("reader"));
     }
 
     private void initialize(MemoryDbAuthProxy proxy, String username) throws IOException {

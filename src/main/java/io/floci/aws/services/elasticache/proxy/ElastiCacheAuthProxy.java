@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.SequenceInputStream;
 import java.net.Socket;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -87,9 +88,29 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
     @Override
     protected void initializeBackend(Socket backend, String username) throws IOException {
-        boolean members = passwordValidator.hasMembers();
-        if (!members && !backendAcl.initialized()) {
+        if (!controlsBackendAccess()) {
             return;
+        }
+        String name = userOrDefault(username);
+        backendAcl.authenticate(backend, name, accessString(name));
+    }
+
+    @Override
+    protected List<String> backendCredentials(String username) throws IOException {
+        if (!controlsBackendAccess()) {
+            return super.backendCredentials(username);
+        }
+        String name = userOrDefault(username);
+        return backendAcl.credentials(backendHost(), backendPort(), name, accessString(name));
+    }
+
+    /**
+     * Whether sessions run as private backend users: once the cache has users, and for as long as the
+     * backend keeps its default user off. Readies a cluster's replication before its first such session.
+     */
+    private boolean controlsBackendAccess() throws IOException {
+        if (!passwordValidator.hasMembers() && !backendAcl.initialized()) {
+            return false;
         }
         if (!backendAcl.initialized() && passwordValidator.clusterMode()) {
             try {
@@ -99,9 +120,11 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
                 throw new IOException("Cluster replication is not ready for access strings", e);
             }
         }
-        String name = username == null || username.isEmpty() ? "default" : username;
-        backendAcl.authenticate(backend, name,
-                () -> members ? passwordValidator.accessString(name) : "on ~* &* +@all");
+        return true;
+    }
+
+    private Supplier<String> accessString(String name) {
+        return () -> passwordValidator.hasMembers() ? passwordValidator.accessString(name) : "on ~* &* +@all";
     }
 
     /**
@@ -109,7 +132,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
      * failure is logged and the sessions keep their old permissions until the user authenticates again.
      */
     public void refreshUser(String username) {
-        String name = username == null || username.isEmpty() ? "default" : username;
+        String name = userOrDefault(username);
         try {
             backendAcl.reapply(backendHost(), backendPort(), name, () -> passwordValidator.accessString(name));
         } catch (IOException e) {
@@ -131,8 +154,25 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     }
 
     @Override
+    protected boolean checksCredentials() {
+        return passwordValidator.hasMembers() || currentAuthMode() != AuthMode.NO_AUTH;
+    }
+
+    @Override
+    protected boolean signsInWithIam(String username) {
+        if (!passwordValidator.hasMembers()) {
+            return currentAuthMode() == AuthMode.IAM;
+        }
+        AuthMode userMode = passwordValidator.memberAuthMode(userOrDefault(username));
+        if (userMode == null && username != null) {
+            userMode = passwordValidator.memberAuthMode(username);
+        }
+        return userMode == AuthMode.IAM;
+    }
+
+    @Override
     protected boolean authenticate(String username, String password) {
-        String effectiveUser = (username == null || username.isEmpty()) ? "default" : username;
+        String effectiveUser = userOrDefault(username);
         if (passwordValidator.hasMembers()) {
             if ("default".equals(effectiveUser)) {
                 if (passwordValidator.validatePassword(username, password)) {

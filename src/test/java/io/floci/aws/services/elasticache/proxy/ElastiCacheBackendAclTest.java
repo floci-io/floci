@@ -76,6 +76,83 @@ class ElastiCacheBackendAclTest {
     }
 
     @Test
+    void aSessionThatSignsInAgainGetsItsNewUsersCredentialsOverAConnectionOfTheirOwn() throws Exception {
+        login("app", "on ~app:* -@all +get");
+        int connections = server.connections();
+        int afterLogin = commands.size();
+
+        List<String> credentials = acl.credentials("localhost", server.port(), "reader",
+                () -> "on ~reports:* -@all +get");
+
+        assertEquals(connections + 1, server.connections());
+        assertEquals(List.of("reader", passwordOf("reader")), credentials);
+        List<List<String>> sent = commands.subList(afterLogin, commands.size());
+        assertTrue(sent.get(0).get(1).startsWith("floci-admin-"), "the rules are installed as the administrator");
+        assertEquals(List.of("ACL", "SETUSER", "reader", "reset", "on", "~reports:*", "-@all", "+get"),
+                sent.get(1).subList(0, 8));
+        assertEquals(List.of("AUTH", "reader", passwordOf("reader")), sent.get(2));
+    }
+
+    @Test
+    void theDefaultUserSignsInAgainAsItsPrivateBackendUser() throws Exception {
+        login("app", "on ~app:* -@all +get");
+
+        List<String> credentials = acl.credentials("localhost", server.port(), "default", () -> "on ~* +@all");
+
+        assertTrue(credentials.get(0).startsWith("floci-default-"), "never the backend's own default user");
+        assertEquals(passwordOf(credentials.get(0)), credentials.get(1));
+    }
+
+    @Test
+    void aUserWhoseRulesTheBackendRefusesGetsNoCredentials() throws Exception {
+        login("app", "on ~app:* -@all +get");
+        refuseNextCommands = true;
+
+        assertThrows(IOException.class, () -> acl.credentials("localhost", server.port(), "reader",
+                () -> "on ~reports:* -@all +get"));
+    }
+
+    @Test
+    void aCacheWithUsersSwitchesASessionToTheBackendUserOfItsNewUser() throws Exception {
+        ElastiCacheAuthProxy.PasswordValidator validator = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        when(validator.hasMembers()).thenReturn(true);
+        when(validator.accessString("reader")).thenReturn("on ~reports:* -@all +get");
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("grp-0001", AuthMode.PASSWORD, "localhost",
+                server.port(), validator, mock(SigV4Validator.class));
+
+        List<String> credentials = proxy.backendCredentials("reader");
+
+        assertEquals("reader", credentials.get(0));
+        assertEquals(List.of("ACL", "SETUSER", "reader", "reset", "on", "~reports:*", "-@all", "+get"),
+                setUserOf("reader").subList(0, 8));
+        assertEquals(passwordOf("reader"), credentials.get(1));
+    }
+
+    @Test
+    void aCacheWithoutUsersSwitchesASessionToTheBackendsOwnDefaultUser() throws Exception {
+        ElastiCacheAuthProxy.PasswordValidator validator = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("grp-0001", AuthMode.PASSWORD, "localhost",
+                server.port(), validator, mock(SigV4Validator.class));
+
+        List<String> credentials = proxy.backendCredentials(null);
+
+        assertEquals("default", credentials.get(0), "an auth-token cache's backend has no users of its own");
+        assertEquals(List.of(), commands);
+    }
+
+    @Test
+    void aClusterNodeReadiesItsReplicationBeforeASessionSwitchesUser() throws Exception {
+        ElastiCacheAuthProxy.PasswordValidator validator = clusterValidator(true);
+        ElastiCacheAuthProxy proxy = clusterNodeProxy(validator);
+
+        proxy.backendCredentials("app");
+
+        InOrder order = inOrder(validator);
+        order.verify(validator).prepareClusterReplication();
+        order.verify(validator, atLeastOnce()).accessString("app");
+    }
+
+    @Test
     void nothingIsSentBeforeTheBackendIsSetUp() throws Exception {
         acl.reapply("localhost", server.port(), "app", "on ~* +@all");
 

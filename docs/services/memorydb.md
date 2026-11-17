@@ -15,7 +15,8 @@ Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only
 A cluster bound to an ACL of its own runs each connection under the `AccessString` of the user it
 signs in as. The proxy installs that access string on a private backend ACL user, and the backend
 answers a command, key or channel outside it with `NOPERM`, as on AWS. A connection that does not
-authenticate runs as the ACL's `default` user. Once the first connection is set up, the backend's
+authenticate runs as the ACL's `default` user, but signing in as `default` is refused: AWS lets the
+built-in `default` user belong only to the `open-access` ACL. Once the first connection is set up, the backend's
 own `default` account is disabled, so an `AUTH` sent after the proxy has bridged the connection
 cannot reach unrestricted permissions.
 
@@ -23,6 +24,13 @@ The backend user is the same kind ElastiCache uses, so the same commands are den
 session, and an access string with an ACL selector is refused. See
 [User access strings](elasticache.md#user-access-strings) on the ElastiCache page.
 Clusters on the `open-access` ACL are relayed without a backend ACL user, as before.
+
+A connection that sends `AUTH` or `HELLO` with `AUTH` again after it has signed in is checked by the
+proxy as at sign-in, and switches to the new user's access string, as described in
+[Signing in again](elasticache.md#signing-in-again). As on AWS, a connection signed in with an IAM
+token is closed 12 hours after it signed in unless it sends a new token, and IAM authentication is
+refused inside `MULTI`/`EXEC`, with the same reply as ElastiCache (see
+[IAM connection lifetime and transactions](elasticache.md#iam-connection-lifetime-and-transactions)).
 
 ## Supported Management Actions
 
