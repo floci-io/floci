@@ -907,6 +907,7 @@ class PaymentCryptographyIntegrationTest {
     void aKeyIsStoppedAndStartedAgain() {
         String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
                 .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
 
         call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -924,6 +925,7 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200)
                     .body("Key.Enabled", equalTo(false))
                     .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
 
         assertKeyIsStarted(call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}"));
     }
@@ -935,6 +937,8 @@ class PaymentCryptographyIntegrationTest {
         String arn = call("CreateKey", createReplicatedKeyBody("[\"us-west-2\"]"))
                 .then().statusCode(200)
                 .extract().path("Key.KeyArn");
+        // The replica goes with the primary, so one delete takes both.
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
         String replicaArn = arn.replace(":us-east-1:", ":us-west-2:");
 
         call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
