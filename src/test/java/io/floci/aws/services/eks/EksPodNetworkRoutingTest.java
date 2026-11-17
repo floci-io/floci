@@ -194,7 +194,7 @@ class EksPodNetworkRoutingTest {
     /**
      * An older Floci answered on the address with a socat relay on the node's loopback, which would answer again once
      * the rules in front of it went: the removal stops it, while its PID file still names it, and takes its address
-     * off the loopback.
+     * off the loopback. The removal runs traced, so the test sees the {@code kill} it sends.
      */
     @Test
     void podIdentityRemovalRetiresTheRelayAnOlderFlociRan(@TempDir Path dir) throws Exception {
@@ -208,10 +208,11 @@ class EksPodNetworkRoutingTest {
         try {
             Files.writeString(RELAY_PID_FILE, relay.pid() + "\n");
 
-            int exit = HelperShellFixture.run(EksPodNetworkRouting.buildPodIdentityRemoveCommand(), dir,
+            int exit = HelperShellFixture.run(traced(EksPodNetworkRouting.buildPodIdentityRemoveCommand()), dir,
                     Map.of("PATH", bin.toString()));
 
             assertEquals(0, exit, HelperShellFixture.output(dir));
+            assertEquals(List.of("kill " + relay.pid()), tracedKills(dir), HelperShellFixture.output(dir));
             assertTrue(relay.waitFor(10, TimeUnit.SECONDS), "the relay is still running");
             assertFalse(Files.exists(RELAY_PID_FILE));
             assertEquals(List.of("addr show dev lo", "addr del 169.254.170.23/32 dev lo"),
@@ -222,7 +223,10 @@ class EksPodNetworkRoutingTest {
         }
     }
 
-    /** A PID file that names another process, here a socat relaying IMDS, leaves that process running. */
+    /**
+     * A PID file that names another process, here a socat relaying IMDS, leaves that process running: the traced
+     * removal sends it no {@code kill}.
+     */
     @Test
     void podIdentityRemovalLeavesTheProcessAStalePidFileNames(@TempDir Path dir) throws Exception {
         Path bin = fakeStockNode(dir);
@@ -230,11 +234,12 @@ class EksPodNetworkRoutingTest {
         try {
             Files.writeString(RELAY_PID_FILE, imdsRelay.pid() + "\n");
 
-            int exit = HelperShellFixture.run(EksPodNetworkRouting.buildPodIdentityRemoveCommand(), dir,
+            int exit = HelperShellFixture.run(traced(EksPodNetworkRouting.buildPodIdentityRemoveCommand()), dir,
                     Map.of("PATH", bin.toString()));
 
             assertEquals(0, exit, HelperShellFixture.output(dir));
-            assertFalse(imdsRelay.waitFor(1, TimeUnit.SECONDS), "the IMDS relay was stopped");
+            assertEquals(List.of(), tracedKills(dir), HelperShellFixture.output(dir));
+            assertTrue(imdsRelay.isAlive(), "the IMDS relay was stopped");
             assertFalse(Files.exists(RELAY_PID_FILE));
         } finally {
             imdsRelay.destroyForcibly();
@@ -352,6 +357,21 @@ class EksPodNetworkRoutingTest {
         }
         return new ProcessBuilder(relay.toString(), "TCP-LISTEN:80,bind=" + bindIp + ",fork,reuseaddr",
                 "TCP:172.18.0.9:4566").start();
+    }
+
+    /** {@code command}, an {@code sh -c} one, run with each command it runs printed to its output ({@code sh -x}). */
+    private static String[] traced(String[] command) {
+        List<String> arguments = new ArrayList<>(List.of(command));
+        arguments.add(1, "-x");
+        return arguments.toArray(String[]::new);
+    }
+
+    /** The {@code kill} commands a {@link #traced} shell ran, as its trace prints them: {@code kill <pid>}. */
+    private static List<String> tracedKills(Path dir) throws Exception {
+        return HelperShellFixture.output(dir).lines()
+                .filter(line -> line.matches("\\++ kill .*"))
+                .map(line -> line.substring(line.indexOf(' ') + 1))
+                .toList();
     }
 
     private static List<String> calls(Path record) throws Exception {

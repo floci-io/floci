@@ -69,6 +69,8 @@ class EksPodIdentityAgentDockerIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String POD = "pod-identity-client";
     private static final String CREDENTIALS_URL = "http://169.254.170.23/v1/credentials";
+    private static final Duration API_SERVER_TIMEOUT = Duration.ofSeconds(90);
+    private static final Duration POD_TIMEOUT = Duration.ofSeconds(120);
 
     @Inject
     DockerClient dockerClient;
@@ -145,7 +147,7 @@ class EksPodIdentityAgentDockerIntegrationTest {
                 + UUID.randomUUID().toString().replace("-", "").toUpperCase(Locale.ROOT);
         cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
 
-        node = EksTestNode.start(dockerClient, eksClusterManager, cluster);
+        node = EksTestNode.start(dockerClient, eksClusterManager, cluster, API_SERVER_TIMEOUT);
         cluster.setStatus(ClusterStatus.ACTIVE);
         eksService.putClusterForAccount(ACCOUNT, cluster);
 
@@ -196,7 +198,7 @@ class EksPodIdentityAgentDockerIntegrationTest {
                     image: alpine:3.21
                     command: ["sleep", "3600"]
                 """.formatted(POD));
-        node.awaitPodRunning(POD);
+        node.awaitPodRunning(POD, POD_TIMEOUT);
     }
 
     private void createAgent(String clusterName) {
@@ -267,8 +269,8 @@ class EksPodIdentityAgentDockerIntegrationTest {
         dockerClient.stopContainerCmd(containerId).withTimeout(30).exec();
         eksClusterManager.restoreCluster(cluster);
         assertEquals(containerId, cluster.getContainerId(), "the surviving node is adopted, not replaced");
-        node.awaitApiServer();
-        node.awaitPodRunning(POD);
+        node.awaitApiServer(API_SERVER_TIMEOUT);
+        node.awaitPodRunning(POD, POD_TIMEOUT);
     }
 
     private static String auth() {

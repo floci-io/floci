@@ -42,14 +42,15 @@ public final class EksTestNode {
     }
 
     /**
-     * Starts {@code cluster}'s node and waits until its API server answers and the controller manager has created the
-     * default service account, which a pod needs before it can be created.
+     * Starts {@code cluster}'s node and waits, up to {@code apiServerTimeout}, until its API server answers, then until
+     * the controller manager has created the default service account, which a pod needs before it can be created.
      */
-    public static EksTestNode start(DockerClient dockerClient, EksClusterManager eksClusterManager, Cluster cluster) {
+    public static EksTestNode start(DockerClient dockerClient, EksClusterManager eksClusterManager, Cluster cluster,
+                                    Duration apiServerTimeout) {
         eksClusterManager.startCluster(cluster);
         assertNotNull(cluster.getContainerId(), "Container ID must not be null");
         EksTestNode node = new EksTestNode(dockerClient, eksClusterManager, cluster);
-        node.awaitApiServer();
+        node.awaitApiServer(apiServerTimeout);
         eksClusterManager.finalizeCluster(cluster);
         await("default serviceaccount created").atMost(Duration.ofSeconds(30)).pollInterval(POLL_INTERVAL)
                 .until(() -> node.kubectl("get", "serviceaccount", "default").exitCode() == 0);
@@ -61,9 +62,9 @@ public final class EksTestNode {
         return cluster.getContainerId();
     }
 
-    /** Waits until the node's API server answers, as after the node starts again. */
-    public void awaitApiServer() {
-        await("k3s API server ready").atMost(Duration.ofSeconds(90)).pollInterval(POLL_INTERVAL)
+    /** Waits up to {@code timeout} until the node's API server answers, as after the node starts again. */
+    public void awaitApiServer(Duration timeout) {
+        await("k3s API server ready").atMost(timeout).pollInterval(POLL_INTERVAL)
                 .until(() -> eksClusterManager.isReady(cluster));
     }
 
@@ -73,9 +74,12 @@ public final class EksTestNode {
         assertEquals(0, applied.exitCode(), "kubectl apply failed: " + applied.stderr());
     }
 
-    /** Waits until pod {@code pod} of the default namespace runs, reporting its container's state if it doesn't. */
-    public void awaitPodRunning(String pod) {
-        await("pod " + pod + " running").atMost(Duration.ofSeconds(120)).pollInterval(POLL_INTERVAL)
+    /**
+     * Waits up to {@code timeout} until pod {@code pod} of the default namespace runs, reporting its container's state
+     * if it doesn't.
+     */
+    public void awaitPodRunning(String pod, Duration timeout) {
+        await("pod " + pod + " running").atMost(timeout).pollInterval(POLL_INTERVAL)
                 .untilAsserted(() -> assertEquals("Running",
                         kubectl("get", "pod", pod, "-o", "jsonpath={.status.phase}").stdout().trim(),
                         () -> "the pod must start, but its container reports: " + kubectl("get", "pod", pod, "-o",

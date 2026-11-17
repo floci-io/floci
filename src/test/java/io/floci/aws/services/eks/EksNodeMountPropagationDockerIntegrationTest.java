@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.UUID;
 
 /**
@@ -61,7 +62,7 @@ class EksNodeMountPropagationDockerIntegrationTest {
     @Test
     void aPodAskingForMountPropagationStartsOnTheNode() {
         cluster = EksTestNode.cluster(ACCOUNT, "mount-prop-" + UUID.randomUUID().toString().substring(0, 8));
-        EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster);
+        EksTestNode node = EksTestNode.start(dockerClient, eksClusterManager, cluster, Duration.ofSeconds(60));
 
         node.apply("""
                 apiVersion: v1
@@ -94,6 +95,6 @@ class EksNodeMountPropagationDockerIntegrationTest {
                       path: /
                 """.formatted(POD));
 
-        node.awaitPodRunning(POD);
+        node.awaitPodRunning(POD, Duration.ofSeconds(90));
     }
 }
