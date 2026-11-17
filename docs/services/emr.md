@@ -47,6 +47,7 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
 | `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
 | `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, a page of Floci's |
+| `GetClusterSessionCredentials` | Returns temporary basic credentials for a runtime role enabled cluster; see [Application UIs](#application-uis) |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
 | `AddInstanceFleet` | Adds an instance fleet to a cluster |
@@ -328,6 +329,15 @@ Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
 * **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
   refused. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI, the `ResourceManager` by default, while
   the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. Both are `PresignedURLReady` at once.
+* **GetClusterSessionCredentials** gives "temporary, HTTP basic credentials that are associated with a given runtime
+  IAM role and used by a cluster with fine-grained access control activated": a random username and password that
+  expire in an hour, as no source gives AWS's lifetime, for a `RUNNING` or `WAITING` cluster on `emr-6.11.0` or later
+  (from which a Workspace attaches to a cluster with a runtime role) whose security configuration sets
+  `EnableApplicationScopedIAMRole` as the cluster was created (deleting or reusing the configuration's name later
+  changes nothing, for this and for `RuntimeRoleEnabledCluster`). A request without an `ExecutionRoleArn`, which the
+  model leaves optional, is refused too, as the credentials are "associated with a given runtime IAM role". Anything
+  else is refused with `InvalidRequestException`, in Floci's own wording. Floci runs no endpoint that checks them, and
+  keeps none.
 
 ## Running steps
 
