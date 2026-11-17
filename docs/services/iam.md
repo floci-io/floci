@@ -3202,8 +3202,9 @@ floci populates:
   EMR for its clusters, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its instances,
   permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource shares,
   Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for its
-  scalable targets, and ECS for its clusters, task definitions, services, capacity providers, tasks and container
-  instances. Tag keys differing only in case are one condition key holding every value.
+  scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
+  instances, and ACM for its certificates. Tag keys differing only in case are one condition key holding every
+  value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
