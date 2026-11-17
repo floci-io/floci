@@ -41,6 +41,7 @@ final class S3PublicAccessEvaluator {
     /** Recognised like the keys above, but the value additionally has to be a narrow range. */
     private static final String SOURCE_IP_CONDITION_KEY = "aws:sourceip";
     private static final String DATA_ACCESS_POINT_ARN_CONDITION_KEY = "s3:dataaccesspointarn";
+    private static final String PRINCIPAL_ARN_CONDITION_KEY = "aws:principalarn";
     private static final Pattern BUCKET_POLICY_ACCESS_POINT_ARN = Pattern.compile(
             "arn:[a-z0-9-]+:s3:[a-z0-9-]+:[0-9]{12}:accesspoint/[a-zA-Z0-9*?._-]+");
 
@@ -187,7 +188,8 @@ final class S3PublicAccessEvaluator {
      * containing neither a wildcard nor an IAM policy variable. A single public statement makes
      * the whole policy public, which is what {@code RestrictPublicBuckets} keys off.
      *
-     * <p>Bucket policies can use a wildcard in the access point name when the account is fixed.
+     * <p>Bucket policies can use a wildcard in the resource part of {@code aws:PrincipalArn} or
+     * the access point name of {@code s3:DataAccessPointArn} when the 12-digit account is fixed.
      * Floci does not model access points, so the different access-point-policy rule does not apply.
      */
     static boolean policyIsPublic(ObjectMapper objectMapper, String policy) {
@@ -244,7 +246,9 @@ final class S3PublicAccessEvaluator {
                 }
                 if (NON_PUBLIC_CONDITION_KEYS.contains(key)
                         && !operatorName.equalsIgnoreCase("IpAddress")
-                        && allValuesFixed(entry.getValue(), PublicAccessConditions::isFixedValue)) {
+                        && allValuesFixed(entry.getValue(), PRINCIPAL_ARN_CONDITION_KEY.equals(key)
+                                ? PublicAccessConditions::isFixedAccountArn
+                                : PublicAccessConditions::isFixedValue)) {
                     return true;
                 }
                 if (SOURCE_IP_CONDITION_KEY.equals(key)
