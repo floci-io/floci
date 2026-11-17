@@ -666,7 +666,7 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void aResourcePolicyIsPutReadAndDeleted() {
         String arn = keyArn();
-        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String policy = PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY;
 
         call("PutResourcePolicy", putPolicyBody(arn, policy))
                 .then().statusCode(200)
@@ -772,7 +772,9 @@ class PaymentCryptographyIntegrationTest {
         String arn = keyArn();
         String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
-                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"]}]}";
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"arn:aws:payment-cryptography:us-east-1:000000000000:"
+                + "key/1234abcd1234abcd\"}]}";
 
         call("PutResourcePolicy", putPolicyBody(arn, policy))
                 .then().statusCode(400)
@@ -816,6 +818,83 @@ class PaymentCryptographyIntegrationTest {
         call("PutResourcePolicy", putPolicyBody(arn, policy))
                 .then().statusCode(200)
                     .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyThatGrantsEveryoneAccessThroughThePrincipalItExcludesIsRefused() {
+        // A grant that names the principals it excludes reaches everyone else, and a
+        // wildcard among them is everyone.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("PublicPolicyException"));
+    }
+
+    @Test
+    void aPolicyThatExcludesEveryoneIsAttached() {
+        // A grant that excludes everyone reaches nobody, so it opens nothing.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"NotPrincipal\":\"*\","
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyThatCarriesAnEmptyStatementIsRefused() {
+        // A policy that grants nothing is not a policy, so it is refused.
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn, "{\"Version\":\"2012-10-17\",\"Statement\":[]}"))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyWhoseStatementNamesNoActionIsRefused() {
+        // A grant names an effect, a principal, an action and a resource, and one that
+        // names no action grants nothing.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyWhoseStatementNamesNoPrincipalIsRefused() {
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatCarriesSomethingAfterTheDocumentIsRefused() {
+        // The whole string is what the key keeps, so a string that is not one document is
+        // not a policy.
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn,
+                "{\"Version\":\"2012-10-17\",\"Statement\":[]} {\"Version\":\"2012-10-17\"}"))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
     }
 
     @Test

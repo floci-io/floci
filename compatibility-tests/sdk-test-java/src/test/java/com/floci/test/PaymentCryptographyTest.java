@@ -729,7 +729,10 @@ class PaymentCryptographyTest {
     @Test
     void aResourcePolicyIsPutReadAndDeleted() {
         Key key = createAesKey();
-        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
 
         assertThat(client.putResourcePolicy(r -> r
                 .resourceArn(key.keyArn())

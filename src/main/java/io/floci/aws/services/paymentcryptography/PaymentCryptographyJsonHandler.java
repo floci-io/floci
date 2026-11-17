@@ -1,6 +1,7 @@
 package io.floci.aws.services.paymentcryptography;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
@@ -30,8 +31,14 @@ public class PaymentCryptographyJsonHandler {
     /** The error a bad page size or a bad token is refused with. */
     private static final String PAGINATION_ERROR = "ValidationException";
 
-    /** The reader of a resource policy, which arrives as a JSON document in a string. */
-    private static final ObjectMapper POLICY_READER = new ObjectMapper();
+    /**
+     * The reader of a resource policy, which arrives as a JSON document in a string.
+     *
+     * <p>The whole string is what the key keeps, so a string that carries anything after
+     * the document is not one policy and is refused.
+     */
+    private static final ObjectMapper POLICY_READER = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final PaymentCryptographyService service;
 
@@ -294,6 +301,30 @@ public class PaymentCryptographyJsonHandler {
     private Map<String, Object> putResourcePolicy(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         String policy = request.path("Policy").asText();
+        JsonNode document = readPolicy(policy);
+        List<JsonNode> statements = statementsOf(document);
+        if (grantsPublicAccess(statements)) {
+            throw new AwsException("PublicPolicyException",
+                    "The resource policy grants public access to the key", 400);
+        }
+        if (!namesTheKey(grantsOf(statements), key.getArn())) {
+            throw new AwsException("ValidationException",
+                    "The resource policy names a resource that is not the key it is attached to", 400);
+        }
+        return policyAnswer(service.putResourcePolicy(key, policy));
+    }
+
+    /**
+     * The policy document a request carries.
+     *
+     * <p>The policy is a JSON document in a string, and a document that does not parse, or
+     * that carries anything after the document, is refused before it is attached: the whole
+     * string is what the key keeps, so a string that is not one document is not a policy.
+     *
+     * @param policy the policy as it was given
+     * @return the policy document
+     */
+    private static JsonNode readPolicy(String policy) {
         JsonNode document;
         try {
             document = POLICY_READER.readTree(policy);
@@ -305,16 +336,7 @@ public class PaymentCryptographyJsonHandler {
             throw new AwsException("ValidationException",
                     "Policy is not a valid JSON policy document", 400);
         }
-        if (grantsPublicAccess(document)) {
-            throw new AwsException("PublicPolicyException",
-                    "The resource policy grants public access to the key", 400);
-        }
-        if (!namesTheKey(document, key.getArn())) {
-            throw new AwsException("ValidationException",
-                    "The resource policy names a resource that is not the key it is attached to", 400);
-        }
-        PaymentCryptographyKey updated = service.putResourcePolicy(key, policy);
-        return policyAnswer(updated);
+        return document;
     }
 
     /** The resource-based policy of a key, which a key without one does not have. */
@@ -330,8 +352,8 @@ public class PaymentCryptographyJsonHandler {
         return Map.of();
     }
 
-    private static Map<String, Object> policyAnswer(PaymentCryptographyKey key) {
-        return Map.of("ResourceArn", key.getArn(), "Policy", key.getResourcePolicy());
+    private static Map<String, Object> policyAnswer(PaymentCryptographyService.ResourcePolicy policy) {
+        return Map.of("ResourceArn", policy.arn(), "Policy", policy.policy());
     }
 
     /**
@@ -340,33 +362,17 @@ public class PaymentCryptographyJsonHandler {
      * <p>The reference says the resource of a policy must be every resource or the ARN of
      * the key the policy is on, so a policy that names another key is refused.
      *
-     * @param policy the policy document
+     * @param statements the statements of the policy
      * @param arn the ARN of the key the policy is attached to
      * @return whether the policy names the key
      */
-    private static boolean namesTheKey(JsonNode policy, String arn) {
-        if (!carriesStatements(policy)) {
-            // A document that carries no statement names no resource.
-            return false;
-        }
-        for (JsonNode statement : statementsOf(policy)) {
+    private static boolean namesTheKey(List<JsonNode> statements, String arn) {
+        for (JsonNode statement : statements) {
             if (!statementNamesTheKey(statement, arn)) {
                 return false;
             }
         }
         return true;
-    }
-
-    /**
-     * Whether a policy document carries the statements a policy is made of: one alone, or
-     * a list of them.
-     *
-     * @param policy the policy document
-     * @return whether the document carries statements
-     */
-    private static boolean carriesStatements(JsonNode policy) {
-        JsonNode statements = policy.path("Statement");
-        return statements.isObject() || statements.isArray();
     }
 
     /**
@@ -385,6 +391,41 @@ public class PaymentCryptographyJsonHandler {
             statements.forEach(out::add);
         }
         return out;
+    }
+
+    /**
+     * The statements of a policy that grant something.
+     *
+     * <p>The grammar a resource policy follows names an effect, a principal, an action and
+     * a resource in every statement, and a document that carries no statement, or a
+     * statement that names none of them, grants nothing, so it is refused rather than
+     * stored on the key.
+     *
+     * @param statements the statements of the policy
+     * @return the statements
+     */
+    private static List<JsonNode> grantsOf(List<JsonNode> statements) {
+        if (statements.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "The resource policy carries no statement", 400);
+        }
+        for (JsonNode statement : statements) {
+            if (!carriesTheElementsOfAGrant(statement)) {
+                throw new AwsException("ValidationException",
+                        "The resource policy carries a statement that names no effect, principal, "
+                                + "action or resource", 400);
+            }
+        }
+        return statements;
+    }
+
+    /** Whether a statement names the elements a grant is made of. */
+    private static boolean carriesTheElementsOfAGrant(JsonNode statement) {
+        String effect = statement.path("Effect").asText();
+        return ("Allow".equalsIgnoreCase(effect) || "Deny".equalsIgnoreCase(effect))
+                && (statement.hasNonNull("Principal") || statement.hasNonNull("NotPrincipal"))
+                && (statement.hasNonNull("Action") || statement.hasNonNull("NotAction"))
+                && statement.hasNonNull("Resource");
     }
 
     /** Whether a statement names the key, either alone or in a list of resources. */
@@ -409,9 +450,12 @@ public class PaymentCryptographyJsonHandler {
      *
      * <p>The reference refuses such a policy, so the service does too: an Allow statement
      * whose principal is everyone, and that carries no condition, is public access.
+     *
+     * @param statements the statements of the policy
+     * @return whether the policy grants public access
      */
-    private static boolean grantsPublicAccess(JsonNode policy) {
-        for (JsonNode statement : statementsOf(policy)) {
+    private static boolean grantsPublicAccess(List<JsonNode> statements) {
+        for (JsonNode statement : statements) {
             if (statementGrantsPublicAccess(statement)) {
                 return true;
             }
@@ -423,10 +467,24 @@ public class PaymentCryptographyJsonHandler {
         if (!"Allow".equalsIgnoreCase(statement.path("Effect").asText())) {
             return false;
         }
-        if (!isEveryone(statement.path("Principal")) || statement.has("Condition")) {
+        if (!grantsToEveryone(statement) || statement.has("Condition")) {
             return false;
         }
         return true;
+    }
+
+    /**
+     * Whether a statement grants to everyone.
+     *
+     * <p>A grant that names everyone as its principal reaches everyone. A grant that names
+     * the principals it excludes reaches everyone else, and a grant that excludes everyone
+     * reaches nobody.
+     */
+    private static boolean grantsToEveryone(JsonNode statement) {
+        if (statement.hasNonNull("Principal")) {
+            return isEveryone(statement.path("Principal"));
+        }
+        return statement.hasNonNull("NotPrincipal") && !isEveryone(statement.path("NotPrincipal"));
     }
 
     /** Whether a principal names every principal: {@code *}, or a list or map that holds it. */

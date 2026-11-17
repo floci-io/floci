@@ -424,10 +424,10 @@ class PaymentCryptographyServiceTest {
         PaymentCryptographyKey key = createKey("us-east-1");
         String policy = PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY;
 
-        assertEquals(policy, service.putResourcePolicy(key, policy).getResourcePolicy());
-        assertEquals(policy, service.resourcePolicy(key).getResourcePolicy());
+        assertEquals(policy, service.putResourcePolicy(key, policy).policy());
+        assertEquals(policy, service.resourcePolicy(key).policy());
         assertEquals(TWO_ACCOUNTS_POLICY,
-                service.putResourcePolicy(key, TWO_ACCOUNTS_POLICY).getResourcePolicy());
+                service.putResourcePolicy(key, TWO_ACCOUNTS_POLICY).policy());
     }
 
     @Test
@@ -439,18 +439,18 @@ class PaymentCryptographyServiceTest {
                 + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
                 + "\"Resource\":\"" + key.getArn() + "\"}]}";
 
-        assertEquals(policy, service.putResourcePolicy(key, policy).getResourcePolicy());
+        assertEquals(policy, service.putResourcePolicy(key, policy).policy());
     }
 
     @Test
     void aResourcePolicyIsPutReadAndDeleted() {
         PaymentCryptographyKey key = createKey("us-east-1");
-        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        String policy = PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY;
 
         assertNull(key.getResourcePolicy(), "a key has a policy before one was put on it");
 
-        assertEquals(policy, service.putResourcePolicy(key, policy).getResourcePolicy());
-        assertEquals(policy, service.resourcePolicy(key).getResourcePolicy());
+        assertEquals(policy, service.putResourcePolicy(key, policy).policy());
+        assertEquals(policy, service.resourcePolicy(key).policy());
 
         service.deleteResourcePolicy(key);
 
@@ -463,17 +463,16 @@ class PaymentCryptographyServiceTest {
     void aResourcePolicyIsReplacedByTheNextOne() {
         PaymentCryptographyKey key = createKey("us-east-1");
 
-        service.putResourcePolicy(key, "{\"Statement\":[]}");
-        service.putResourcePolicy(key, "{\"Statement\":[{\"Effect\":\"Allow\"}]}");
+        service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY);
+        service.putResourcePolicy(key, TWO_ACCOUNTS_POLICY);
 
-        assertEquals("{\"Statement\":[{\"Effect\":\"Allow\"}]}",
-                service.resourcePolicy(key).getResourcePolicy());
+        assertEquals(TWO_ACCOUNTS_POLICY, service.resourcePolicy(key).policy());
     }
 
     @Test
     void aDeletedKeyHasNoResourcePolicy() {
         PaymentCryptographyKey key = createKey("us-east-1");
-        service.putResourcePolicy(key, "{\"Statement\":[]}");
+        service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY);
         service.deleteKey(key);
 
         AwsException gone = assertThrows(AwsException.class,
@@ -481,7 +480,7 @@ class PaymentCryptographyServiceTest {
         assertEquals("ResourceNotFoundException", gone.getErrorCode());
 
         AwsException deleted = assertThrows(AwsException.class,
-                () -> service.putResourcePolicy(key, "{\"Statement\":[]}"));
+                () -> service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
         assertEquals("ResourceNotFoundException", deleted.getErrorCode());
     }
 

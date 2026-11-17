@@ -643,29 +643,42 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     // ---- resource policies ----------------------------------------------------
 
     /**
+     * A key's resource-based policy as it is at one moment.
+     *
+     * <p>The store holds the key itself, and a key is mutable, so a read takes the two
+     * values the answer carries while it holds the lock. A policy taken away after the
+     * read cannot change the answer.
+     *
+     * @param arn the ARN of the key the policy is on
+     * @param policy the policy document
+     */
+    public record ResourcePolicy(String arn, String policy) {
+    }
+
+    /**
      * Attaches or replaces the resource-based policy of a key.
      *
      * <p>The policy belongs to the key, so it is written with the key and goes when the key
      * goes. A policy the service has not seen is replaced, as the reference replaces one.
      */
-    public synchronized PaymentCryptographyKey putResourcePolicy(PaymentCryptographyKey key,
-                                                                  String policy) {
+    public synchronized ResourcePolicy putResourcePolicy(PaymentCryptographyKey key, String policy) {
         PaymentCryptographyKey current = liveKey(key);
         // A replica is read-only, and the reference attaches a policy to the primary alone.
         requireNotReplica(current, "a policy may only be attached to the primary");
         current.setResourcePolicy(policy);
         storeKey(current);
-        return current;
+        return new ResourcePolicy(current.getArn(), current.getResourcePolicy());
     }
 
     /**
-     * The key and the resource-based policy attached to it.
+     * The resource-based policy attached to a key.
      *
      * <p>A key without a policy is refused as the resource the reference cannot find, not
      * answered with an empty policy: the two are different answers.
      */
-    public PaymentCryptographyKey resourcePolicy(PaymentCryptographyKey key) {
-        return keyWithPolicy(key);
+    public synchronized ResourcePolicy resourcePolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = keyWithPolicy(key);
+        return new ResourcePolicy(current.getArn(), current.getResourcePolicy());
     }
 
     /**
@@ -673,11 +686,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      *
      * <p>A key without a policy is refused, as it is by the read.
      */
-    public synchronized PaymentCryptographyKey deleteResourcePolicy(PaymentCryptographyKey key) {
+    public synchronized void deleteResourcePolicy(PaymentCryptographyKey key) {
         PaymentCryptographyKey current = keyWithPolicy(key);
         current.setResourcePolicy(null);
         storeKey(current);
-        return current;
     }
 
     /**
