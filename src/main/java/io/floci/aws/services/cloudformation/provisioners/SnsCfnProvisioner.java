@@ -121,6 +121,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         String throughputScope = ctx.resolveOptional(props, "FifoThroughputScope");
         String maximumMessageSize = ctx.resolveOptional(props, "MaximumMessageSize");
+        String displayName = ctx.resolveOptional(props, "DisplayName");
         // The .fifo suffix is what makes SnsService treat a topic as FIFO, so an explicitly named
         // one is FIFO with or without the flag, which only has to steer a generated name.
         boolean fifo = "true".equalsIgnoreCase(ctx.resolveOptional(props, "FifoTopic"))
@@ -162,6 +163,9 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         if (maximumMessageSize != null && !maximumMessageSize.isBlank()) {
             attributes.put("MaximumMessageSize", maximumMessageSize);
         }
+        if (displayName != null) {
+            attributes.put("DisplayName", displayName);
+        }
 
         JsonNode subscriptions = props == null ? null
                 : ctx.engine().resolveNodeOmittingNoValue(props.path("Subscription"));
@@ -197,6 +201,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                     && topic.getAttributes().containsKey("MaximumMessageSize")) {
                 desired.put("MaximumMessageSize",
                         String.valueOf(SnsService.DEFAULT_MAX_MESSAGE_SIZE));
+            }
+            // A dropped DisplayName goes back to the empty default GetTopicAttributes reports.
+            if (!desired.containsKey("DisplayName") && topic.getAttributes().containsKey("DisplayName")) {
+                desired.put("DisplayName", "");
             }
         }
         // A replacing update that adopted an existing topic changes something the stack did not

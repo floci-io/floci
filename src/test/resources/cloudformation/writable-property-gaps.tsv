@@ -644,7 +644,6 @@ AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
 AWS::SNS::Topic	ArchivePolicy	accepted and ignored
 AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
 AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored
-AWS::SNS::Topic	DisplayName	accepted and ignored
 AWS::SNS::Topic	KmsMasterKeyId	accepted and ignored
 AWS::SNS::Topic	SignatureVersion	accepted and ignored
 AWS::SNS::Topic	Tags	accepted and ignored

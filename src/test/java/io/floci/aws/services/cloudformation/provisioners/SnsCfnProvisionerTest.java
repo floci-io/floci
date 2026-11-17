@@ -509,6 +509,44 @@ class SnsCfnProvisionerTest {
                 anyString(), anyString());
     }
 
+    @Test
+    void displayNameIsForwardedOnlyWhenSet() {
+        ArgumentCaptor<Map<String, String>> attrs = ArgumentCaptor.forClass(Map.class);
+        when(sns.createTopic(anyString(), attrs.capture(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+
+        provision("AWS::SNS::Topic", """
+                {"TopicName": "events", "DisplayName": "Expected Name"}
+                """);
+        assertEquals("Expected Name", attrs.getValue().get("DisplayName"));
+
+        setUp();
+        ArgumentCaptor<Map<String, String>> plain = ArgumentCaptor.forClass(Map.class);
+        when(sns.createTopic(anyString(), plain.capture(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+        provision("AWS::SNS::Topic", """
+                {"TopicName": "events"}
+                """);
+        assertFalse(plain.getValue().containsKey("DisplayName"));
+    }
+
+    @Test
+    void anUpdateThatDropsDisplayNameClearsItOnlyWhenSet() {
+        Topic named = topic(TOPIC_ARN);
+        named.getAttributes().put("DisplayName", "Expected Name");
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(named);
+
+        provisionUpdate("""
+                {"TopicName": "events"}
+                """);
+        verify(sns).setTopicAttributes(TOPIC_ARN, "DisplayName", "", REGION);
+
+        setUp();
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
+        provisionUpdate("""
+                {"TopicName": "events"}
+                """);
+        verify(sns, never()).setTopicAttributes(anyString(), eq("DisplayName"), anyString(), anyString());
+    }
+
     /** Real SNS rejects both attributes on a standard topic, so an update must not invent them. */
     @Test
     void aStandardTopicUpdateWritesNoFifoDefaults() {
