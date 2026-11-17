@@ -3966,7 +3966,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         String bucket = tasksBucketName(region);
         try {
             try {
-                s3Service.createInternalBucket(bucket, region);
+                s3Service.createServiceOwnedBucket(bucket, region);
             } catch (AwsException e) {
                 if (!"BucketAlreadyOwnedByYou".equals(e.getErrorCode())) {
                     throw e;
