@@ -10,6 +10,7 @@ import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -180,10 +181,9 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("region", region);
         snapshot.put("description", key.getDescription());
         snapshot.put("policy", key.getPolicy());
-        snapshot.put("tagKeys", r.getAttributes().get(TAG_KEYS_ATTR));
         snapshot.put("enabled", key.isEnabled());
         snapshot.put("rotation", key.isKeyRotationEnabled());
-        CfnRollback.putTagSnapshot(snapshot, managedTagKeys, key.getTags());
+        Ec2Tags.snapshotOwned(snapshot, priorTagKeys, desiredTags, key.getTags(), r.getAttributes().get(TAG_KEYS_ATTR));
         r.setPhysicalId(keyId);
         r.getAttributes().put("Arn", key.getArn());
         r.getAttributes().put("KeyId", keyId);
@@ -278,7 +278,13 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
         converge(kmsService.describeKey(keyId, region), description == null ? "" : description,
                 CfnRollback.snapshotText(snapshot, "policy"), snapshot.path("enabled").asBoolean(),
                 snapshot.path("rotation").asBoolean(), CfnRollback.snapshotTags(snapshot),
-                CfnRollback.snapshotTagKeys(snapshot), region);
+                touchedKeys(snapshot), region);
+    }
+
+    private static List<String> touchedKeys(JsonNode snapshot) {
+        List<String> keys = new ArrayList<>();
+        snapshot.path("touched").forEach(key -> keys.add(key.asText()));
+        return keys;
     }
 
     @Override
