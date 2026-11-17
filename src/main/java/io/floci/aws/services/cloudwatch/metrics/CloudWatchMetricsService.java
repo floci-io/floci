@@ -322,7 +322,8 @@ public class CloudWatchMetricsService {
             if (parts.length < 6) return false;
             try {
                 long ts = Long.parseLong(parts[parts.length - 2]);
-                return ts >= startEpoch && ts <= endEpoch;
+                return ts >= startEpoch && (endTime == null || ts < endEpoch
+                        || ts == endEpoch && endTime.getNano() > 0);
             } catch (NumberFormatException e) {
                 return false;
             }
