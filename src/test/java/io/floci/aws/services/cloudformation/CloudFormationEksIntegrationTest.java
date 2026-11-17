@@ -231,6 +231,18 @@ class CloudFormationEksIntegrationTest {
     }
 
     @Test
+    void aBlankEncryptionConfigFailsTheClusterInsteadOfCreatingItUnencrypted() {
+        String stack = "cfn-eks-blank-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, subjectStack("", "", "AWS::EKS::Cluster",
+                    ROLE + "\"EncryptionConfig\": \"\""), "ROLLBACK_COMPLETE");
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
     void changingTheServiceCidrReplacesTheClusterWithTheNewOne() {
         String stack = "cfn-eks-cidr-" + Long.toString(System.nanoTime(), 36);
         try (CloudFormationClient client = AwsTestClients.create(
