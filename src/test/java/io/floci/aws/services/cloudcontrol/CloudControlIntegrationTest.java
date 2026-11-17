@@ -3,6 +3,8 @@ package io.floci.aws.services.cloudcontrol;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.AppSyncRequests;
+import io.floci.aws.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.parsing.Parser;
@@ -12,10 +14,13 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
 import static io.restassured.config.EncoderConfig.encoderConfig;
 import static io.restassured.config.RestAssuredConfig.config;
 import static io.restassured.http.ContentType.TEXT;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -274,6 +279,49 @@ class CloudControlIntegrationTest {
                 .extract().asString();
 
         assertThat(body, containsString(identifier));
+    }
+
+    /**
+     * A resource is created and deleted in the Region the request is signed for, where its service then finds it: an
+     * AppSync API outside the default Region gets the environment variables its create sets with a second call, and
+     * the delete removes it.
+     */
+    @Test
+    void aResourceIsCreatedAndDeletedInTheRequestsRegion() {
+        String ct = "application/x-amz-json-1.0";
+        String account = "333333333333";
+        String region = "eu-west-1";
+        String auth = EnforcementFixtures.auth(account, region, "cloudcontrol");
+        String token = given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct).header("Authorization", auth)
+                .header("X-Amz-Target", "CloudApiService.CreateResource")
+                .body("{\"TypeName\":\"AWS::AppSync::GraphQLApi\",\"DesiredState\":\"{\\\"Name\\\":\\\"regional\\\","
+                        + "\\\"AuthenticationType\\\":\\\"API_KEY\\\","
+                        + "\\\"EnvironmentVariables\\\":{\\\"STAGE\\\":\\\"eu\\\"}}\"}")
+                .when().post("/").then().statusCode(200)
+                .extract().path("ProgressEvent.RequestToken");
+
+        ExtractableResponse<Response> done = await("the create finishes").atMost(Duration.ofSeconds(10))
+                .pollInterval(Duration.ofMillis(100))
+                .until(() -> given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                                .contentType(ct).header("Authorization", auth)
+                                .header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus")
+                                .body("{\"RequestToken\":\"" + token + "\"}")
+                                .when().post("/").then().statusCode(200).extract(),
+                        status -> !"IN_PROGRESS".equals(status.path("ProgressEvent.OperationStatus")));
+        assertEquals("SUCCESS", done.path("ProgressEvent.OperationStatus"), done.asString());
+        String apiId = done.path("ProgressEvent.Identifier");
+
+        AppSyncRequests.signed(account, region).get("/v1/apis/" + apiId + "/environmentVariables")
+                .then().statusCode(200).body("environmentVariables.STAGE", equalTo("eu"));
+
+        given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
+                .contentType(ct).header("Authorization", auth)
+                .header("X-Amz-Target", "CloudApiService.DeleteResource")
+                .body("{\"TypeName\":\"AWS::AppSync::GraphQLApi\",\"Identifier\":\"" + apiId + "\"}")
+                .when().post("/").then().statusCode(200)
+                .body("ProgressEvent.OperationStatus", equalTo("SUCCESS"));
+        AppSyncRequests.signed(account, region).get("/v1/apis/" + apiId).then().statusCode(404);
     }
 
     @Test
