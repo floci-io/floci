@@ -3094,6 +3094,57 @@ class IamServiceTest {
         assertEquals("existing-secret", iamService.findSecretKey("floci").orElseThrow());
     }
 
+    /**
+     * Starts with the deployer seeded under an access key ID, on the stores an earlier start left
+     * behind, the way a restart under persistent storage does.
+     */
+    private static IamService startSeedingDeployerAs(String accessKeyId, StorageBackend<String, IamUser> users,
+                                                     StorageBackend<String, AccessKey> accessKeys) {
+        IamService service = new IamService(users, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), accessKeys, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), true, accessKeyId, null, Map.of(),
+                Clock.systemUTC());
+        service.seedDefaults();
+        return service;
+    }
+
+    private static List<String> accessKeyIds(IamService service, String userName) {
+        return service.listAccessKeys(userName).stream().map(AccessKey::getAccessKeyId).sorted().toList();
+    }
+
+    @Test
+    void seedingUnderAnotherAccessKeyIdDeletesTheKeySeededUnderTheEarlierOne() {
+        InMemoryStorage<String, IamUser> users = new InMemoryStorage<>();
+        InMemoryStorage<String, AccessKey> accessKeys = new InMemoryStorage<>();
+        startSeedingDeployerAs("floci", users, accessKeys);
+
+        IamService restarted = startSeedingDeployerAs("AKIAFLOCIDEPLOYER001", users, accessKeys);
+
+        assertEquals(List.of("AKIAFLOCIDEPLOYER001"), accessKeyIds(restarted, "floci-deployer"));
+        assertTrue(restarted.findSecretKey("floci").isEmpty());
+
+        IamService restartedAgain = startSeedingDeployerAs("AKIAFLOCIDEPLOYER002", users, accessKeys);
+
+        assertEquals(List.of("AKIAFLOCIDEPLOYER002"), accessKeyIds(restartedAgain, "floci-deployer"));
+    }
+
+    @Test
+    void seedingUnderAnotherAccessKeyIdKeepsTheKeysCreatedForTheDeployer() {
+        InMemoryStorage<String, IamUser> users = new InMemoryStorage<>();
+        InMemoryStorage<String, AccessKey> accessKeys = new InMemoryStorage<>();
+        String created = startSeedingDeployerAs("floci", users, accessKeys)
+                .createAccessKey("floci-deployer").getAccessKeyId();
+
+        IamService restarted = startSeedingDeployerAs("AKIAFLOCIDEPLOYER001", users, accessKeys);
+
+        assertEquals(List.of("AKIAFLOCIDEPLOYER001", created).stream().sorted().toList(),
+                accessKeyIds(restarted, "floci-deployer"));
+    }
+
     @Test
     void attachManagedPolicyToRole() {
         iamService.seedAwsManagedPolicies();

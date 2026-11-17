@@ -2250,7 +2250,7 @@ FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true
 FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID=AKIAFLOCIDEPLOYER001
 ```
 
-The secret access key stays `floci`. Seeding runs at every start, so under persistent storage a retired deployer comes back on the next start unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` is turned off, and a key seeded under an earlier ID is kept when the ID changes.
+The secret access key stays `floci`. Seeding runs at every start, so under persistent storage a retired deployer comes back on the next start unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` is turned off. When the ID changes, seeding deletes the deployer's key seeded under the earlier ID, so an install that already seeded `floci` can then retire the deployer; keys created for the deployer with `CreateAccessKey` are kept.
 
 ## IAM Enforcement Mode
 

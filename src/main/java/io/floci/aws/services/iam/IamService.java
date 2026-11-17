@@ -906,12 +906,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             user.getAttachedPolicyArns().add(adminPolicyArn);
             users.put(DEFAULT_DEPLOYER_USER, user);
         }
-        if (accessKeys.get(seededDeployerAccessKeyId).isEmpty()) {
-            accessKeys.put(seededDeployerAccessKeyId, new AccessKey(
-                    seededDeployerAccessKeyId,
-                    DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
-                    DEFAULT_DEPLOYER_USER));
-            LOG.infov("Seeded default IAM deployer access key: {0}", seededDeployerAccessKeyId);
+        synchronized (accessKeyLock) {
+            // Under persistent storage a key seeded under an earlier ID outlives a change of ID. It
+            // signs with the same public secret, and while it exists DeleteUser refuses the user, so
+            // it goes. A key created for the deployer has a secret of its own and stays.
+            for (AccessKey earlier : userAccessKeys(DEFAULT_DEPLOYER_USER)) {
+                if (!earlier.getAccessKeyId().equals(seededDeployerAccessKeyId)
+                        && DEFAULT_DEPLOYER_SECRET_ACCESS_KEY.equals(earlier.getSecretAccessKey())) {
+                    accessKeys.delete(earlier.getAccessKeyId());
+                    LOG.infov("Deleted IAM deployer access key seeded under an earlier ID: {0}",
+                            earlier.getAccessKeyId());
+                }
+            }
+            if (accessKeys.get(seededDeployerAccessKeyId).isEmpty()) {
+                accessKeys.put(seededDeployerAccessKeyId, new AccessKey(
+                        seededDeployerAccessKeyId,
+                        DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
+                        DEFAULT_DEPLOYER_USER));
+                LOG.infov("Seeded default IAM deployer access key: {0}", seededDeployerAccessKeyId);
+            }
         }
     }
 
