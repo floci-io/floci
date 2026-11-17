@@ -140,8 +140,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
                                        TypeReference<T> type) {
         JsonNode resolved = props == null || !props.has(name) ? null
                 : ctx.engine().resolveNodeOmittingNoValue(props.get(name));
-        if (resolved == null || resolved.isMissingNode() || resolved.isNull()
-                || (resolved.isTextual() && resolved.asText().isBlank())) {
+        if (resolved == null || resolved.isMissingNode() || resolved.isNull()) {
             return null;
         }
         if (list ? !resolved.isArray() : !resolved.isObject()) {
