@@ -5,6 +5,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.CsvParser;
+import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -77,6 +78,7 @@ public class AthenaService {
     public static final String DEFAULT_CATALOG = "AwsDataCatalog";
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
+    private static final String START_QUERY_EXECUTION = "athena:StartQueryExecution";
     private static final String DEFAULT_ENGINE_VERSION = "Athena engine version 3";
     /** The engine version a workgroup selects when its request names none: AWS picks the version. */
     private static final String AUTO_ENGINE_VERSION = "AUTO";
@@ -119,6 +121,7 @@ public class AthenaService {
     private final RegionResolver regionResolver;
     private final AthenaHiveDdlExecutor hiveDdlExecutor;
     private final AthenaIcebergStatements icebergStatements;
+    private final IamEnforcementFilter iamEnforcementFilter;
 
     @Inject
     public AthenaService(StorageFactory storageFactory,
@@ -129,7 +132,8 @@ public class AthenaService {
                          Vertx vertx,
                          GlueViewDdlBuilder ddlBuilder,
                          RegionResolver regionResolver,
-                         AthenaIcebergStatements icebergStatements) {
+                         AthenaIcebergStatements icebergStatements,
+                         IamEnforcementFilter iamEnforcementFilter) {
         this.queryStore = storageFactory.create("athena", "queries.json",
                 new TypeReference<>() {});
         this.workGroupStore = storageFactory.create("athena", "workgroups.json",
@@ -146,6 +150,7 @@ public class AthenaService {
         this.ddlBuilder = ddlBuilder;
         this.regionResolver = regionResolver;
         this.icebergStatements = icebergStatements;
+        this.iamEnforcementFilter = iamEnforcementFilter;
         this.hiveDdlExecutor = new AthenaHiveDdlExecutor(glueService, s3Service, icebergStatements);
     }
 
@@ -199,6 +204,9 @@ public class AthenaService {
                 if (invalidHiveDdl != null) {
                     throw invalidHiveDdl;
                 }
+                if (s3TablesBucket == null) {
+                    requireGluePermissions(hiveDdl, database);
+                }
                 List<String> rows = hiveDdlExecutor.execute(hiveDdl, resolvedContext.getCatalog(), database);
                 if (outputLocation != null) {
                     writeSingleColumnResult(id, outputLocation, "partition", rows);
@@ -215,6 +223,10 @@ public class AthenaService {
                 CreateDatabaseDdl createDatabaseDdl = parseCreateDatabase(query);
                 if (createDatabaseDdl == null) {
                     throw new AwsException("InvalidRequestException", "Invalid CREATE DATABASE statement", 400);
+                }
+                if (s3TablesBucket == null) {
+                    requireGluePermissions("CREATE DATABASE",
+                            Map.of("database", GlueService.normalizeName(createDatabaseDdl.name())), false);
                 }
                 if (s3TablesBucket != null) {
                     // In an S3 Tables catalog a database is a namespace of the table bucket.
@@ -781,6 +793,59 @@ public class AthenaService {
             execution.getStatus().setState(QueryExecutionState.SUCCEEDED);
             execution.getStatus().setCompletionDateTime(Instant.now());
             queryStore.put(id, execution);
+        }
+    }
+
+    /**
+     * Fails the query as Athena does when the caller may not make the Glue requests a statement of the default catalog
+     * makes. Athena runs a DDL statement against the Glue Data Catalog with the caller's identity, and a denial fails
+     * the query rather than the request, its reason as AWS reports it: "Insufficient permissions to execute the query.
+     * User: <caller> is not authorized to perform: glue:GetDatabase on resource: arn:aws:glue:<region>:<account>:catalog
+     * because no identity-based policy allows the glue:GetDatabase action ". The requests each statement makes are
+     * the IAM table's, read from the permissions Athena's user guide gives each DDL statement, named as the guide
+     * names the statement; one it gives none makes none, and only a partitioned table's makes partition requests.
+     */
+    private void requireGluePermissions(AthenaHiveDdl.Statement statement, String contextDatabase) {
+        String documented = switch (statement) {
+            case AthenaHiveDdl.CreateTable create -> "CREATE TABLE";
+            case AthenaHiveDdl.CreateIcebergTable create -> "CREATE TABLE";
+            case AthenaHiveDdl.DropTable drop -> "DROP TABLE";
+            case AthenaHiveDdl.RepairTable repair -> "MSCK REPAIR TABLE";
+            default -> null;
+        };
+        if (documented == null) {
+            return;
+        }
+        // Glue names a database and a table in an ARN as it stores them, lowercase, however the query spells them.
+        String database = GlueService.normalizeName(
+                statement.ref().database() != null ? statement.ref().database() : contextDatabase);
+        String table = GlueService.normalizeName(statement.ref().table());
+        boolean partitioned = statement instanceof AthenaHiveDdl.DropTable && isPartitioned(database, table);
+        requireGluePermissions(documented, Map.of("database", database, "table", table), partitioned);
+    }
+
+    private void requireGluePermissions(String statement, Map<String, String> names, boolean partitioned) {
+        Optional<String> refusal = iamEnforcementFilter.statementRefusal(START_QUERY_EXECUTION, statement, names,
+                partitioned);
+        if (refusal.isPresent()) {
+            throw new AwsException("AccessDeniedException",
+                    "Insufficient permissions to execute the query. " + refusal.get() + " ", 400);
+        }
+    }
+
+    /**
+     * Whether the catalog holds the table with partition keys. A table it does not hold has none, so dropping it makes
+     * no partition request; any other failure to read the table fails the query, as the drop itself would.
+     */
+    private boolean isPartitioned(String database, String table) {
+        try {
+            Table held = glueService.getTable(database, table);
+            return held.getPartitionKeys() != null && !held.getPartitionKeys().isEmpty();
+        } catch (AwsException e) {
+            if (!"EntityNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return false;
         }
     }
 
