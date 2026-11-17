@@ -74,7 +74,7 @@ public class EmrCluster {
     private Instant terminatingDateTime;
     // Status.ErrorDetails: the errors that ended the cluster, empty unless one of those with an ErrorDetail code did.
     private List<EmrErrorDetail> errorDetails = new ArrayList<>();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private List<EmrStep> steps = new ArrayList<>();
     private List<EmrInstanceGroup> instanceGroups = new ArrayList<>();
     private List<EmrInstanceFleet> instanceFleets = new ArrayList<>();

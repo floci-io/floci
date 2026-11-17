@@ -1733,6 +1733,31 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR holds on the cluster a request names, so an allow on one
+     * team's tag lets the caller describe that team's cluster and not another's.
+     */
+    @Test
+    void anEmrResourceTagConditionReadsTheTagsOfTheCluster() {
+        String tagged = emrClusterId(emrCluster("res-emr-tag"), "data");
+        String other = emrClusterId(emrCluster("res-emr-tag"), "web");
+
+        User user = user("res-emr-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"elasticmapreduce:DescribeCluster\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        emr(user, "DescribeCluster", "{\"ClusterId\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(emr(user, "DescribeCluster", "{\"ClusterId\":\"" + other + "\"}"),
+                "elasticmapreduce:DescribeCluster");
+    }
+
+    /** The id of the cluster {@code arn} names, tagged with the team by an administrator. */
+    private static String emrClusterId(String arn, String team) {
+        String id = arn.substring(arn.lastIndexOf('/') + 1);
+        adminJson("elasticmapreduce", "ElasticMapReduce.AddTags").body("{\"ResourceId\":\"" + id
+                + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}").post("/").then().statusCode(200);
+        return id;
+    }
+
+    /**
      * A Rekognition stream processor is checked on the ARN its {@code Name} gives, and a moderation analysis on the
      * custom model whose ARN its {@code ProjectVersion} gives. Floci serves no stream processor and no custom model,
      * so an allowed request is answered by the handler, never by IAM.
