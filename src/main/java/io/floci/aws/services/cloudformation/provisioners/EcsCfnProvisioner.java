@@ -59,6 +59,12 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private static final String SERVICE = "AWS::ECS::Service";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final TypeReference<List<ClusterSetting>> SETTINGS = new TypeReference<>() { };
+    private static final CfnApiShapeConverter.Rules API_SHAPE = new CfnApiShapeConverter.Rules(
+            Map.of("EFSVolumeConfiguration", "efsVolumeConfiguration",
+                    "FSxWindowsFileServerVolumeConfiguration", "fsxWindowsFileServerVolumeConfiguration",
+                    "S3FilesVolumeConfiguration", "s3filesVolumeConfiguration",
+                    "FilesystemId", "fileSystemId", "IAM", "iam"),
+            Set.of("DriverOpts", "Labels"), Set.of("TransitEncryptionPort"), false);
 
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
@@ -586,42 +592,11 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         if (node != null && node.isArray()) {
             node.forEach(item -> {
                 if (item.isObject()) {
-                    result.add(normalizeCfnEcsNode(item));
+                    result.add(CfnApiShapeConverter.convert(item, API_SHAPE));
                 }
             });
         }
         return result;
-    }
-
-    private static JsonNode normalizeCfnEcsNode(JsonNode node) {
-        if (node.isObject()) {
-            ObjectNode result = MAPPER.createObjectNode();
-            node.fields().forEachRemaining(field -> {
-                String key = field.getKey();
-                JsonNode value = field.getValue();
-                String apiKey = switch (key) {
-                    case "EFSVolumeConfiguration" -> "efsVolumeConfiguration";
-                    case "FSxWindowsFileServerVolumeConfiguration" -> "fsxWindowsFileServerVolumeConfiguration";
-                    case "S3FilesVolumeConfiguration" -> "s3filesVolumeConfiguration";
-                    case "FilesystemId" -> "fileSystemId";
-                    case "IAM" -> "iam";
-                    default -> key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
-                };
-                if ("TransitEncryptionPort".equals(key) && value.isTextual()) {
-                    result.put(apiKey, value.asInt());
-                } else {
-                    result.set(apiKey, "DriverOpts".equals(key) || "Labels".equals(key)
-                            ? value.deepCopy() : normalizeCfnEcsNode(value));
-                }
-            });
-            return result;
-        }
-        if (node.isArray()) {
-            ArrayNode result = MAPPER.createArrayNode();
-            node.forEach(item -> result.add(normalizeCfnEcsNode(item)));
-            return result;
-        }
-        return node.deepCopy();
     }
 
     private static Integer optionalInt(JsonNode node, String member) {
