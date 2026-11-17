@@ -1610,6 +1610,21 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 .findFirst();
     }
 
+    /**
+     * What a listing's marker resumes only, as a JSON list: the operation, the account, the Region and each filter, an
+     * absent filter told apart from any value. A marker from another account, Region or filter is then refused, rather
+     * than resuming this listing at its cursor.
+     */
+    static String listingNamespace(String operation, String accountId, String region, String... filters) {
+        List<String> parts = new ArrayList<>(Arrays.asList(operation, accountId, region));
+        parts.addAll(Arrays.asList(filters));
+        try {
+            return SNAPSHOT_MAPPER.writeValueAsString(parts);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot write a listing's namespace", e);
+        }
+    }
+
     static AwsException invalid(String message) {
         return new AwsException("InvalidRequestException", message, 400);
     }

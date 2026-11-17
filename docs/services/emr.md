@@ -265,7 +265,8 @@ nothing answers.
 * **UpdateStudio** changes what it is given. Its `SubnetIds` "can include new subnet IDs, but must also include all of
   the subnet IDs previously associated with the Studio", at most 5, in the Studio's VPC; anything else is refused.
 * **DeleteStudio** removes the Studio and its session mappings. **ListStudios** lists the Region's Studios in the order
-  they were made, 50 to a page, after a `Marker`; no source gives AWS's order or page size.
+  they were made, 50 to a page, after a `Marker`, which resumes only the listing it came from: the same account and
+  Region. No source gives AWS's order or page size.
 * **Session mappings** are for an `SSO` Studio, as "Use CreateStudioSessionMapping to assign users to a Studio when you
   use IAM Identity Center authentication"; one on an `IAM` Studio is refused. A call names its user or group by
   "Either IdentityName or IdentityId ... but not both", and the identity must be in the identity store of the
@@ -273,7 +274,8 @@ nothing answers.
   both. A user or group mapped twice, or not mapped, is refused, each with `InvalidRequestException` in Floci's own
   wording. Getting, updating and removing a mapping finds it by the id or the name it was made with, so one whose
   user or group has since been deleted can still be removed. The `SessionPolicyArn` is kept as given. `ListStudioSessionMappings` lists a Studio's mappings, or every
-  Studio's when it names none, filtered by `IdentityType`, in the order they were made, 50 to a page.
+  Studio's when it names none, filtered by `IdentityType`, in the order they were made, 50 to a page, after a `Marker`
+  that resumes only the listing it came from: the same account, Region, Studio and `IdentityType`.
 
 ## Notebook executions
 
