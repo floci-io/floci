@@ -795,6 +795,7 @@ public class EmrHandler {
         putS3Location(node, "OutputNotebookS3Location", execution.getOutputNotebookS3Bucket(),
                 execution.getOutputNotebookS3Key());
         putIfSet(node, "OutputNotebookFormat", execution.getOutputNotebookFormat());
+        putIfSet(node, "OutputNotebookURI", execution.getOutputNotebookUri());
         if (execution.getEnvironmentVariables() != null) {
             ObjectNode variables = node.putObject("EnvironmentVariables");
             execution.getEnvironmentVariables().forEach(variables::put);

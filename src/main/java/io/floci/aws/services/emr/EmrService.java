@@ -169,6 +169,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final ClusterStorage clusterStorage;
     private final ReleaseImages releaseImages;
     private final Executor stepExecutor;
+    // The commands other EMR services run on a cluster ({@link #runOnCluster}), by run id, with their cluster's id.
+    private final Map<String, String> clusterRuns = new HashMap<>();
     // The Spark Connect servers of the sessions, in the docker runner mode, and the tokens given for every session.
     private final SparkConnectServers sessionServers;
     private final SessionOwner sessionOwner = new SessionOwner();
@@ -451,6 +453,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         generation++;
         executing.clear();
         bootstrapping.clear();
+        clusterRuns.clear();
         sessionServers.reset();
         if (bootstrapRunner != null) {
             bootstrapRunner.removeImages(Set.of());
@@ -860,6 +863,152 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // Whether a session runs a Spark Connect server: in the docker runner mode, where its cluster has storage.
     private boolean runsSessionServers() {
         return sparkRunner != null && clusterStorage != null;
+    }
+
+    /** Whether {@link #runOnCluster} runs anything: in the docker runner mode, as steps run. */
+    public boolean runsOnClusters() {
+        return runsSessionServers();
+    }
+
+    /** What a command run on a cluster ({@link #runOnCluster}) tells its caller, and asks it, as its account. */
+    public interface ClusterRun {
+
+        /** The command's container runs. */
+        void started();
+
+        /** The command has ended, as {@code outcome} says; the cluster's end stops it, which says it was stopped. */
+        void ended(SparkJobRunner.Outcome outcome);
+
+        /** Whether the run is past starting, or going on. */
+        boolean cancelled();
+    }
+
+    /**
+     * Runs {@code command} on the cluster as a step's command runs, its {@code spark-submit} a YARN application there
+     * with the cluster's Spark settings, as {@code runId}, with {@code environment}, as {@code role} (else the
+     * cluster's instance profile), for at most {@code limit}, telling {@code run}. The cluster keeps its storage while
+     * it runs, and its end stops it, as a reset's or a shutdown's teardown does. A command that cannot be handed to its
+     * thread, its cluster shut down or a teardown begun, has ended before this returns, as stopped, or as one that
+     * could not start. A notebook execution runs its notebook so.
+     */
+    public void runOnCluster(String clusterId, String runId, String role, List<String> command,
+                             Map<String, String> environment, Duration limit, ClusterRun run) {
+        CommandLaunch launch;
+        try {
+            launch = call(() -> commandLaunch(clusterId, runId, role, command, environment, limit));
+        } catch (RuntimeException e) {
+            run.ended(SparkJobRunner.Outcome.couldNotStart(reasonOf(e)));
+            return;
+        }
+        if (launch == null) {
+            run.ended(SparkJobRunner.Outcome.halted());
+            return;
+        }
+        try {
+            stepExecutor.execute(() -> runCommand(launch, run));
+        } catch (RuntimeException e) {
+            run.ended(SparkJobRunner.Outcome.couldNotStart(reasonOf(e)));
+            forgetCommand(runId);
+        }
+    }
+
+    // A command that runs no more no longer holds what its cluster kept.
+    private void forgetCommand(String runId) {
+        run(() -> {
+            String clusterId = clusterRuns.remove(runId);
+            if (clusterId != null) {
+                clusterStore.get(clusterId).ifPresent(this::releaseEnded);
+            }
+        });
+    }
+
+    /**
+     * A command handed to its thread: its job, what sets its cluster up, its cluster, and the reset and the teardowns
+     * it was handed off after.
+     */
+    private record CommandLaunch(SparkJobRunner.Job job, ClusterPreparation preparation, String clusterId,
+                                 long launchedIn, long teardownsBefore) {
+    }
+
+    // A command's launch, under the service's lock, its cluster keeping its storage from now; null where the cluster
+    // has shut down or a teardown has begun, which would stop it at once.
+    private CommandLaunch commandLaunch(String clusterId, String runId, String role, List<String> command,
+                                        Map<String, String> environment, Duration limit) {
+        EmrCluster cluster = requireCluster(clusterId);
+        if (tornDown || shutDownAt(cluster, now()) != null) {
+            return null;
+        }
+        String accountId = regionResolver.getAccountId();
+        String region = regionOf(cluster);
+        OnCluster onCluster = onCluster(cluster, accountId, region, true);
+        clusterStore.put(cluster.getId(), cluster);
+        SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, runId, accountId, region,
+                cluster.getReleaseLabel(), SparkJobRunner.Engine.SPARK, onCluster.image(), null, dockerNetwork,
+                role != null ? role : instanceProfileRole(cluster, accountId),
+                EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(), command,
+                limit, null, null, environment, List.of(), onCluster.storage(),
+                EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.hadoopLog4j(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), null);
+        ClusterPreparation preparation = new ClusterPreparation(cluster.getId(), accountId, region,
+                onCluster.releaseImage(), onCluster.hdfs(), onCluster.primary());
+        clusterRuns.put(runId, cluster.getId());
+        return new CommandLaunch(job, preparation, cluster.getId(), generation, teardowns.get());
+    }
+
+    private static String reasonOf(RuntimeException e) {
+        return e.getMessage() != null ? e.getMessage() : e.toString();
+    }
+
+    /** Stops a command {@link #runOnCluster} runs, which then ends as stopped. */
+    public void stopOnCluster(String runId) {
+        if (sparkRunner != null) {
+            sparkRunner.stop(runId);
+        }
+    }
+
+    // A command's thread on its cluster, as a step's: its setup, its run, then its caller told, and what its cluster
+    // kept released once nothing of it runs any more.
+    private void runCommand(CommandLaunch launch, ClusterRun run) {
+        SparkJobRunner.Job job = launch.job();
+        ClusterPreparation preparation = launch.preparation();
+        SparkJobRunner.Outcome outcome;
+        SparkJobRunner.Progress progress = new SparkJobRunner.Progress() {
+            @Override
+            public void started() {
+                RequestScopes.runAs(job.accountId(), job.region(), run::started);
+            }
+
+            @Override
+            public void timedOut() {
+                // The outcome says so.
+            }
+
+            // Past starting, or going on, once a teardown has begun, a reset has removed it, its cluster has shut down,
+            // or its caller has stopped it.
+            @Override
+            public boolean cancelled() {
+                return teardowns.get() != launch.teardownsBefore()
+                        || !RequestScopes.callAs(job.accountId(), job.region(), () -> commandGoing(launch))
+                        || RequestScopes.callAs(job.accountId(), job.region(), run::cancelled);
+            }
+        };
+        try {
+            outcome = sparkRunner.run(preparation.prepare(job, progress::cancelled), progress);
+        } catch (RuntimeException e) {
+            outcome = progress.cancelled() ? SparkJobRunner.Outcome.halted()
+                    : SparkJobRunner.Outcome.couldNotStart(reasonOf(e));
+        } finally {
+            preparation.release();
+        }
+        SparkJobRunner.Outcome ended = outcome;
+        try {
+            RequestScopes.runAs(job.accountId(), job.region(), () -> run.ended(ended));
+        } finally {
+            RequestScopes.runAs(job.accountId(), job.region(), () -> forgetCommand(job.runId()));
+        }
     }
 
     /**
@@ -2065,7 +2214,16 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // still running on it", and stops their servers.
     private void endSessionsOf(EmrCluster cluster) {
         Instant now = now();
-        if (!cluster.isSessionEnabled() || EmrService.shutDownAt(cluster, now) == null) {
+        if (EmrService.shutDownAt(cluster, now) == null) {
+            return;
+        }
+        // The commands run on it stop too, and end as stopped.
+        clusterRuns.forEach((runId, clusterId) -> {
+            if (clusterId.equals(cluster.getId())) {
+                stopOnCluster(runId);
+            }
+        });
+        if (!cluster.isSessionEnabled()) {
             return;
         }
         for (EmrSession session : sessionStore.scan(key -> true)) {
@@ -2078,8 +2236,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
     }
 
-    // Whether a server of the cluster's sessions is still there, its container perhaps still on its storage.
+    // Whether a server of the cluster's sessions, or a command run on it, is still there, its container perhaps still
+    // on its storage.
     private boolean sessionServersRunning(EmrCluster cluster) {
+        if (clusterRuns.containsValue(cluster.getId())) {
+            return true;
+        }
         return cluster.isSessionEnabled() && sessionStore.scan(key -> true).stream()
                 .anyMatch(session -> cluster.getId().equals(session.getClusterId())
                         && sessionServers.runs(session.getId()));
@@ -2309,6 +2471,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return launch.launchedIn() == generation && clusterStore.get(launch.clusterId())
                 .flatMap(cluster -> stepOf(cluster, launch.stepId()))
                 .filter(step -> EmrClusterLifecycle.RUNNING.equals(step.getState())).isPresent();
+    }
+
+    // Whether a command's cluster still runs, in the reset it was handed off in.
+    private synchronized boolean commandGoing(CommandLaunch launch) {
+        return launch.launchedIn() == generation && clusterStore.get(launch.clusterId())
+                .filter(cluster -> shutDownAt(cluster, now()) == null).isPresent();
     }
 
     private synchronized boolean resetSince(StepLaunch launch) {
