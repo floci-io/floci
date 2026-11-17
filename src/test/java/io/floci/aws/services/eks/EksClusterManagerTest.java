@@ -2590,7 +2590,8 @@ class EksClusterManagerTest {
             assertArrayEquals(EksPodNetworkRouting.buildPodIdentityForwardCommand(null, "floci-host", 4566),
                     capturedCmds.get(0));
             String script = capturedCmds.get(0)[2];
-            assertFalse(script.contains("socat"), "nothing is installed or started in the node");
+            assertFalse(script.contains("install"), "nothing is installed in the node");
+            assertFalse(script.contains("nohup socat"), "no relay is started in the node");
             assertFalse(script.contains("169.254.169.254"), "pod identity forwarding must not route IMDS traffic");
         }
 

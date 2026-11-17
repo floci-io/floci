@@ -16,9 +16,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,7 +33,13 @@ class EksPodNetworkRoutingTest {
             "-t nat -D PREROUTING -s 10.42.0.0/16 -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT"
                     + " --to-destination 172.18.0.9:4566",
             "-t nat -S OUTPUT",
-            "-t nat -D OUTPUT -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:4566");
+            "-t nat -D OUTPUT -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:4566",
+            "-t nat -S FLOCI-LINK-LOCAL",
+            "-t nat -D FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT"
+                    + " --to-destination 169.254.170.23:80");
+
+    /** Where the relay an older Floci ran for the address kept its PID. */
+    private static final Path RELAY_PID_FILE = Path.of("/tmp/floci-pod-identity-proxy.pid");
 
     @Test
     void linkLocalEndpointValidatesInput() {
@@ -183,6 +191,57 @@ class EksPodNetworkRoutingTest {
         assertEquals(EARLIER_RULES_REMOVED, Files.readAllLines(dir.resolve("iptables-calls")));
     }
 
+    /**
+     * An older Floci answered on the address with a socat relay on the node's loopback, which would answer again once
+     * the rules in front of it went: the removal stops it, while its PID file still names it, and takes its address
+     * off the loopback.
+     */
+    @Test
+    void podIdentityRemovalRetiresTheRelayAnOlderFlociRan(@TempDir Path dir) throws Exception {
+        Path bin = fakeStockNode(dir);
+        HelperShellFixture.writeTool(bin, "ip", "echo \"$*\" >> '" + dir.resolve("ip-calls") + "'\n"
+                + "if [ \"$*\" = 'addr show dev lo' ]; then\n"
+                + "  echo '    inet 127.0.0.1/8 scope host lo'\n"
+                + "  echo '    inet 169.254.170.23/32 scope global lo'\n"
+                + "fi\n");
+        Process relay = startFakeRelay(bin, "169.254.170.23");
+        try {
+            Files.writeString(RELAY_PID_FILE, relay.pid() + "\n");
+
+            int exit = HelperShellFixture.run(EksPodNetworkRouting.buildPodIdentityRemoveCommand(), dir,
+                    Map.of("PATH", bin.toString()));
+
+            assertEquals(0, exit, HelperShellFixture.output(dir));
+            assertTrue(relay.waitFor(10, TimeUnit.SECONDS), "the relay is still running");
+            assertFalse(Files.exists(RELAY_PID_FILE));
+            assertEquals(List.of("addr show dev lo", "addr del 169.254.170.23/32 dev lo"),
+                    calls(dir.resolve("ip-calls")));
+        } finally {
+            relay.destroyForcibly();
+            Files.deleteIfExists(RELAY_PID_FILE);
+        }
+    }
+
+    /** A PID file that names another process, here a socat relaying IMDS, leaves that process running. */
+    @Test
+    void podIdentityRemovalLeavesTheProcessAStalePidFileNames(@TempDir Path dir) throws Exception {
+        Path bin = fakeStockNode(dir);
+        Process imdsRelay = startFakeRelay(bin, "169.254.169.254");
+        try {
+            Files.writeString(RELAY_PID_FILE, imdsRelay.pid() + "\n");
+
+            int exit = HelperShellFixture.run(EksPodNetworkRouting.buildPodIdentityRemoveCommand(), dir,
+                    Map.of("PATH", bin.toString()));
+
+            assertEquals(0, exit, HelperShellFixture.output(dir));
+            assertFalse(imdsRelay.waitFor(1, TimeUnit.SECONDS), "the IMDS relay was stopped");
+            assertFalse(Files.exists(RELAY_PID_FILE));
+        } finally {
+            imdsRelay.destroyForcibly();
+            Files.deleteIfExists(RELAY_PID_FILE);
+        }
+    }
+
     /** A node without iptables has no rules to remove, but cannot be given any. */
     @Test
     void withoutIptablesRemovalSucceedsAndTheForwardFails(@TempDir Path dir) throws Exception {
@@ -244,13 +303,15 @@ class EksPodNetworkRoutingTest {
 
     /**
      * A bin directory of stand-ins for a stock k3s node's tools, beside the host's awk, sed, grep,
-     * env, sleep and cat. iptables records its arguments in {@code iptables-calls} and lists, in
-     * each chain, a rule an earlier Floci on 172.18.0.9 left for the address and one rule of
-     * another's. nslookup records its arguments in {@code nslookup-calls} and answers as BusyBox's.
+     * env, sleep, cat, tr and rm. iptables records its arguments in {@code iptables-calls} and lists,
+     * in {@code PREROUTING} and {@code OUTPUT}, a rule an earlier Floci on 172.18.0.9 left for the
+     * address and one rule of another's, and in {@code FLOCI-LINK-LOCAL} the rule an older Floci sent
+     * the address to its relay with, beside the IMDS one. nslookup records its arguments in
+     * {@code nslookup-calls} and answers as BusyBox's.
      */
     private static Path fakeStockNode(Path dir) throws Exception {
         Path bin = Files.createDirectory(dir.resolve("bin"));
-        HelperShellFixture.linkHostTools(bin, List.of("awk", "sed", "grep", "env", "sleep", "cat"));
+        HelperShellFixture.linkHostTools(bin, List.of("awk", "sed", "grep", "env", "sleep", "cat", "tr", "rm"));
         HelperShellFixture.writeTool(bin, "iptables", "echo \"$*\" >> '" + dir.resolve("iptables-calls") + "'\n"
                 + "if [ \"$*\" = '-t nat -S PREROUTING' ]; then\n"
                 + "  echo '-P PREROUTING ACCEPT'\n"
@@ -262,6 +323,13 @@ class EksPodNetworkRoutingTest {
                 + "  echo '-P OUTPUT ACCEPT'\n"
                 + "  echo '-A OUTPUT -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:4566'\n"
                 + "  echo '-A OUTPUT -j KUBE-SERVICES'\n"
+                + "fi\n"
+                + "if [ \"$*\" = '-t nat -S FLOCI-LINK-LOCAL' ]; then\n"
+                + "  echo '-N FLOCI-LINK-LOCAL'\n"
+                + "  echo '-A FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT"
+                + " --to-destination 169.254.169.254:80'\n"
+                + "  echo '-A FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT"
+                + " --to-destination 169.254.170.23:80'\n"
                 + "fi\n");
         HelperShellFixture.writeTool(bin, "nslookup", "echo \"$*\" >> '" + dir.resolve("nslookup-calls") + "'\n"
                 + "[ \"$1\" = floci-under-test.internal ] || exit 1\n"
@@ -270,6 +338,20 @@ class EksPodNetworkRoutingTest {
         HelperShellFixture.writeTool(bin, "wget", "[ -z \"${http_proxy:-}\" ] || exit 2\n"
                 + "echo 'wget: server returned error: HTTP/1.1 400 Bad Request' >&2\nexit 1\n");
         return bin;
+    }
+
+    /**
+     * A process named socat, as the relay an older Floci ran is, with that relay's arguments for {@code bindIp}. It
+     * ends on SIGTERM.
+     */
+    private static Process startFakeRelay(Path bin, String bindIp) throws Exception {
+        Path relay = Files.createDirectories(bin.resolveSibling("relay")).resolve("socat");
+        if (!Files.exists(relay)) {
+            HelperShellFixture.writeTool(relay.getParent(), "socat",
+                    "trap 'kill \"$child\" 2>/dev/null; exit 0' TERM\nsleep 60 &\nchild=$!\nwait \"$child\"\n");
+        }
+        return new ProcessBuilder(relay.toString(), "TCP-LISTEN:80,bind=" + bindIp + ",fork,reuseaddr",
+                "TCP:172.18.0.9:4566").start();
     }
 
     private static List<String> calls(Path record) throws Exception {

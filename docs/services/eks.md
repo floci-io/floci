@@ -157,6 +157,8 @@ The rules follow the add-on:
 - `DeleteAddon` removes them. With `preserve=true` they stay, since EKS leaves the agent running on the cluster then.
 - When the cluster container starts or a Floci restart adopts it, Floci adds them while the add-on is stored and otherwise removes any it finds. So after a `DeleteAddon` with `preserve=true`, the address answers only until the next restart.
 
+Each of these also retires the `socat` relay an older Floci ran for the address in the node, with its loopback address and its rule in the `FLOCI-LINK-LOCAL` chain, so the relay can't answer once the rules are removed.
+
 The rules need `iptables` in the node, which the stock `rancher/k3s` image has, and they are only set up with `floci.services.eks.pod-identity-webhook` and TLS on (see below), since pods get the credentials URL only from the webhook. Floci's host name is resolved inside the node, from its `/etc/hosts` (where `host.docker.internal` lives on Linux) or else through DNS.
 
 The credentials endpoint performs the following validations:

@@ -14,6 +14,13 @@ public final class Ec2MetadataProxy {
 
     private static final int EC2_IMDS_RELAY_PORT = 42169;
 
+    /** A shell function: whether process {@code $1} is a socat whose arguments hold {@code $2}. */
+    private static final List<String> IS_SOCAT_LISTENER = List.of(
+            "is_socat_listener() {",
+            "  [ \"$(cat \"/proc/$1/comm\" 2>/dev/null)\" = socat ]"
+                    + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$1/cmdline\" | grep -Fq \"$2\"",
+            "}");
+
     /**
      * Run first in the shells that install and start these proxies and in the sshd install probe.
      * {@code docker exec} hands the shell the image's environment, so an application's library
@@ -134,7 +141,7 @@ public final class Ec2MetadataProxy {
     private static String[] startCommand(String name, String bindIp, int bindPort,
                                          String targetHost, int targetPort, String probeCommand,
                                          boolean routeImdsPort) {
-        String legacyPidFile = "/tmp/floci-" + name + "-proxy.pid";
+        String legacyPidFile = relayPidFile(name);
         String pidFile = routeImdsPort ? "/tmp/floci-" + name + "-proxy-" + bindPort + ".pid" : legacyPidFile;
         String logFile = "/tmp/floci-" + name + "-proxy.log";
         String listener = "TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",";
@@ -146,10 +153,7 @@ public final class Ec2MetadataProxy {
                 LEAVE_ROOT_CGROUP,
                 CLEAR_APPLICATION_PATHS,
                 "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo"));
-        lines.add("is_socat_listener() {");
-        lines.add("  [ \"$(cat \"/proc/$1/comm\" 2>/dev/null)\" = socat ]"
-                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$1/cmdline\" | grep -Fq \"$2\"");
-        lines.add("}");
+        lines.addAll(IS_SOCAT_LISTENER);
 
         // The writable-layer PID file survives a container restart, so verify the process name and
         // listener arguments before reusing it or retiring a pre-upgrade TCP/80 listener.
@@ -303,6 +307,29 @@ public final class Ec2MetadataProxy {
         lines.add("cat " + logFile + " >&2 || true");
         lines.add("exit 1");
         return new String[]{"sh", "-c", String.join("\n", lines)};
+    }
+
+    /**
+     * Shell lines that retire the relay {@link #startCommand(String, String, int, String, int, String)} started as
+     * {@code name} on {@code bindIp}, port 80: the socat its PID file names, while that is still the relay, then the
+     * PID file and the loopback address the relay was given. A node without the relay, or without {@code ip}, is
+     * left as it is.
+     */
+    public static List<String> stopRelayLines(String name, String bindIp) {
+        String pidFile = relayPidFile(name);
+        List<String> lines = new ArrayList<>(IS_SOCAT_LISTENER);
+        lines.add(socatPidCheck(pidFile, "TCP-LISTEN:80,bind=" + bindIp + ","));
+        lines.add("  kill \"$pid\" 2>/dev/null || true");
+        lines.add("fi");
+        lines.add("rm -f " + pidFile);
+        lines.add("if command -v ip >/dev/null 2>&1 && ip addr show dev lo | grep -q '" + bindIp + "/32'; then");
+        lines.add("  ip addr del " + bindIp + "/32 dev lo");
+        lines.add("fi");
+        return lines;
+    }
+
+    private static String relayPidFile(String name) {
+        return "/tmp/floci-" + name + "-proxy.pid";
     }
 
     private static String socatPidCheck(String pidFile, String listener) {

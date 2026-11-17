@@ -1,5 +1,7 @@
 package io.floci.aws.services.eks;
 
+import io.floci.aws.services.ec2.Ec2MetadataProxy;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -69,11 +71,10 @@ public final class EksPodNetworkRouting {
      *
      * <p>A {@code PREROUTING} rule takes the pod network's requests and an {@code OUTPUT} rule
      * those of the node itself, which is where a {@code hostNetwork} pod's come from. The node's
-     * own masquerade rule (flannel's) carries the answers back. Earlier rules for the address in
-     * those two chains are removed first, as {@link #buildPodIdentityRemoveCommand} removes them,
-     * so a Floci that comes back on another address leaves none behind. A rule an older Floci put in
-     * {@link #CHAIN_NAME} for its relay stays, but the new first {@code PREROUTING} rule comes
-     * before the jump to it.
+     * own masquerade rule (flannel's) carries the answers back. What an earlier Floci set up for the
+     * address is removed first, as {@link #buildPodIdentityRemoveCommand} removes it, so a Floci that
+     * comes back on another address leaves no rule behind, and a node an older Floci gave a relay ends
+     * as a new node does.
      *
      * <p>iptables needs an address, so a {@code flociHost} name is resolved inside the node, as
      * its pods resolve it: from {@code /etc/hosts} (where {@code host.docker.internal} lives on
@@ -138,9 +139,9 @@ public final class EksPodNetworkRouting {
 
     /**
      * Builds a POSIX sh command array that removes the rules {@link #buildPodIdentityForwardCommand}
-     * adds, and any an earlier Floci added for the address, so that nothing answers on it, as on an
-     * EKS node without the Pod Identity agent. A node without {@code iptables} has no such rules,
-     * so the command succeeds there.
+     * adds, any an earlier Floci added for the address, and the relay an older Floci ran for it, so
+     * that nothing answers on it, as on an EKS node without the Pod Identity agent. A node without
+     * {@code iptables} has no such rules, so the command succeeds there.
      *
      * @return command array suitable for container exec (["sh", "-c", "..."])
      */
@@ -187,12 +188,17 @@ public final class EksPodNetworkRouting {
         return lines;
     }
 
-    /** Deletes each {@code PREROUTING} and {@code OUTPUT} rule for the Pod Identity address. */
+    /**
+     * Deletes each rule for the Pod Identity address in {@code PREROUTING} and {@code OUTPUT}, and in
+     * {@link #CHAIN_NAME}, where an older Floci sent it to the relay it ran in the node, then retires that relay.
+     * The relay would otherwise answer again once the rules in front of it go.
+     */
     private static void addPodIdentityRuleRemoval(List<String> lines) {
-        lines.add("for CHAIN in PREROUTING OUTPUT; do");
-        lines.add("  $IPTABLES -t nat -S \"$CHAIN\" | grep -F -- '-d " + POD_IDENTITY_ENDPOINT.ip() + "/32 '"
+        lines.add("for CHAIN in PREROUTING OUTPUT " + CHAIN_NAME + "; do");
+        lines.add("  $IPTABLES -t nat -S \"$CHAIN\" 2>/dev/null | grep -F -- '-d " + POD_IDENTITY_ENDPOINT.ip() + "/32 '"
                 + " | grep -F -- '--dport " + POD_IDENTITY_ENDPOINT.port() + " '"
                 + " | sed 's/^-A /-D /' | while read -r rule; do $IPTABLES -t nat $rule; done");
         lines.add("done");
+        lines.addAll(Ec2MetadataProxy.stopRelayLines("pod-identity", POD_IDENTITY_ENDPOINT.ip()));
     }
 }
