@@ -57,13 +57,20 @@ aws_cmd_in() {
 # The attributes of the key the tests create.
 KEY_ATTRIBUTES='KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}'
 
-# The key that leaves the service, replicated to the regions named.
-create_replicated_key() {
+# The command that creates a key replicated to the region named.
+create_replicated_key_command() {
+    local region="$1"
+    shift
     aws_cmd payment-cryptography create-key \
         --key-attributes "$KEY_ATTRIBUTES" \
         --exportable \
-        --replication-regions "$1" \
-        --query 'Key.KeyArn' --output text
+        --replication-regions "$region" \
+        "$@"
+}
+
+# The key that leaves the service, replicated to the regions named.
+create_replicated_key() {
+    create_replicated_key_command "$1" --query 'Key.KeyArn' --output text
 }
 
 @test "Payment Cryptography multi-region: the default replication regions are read and set" {
@@ -151,10 +158,7 @@ create_replicated_key() {
 @test "Payment Cryptography multi-region: a region of another partition is refused" {
     # A key is replicated within the partition it is in, as the reference says, so a
     # region of another partition is refused.
-    run aws_cmd payment-cryptography create-key \
-        --key-attributes "$KEY_ATTRIBUTES" \
-        --exportable \
-        --replication-regions cn-north-1
+    run create_replicated_key_command cn-north-1
     assert_failure
     [[ "$output" == *"cn-north-1"* ]]
 }
@@ -162,10 +166,7 @@ create_replicated_key() {
 @test "Payment Cryptography multi-region: the region of the request is not a region to replicate to" {
     # The key is in the region of the request already, so naming that region is a request
     # that cannot be carried out.
-    run aws_cmd payment-cryptography create-key \
-        --key-attributes "$KEY_ATTRIBUTES" \
-        --exportable \
-        --replication-regions us-east-1
+    run create_replicated_key_command us-east-1
     assert_failure
     [[ "$output" == *"us-east-1"* ]]
 }

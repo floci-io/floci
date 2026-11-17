@@ -313,16 +313,27 @@ class PaymentCryptographyTest {
         return createKey(algorithm, KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
     }
 
-    /** A key of the given algorithm and usage, for a variant that binds a purpose. */
-    private static Key createKey(KeyAlgorithm algorithm, KeyUsage usage) {
-        Key key = client.createKey(r -> r
+    /**
+     * The request that creates a key of the given algorithm and usage.
+     *
+     * @param algorithm the key's algorithm
+     * @param usage the key's usage
+     * @param exportable whether the key may leave the service
+     */
+    private static Consumer<CreateKeyRequest.Builder> keyRequest(KeyAlgorithm algorithm, KeyUsage usage,
+                                                                 boolean exportable) {
+        return r -> r
                 .keyAttributes(a -> a
                         .keyAlgorithm(algorithm)
                         .keyClass(KeyClass.SYMMETRIC_KEY)
                         .keyUsage(usage)
                         .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(true))
-                .key();
+                .exportable(exportable);
+    }
+
+    /** A key of the given algorithm and usage, for a variant that binds a purpose. */
+    private static Key createKey(KeyAlgorithm algorithm, KeyUsage usage) {
+        Key key = client.createKey(keyRequest(algorithm, usage, true)).key();
         keyArns.add(key.keyArn());
         return key;
     }
@@ -336,14 +347,11 @@ class PaymentCryptographyTest {
      */
     private static Consumer<CreateKeyRequest.Builder> replicatedKeyRequest(boolean exportable,
                                                                           String... regions) {
-        return r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
-                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
-                .exportable(exportable)
-                .replicationRegions(regions);
+        return r -> {
+            keyRequest(KeyAlgorithm.AES_256, KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY, exportable)
+                    .accept(r);
+            r.replicationRegions(regions);
+        };
     }
 
     /**
