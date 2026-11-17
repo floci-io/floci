@@ -148,6 +148,8 @@ public class PostgresProtocolHandler {
      * StartupMessage parameters ({@code options}, {@code application_name} and any run-time
      * parameter) apply as they would on the server itself: they open the backend session, or,
      * for an IAM login handed over to the token's role, are set once the role owns the session.
+     * {@code replication} opens the backend session in both cases, since it can only be chosen
+     * at connection start.
      */
     public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
@@ -345,14 +347,15 @@ public class PostgresProtocolHandler {
             // An IAM login for any role but the master runs on a session opened as the master and
             // handed over below, so PostgreSQL would apply the client's parameters with the
             // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
-            // would regain the master. Those logins open without them, and their parameters are
-            // applied once the session belongs to the role (Phase 5c). The proxy reads that
-            // session's results and sends it SQL of its own, so it fixes the encoding to UTF-8.
+            // would regain the master. Those logins open with only "replication", which cannot be
+            // chosen later, and their other parameters are applied once the session belongs to the
+            // role (Phase 5c). The proxy reads that session's results and sends it SQL of its own,
+            // so it fixes the encoding to UTF-8.
             Map<String, String> backendParameters;
             if (!forwardStartupParameters) {
                 backendParameters = Map.of();
             } else if (iamHandover) {
-                backendParameters = Map.of("client_encoding", "UTF8");
+                backendParameters = handoverStartupParameters(startup.parameters(), Map.of());
             } else {
                 backendParameters = startup.parameters();
             }
@@ -434,11 +437,9 @@ public class PostgresProtocolHandler {
                     backend.setSoTimeout(handshakeTimeoutMillis);
                     backendIn = backend.getInputStream();
                     backendOut = backend.getOutputStream();
-                    Map<String, String> withDefaults = new LinkedHashMap<>();
-                    withDefaults.put("options", startupOptions(defaults.atStartup()));
-                    withDefaults.put("client_encoding", "UTF8");
                     backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
-                            effectiveDbName, withDefaults);
+                            effectiveDbName, handoverStartupParameters(startup.parameters(),
+                                    Map.of("options", startupOptions(defaults.atStartup()))));
                     if (backendRejection != null) {
                         clientOut.write(backendRejection);
                         clientOut.flush();
@@ -566,6 +567,17 @@ public class PostgresProtocolHandler {
                                     : !selectedRole.allowed() ? (databaseIamAuthentication
                                             ? "final LOGIN and rds_iam membership required" : "final LOGIN required")
                                     : "role identity changed during handover");
+                    return null;
+                }
+                // PostgreSQL checks the replication privilege only when the WAL sender starts,
+                // which it did as the master, and never again for replication commands.
+                if (requestsReplication(startup.parameters()) && !hasReplicationPrivilege(backendIn, backendOut)) {
+                    LOG.infov("RDS IAM replication connection refused for role {0}: replication privilege required",
+                            SigV4RequestValidator.sanitizeForLog(clientUsername));
+                    sendErrorResponse(clientOut, "FATAL", "42501", "permission denied to start WAL sender");
+                    clientOut.flush();
+                    closeQuietly(client);
+                    closeQuietly(backend);
                     return null;
                 }
             }
@@ -1350,7 +1362,8 @@ public class PostgresProtocolHandler {
     /**
      * The run-time parameters a StartupMessage asks for, in the order PostgreSQL applies them:
      * the {@code -c} switches in {@code options} first, then every other parameter as sent.
-     * {@code user}, {@code database} and {@code _pq_.} protocol extensions are not parameters.
+     * {@code user}, {@code database}, {@code replication} and {@code _pq_.} protocol extensions
+     * are not run-time parameters.
      */
     static List<SessionSetting> sessionSettings(Map<String, String> startupParameters)
             throws StartupParameterException {
@@ -1362,25 +1375,45 @@ public class PostgresProtocolHandler {
         for (Map.Entry<String, String> parameter : startupParameters.entrySet()) {
             String name = parameter.getKey();
             if ("user".equals(name) || "database".equals(name) || "options".equals(name)
-                    || name.startsWith("_pq_.")) {
-                continue;
-            }
-            if ("replication".equals(name)) {
-                String value = parameter.getValue();
-                Boolean replication = "database".equals(value) ? Boolean.TRUE : parseBool(value);
-                if (replication == null) {
-                    throw new StartupParameterException("22023",
-                            "invalid value for parameter \"replication\": \"" + value + "\"");
-                }
-                if (replication) {
-                    throw new StartupParameterException("0A000",
-                            "replication connections are not supported for IAM sessions through the proxy");
-                }
+                    || "replication".equals(name) || name.startsWith("_pq_.")) {
                 continue;
             }
             settings.add(new SessionSetting(name, parameter.getValue()));
         }
         return settings;
+    }
+
+    /**
+     * The StartupMessage parameters of a backend session opened as the master for a handover:
+     * {@code base}, UTF-8 for the proxy's own queries, and the client's {@code replication},
+     * which can only be chosen at connection start.
+     */
+    static Map<String, String> handoverStartupParameters(Map<String, String> clientParameters,
+                                                         Map<String, String> base) {
+        Map<String, String> parameters = new LinkedHashMap<>(base);
+        parameters.put("client_encoding", "UTF8");
+        String replication = clientParameters.get("replication");
+        if (replication != null) {
+            parameters.put("replication", replication);
+        }
+        return parameters;
+    }
+
+    static boolean requestsReplication(Map<String, String> startupParameters) {
+        String value = startupParameters.get("replication");
+        return value != null && ("database".equals(value) || Boolean.TRUE.equals(parseBool(value)));
+    }
+
+    static String replicationPrivilegeQuery() {
+        return "SELECT r.oid::pg_catalog.text, r.rolsuper OR r.rolreplication OR EXISTS ("
+                + "SELECT 1 FROM pg_catalog.pg_roles g WHERE g.rolname OPERATOR(pg_catalog.=) 'rds_replication' "
+                + "AND pg_catalog.pg_has_role(r.oid, g.oid, 'MEMBER')) "
+                + "FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) SESSION_USER";
+    }
+
+    private static boolean hasReplicationPrivilege(InputStream in, OutputStream out) throws IOException {
+        List<SessionSetting> rows = settingsFromDataRows(runQuery(in, out, replicationPrivilegeQuery()));
+        return rows.size() == 1 && "t".equals(rows.getFirst().value());
     }
 
     /**
@@ -1663,7 +1696,10 @@ public class PostgresProtocolHandler {
                 closeQuietly(backend);
             }
         };
-        Thread t1 = RelayThreads.start("rds-pg-c2b", () -> relay(clientIn, backendOut, closeBoth));
+        boolean logicalReplication = session.iamRole() != null && requestsReplication(session.startupParameters());
+        Thread t1 = RelayThreads.start("rds-pg-c2b", logicalReplication
+                ? () -> relayRefusingPhysicalReplication(clientIn, backendOut, session.iamRole(), closeBoth)
+                : () -> relay(clientIn, backendOut, closeBoth));
         Thread t2 = RelayThreads.start("rds-pg-b2c",
                 () -> relayToClient(backendIn, clientOut, session.iamRole(), closeBoth));
         try {
@@ -1770,6 +1806,134 @@ public class PostgresProtocolHandler {
         } finally {
             onDone.run();
         }
+    }
+
+    static final String PHYSICAL_REPLICATION_REFUSAL = "DO $$BEGIN RAISE EXCEPTION "
+            + "'permission denied to use physical replication' USING ERRCODE = 'insufficient_privilege'; END$$";
+
+    private static final Set<String> REPLICATION_COMMANDS = Set.of("IDENTIFY_SYSTEM", "BASE_BACKUP",
+            "START_REPLICATION", "CREATE_REPLICATION_SLOT", "DROP_REPLICATION_SLOT", "ALTER_REPLICATION_SLOT",
+            "READ_REPLICATION_SLOT", "TIMELINE_HISTORY", "UPLOAD_MANIFEST", "SHOW");
+
+    /** A WAL sender refuses the extended query protocol, so only a Query can carry a replication command. */
+    private static void relayRefusingPhysicalReplication(InputStream clientIn, OutputStream backendOut,
+                                                         String iamRole, Runnable onDone) {
+        RelayInputStream from = new RelayInputStream(clientIn);
+        BufferedOutputStream to = new BufferedOutputStream(backendOut, 8192);
+        byte[] buf = new byte[8192];
+        try {
+            while (true) {
+                int type = from.read();
+                if (type < 0) {
+                    return;
+                }
+                byte[] header = new byte[4];
+                PostgresWire.readFully(from, header);
+                int length = PostgresWire.int32(header, 0);
+                if (length < 4) {
+                    return;
+                }
+                int remaining = length - 4;
+                if (type == 'Q') {
+                    byte[] payload = new byte[remaining];
+                    PostgresWire.readFully(from, payload);
+                    if (!permittedOnLogicalReplication(PostgresWire.cString(payload, 0).value())) {
+                        LOG.infov("RDS IAM replication session for role {0} sent a physical replication command; refused",
+                                SigV4RequestValidator.sanitizeForLog(iamRole));
+                        payload = PostgresWire.cStringBytes(PHYSICAL_REPLICATION_REFUSAL);
+                        header = PostgresWire.int32(payload.length + 4);
+                    }
+                    to.write(type);
+                    to.write(header);
+                    to.write(payload);
+                } else {
+                    to.write(type);
+                    to.write(header);
+                    while (remaining > 0) {
+                        int n = from.read(buf, 0, Math.min(buf.length, remaining));
+                        if (n < 0) {
+                            return;
+                        }
+                        to.write(buf, 0, n);
+                        remaining -= n;
+                    }
+                }
+                if (from.isDrained()) {
+                    to.flush();
+                }
+            }
+        } catch (IOException e) {
+            LOG.debugv("RDS IAM replication relay for role {0} ended: {1}", iamRole, e.getMessage());
+        } finally {
+            try {
+                to.flush();
+            } catch (IOException e) {
+                LOG.debugv("Backend for RDS IAM role {0} gone before the last flush: {1}", iamRole, e.getMessage());
+            }
+            onDone.run();
+        }
+    }
+
+    /**
+     * Keywords are matched ignoring ASCII case, which PostgreSQL does not, so a lowercase command
+     * PostgreSQL would run as SQL and refuse as a syntax error is refused here instead.
+     */
+    static boolean permittedOnLogicalReplication(String query) {
+        List<String> words = leadingReplicationWords(query, 4);
+        if (words.isEmpty() || !REPLICATION_COMMANDS.contains(words.getFirst())) {
+            return true;
+        }
+        return switch (words.getFirst()) {
+            case "IDENTIFY_SYSTEM", "SHOW", "DROP_REPLICATION_SLOT", "ALTER_REPLICATION_SLOT" -> true;
+            case "CREATE_REPLICATION_SLOT" -> words.size() > 2 && (words.get(2).equals("LOGICAL")
+                    || (words.get(2).equals("TEMPORARY") && words.size() > 3 && words.get(3).equals("LOGICAL")));
+            case "START_REPLICATION" -> words.size() > 3 && words.get(1).equals("SLOT")
+                    && words.get(3).equals("LOGICAL");
+            default -> false;
+        };
+    }
+
+    /** A double-quoted identifier keeps its quotes, so it never reads as a keyword. */
+    private static List<String> leadingReplicationWords(String query, int limit) {
+        List<String> words = new ArrayList<>();
+        int i = 0;
+        int n = query.length();
+        while (words.size() < limit) {
+            while (i < n && " \t\n\r\f\u000b".indexOf(query.charAt(i)) >= 0) {
+                i++;
+            }
+            if (i == n) {
+                break;
+            }
+            StringBuilder word = new StringBuilder();
+            if (query.charAt(i) == '"') {
+                word.append(query.charAt(i++));
+                while (i < n) {
+                    char c = query.charAt(i++);
+                    word.append(c);
+                    if (c == '"' && (i == n || query.charAt(i) != '"')) {
+                        break;
+                    }
+                    if (c == '"') {
+                        word.append(query.charAt(i++));
+                    }
+                }
+            } else if (isIdentifierStart(query.charAt(i))) {
+                while (i < n && (isIdentifierStart(query.charAt(i))
+                        || (query.charAt(i) >= '0' && query.charAt(i) <= '9') || query.charAt(i) == '$')) {
+                    char c = query.charAt(i++);
+                    word.append(c >= 'a' && c <= 'z' ? (char) (c - 'a' + 'A') : c);
+                }
+            } else {
+                break;
+            }
+            words.add(word.toString());
+        }
+        return words;
+    }
+
+    private static boolean isIdentifierStart(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c >= 0x80;
     }
 
     // ── Error response ────────────────────────────────────────────────────────

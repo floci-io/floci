@@ -324,6 +324,14 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void postgresInitSqlCreatesRdsReplicationRoleWhenMissing() {
+        String sql = RdsContainerManager.postgresIamRoleInitSql();
+
+        assertTrue(sql.contains("rolname = 'rds_replication'"));
+        assertTrue(sql.contains("CREATE ROLE rds_replication"));
+    }
+
+    @Test
     void mysqlMasterGrantSqlGrantsGlobalPrivilegesWithGrantOption() {
         String sql = RdsContainerManager.mysqlMasterGrantSql("admin");
 
@@ -1548,6 +1556,15 @@ class RdsContainerManagerTest {
                 "Script must not drop the current user");
         assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),
                 "Script must not drop system roles");
+    }
+
+    @Test
+    void restoreScriptCreatesThePredefinedRolesAfterReplayingTheDump() {
+        String script = RdsContainerManager.postgresRestoreScript();
+
+        int replay = script.indexOf("-f /tmp/dump.sql");
+        int roles = script.indexOf(RdsContainerManager.postgresIamRoleInitSql());
+        assertTrue(replay >= 0 && roles > replay, "Roles a dump lacks must be created after it is replayed");
     }
 
     @Test
