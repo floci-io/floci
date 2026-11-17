@@ -1351,6 +1351,51 @@ class AppSyncTest {
         }
     }
 
+    // ── Events API ──────────────────────────────────────────────────────
+
+    @Test
+    @Order(140)
+    @DisplayName("Events API: CreateApi, GetApi, UpdateApi, ListApis, channel namespace and DeleteApi")
+    void eventsApiLifecycle() {
+        EventConfig eventConfig = EventConfig.builder()
+                .authProviders(AuthProvider.builder().authType(AuthenticationType.AWS_IAM).build(),
+                        AuthProvider.builder().authType(AuthenticationType.API_KEY).build())
+                .connectionAuthModes(AuthMode.builder().authType(AuthenticationType.API_KEY).build())
+                .defaultPublishAuthModes(AuthMode.builder().authType(AuthenticationType.AWS_IAM).build())
+                .defaultSubscribeAuthModes(AuthMode.builder().authType(AuthenticationType.API_KEY).build())
+                .build();
+        Api created = client.createApi(r -> r.name("sdk-events-api").eventConfig(eventConfig)).api();
+        String eventsApiId = created.apiId();
+        try {
+            assertThat(created.apiArn()).startsWith("arn:" + TestFixtures.partition() + ":appsync:")
+                    .endsWith(":apis/" + eventsApiId);
+            assertThat(created.dns()).containsKeys("HTTP", "REALTIME");
+            assertThat(created.dns().get("HTTP")).startsWith(eventsApiId + ".appsync-api.");
+            assertThat(created.dns().get("REALTIME")).startsWith(eventsApiId + ".appsync-realtime-api.");
+            assertThat(created.created()).isAfter(Instant.now().minus(Duration.ofHours(1)));
+
+            assertThat(client.getApi(r -> r.apiId(eventsApiId)).api().name()).isEqualTo("sdk-events-api");
+            assertThat(client.listApis(r -> r.maxResults(25)).apis()).extracting(Api::apiId).contains(eventsApiId);
+
+            Api updated = client.updateApi(r -> r.apiId(eventsApiId).name("sdk-events-renamed")
+                    .eventConfig(eventConfig)).api();
+            assertThat(updated.name()).isEqualTo("sdk-events-renamed");
+
+            ChannelNamespace ns = client.createChannelNamespace(r -> r.apiId(eventsApiId).name("sdk-ns")
+                    .publishAuthModes(AuthMode.builder().authType(AuthenticationType.AWS_IAM).build()))
+                    .channelNamespace();
+            assertThat(ns.channelNamespaceArn()).endsWith(":apis/" + eventsApiId + "/channelNamespace/sdk-ns");
+            assertThat(ns.publishAuthModes()).extracting(AuthMode::authType).containsExactly(AuthenticationType.AWS_IAM);
+
+            assertThatThrownBy(() -> client.createChannelNamespace(r -> r.apiId(eventsApiId).name("sdk-lambda")
+                    .subscribeAuthModes(AuthMode.builder().authType(AuthenticationType.AWS_LAMBDA).build())))
+                    .isInstanceOf(BadRequestException.class);
+        } finally {
+            client.deleteApi(r -> r.apiId(eventsApiId));
+        }
+        assertThatThrownBy(() -> client.getApi(r -> r.apiId(eventsApiId))).isInstanceOf(NotFoundException.class);
+    }
+
     @Test
     @Order(200)
     void startSchemaCreation_syntaxError_throwsBadRequestWithExtendedBody() throws Exception {

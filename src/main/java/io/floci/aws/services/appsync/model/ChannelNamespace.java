@@ -16,9 +16,9 @@ public class ChannelNamespace {
     private String description;
     private String channelNamespaceArn;
     private String codeHandlers;
-    private Long created;
+    private Double created;
     private HandlerConfigs handlerConfigs;
-    private Long lastModified;
+    private Double lastModified;
     private List<AuthMode> publishAuthModes;
     private List<AuthMode> subscribeAuthModes;
     private Map<String, String> tags;
@@ -38,14 +38,14 @@ public class ChannelNamespace {
     public String getCodeHandlers() { return codeHandlers; }
     public void setCodeHandlers(String codeHandlers) { this.codeHandlers = codeHandlers; }
 
-    public Long getCreated() { return created; }
-    public void setCreated(Long created) { this.created = created; }
+    public Double getCreated() { return created; }
+    public void setCreated(Double created) { this.created = created; }
 
     public HandlerConfigs getHandlerConfigs() { return handlerConfigs; }
     public void setHandlerConfigs(HandlerConfigs handlerConfigs) { this.handlerConfigs = handlerConfigs; }
 
-    public Long getLastModified() { return lastModified; }
-    public void setLastModified(Long lastModified) { this.lastModified = lastModified; }
+    public Double getLastModified() { return lastModified; }
+    public void setLastModified(Double lastModified) { this.lastModified = lastModified; }
 
     public List<AuthMode> getPublishAuthModes() { return publishAuthModes; }
     public void setPublishAuthModes(List<AuthMode> publishAuthModes) { this.publishAuthModes = publishAuthModes; }

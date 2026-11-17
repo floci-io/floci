@@ -4,9 +4,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
+import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -46,6 +48,7 @@ public class AppSyncService {
     private static final int API_KEY_RANDOM_LENGTH = 26;
 
     private final StorageBackend<String, GraphqlApi> apiStore;
+    private final StorageBackend<String, Api> eventApiStore;
     private final AccountAwareStorageBackend<String> schemaStore;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     private final StorageBackend<String, DataSource> dataSourceStore;
@@ -78,6 +81,7 @@ public class AppSyncService {
                           Clock clock,
                           LambdaAuthorizerCache lambdaAuthorizerCache) {
         this.apiStore = storageFactory.create("appsync", "appsync-apis.json", new TypeReference<>() {});
+        this.eventApiStore = storageFactory.create("appsync", "appsync-event-apis.json", new TypeReference<>() {});
         this.schemaStore = schemaStore;
         this.schemaStatusStore = schemaStatusStore;
         this.dataSourceStore = storageFactory.create("appsync", "appsync-datasources.json", new TypeReference<>() {});
@@ -246,6 +250,285 @@ public class AppSyncService {
         deleteDomainAssociationsForApi(apiId);
         lambdaAuthorizerCache.evictApi(apiId);
         LOG.infov("Deleted GraphQL API {0}", apiId);
+    }
+
+    // ──────────────────────────── Events API ────────────────────────────
+
+    /** The model's {@code ApiName} shape. */
+    private static final Pattern EVENT_API_NAME = Pattern.compile("[A-Za-z0-9_\\- ]{1,50}");
+
+    /** The model's {@code Namespace} shape. */
+    private static final Pattern NAMESPACE_NAME = Pattern.compile("[A-Za-z0-9](?:[A-Za-z0-9-]{0,48}[A-Za-z0-9])?");
+
+    private static final Set<String> EVENT_LOG_LEVELS = Set.of("NONE", "ERROR", "ALL", "INFO", "DEBUG");
+    private static final Set<String> HANDLER_BEHAVIORS = Set.of("CODE", "DIRECT");
+
+    public synchronized Api createApi(Map<String, Object> request, String region) {
+        assertNoSchemaBusyAnywhere();
+        String name = requireEventApiName(request.get("name"));
+        EventConfig eventConfig = parseEventConfig(request.get("eventConfig"));
+        String apiId = generateApiId();
+        Api api = new Api();
+        api.setApiId(apiId);
+        api.setName(name);
+        api.setOwnerContact(coerceString(request.get("ownerContact")));
+        api.setEventConfig(eventConfig);
+        api.setTags(parseTags(request.get("tags")));
+        api.setApiArn(buildApiArn(apiId, region));
+        api.setDns(eventApiDns(apiId, region));
+        api.setCreated(EpochSeconds.fromInstant(clock.instant()));
+        api.setXrayEnabled(false);
+        eventApiStore.put(apiId, api);
+        LOG.infov("Created Events API {0}: {1}", apiId, name);
+        return api;
+    }
+
+    public Api getApi(String apiId) {
+        return eventApiStore.get(apiId)
+                .orElseThrow(() -> new AwsException("NotFoundException", "API not found: " + apiId, 404));
+    }
+
+    public Page<Api> listApis(Integer maxResults, String nextToken) {
+        return paginate(eventApiStore.scan(k -> true), nextToken, maxResults);
+    }
+
+    public synchronized Api updateApi(String apiId, Map<String, Object> request) {
+        Api existing = copyOf(getApi(apiId), Api.class);
+        if (request.containsKey("name")) {
+            existing.setName(requireEventApiName(request.get("name")));
+        }
+        if (request.containsKey("ownerContact")) {
+            existing.setOwnerContact(coerceString(request.get("ownerContact")));
+        }
+        if (request.containsKey("eventConfig")) {
+            existing.setEventConfig(parseEventConfig(request.get("eventConfig")));
+        }
+        eventApiStore.put(apiId, existing);
+        return existing;
+    }
+
+    public synchronized void deleteApi(String apiId) {
+        getApi(apiId);
+        eventApiStore.delete(apiId);
+        deleteApiKeysForApi(apiId);
+        deleteChannelNamespacesForApi(apiId);
+        deleteDomainAssociationsForApi(apiId);
+        lambdaAuthorizerCache.evictApi(apiId);
+        LOG.infov("Deleted Events API {0}", apiId);
+    }
+
+    private String requireEventApiName(Object value) {
+        String name = coerceString(value);
+        if (name == null || name.isBlank()) {
+            throw new AwsException("BadRequestException", "An API name is required", 400);
+        }
+        if (!EVENT_API_NAME.matcher(name).matches()) {
+            throw new AwsException("BadRequestException",
+                    "The API name must be 1 to 50 letters, digits, spaces, underscores or hyphens", 400);
+        }
+        return name;
+    }
+
+    /**
+     * Reads and checks an {@code eventConfig}. AWS requires at least one auth provider, and every
+     * connection, publish and subscribe mode must name an auth type that is one of those providers.
+     */
+    private EventConfig parseEventConfig(Object value) {
+        if (!(value instanceof Map<?, ?>)) {
+            throw new AwsException("BadRequestException", "An eventConfig is required", 400);
+        }
+        EventConfig config;
+        try {
+            config = objectMapper.convertValue(value, EventConfig.class);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid eventConfig: " + e.getMessage(), 400);
+        }
+        List<EventAuthProvider> providers = config.getAuthProviders();
+        if (providers == null || providers.isEmpty()) {
+            throw new AwsException("BadRequestException",
+                    "The eventConfig must specify at least one auth provider", 400);
+        }
+        Set<String> configured = new HashSet<>();
+        for (EventAuthProvider provider : providers) {
+            AuthenticationType type = provider == null ? null
+                    : parseEnum(AuthenticationType.class, provider.getAuthType());
+            if (type == null) {
+                throw new AwsException("BadRequestException", "Each auth provider requires an authType", 400);
+            }
+            assertAuthProviderConfig(type, provider);
+            boolean singleton = type == AuthenticationType.API_KEY || type == AuthenticationType.AWS_IAM
+                    || type == AuthenticationType.AWS_LAMBDA;
+            if (!configured.add(type.name()) && singleton) {
+                throw new AwsException("BadRequestException",
+                        "The auth provider " + type + " can only be specified once", 400);
+            }
+        }
+        requireAuthModes("connectionAuthModes", config.getConnectionAuthModes(), configured);
+        requireAuthModes("defaultPublishAuthModes", config.getDefaultPublishAuthModes(), configured);
+        requireAuthModes("defaultSubscribeAuthModes", config.getDefaultSubscribeAuthModes(), configured);
+        EventLogConfig logConfig = config.getLogConfig();
+        if (logConfig != null) {
+            if (logConfig.getLogLevel() == null || !EVENT_LOG_LEVELS.contains(logConfig.getLogLevel())) {
+                throw new AwsException("BadRequestException",
+                        "Invalid logConfig.logLevel: " + logConfig.getLogLevel(), 400);
+            }
+            if (logConfig.getCloudWatchLogsRoleArn() == null || logConfig.getCloudWatchLogsRoleArn().isBlank()) {
+                throw new AwsException("BadRequestException", "A logConfig.cloudWatchLogsRoleArn is required", 400);
+            }
+        }
+        return config;
+    }
+
+    private void assertAuthProviderConfig(AuthenticationType type, EventAuthProvider provider) {
+        switch (type) {
+            case AWS_LAMBDA -> requireConfigMember(type, "lambdaAuthorizerConfig",
+                    provider.getLambdaAuthorizerConfig(), "authorizerUri");
+            case AMAZON_COGNITO_USER_POOLS -> {
+                requireConfigMember(type, "cognitoConfig", provider.getCognitoConfig(), "userPoolId");
+                requireConfigMember(type, "cognitoConfig", provider.getCognitoConfig(), "awsRegion");
+            }
+            case OPENID_CONNECT -> requireConfigMember(type, "openIDConnectConfig",
+                    provider.getOpenIDConnectConfig(), "issuer");
+            default -> {
+                // API_KEY and AWS_IAM take no configuration.
+            }
+        }
+    }
+
+    private void requireConfigMember(AuthenticationType type, String configName, Map<String, Object> config,
+                                     String member) {
+        String value = config == null ? null : coerceString(config.get(member));
+        if (value == null || value.isBlank()) {
+            throw new AwsException("BadRequestException",
+                    "The " + type + " auth provider requires " + configName + "." + member, 400);
+        }
+    }
+
+    private void requireAuthModes(String member, List<AuthMode> modes, Set<String> configured) {
+        if (modes == null || modes.isEmpty()) {
+            throw new AwsException("BadRequestException",
+                    "The eventConfig must specify at least one auth mode in " + member, 400);
+        }
+        assertAuthModesConfigured(member, modes, configured);
+    }
+
+    private void assertAuthModesConfigured(String member, List<AuthMode> modes, Set<String> configured) {
+        for (AuthMode mode : modes) {
+            AuthenticationType type = mode == null ? null : parseEnum(AuthenticationType.class, mode.getAuthType());
+            if (type == null) {
+                throw new AwsException("BadRequestException",
+                        "Each auth mode in " + member + " requires an authType", 400);
+            }
+            if (!configured.contains(type.name())) {
+                throw new AwsException("BadRequestException",
+                        "The auth mode " + type + " in " + member + " is not one of the API's auth providers", 400);
+            }
+        }
+    }
+
+    private Map<String, String> eventApiDns(String apiId, String region) {
+        Map<String, String> dns = new HashMap<>();
+        dns.put("HTTP", AwsEndpoints.appsyncEventsHttpHost(apiId, region));
+        dns.put("REALTIME", AwsEndpoints.appsyncEventsRealtimeHost(apiId, region));
+        return dns;
+    }
+
+    private Map<String, String> parseTags(Object value) {
+        Map<String, Object> tags = castMap(value);
+        if (tags == null) {
+            return null;
+        }
+        Map<String, String> tagMap = new HashMap<>();
+        tags.forEach((k, v) -> tagMap.put(k, v != null ? String.valueOf(v) : ""));
+        return tagMap;
+    }
+
+    /** The API a v2 child resource hangs off: an Events API or a GraphQL API. */
+    private record ParentApi(String arn, Set<String> authTypes) {}
+
+    /**
+     * Resolves an API id that names either an Events API or a GraphQL API, for the paths both
+     * kinds share: channel namespaces, API keys and tags.
+     */
+    private ParentApi requireApi(String apiId) {
+        Optional<Api> events = eventApiStore.get(apiId);
+        if (events.isPresent()) {
+            Set<String> types = new HashSet<>();
+            EventConfig config = events.get().getEventConfig();
+            if (config != null && config.getAuthProviders() != null) {
+                for (EventAuthProvider provider : config.getAuthProviders()) {
+                    types.add(provider.getAuthType());
+                }
+            }
+            return new ParentApi(events.get().getApiArn(), types);
+        }
+        Optional<GraphqlApi> graphql = apiStore.get(apiId);
+        if (graphql.isPresent()) {
+            Set<String> types = new HashSet<>();
+            if (graphql.get().getAuthenticationType() != null) {
+                types.add(graphql.get().getAuthenticationType().name());
+            }
+            if (graphql.get().getAdditionalAuthenticationProviders() != null) {
+                for (AdditionalAuthenticationProvider provider : graphql.get().getAdditionalAuthenticationProviders()) {
+                    if (provider != null && provider.getAuthenticationType() != null) {
+                        types.add(provider.getAuthenticationType().name());
+                    }
+                }
+            }
+            return new ParentApi(graphql.get().getArn(), types);
+        }
+        throw new AwsException("NotFoundException", "API not found: " + apiId, 404);
+    }
+
+    /** The region of an API's ARN, where its child resources live; the request region if it has none. */
+    private String arnRegion(String arn) {
+        if (arn != null && AwsArnUtils.isArn(arn)) {
+            return AwsArnUtils.parse(arn).region();
+        }
+        return regionResolver.getRegion();
+    }
+
+    private List<AuthMode> parseNamespaceAuthModes(String member, Object value, ParentApi api) {
+        if (value == null) {
+            return null;
+        }
+        List<AuthMode> modes;
+        try {
+            modes = objectMapper.convertValue(value, new TypeReference<List<AuthMode>>() {});
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid " + member + ": " + e.getMessage(), 400);
+        }
+        assertAuthModesConfigured(member, modes, api.authTypes());
+        return modes;
+    }
+
+    private HandlerConfigs parseHandlerConfigs(Object value) {
+        if (value == null) {
+            return null;
+        }
+        HandlerConfigs configs;
+        try {
+            configs = objectMapper.convertValue(value, HandlerConfigs.class);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", "Invalid handlerConfigs: " + e.getMessage(), 400);
+        }
+        assertHandlerConfig("onPublish", configs.getOnPublish());
+        assertHandlerConfig("onSubscribe", configs.getOnSubscribe());
+        return configs;
+    }
+
+    private void assertHandlerConfig(String member, HandlerConfig config) {
+        if (config == null) {
+            return;
+        }
+        if (config.getBehavior() == null || !HANDLER_BEHAVIORS.contains(config.getBehavior())) {
+            throw new AwsException("BadRequestException",
+                    "Invalid handlerConfigs." + member + ".behavior: " + config.getBehavior(), 400);
+        }
+        if (config.getIntegration() == null || config.getIntegration().getDataSourceName() == null) {
+            throw new AwsException("BadRequestException",
+                    "A handlerConfigs." + member + ".integration.dataSourceName is required", 400);
+        }
     }
 
     // ──────────────────────────── Schema ────────────────────────────
@@ -649,7 +932,7 @@ public class AppSyncService {
     // ──────────────────────────── API Keys ────────────────────────────
 
     public synchronized ApiKey createApiKey(String apiId, Map<String, Object> request) {
-        getGraphqlApi(apiId);
+        requireApi(apiId);
         long existingCount = apiKeyStore.scan(k -> k.startsWith(apiId + "::")).size();
         if (existingCount >= 2) {
             throw new AwsException("ApiKeyLimitExceededException",
@@ -719,11 +1002,25 @@ public class AppSyncService {
 
     public Map<String, String> getTags(String resourceArn) {
         String apiId = extractApiIdFromArn(resourceArn);
+        Optional<Api> events = eventApiStore.get(apiId);
+        if (events.isPresent()) {
+            Map<String, String> tags = events.get().getTags();
+            return tags != null ? tags : Map.of();
+        }
         return getGraphqlApi(apiId).getTags();
     }
 
     public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
         String apiId = extractApiIdFromArn(resourceArn);
+        Optional<Api> events = eventApiStore.get(apiId);
+        if (events.isPresent()) {
+            Api api = events.get();
+            Map<String, String> updated = api.getTags() != null ? new HashMap<>(api.getTags()) : new HashMap<>();
+            updated.putAll(tags);
+            api.setTags(updated);
+            eventApiStore.put(apiId, api);
+            return;
+        }
         GraphqlApi api = getGraphqlApi(apiId);
         api.getTags().putAll(tags);
         apiStore.put(apiId, api);
@@ -731,6 +1028,17 @@ public class AppSyncService {
 
     public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         String apiId = extractApiIdFromArn(resourceArn);
+        Optional<Api> events = eventApiStore.get(apiId);
+        if (events.isPresent()) {
+            Api api = events.get();
+            if (api.getTags() != null) {
+                Map<String, String> updated = new HashMap<>(api.getTags());
+                tagKeys.forEach(updated::remove);
+                api.setTags(updated);
+                eventApiStore.put(apiId, api);
+            }
+            return;
+        }
         GraphqlApi api = getGraphqlApi(apiId);
         tagKeys.forEach(api.getTags()::remove);
         apiStore.put(apiId, api);
@@ -857,10 +1165,15 @@ public class AppSyncService {
 
     public synchronized ChannelNamespace createChannelNamespace(String apiId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        GraphqlApi api = getGraphqlApi(apiId);
-        String name = (String) request.get("name");
+        ParentApi api = requireApi(apiId);
+        String name = coerceString(request.get("name"));
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "A channel namespace name is required", 400);
+        }
+        if (!NAMESPACE_NAME.matcher(name).matches()) {
+            throw new AwsException("BadRequestException",
+                    "The channel namespace name must be 1 to 50 letters, digits or hyphens,"
+                            + " starting and ending with a letter or digit", 400);
         }
         String nsKey = apiKey(apiId, name);
         if (channelNamespaceStore.get(nsKey).isPresent()) {
@@ -870,17 +1183,23 @@ public class AppSyncService {
         ChannelNamespace ns = new ChannelNamespace();
         ns.setName(name);
         ns.setApiId(apiId);
-        ns.setDescription((String) request.get("description"));
-        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", apiRegion(api),
-            "apis/" + apiId + "/channelNamespaces/" + name));
-        ns.setCodeHandlers((String) request.get("codeHandlers"));
-        ns.setCreated(System.currentTimeMillis());
-        ns.setLastModified(System.currentTimeMillis());
+        ns.setDescription(coerceString(request.get("description")));
+        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", arnRegion(api.arn()),
+            "apis/" + apiId + "/channelNamespace/" + name));
+        ns.setCodeHandlers(coerceString(request.get("codeHandlers")));
+        ns.setPublishAuthModes(parseNamespaceAuthModes("publishAuthModes", request.get("publishAuthModes"), api));
+        ns.setSubscribeAuthModes(parseNamespaceAuthModes("subscribeAuthModes", request.get("subscribeAuthModes"), api));
+        ns.setHandlerConfigs(parseHandlerConfigs(request.get("handlerConfigs")));
+        ns.setTags(parseTags(request.get("tags")));
+        double now = EpochSeconds.fromInstant(clock.instant());
+        ns.setCreated(now);
+        ns.setLastModified(now);
         channelNamespaceStore.put(nsKey, ns);
         return ns;
     }
 
     public ChannelNamespace getChannelNamespace(String apiId, String name) {
+        requireApi(apiId);
         return channelNamespaceStore.get(apiKey(apiId, name))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Channel namespace not found: " + name, 404));
@@ -888,10 +1207,26 @@ public class AppSyncService {
 
     public synchronized ChannelNamespace updateChannelNamespace(String apiId, String name, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        ChannelNamespace existing = getChannelNamespace(apiId, name);
-        if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
-        if (request.containsKey("codeHandlers")) existing.setCodeHandlers((String) request.get("codeHandlers"));
-        existing.setLastModified(System.currentTimeMillis());
+        ParentApi api = requireApi(apiId);
+        ChannelNamespace existing = copyOf(getChannelNamespace(apiId, name), ChannelNamespace.class);
+        if (request.containsKey("description")) {
+            existing.setDescription(coerceString(request.get("description")));
+        }
+        if (request.containsKey("codeHandlers")) {
+            existing.setCodeHandlers(coerceString(request.get("codeHandlers")));
+        }
+        if (request.containsKey("publishAuthModes")) {
+            existing.setPublishAuthModes(
+                    parseNamespaceAuthModes("publishAuthModes", request.get("publishAuthModes"), api));
+        }
+        if (request.containsKey("subscribeAuthModes")) {
+            existing.setSubscribeAuthModes(
+                    parseNamespaceAuthModes("subscribeAuthModes", request.get("subscribeAuthModes"), api));
+        }
+        if (request.containsKey("handlerConfigs")) {
+            existing.setHandlerConfigs(parseHandlerConfigs(request.get("handlerConfigs")));
+        }
+        existing.setLastModified(EpochSeconds.fromInstant(clock.instant()));
         channelNamespaceStore.put(apiKey(apiId, name), existing);
         return existing;
     }
@@ -903,6 +1238,7 @@ public class AppSyncService {
     }
 
     public Page<ChannelNamespace> listChannelNamespaces(String apiId, Integer maxResults, String nextToken) {
+        requireApi(apiId);
         return paginate(channelNamespaceStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
@@ -1203,14 +1539,6 @@ public class AppSyncService {
 
     private String resolverKey(String apiId, String typeName, String fieldName) {
         return apiId + "::" + typeName + "::" + fieldName;
-    }
-
-    /** The region of an API's ARN, where its child resources live; the request region if it has none. */
-    private String apiRegion(GraphqlApi api) {
-        if (api.getArn() != null && AwsArnUtils.isArn(api.getArn())) {
-            return AwsArnUtils.parse(api.getArn()).region();
-        }
-        return regionResolver.getRegion();
     }
 
     private String buildApiArn(String apiId, String region) {

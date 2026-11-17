@@ -13,6 +13,8 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Verifies that REST calls for unimplemented operations signed for a service sharing a path
@@ -38,21 +40,21 @@ class RestCrossServiceRouteCollisionIntegrationTest {
             spec.header("Authorization", authorization);
         }
         spec.when()
-            .post("/v2/apis")
+            .post("/v2/apis/api-123/routes")
         .then()
             .statusCode(404)
             .contentType(containsString("application/json"))
             .header("X-Amzn-Errortype", "UnknownOperationException")
             .body("__type", equalTo("UnknownOperationException"))
-            .body("message", equalTo("Unknown operation: POST /v2/apis"));
+            .body("message", equalTo("Unknown operation: POST /v2/apis/api-123/routes"));
     }
 
     @ParameterizedTest
     @CsvSource({
-            "appsync, POST, /v2/apis",
-            "appsync, GET, /v2/apis",
-            "appsync, GET, /v2/apis/api-123",
-            "appsync, DELETE, /v2/apis/api-123",
+            "appsync, PUT, /v2/apis/api-123",
+            "appsync, POST, /v2/apis/api-123/routes",
+            "appsync, GET, /v2/apis/api-123/routes",
+            "appsync, DELETE, /v2/apis/api-123/routes/r-123",
             "app-integrations, POST, /applications",
             "app-integrations, GET, /applications",
             "app-integrations, GET, /applications/app-123",
@@ -118,6 +120,47 @@ class RestCrossServiceRouteCollisionIntegrationTest {
         .then()
             .statusCode(404)
             .header("X-Amzn-Errortype", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
+     * AppSync's Events API management operations share {@code /v2/apis} and
+     * {@code /v2/apis/{apiId}} with API Gateway v2, so the signing service decides which one
+     * answers: appsync-signed requests reach AppSync, apigateway-signed ones still reach API
+     * Gateway.
+     */
+    @Test
+    void appSyncSignedApiCallsReachAppSyncAndApiGatewaySignedOnesReachApiGateway() {
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "appsync"))
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(200)
+            .body("apis", notNullValue());
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "appsync"))
+        .when()
+            .get("/v2/apis/api-123")
+        .then()
+            .statusCode(404)
+            .header("X-Amzn-Errortype", equalTo("NotFoundException"));
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "appsync"))
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/v2/apis")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", equalTo("BadRequestException"));
+        given()
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "apigateway"))
+        .when()
+            .get("/v2/apis")
+        .then()
+            .statusCode(200)
+            .body("items", notNullValue())
+            .body("apis", nullValue());
     }
 
     @Test
