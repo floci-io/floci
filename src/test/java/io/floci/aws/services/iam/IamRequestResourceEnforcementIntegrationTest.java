@@ -555,6 +555,32 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Payment Cryptography holds on the key a request names, so an
+     * allow on one team's tag lets the caller read that team's key and not another's.
+     */
+    @Test
+    void aPaymentCryptographyResourceTagConditionReadsTheTagsOfTheKey() {
+        String tagged = taggedPaymentKey("data");
+        String other = taggedPaymentKey("web");
+
+        User user = user("res-key-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"payment-cryptography:GetKey\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        getPaymentKey(user, tagged).statusCode(200);
+        refusedJson(getPaymentKey(user, other), "payment-cryptography:GetKey");
+    }
+
+    /** A Payment Cryptography key an administrator creates and tags with the team; its ARN. */
+    private String taggedPaymentKey(String team) {
+        String key = createPaymentKey();
+        admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.TagResource")
+                .contentType("application/x-amz-json-1.0").body("{\"ResourceArn\":\"" + key
+                        + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}")
+                .post("/").then().statusCode(200);
+        return key;
+    }
+
+    /**
      * A tagging request names its key by the ARN of one, as the reference takes it there, so a request naming it by
      * its id names no key for the check and is refused: a deny on the key is not skipped by naming it another way.
      */
