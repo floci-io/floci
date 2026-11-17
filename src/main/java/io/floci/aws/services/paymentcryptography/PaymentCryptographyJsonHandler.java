@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.services.iam.PolicyDocument;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -302,7 +303,7 @@ public class PaymentCryptographyJsonHandler {
         PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         String policy = request.path("Policy").asText();
         JsonNode document = readPolicy(policy);
-        List<JsonNode> statements = statementsOf(document);
+        List<JsonNode> statements = PolicyDocument.statementsOf(document);
         if (grantsPublicAccess(statements)) {
             throw new AwsException("PublicPolicyException",
                     "The resource policy grants public access to the key", 400);
@@ -373,24 +374,6 @@ public class PaymentCryptographyJsonHandler {
             }
         }
         return true;
-    }
-
-    /**
-     * The statements of a policy, whether it carries one alone or a list of them.
-     *
-     * @param policy the policy document
-     * @return the statements, empty when the document carries none
-     */
-    private static List<JsonNode> statementsOf(JsonNode policy) {
-        JsonNode statements = policy.path("Statement");
-        if (statements.isObject()) {
-            return List.of(statements);
-        }
-        List<JsonNode> out = new ArrayList<>();
-        if (statements.isArray()) {
-            statements.forEach(out::add);
-        }
-        return out;
     }
 
     /**
@@ -467,47 +450,10 @@ public class PaymentCryptographyJsonHandler {
         if (!"Allow".equalsIgnoreCase(statement.path("Effect").asText())) {
             return false;
         }
-        if (!grantsToEveryone(statement) || statement.has("Condition")) {
+        if (!PolicyDocument.grantsToEveryone(statement) || statement.has("Condition")) {
             return false;
         }
         return true;
-    }
-
-    /**
-     * Whether a statement grants to everyone.
-     *
-     * <p>A grant that names everyone as its principal reaches everyone. A grant that names
-     * the principals it excludes reaches everyone else, and a grant that excludes everyone
-     * reaches nobody.
-     */
-    private static boolean grantsToEveryone(JsonNode statement) {
-        if (statement.hasNonNull("Principal")) {
-            return isEveryone(statement.path("Principal"));
-        }
-        return statement.hasNonNull("NotPrincipal") && !isEveryone(statement.path("NotPrincipal"));
-    }
-
-    /** Whether a principal names every principal: {@code *}, or a list or map that holds it. */
-    private static boolean isEveryone(JsonNode principal) {
-        if (principal.isTextual()) {
-            return "*".equals(principal.asText());
-        }
-        if (principal.isArray()) {
-            for (JsonNode entry : principal) {
-                if (isEveryone(entry)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        if (principal.isObject()) {
-            for (Map.Entry<String, JsonNode> entry : principal.properties()) {
-                if (isEveryone(entry.getValue())) {
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 
     /** The tags of a request, as the name and the value of each. */
