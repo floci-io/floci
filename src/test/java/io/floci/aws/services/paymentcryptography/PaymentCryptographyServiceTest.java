@@ -396,6 +396,94 @@ class PaymentCryptographyServiceTest {
                 "the key is in the store again after it was deleted");
     }
 
+    /** The policy that grants different permissions to different accounts. */
+    private static final String TWO_ACCOUNTS_POLICY = """
+            {"Version":"2012-10-17","Statement":[
+             {"Sid":"Allow3DSACSToGenerate","Effect":"Allow",
+              "Principal":{"AWS":"arn:aws:iam::111122223333:role/3dsAcsRole"},
+              "Action":["payment-cryptography:GenerateCardValidationData"],"Resource":"*"},
+             {"Sid":"AllowPaymentAuthToVerify","Effect":"Allow",
+              "Principal":{"AWS":"arn:aws:iam::444455556666:role/PaymentAuthRole"},
+              "Action":["payment-cryptography:VerifyAuthRequestCryptogram"],"Resource":"*"}]}""";
+
+    @Test
+    void aPolicyIsNotAttachedToAReplica() {
+        // The reference attaches a policy to the primary key alone, so a replica takes none.
+        PaymentCryptographyKey primary = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey replica = service.findKey("us-west-2", primary.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.putResourcePolicy(replica, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void thePolicyOfTheReferenceIsAttachedAndReadBack() {
+        // The reference's own page shows these two policies, and the service keeps the
+        // document as it was given.
+        PaymentCryptographyKey key = createKey("us-east-1");
+        String policy = PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY;
+
+        assertEquals(policy, service.putResourcePolicy(key, policy).policy());
+        assertEquals(policy, service.resourcePolicy(key).policy());
+        assertEquals(TWO_ACCOUNTS_POLICY,
+                service.putResourcePolicy(key, TWO_ACCOUNTS_POLICY).policy());
+    }
+
+    @Test
+    void aPolicyThatNamesTheKeyItIsOnIsAttached() {
+        // The resource may be the key's own ARN as well as every resource.
+        PaymentCryptographyKey key = createKey("us-east-1");
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"" + key.getArn() + "\"}]}";
+
+        assertEquals(policy, service.putResourcePolicy(key, policy).policy());
+    }
+
+    @Test
+    void aResourcePolicyIsPutReadAndDeleted() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        String policy = PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY;
+
+        assertNull(key.getResourcePolicy(), "a key has a policy before one was put on it");
+
+        assertEquals(policy, service.putResourcePolicy(key, policy).policy());
+        assertEquals(policy, service.resourcePolicy(key).policy());
+
+        service.deleteResourcePolicy(key);
+
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.resourcePolicy(key));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    @Test
+    void aResourcePolicyIsReplacedByTheNextOne() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY);
+        service.putResourcePolicy(key, TWO_ACCOUNTS_POLICY);
+
+        assertEquals(TWO_ACCOUNTS_POLICY, service.resourcePolicy(key).policy());
+    }
+
+    @Test
+    void aDeletedKeyHasNoResourcePolicy() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY);
+        service.deleteKey(key);
+
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.resourcePolicy(key));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
+        assertEquals("ResourceNotFoundException", deleted.getErrorCode());
+    }
+
     @Test
     void theKeysAreListedAPageAtATime() {
         createKey("us-east-1");

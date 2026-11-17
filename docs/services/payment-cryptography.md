@@ -30,6 +30,9 @@
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
+| `PutResourcePolicy` | Attach or replace the resource-based policy of a key |
+| `GetResourcePolicy` | Get the resource-based policy of a key |
+| `DeleteResourcePolicy` | Remove the resource-based policy of a key |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -225,9 +228,24 @@
 - **The replication is in sync at once:** the service does not model the progress of a
   replication, so the status of a replica that is there is `SYNCHRONIZED` right away,
   where the reference answers `IN_PROGRESS` until the replication has finished.
-- **Not yet emulated:** the resource policy operations, the key usage operations, the key
-  restore operation, the multi-party approval operations and the certificate signing
-  request.
+- **Resource policies:** `PutResourcePolicy` attaches or replaces the policy stored on the
+  key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
+  a policy is answered with `ResourceNotFoundException` by both reads. The policy is a JSON
+  document, and one that does not parse, or that carries anything after the document, is
+  refused with `ValidationException`. A grant names an effect, a principal, an action and
+  a resource, and a policy that carries no statement, or a statement that names none of
+  them, is refused with `ValidationException`. An `Allow` statement that reaches every
+  principal and carries no condition is refused with `PublicPolicyException`, as the
+  reference refuses one: a principal that is everyone, and a grant that excludes a
+  principal and so reaches everyone else, both reach everyone. A statement that carries a
+  condition is taken to be narrowed by it, so a condition that narrows nothing is not read.
+  The resource a policy names must be every resource or the ARN of the key the policy is
+  on, so a policy that names another key is refused. The reference attaches a policy to the
+  primary key alone, so a replica takes none and a request that names one is refused. The
+  access the policy grants is not enforced: the service's operations are not among the ones
+  IAM checks.
+- **Not yet emulated:** the key usage operations, the key restore operation, the
+  multi-party approval operations and the certificate signing request.
 
 ## Configuration
 

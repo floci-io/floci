@@ -640,6 +640,76 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                 maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
     }
 
+    // ---- resource policies ----------------------------------------------------
+
+    /**
+     * A key's resource-based policy as it is at one moment.
+     *
+     * <p>The store holds the key itself, and a key is mutable, so a read takes the two
+     * values the answer carries while it holds the lock. A policy taken away after the
+     * read cannot change the answer.
+     *
+     * @param arn the ARN of the key the policy is on
+     * @param policy the policy document
+     */
+    public record ResourcePolicy(String arn, String policy) {
+    }
+
+    /**
+     * Attaches or replaces the resource-based policy of a key.
+     *
+     * <p>The policy belongs to the key, so it is written with the key and goes when the key
+     * goes. A policy the service has not seen is replaced, as the reference replaces one.
+     */
+    public synchronized ResourcePolicy putResourcePolicy(PaymentCryptographyKey key, String policy) {
+        PaymentCryptographyKey current = liveKey(key);
+        // A replica is read-only, and the reference attaches a policy to the primary alone.
+        requireNotReplica(current, "a policy may only be attached to the primary");
+        current.setResourcePolicy(policy);
+        storeKey(current);
+        return new ResourcePolicy(current.getArn(), current.getResourcePolicy());
+    }
+
+    /**
+     * The resource-based policy attached to a key.
+     *
+     * <p>A key without a policy is refused as the resource the reference cannot find, not
+     * answered with an empty policy: the two are different answers.
+     */
+    public synchronized ResourcePolicy resourcePolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = keyWithPolicy(key);
+        return new ResourcePolicy(current.getArn(), current.getResourcePolicy());
+    }
+
+    /**
+     * Removes the resource-based policy of a key.
+     *
+     * <p>A key without a policy is refused, as it is by the read.
+     */
+    public synchronized void deleteResourcePolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = keyWithPolicy(key);
+        current.setResourcePolicy(null);
+        storeKey(current);
+    }
+
+    /**
+     * The key as it is in the store now, with the policy it carries.
+     *
+     * <p>A key without a policy is refused as the resource the reference cannot find, not
+     * answered with an empty policy: the two are different answers.
+     *
+     * @param key the key the request named
+     * @return the key, with its policy
+     */
+    private PaymentCryptographyKey keyWithPolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        if (current.getResourcePolicy() == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Resource policy for key " + key.getArn() + " is not found", 400);
+        }
+        return current;
+    }
+
     // ---- the key exchange ----------------------------------------------------
 
     /**
