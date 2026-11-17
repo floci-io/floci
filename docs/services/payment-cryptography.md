@@ -230,14 +230,18 @@
   where the reference answers `IN_PROGRESS` until the replication has finished.
 - **Resource policies:** `PutResourcePolicy` attaches or replaces the policy stored on the
   key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
-  a policy is answered with `ResourceNotFoundException` by both reads. A policy that names
-  every principal without a condition that bounds it is refused with
-  `PublicPolicyException`, as the reference refuses one. The resource a policy names must be
-  every resource or the ARN of the key the policy is on, so a policy that names another key
-  is refused. The reference attaches a policy to the primary key alone, so a replica takes
-  none and a request that names one is refused.
+  a policy is answered with `ResourceNotFoundException` by both reads. An `Allow` statement
+  that names every principal and carries no condition is refused with
+  `PublicPolicyException`, as the reference refuses one. A statement that carries a
+  condition is taken to be narrowed by it, so a condition that narrows nothing is not read.
+  The resource a policy names must be every resource or the ARN of the key the policy is
+  on, so a policy that names another key is refused. The reference attaches a policy to the
+  primary key alone, so a replica takes none and a request that names one is refused. The
+  access the policy grants is not enforced: the service's operations are not among the ones
+  IAM checks.
 - **Not yet emulated:** the key usage operations, the key restore operation, the
   multi-party approval operations and the certificate signing request.
+
 ## Configuration
 
 | Variable | Default | Description |
