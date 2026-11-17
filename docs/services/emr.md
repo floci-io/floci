@@ -4,7 +4,7 @@
 **Endpoint:** `http://localhost:4566/`
 **Target prefix:** `X-Amz-Target: ElasticMapReduce.*`
 
-Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, Spark Connect sessions, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
+Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, Spark Connect sessions, EMR Studios and their session mappings, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
 
 ## Supported Actions
 
@@ -29,6 +29,16 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `ListSessions` | Lists a cluster's sessions, newest first, filterable by state |
 | `TerminateSession` | Terminates a session that has not ended |
 | `GetSessionEndpoint` | Returns a session's endpoint and an authentication token valid for an hour |
+| `CreateStudio` | Creates an EMR Studio in a VPC of Floci's EC2; see [Studios](#studios) |
+| `DescribeStudio` | Returns a Studio's configuration |
+| `ListStudios` | Lists the Region's Studios |
+| `UpdateStudio` | Changes a Studio's name, description, subnets, default S3 location or encryption key |
+| `DeleteStudio` | Deletes a Studio and its session mappings |
+| `CreateStudioSessionMapping` | Maps an IAM Identity Center user or group to a Studio, with a session policy |
+| `GetStudioSessionMapping` | Returns a user's or group's session mapping |
+| `ListStudioSessionMappings` | Lists the session mappings of a Studio, or of every Studio |
+| `UpdateStudioSessionMapping` | Changes a mapped user's or group's session policy |
+| `DeleteStudioSessionMapping` | Removes a user or group from a Studio |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
 | `AddInstanceFleet` | Adds an instance fleet to a cluster |
@@ -222,6 +232,39 @@ starts no Spark Connect server for it, in either runner mode, so nothing answers
   page.
 * A session's `EngineConfigurations`, `MonitoringConfiguration` and `Tags` are kept as given and reported by
   `GetSession`; none of them configures anything, and no session logs are written.
+
+## Studios
+
+An EMR Studio is kept with the network and identities it names, each checked against Floci's own EC2 and IAM Identity
+Center, but Floci serves no Studio: its `Url` is on Floci's own address (`/_aws/emr/studios/<studioId>`), where
+nothing answers.
+
+* **CreateStudio** refuses a request without one of the model's required members, or with an `AuthMode` or
+  `IdcUserAssignment` it does not name, with `ValidationException`, and a member of the wrong JSON type with
+  `SerializationException`. Then, each with `InvalidRequestException` in Floci's own wording, as AWS's is not recorded:
+  more than 5 subnets ("A Studio can have a maximum of 5 subnets"), none, a VPC, subnet or security group Floci's EC2
+  does not have, a subnet or security group outside the VPC ("The subnets must belong to the VPC specified by VpcId",
+  each security group "must be in the same VPC"), an `SSO` Studio without a `UserRole` ("When you use IAM Identity
+  Center authentication, you must specify a --user-role"), an `IAM` one with one ("Only specify a UserRole when you
+  use IAM Identity Center authentication"), an `SSO` one with `IdpAuthUrl` or `IdpRelayStateParameterName`, which are
+  for "when you use IAM authentication", and an `SSO` one when the account has no IAM Identity Center instance, or
+  not the one `IdcInstanceArn` names. An `SSO` Studio's `TrustedIdentityPropagationEnabled` is `false` unless given,
+  as "The default value is false". The Studio's id is `es-` and 25 letters and digits. A subnet named twice is kept
+  once.
+* **Tags**: `AddTags` and `RemoveTags` take a Studio's id as their `ResourceId`, which is "a cluster identifier or an
+  Amazon EMR Studio ID", and IAM's `aws:ResourceTag` conditions read a Studio's tags.
+* **UpdateStudio** changes what it is given. Its `SubnetIds` "can include new subnet IDs, but must also include all of
+  the subnet IDs previously associated with the Studio", at most 5, in the Studio's VPC; anything else is refused.
+* **DeleteStudio** removes the Studio and its session mappings. **ListStudios** lists the Region's Studios in the order
+  they were made, 50 to a page, after a `Marker`; no source gives AWS's order or page size.
+* **Session mappings** are for an `SSO` Studio, as "Use CreateStudioSessionMapping to assign users to a Studio when you
+  use IAM Identity Center authentication"; one on an `IAM` Studio is refused. A call names its user or group by
+  "Either IdentityName or IdentityId ... but not both", and the identity must be in the identity store of the
+  Studio's IAM Identity Center instance, a user by its `UserName` and a group by its `DisplayName`; a mapping reports
+  both. A user or group mapped twice, or not mapped, is refused, each with `InvalidRequestException` in Floci's own
+  wording. Getting, updating and removing a mapping finds it by the id or the name it was made with, so one whose
+  user or group has since been deleted can still be removed. The `SessionPolicyArn` is kept as given. `ListStudioSessionMappings` lists a Studio's mappings, or every
+  Studio's when it names none, filtered by `IdentityType`, in the order they were made, 50 to a page.
 
 ## Running steps
 

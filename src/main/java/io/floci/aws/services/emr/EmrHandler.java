@@ -21,6 +21,8 @@ import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
+import io.floci.aws.services.emr.model.EmrStudio;
+import io.floci.aws.services.emr.model.EmrStudioSessionMapping;
 import io.floci.aws.services.emr.model.SecurityConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -50,11 +52,13 @@ public class EmrHandler {
     static final int INSTANCES_PER_PAGE = 2000;
 
     private final EmrService service;
+    private final EmrStudioService studios;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public EmrHandler(EmrService service, ObjectMapper objectMapper) {
+    public EmrHandler(EmrService service, EmrStudioService studios, ObjectMapper objectMapper) {
         this.service = service;
+        this.studios = studios;
         this.objectMapper = objectMapper;
     }
 
@@ -80,6 +84,16 @@ public class EmrHandler {
                 case "ListSessions" -> handleListSessions(request);
                 case "TerminateSession" -> handleTerminateSession(request);
                 case "GetSessionEndpoint" -> handleGetSessionEndpoint(request);
+                case "CreateStudio" -> handleCreateStudio(request);
+                case "DescribeStudio" -> handleDescribeStudio(request);
+                case "ListStudios" -> handleListStudios(request);
+                case "UpdateStudio" -> handleUpdateStudio(request);
+                case "DeleteStudio" -> handleDeleteStudio(request);
+                case "CreateStudioSessionMapping" -> handleCreateStudioSessionMapping(request);
+                case "GetStudioSessionMapping" -> handleGetStudioSessionMapping(request);
+                case "ListStudioSessionMappings" -> handleListStudioSessionMappings(request);
+                case "UpdateStudioSessionMapping" -> handleUpdateStudioSessionMapping(request);
+                case "DeleteStudioSessionMapping" -> handleDeleteStudioSessionMapping(request);
                 case "AddInstanceGroups" -> handleAddInstanceGroups(request);
                 case "ListInstanceGroups" -> handleListInstanceGroups(request);
                 case "AddInstanceFleet" -> handleAddInstanceFleet(request);
@@ -529,6 +543,176 @@ public class EmrHandler {
         return new AwsException("SerializationException", message, 400);
     }
 
+    // ──────────────────────────── Studios ────────────────────────────
+
+    private Response handleCreateStudio(JsonNode request) {
+        EmrStudio studio = new EmrStudio();
+        studio.setName(string(request, "Name"));
+        studio.setDescription(string(request, "Description"));
+        studio.setAuthMode(string(request, "AuthMode"));
+        studio.setVpcId(string(request, "VpcId"));
+        studio.setSubnetIds(strings(request.path("SubnetIds"), "SubnetIds"));
+        studio.setServiceRole(string(request, "ServiceRole"));
+        studio.setUserRole(string(request, "UserRole"));
+        studio.setWorkspaceSecurityGroupId(string(request, "WorkspaceSecurityGroupId"));
+        studio.setEngineSecurityGroupId(string(request, "EngineSecurityGroupId"));
+        studio.setDefaultS3Location(string(request, "DefaultS3Location"));
+        studio.setIdpAuthUrl(string(request, "IdpAuthUrl"));
+        studio.setIdpRelayStateParameterName(string(request, "IdpRelayStateParameterName"));
+        studio.setTags(tagList(request.path("Tags"), "Tags"));
+        studio.setTrustedIdentityPropagationEnabled(bool(request, "TrustedIdentityPropagationEnabled"));
+        studio.setIdcUserAssignment(string(request, "IdcUserAssignment"));
+        studio.setIdcInstanceArn(string(request, "IdcInstanceArn"));
+        studio.setEncryptionKeyArn(string(request, "EncryptionKeyArn"));
+        EmrStudio created = studios.createStudio(studio);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StudioId", created.getStudioId());
+        response.put("Url", created.getUrl());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeStudio(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Studio", studioNode(studios.describeStudio(string(request, "StudioId"))));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListStudios(JsonNode request) {
+        PaginatedResult<EmrStudio> page = studios.listStudios(string(request, "Marker"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("Studios");
+        for (EmrStudio studio : page.items()) {
+            ObjectNode summary = summaries.addObject();
+            summary.put("StudioId", studio.getStudioId());
+            summary.put("Name", studio.getName());
+            summary.put("VpcId", studio.getVpcId());
+            if (studio.getDescription() != null) {
+                summary.put("Description", studio.getDescription());
+            }
+            summary.put("Url", studio.getUrl());
+            summary.put("AuthMode", studio.getAuthMode());
+            putEpoch(summary, "CreationTime", studio.getCreationTime());
+        }
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateStudio(JsonNode request) {
+        studios.updateStudio(string(request, "StudioId"), string(request, "Name"), string(request, "Description"),
+                strings(request.path("SubnetIds"), "SubnetIds"), string(request, "DefaultS3Location"),
+                string(request, "EncryptionKeyArn"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteStudio(JsonNode request) {
+        studios.deleteStudio(string(request, "StudioId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleCreateStudioSessionMapping(JsonNode request) {
+        studios.createSessionMapping(string(request, "StudioId"), identity(request),
+                string(request, "SessionPolicyArn"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetStudioSessionMapping(JsonNode request) {
+        String studioId = string(request, "StudioId");
+        EmrStudioSessionMapping mapping = studios.getSessionMapping(studioId, identity(request));
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode detail = sessionMappingNode(studioId, mapping);
+        putEpoch(detail, "LastModifiedTime", mapping.getLastModifiedTime());
+        response.set("SessionMapping", detail);
+        return Response.ok(response).build();
+    }
+
+    private Response handleListStudioSessionMappings(JsonNode request) {
+        PaginatedResult<EmrStudioService.StudioMapping> page = studios.listSessionMappings(
+                string(request, "StudioId"), string(request, "IdentityType"), string(request, "Marker"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode mappings = response.putArray("SessionMappings");
+        page.items().forEach(item -> mappings.add(sessionMappingNode(item.studioId(), item.mapping())));
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateStudioSessionMapping(JsonNode request) {
+        studios.updateSessionMapping(string(request, "StudioId"), identity(request),
+                string(request, "SessionPolicyArn"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteStudioSessionMapping(JsonNode request) {
+        studios.deleteSessionMapping(string(request, "StudioId"), identity(request));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static EmrStudioService.Identity identity(JsonNode request) {
+        return new EmrStudioService.Identity(string(request, "IdentityType"), string(request, "IdentityId"),
+                string(request, "IdentityName"));
+    }
+
+    private ObjectNode studioNode(EmrStudio studio) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("StudioId", studio.getStudioId());
+        node.put("StudioArn", studio.getStudioArn());
+        node.put("Name", studio.getName());
+        putIfSet(node, "Description", studio.getDescription());
+        node.put("AuthMode", studio.getAuthMode());
+        node.put("VpcId", studio.getVpcId());
+        ArrayNode subnets = node.putArray("SubnetIds");
+        studio.getSubnetIds().forEach(subnets::add);
+        node.put("ServiceRole", studio.getServiceRole());
+        putIfSet(node, "UserRole", studio.getUserRole());
+        node.put("WorkspaceSecurityGroupId", studio.getWorkspaceSecurityGroupId());
+        node.put("EngineSecurityGroupId", studio.getEngineSecurityGroupId());
+        node.put("Url", studio.getUrl());
+        putEpoch(node, "CreationTime", studio.getCreationTime());
+        node.put("DefaultS3Location", studio.getDefaultS3Location());
+        putIfSet(node, "IdpAuthUrl", studio.getIdpAuthUrl());
+        putIfSet(node, "IdpRelayStateParameterName", studio.getIdpRelayStateParameterName());
+        node.set("Tags", tagArray(studio.getTags()));
+        putIfSet(node, "IdcInstanceArn", studio.getIdcInstanceArn());
+        if (studio.getTrustedIdentityPropagationEnabled() != null) {
+            node.put("TrustedIdentityPropagationEnabled", studio.getTrustedIdentityPropagationEnabled());
+        }
+        putIfSet(node, "IdcUserAssignment", studio.getIdcUserAssignment());
+        putIfSet(node, "EncryptionKeyArn", studio.getEncryptionKeyArn());
+        return node;
+    }
+
+    // A SessionMappingSummary; GetStudioSessionMapping's detail adds its LastModifiedTime.
+    private ObjectNode sessionMappingNode(String studioId, EmrStudioSessionMapping mapping) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("StudioId", studioId);
+        node.put("IdentityId", mapping.getIdentityId());
+        putIfSet(node, "IdentityName", mapping.getIdentityName());
+        node.put("IdentityType", mapping.getIdentityType());
+        node.put("SessionPolicyArn", mapping.getSessionPolicyArn());
+        putEpoch(node, "CreationTime", mapping.getCreationTime());
+        return node;
+    }
+
+    private static void putIfSet(ObjectNode node, String field, String value) {
+        if (value != null) {
+            node.put(field, value);
+        }
+    }
+
+    private static Boolean bool(JsonNode request, String member) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isBoolean()) {
+            throw malformed(member + " must be a boolean");
+        }
+        return value.asBoolean();
+    }
+
     // ──────────────────────────── Instance groups / fleets ────────────────────────────
 
     private Response handleAddInstanceGroups(JsonNode request) {
@@ -838,13 +1022,24 @@ public class EmrHandler {
 
     // ──────────────────────────── Tags ────────────────────────────
 
+    // A tag call's ResourceId is "a cluster identifier or an Amazon EMR Studio ID".
     private Response handleAddTags(JsonNode request) {
-        service.addTags(text(request, "ResourceId"), parseTags(request.path("Tags")));
+        String resourceId = text(request, "ResourceId");
+        if (EmrStudioService.isStudioId(resourceId)) {
+            studios.addTags(resourceId, parseTags(request.path("Tags")));
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        service.addTags(resourceId, parseTags(request.path("Tags")));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleRemoveTags(JsonNode request) {
-        service.removeTags(text(request, "ResourceId"), stringList(request.path("TagKeys")));
+        String resourceId = text(request, "ResourceId");
+        if (EmrStudioService.isStudioId(resourceId)) {
+            studios.removeTags(resourceId, stringList(request.path("TagKeys")));
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        service.removeTags(resourceId, stringList(request.path("TagKeys")));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
