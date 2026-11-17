@@ -305,7 +305,7 @@ class PaymentCryptographyDataPlaneTest {
     void aKeyEncryptionKeyAnswersAKeyEncryptionKeyValidationOfItself() {
         String kekArn = TestFixtures.paymentCryptographyClient().createKey(r -> r
                 .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.TDES_2KEY)
+                        .keyAlgorithm(KeyAlgorithm.TDES_2_KEY)
                         .keyClass(KeyClass.SYMMETRIC_KEY)
                         .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
                         .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
@@ -318,7 +318,7 @@ class PaymentCryptographyDataPlaneTest {
                 .keyIdentifier(kekArn)
                 .randomKeySendVariantMask(RandomKeySendVariantMask.VARIANT_MASK_82)
                 .kekValidationType(t -> t.kekValidationRequest(q -> q
-                        .deriveKeyAlgorithm(SymmetricKeyAlgorithm.TDES_2KEY)
+                        .deriveKeyAlgorithm(SymmetricKeyAlgorithm.TDES_2_KEY)
                         .randomKeyMaxLength(RandomKeyMaxLength.BYTES_16))));
 
         assertThat(asked.keyArn()).isEqualTo(kekArn);
