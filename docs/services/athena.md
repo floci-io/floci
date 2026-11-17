@@ -121,7 +121,7 @@ results storage.
 `StartQueryExecution` reads a query string as Athena engine version 3 does:
 
 - The whitespace and semicolons around the statement are dropped: `GetQueryExecution` returns `SELECT 1 ;` and `;SELECT 1` as `SELECT 1`. A comment at either end stays.
-- A query holding more than one statement, meaning anything (a comment included) on both sides of a semicolon, is rejected with an `InvalidRequestException` whose `AthenaErrorCode` is `MALFORMED_QUERY`. A semicolon inside a literal, a quoted identifier or a comment separates nothing; as on Athena, Hive's backslash escapes are not read here.
+- A query holding more than one statement, meaning anything (a comment included) on both sides of a semicolon, is rejected with an `InvalidRequestException` whose `AthenaErrorCode` is `MALFORMED_QUERY`. A semicolon inside a literal, a quoted identifier (backtick-quoted included) or a comment separates nothing; as on Athena, Hive's backslash escapes are not read here. Where Trino and DuckDB end a nested block comment at different places, a second statement under either reading counts.
 
 ## Trino SQL on DuckDB
 

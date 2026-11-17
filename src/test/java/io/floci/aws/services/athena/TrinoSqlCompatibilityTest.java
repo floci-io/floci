@@ -127,6 +127,24 @@ class TrinoSqlCompatibilityTest {
                 "SELECT 'a; b' AS s, \"c;d\" AS q -- e; f\n/* g; h */"));
     }
 
+    /** Athena (engine v3) runs this: a backtick-quoted name is one token, as in Trino's lexer. */
+    @Test
+    void aSemicolonInABacktickQuotedNameSeparatesNothing() {
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements(
+                "CREATE EXTERNAL TABLE t (`a;b` int, `c``;d` int) LOCATION 's3://bucket/t/'"));
+    }
+
+    /**
+     * Trino ends the comment at its first close, leaving a literal holding the semicolon; DuckDB nests it, leaving a
+     * second INSERT. Either reading's second statement counts, and Athena (engine v3) rejects the query too.
+     */
+    @Test
+    void aSecondStatementEitherTrinoOrDuckDbWouldReadCounts() {
+        assertTrue(TrinoSqlCompatibility.holdsSeveralStatements(
+                "INSERT INTO t VALUES (1) /* outer /* inner */ ' */; INSERT INTO t VALUES (2) -- '"));
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements("SELECT /* a /* b */ 1 AS a"));
+    }
+
     /** Athena (engine v3) splits Hive DDL by the same rules, so it rejects this as two statements too. */
     @Test
     void aSemicolonAfterAHiveBackslashEscapeSeparatesStatementsAsOnAthena() {
