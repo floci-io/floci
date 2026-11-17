@@ -1,6 +1,5 @@
-package io.floci.aws.services.dsql.dataplane;
+package io.floci.aws.core.common;
 
-import io.floci.aws.core.common.PostgresWire;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;

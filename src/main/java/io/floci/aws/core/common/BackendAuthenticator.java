@@ -1,6 +1,4 @@
-package io.floci.aws.services.dsql.dataplane;
-
-import io.floci.aws.core.common.PostgresWire;
+package io.floci.aws.core.common;
 
 import javax.crypto.Mac;
 import javax.crypto.SecretKeyFactory;
@@ -17,12 +15,13 @@ import java.util.HexFormat;
 import java.util.Optional;
 
 /**
- * Answers the password challenge of an external PostgreSQL backend: cleartext, MD5 and
+ * Answers the password challenge of a PostgreSQL server Floci logs in to as a client, such as the
+ * RDS proxy's backend or an Aurora DSQL cluster's external database: cleartext, MD5 and
  * SCRAM-SHA-256 (RFC 5802 and 7677, without channel binding), or SCRAM-SHA-256 alone where the
  * server is known to store SCRAM verifiers. One instance serves one connection, as the SCRAM
  * exchange keeps its state between the messages.
  */
-final class BackendAuthenticator {
+public final class BackendAuthenticator {
 
     private static final String SCRAM = "SCRAM-SHA-256";
     private static final int NONCE_BYTES = 18;
@@ -39,7 +38,7 @@ final class BackendAuthenticator {
     private byte[] serverSignature;
     private boolean scramVerified;
 
-    BackendAuthenticator(String user, String password) {
+    public BackendAuthenticator(String user, String password) {
         this(user, password, false);
     }
 
@@ -49,7 +48,7 @@ final class BackendAuthenticator {
      * not that server. A login accepted before any request (trust) discloses nothing and is
      * accepted; one accepted after SASL started but before its signature was verified is not.
      */
-    BackendAuthenticator(String user, String password, boolean scramOnly) {
+    public BackendAuthenticator(String user, String password, boolean scramOnly) {
         this(user, password, newNonce(), "", scramOnly);
     }
 
@@ -79,7 +78,7 @@ final class BackendAuthenticator {
      * AuthenticationOk that comes while a SCRAM exchange has not yet proved the server's signature
      * is refused, as the server would then be one that never knew the password.
      */
-    Optional<PostgresWire.Message> answer(PostgresWire.Message authRequest) throws IOException {
+    public Optional<PostgresWire.Message> answer(PostgresWire.Message authRequest) throws IOException {
         byte[] body = authRequest.body();
         if (authRequest.type() != 'R' || body.length < 4) {
             throw new IOException("unexpected backend authentication message");
@@ -123,18 +122,14 @@ final class BackendAuthenticator {
         if (body.length < 8) {
             throw new IOException("malformed backend MD5 authentication request");
         }
-        try {
-            MessageDigest md5 = MessageDigest.getInstance("MD5");
-            md5.update(password.getBytes(StandardCharsets.UTF_8));
-            md5.update(user.getBytes(StandardCharsets.UTF_8));
-            String inner = HexFormat.of().formatHex(md5.digest());
-            md5.update(inner.getBytes(StandardCharsets.US_ASCII));
-            md5.update(body, 4, 4);
-            String hashed = "md5" + HexFormat.of().formatHex(md5.digest());
-            return new PostgresWire.Message((byte) 'p', PostgresWire.cStringBytes(hashed));
-        } catch (GeneralSecurityException e) {
-            throw new IOException("MD5 is not available", e);
-        }
+        MessageDigest md5 = Digests.md5Digest();
+        md5.update(password.getBytes(StandardCharsets.UTF_8));
+        md5.update(user.getBytes(StandardCharsets.UTF_8));
+        String inner = HexFormat.of().formatHex(md5.digest());
+        md5.update(inner.getBytes(StandardCharsets.US_ASCII));
+        md5.update(body, 4, 4);
+        String hashed = "md5" + HexFormat.of().formatHex(md5.digest());
+        return new PostgresWire.Message((byte) 'p', PostgresWire.cStringBytes(hashed));
     }
 
     private PostgresWire.Message saslInitial(byte[] body) throws IOException {
@@ -194,7 +189,7 @@ final class BackendAuthenticator {
         try {
             byte[] salted = saltedPassword(password, salt, iterations);
             byte[] clientKey = hmac(salted, "Client Key".getBytes(StandardCharsets.UTF_8));
-            byte[] storedKey = MessageDigest.getInstance("SHA-256").digest(clientKey);
+            byte[] storedKey = Digests.sha256(clientKey);
             byte[] clientSignature = hmac(storedKey, authMessage);
             byte[] proof = new byte[clientKey.length];
             for (int i = 0; i < proof.length; i++) {
@@ -227,7 +222,7 @@ final class BackendAuthenticator {
     }
 
     /** SCRAM's SaltedPassword: PBKDF2 with HMAC-SHA256 (RFC 5802, section 3). */
-    static byte[] saltedPassword(String password, byte[] salt, int iterations) throws GeneralSecurityException {
+    public static byte[] saltedPassword(String password, byte[] salt, int iterations) throws GeneralSecurityException {
         PBEKeySpec spec = new PBEKeySpec(password.toCharArray(), salt, iterations, 256);
         try {
             return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
@@ -236,7 +231,7 @@ final class BackendAuthenticator {
         }
     }
 
-    static byte[] hmac(byte[] key, byte[] data) throws GeneralSecurityException {
+    public static byte[] hmac(byte[] key, byte[] data) throws GeneralSecurityException {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data);
