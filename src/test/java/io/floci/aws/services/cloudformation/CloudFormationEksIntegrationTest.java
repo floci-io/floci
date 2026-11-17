@@ -3,9 +3,13 @@ package io.floci.aws.services.cloudformation;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+
+import java.util.List;
+import java.util.Map;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.executeAndAwaitUpdate;
@@ -15,6 +19,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * End-to-end check that CloudFormation provisions EKS resources for real (into EksService) rather
@@ -128,6 +133,43 @@ class CloudFormationEksIntegrationTest {
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
+    }
+
+    @Test
+    void anUnnamedNodegroupKeepsItsArnAndReconcilesStackTagsWhenOnlyTagsChange() {
+        String stack = "cfn-eksng-upd-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, nodegroup("one", "{\"Key\": \"old\", \"Value\": \"x\"}"),
+                    "CREATE_COMPLETE");
+            String base = "/clusters/" + physicalId(client, stack, "Cluster") + "/node-groups";
+            List<String> names = given().get(base).jsonPath().getList("nodegroups");
+            assertEquals(1, names.size());
+            String arn = given().get(base + "/" + names.getFirst()).jsonPath().getString("nodegroup.nodegroupArn");
+            given().contentType("application/json").body(Map.of("tags", Map.of("ext", "1")))
+                    .post("/tags/" + arn).then().statusCode(200);
+
+            createUpdateChangeSet(client, stack, "tags", nodegroup("two", ""));
+            executeAndAwaitUpdate(client, stack, "tags");
+
+            assertEquals(names, given().get(base).jsonPath().getList("nodegroups"));
+            JsonPath after = given().get(base + "/" + names.getFirst()).jsonPath();
+            assertEquals(arn, after.getString("nodegroup.nodegroupArn"));
+            assertEquals("two", after.getString("nodegroup.tags.team"));
+            assertEquals("1", after.getString("nodegroup.tags.ext"));
+            assertNull(after.getString("nodegroup.tags.old"));
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static String nodegroup(String team, String extraTag) {
+        String cluster = "\"Cluster\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {\"RoleArn\":"
+                + " \"arn:aws:iam::000000000000:role/eks-cluster-role\"}}";
+        return subjectStack(cluster, "", "AWS::EKS::Nodegroup", "\"ClusterName\": {\"Ref\": \"Cluster\"},"
+                + " \"NodeRole\": \"arn:aws:iam::000000000000:role/eks-node-role\","
+                + " \"Subnets\": [\"subnet-aaaa1111\"], \"Tags\": [{\"Key\": \"team\", \"Value\": \""
+                + team + "\"}" + (extraTag.isEmpty() ? "" : ", " + extraTag) + "]");
     }
 
     private static String cluster(String role, String team) {
