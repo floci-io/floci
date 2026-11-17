@@ -98,6 +98,9 @@ class CfnReplacementIntegrationTest {
 
     private static final String PROFILE = profileProperties(APP_REF, "");
 
+    /** The two topics the SNS subscription rows point at. */
+    private static final String SNS_TOPICS = json("'TopicA': {'Type': 'AWS::SNS::Topic'}, 'TopicB': {'Type': 'AWS::SNS::Topic'}");
+
     /** The cluster names a subnet group whose own name comes from a parameter that changes in the update. */
     private static final Row SUBNET_GROUP_REPLACED = createOnlyRow("ElastiCache cluster in a replaced subnet group",
             json(vpcAndSubnet("10.73")
@@ -222,6 +225,24 @@ class CfnReplacementIntegrationTest {
                         "True", false, null),
                 createOnlyRow("SNS topic FifoTopic switched on", "", "", "AWS::SNS::Topic",
                         "\"FifoTopic\": false", "\"FifoTopic\": true", "True", false, null),
+                createOnlyRow("SNS subscription Endpoint", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub-@V@\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription Protocol", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"email-json\","
+                                + " \"Endpoint\": \"repl@example.com\"",
+                        "True", false, null),
+                createOnlyRow("SNS subscription TopicArn", SNS_TOPICS, "", "AWS::SNS::Subscription",
+                        "\"TopicArn\": {\"Ref\": \"TopicA\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "\"TopicArn\": {\"Ref\": \"TopicB\"}, \"Protocol\": \"sqs\","
+                                + " \"Endpoint\": \"arn:aws:sqs:us-east-1:000000000000:repl-sub\"",
+                        "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
