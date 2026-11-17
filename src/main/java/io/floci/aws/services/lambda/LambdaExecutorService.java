@@ -21,11 +21,11 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.UncheckedIOException;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -38,6 +38,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  * Orchestrates Lambda function invocations.
@@ -175,6 +176,11 @@ public class LambdaExecutorService implements Resettable {
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, String requestId,
                                String traceId) {
         return invoke(fn, payload, type, 0, null, null, requestId, null, traceId);
+    }
+
+    public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, String requestId,
+                               String traceId, boolean logTail) {
+        return invoke(fn, payload, type, 0, null, null, requestId, null, traceId, logTail);
     }
 
     /**
@@ -436,8 +442,9 @@ public class LambdaExecutorService implements Resettable {
         boolean initializing = !runtimeApiServer.hasRuntimePolled();
         long dispatchWaitMs = dispatchWaitMs(fn.getTimeout(), initializing,
                 runtimeApiServer.getContainerStartedAtMs(), System.currentTimeMillis());
-        Instant logStart = handle.beginInvocation();
+        Supplier<String> logs = null;
         try {
+            logs = beginLogTail(handle, logTail);
             runtimeApiServer.enqueue(invocation);
 
             CompletableFuture.anyOf(
@@ -445,7 +452,7 @@ public class LambdaExecutorService implements Resettable {
                     .get(dispatchWaitMs, TimeUnit.MILLISECONDS);
             InvokeResult result = invocation.getResultFuture().get();
 
-            includeLogTail(result, handle, logStart, logTail);
+            includeLogTail(result, handle, logs);
             warmPool.release(handle);
             return result;
 
@@ -465,7 +472,7 @@ public class LambdaExecutorService implements Resettable {
                 InvokeResult result = new InvokeResult(200, "Unhandled",
                         buildErrorPayload("Task timed out after " + fn.getTimeout() + " seconds", "Function.TimedOut"),
                         null, requestId);
-                includeLogTail(result, handle, logStart, logTail);
+                includeLogTail(result, handle, logs);
                 warmPool.destroyHandle(handle);
                 return result;
             }
@@ -476,13 +483,21 @@ public class LambdaExecutorService implements Resettable {
         }
     }
 
-    private void includeLogTail(InvokeResult result, ContainerHandle handle, Instant since, boolean requested) {
-        if (requested) {
+    private Supplier<String> beginLogTail(ContainerHandle handle, boolean requested) {
+        try {
+            return handle.beginInvocation(requested);
+        } catch (IllegalStateException | UncheckedIOException e) {
+            LOG.warnv(e, "Could not begin invocation log capture for function {0}", handle.getFunctionName());
+            return null;
+        }
+    }
+
+    private void includeLogTail(InvokeResult result, ContainerHandle handle, Supplier<String> logs) {
+        if (logs != null) {
             try {
-                result.setLogResult(handle.readLogTail(since));
-            } catch (Exception e) {
-                LOG.warnv("Could not read invocation logs for function {0}: {1}",
-                        handle.getFunctionName(), e.getMessage());
+                result.setLogResult(logs.get());
+            } catch (IllegalStateException | UncheckedIOException e) {
+                LOG.warnv(e, "Could not read invocation logs for function {0}", handle.getFunctionName());
             }
         }
     }

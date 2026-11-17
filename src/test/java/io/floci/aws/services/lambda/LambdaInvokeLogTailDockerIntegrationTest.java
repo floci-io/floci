@@ -2,6 +2,7 @@ package io.floci.aws.services.lambda;
 
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -36,11 +37,8 @@ class LambdaInvokeLogTailDockerIntegrationTest {
 
     @Test
     void synchronousInvokeReturnsItsOwnLogsThroughTheSdk() {
-        try {
-            dockerClient.pingCmd().exec();
-        } catch (Exception expected) {
-            Assumptions.abort("Docker is required for Lambda invocation log tails");
-        }
+        Assumptions.assumeTrue(DockerAvailability.answers(dockerClient),
+                "Docker is required for Lambda invocation log tails");
 
         String name = "invoke-log-tail-" + UUID.randomUUID().toString().substring(0, 8);
         try (LambdaClient client = AwsTestClients.create(LambdaClient.builder(), "000000000000", Region.US_EAST_1)) {
@@ -52,7 +50,7 @@ class LambdaInvokeLogTailDockerIntegrationTest {
                             exports.handler = async (event) => {
                               console.log('hello from log tail probe ' + event.marker);
                               console.error('stderr ' + event.marker);
-                              if (event.large) process.stdout.write('é'.repeat(3500) + ' END ' + event.marker + '\\n');
+                              if (event.large) process.stdout.write('é'.repeat(9000) + ' END ' + event.marker + '\\n');
                               if (event.fail) throw new Error('failure ' + event.marker);
                               return {ok: true};
                             };
@@ -85,9 +83,11 @@ class LambdaInvokeLogTailDockerIntegrationTest {
 
                 InvokeResponse large = client.invoke(request -> request.functionName(name).logType(LogType.TAIL)
                         .payload(SdkBytes.fromUtf8String("{\"marker\":\"large\",\"large\":true}")));
-                byte[] largeOutput = ("é".repeat(3500) + " END large\n").getBytes(StandardCharsets.UTF_8);
+                byte[] largeOutput = ("é".repeat(9000) + " END large\n").getBytes(StandardCharsets.UTF_8);
+                byte[] actualTail = Base64.getDecoder().decode(large.logResult());
                 assertArrayEquals(Arrays.copyOfRange(largeOutput, largeOutput.length - 4096, largeOutput.length),
-                        Base64.getDecoder().decode(large.logResult()));
+                        actualTail, () -> "Unexpected tail metadata: "
+                                + new String(actualTail, StandardCharsets.UTF_8).replace("é", ""));
 
                 InvokeResponse noTail = client.invoke(request -> request.functionName(name)
                         .logType(LogType.NONE).payload(SdkBytes.fromUtf8String("{}")));

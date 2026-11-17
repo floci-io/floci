@@ -80,6 +80,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -1478,7 +1479,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         }
         reportCustomResourceLiveness(payload);
         InvokeResult durable = invokeIfDurable(fn, region, qualifier, durableExecutionName, payload, type,
-                traceHeader);
+                traceHeader, logTail);
         if (durable != null) {
             return durable;
         }
@@ -1494,7 +1495,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
     /** Null for a plain function, and for a DryRun, which only checks the qualifier. */
     private InvokeResult invokeIfDurable(LambdaFunction fn, String region, String qualifier,
                                          String durableExecutionName, byte[] payload, InvocationType type,
-                                         String traceHeader) {
+                                         String traceHeader, boolean logTail) {
         if (!fn.isDurable()) {
             return null;
         }
@@ -1505,7 +1506,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         if (type == InvocationType.DryRun) {
             return null;
         }
-        InvokeResult result = invokeDurable(fn, region, durableExecutionName, payload, type, traceHeader);
+        InvokeResult result = invokeDurable(fn, region, durableExecutionName, payload, type, traceHeader, logTail);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -1515,7 +1516,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
      * limit. Event answers 202 as soon as the execution exists.
      */
     private InvokeResult invokeDurable(LambdaFunction fn, String region, String executionName, byte[] payload,
-                                       InvocationType type, String traceHeader) {
+                                       InvocationType type, String traceHeader, boolean logTail) {
         boolean synchronous = type == InvocationType.RequestResponse;
         if (synchronous && fn.getDurableExecutionTimeout() > MAX_FUNCTION_TIMEOUT_SECONDS) {
             throw new AwsException("InvalidParameterValueException",
@@ -1530,23 +1531,35 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         String input = payload == null || payload.length == 0 ? "{}" : new String(payload, StandardCharsets.UTF_8);
         DurableExecution execution = durableExecutionService.start(new DurableExecutionService.StartRequest(
                 fn.getAccountId(), region, fn.getFunctionName(), fn.getVersion(), executionName, input, synchronous,
-                traceHeader));
+                traceHeader, logTail));
         String requestId = UUID.randomUUID().toString();
         InvokeResult result;
         if (!synchronous) {
             result = new InvokeResult(202, null, new byte[0], null, requestId);
         } else {
-            result = awaitDurableResult(execution.getExecutionArn(), requestId);
+            try {
+                result = awaitDurableResult(execution.getExecutionArn(), requestId, logTail);
+            } finally {
+                if (logTail) {
+                    durableExecutionService.releaseInvocationLogs(execution.getExecutionArn());
+                }
+            }
         }
         result.setDurableExecutionArn(execution.getExecutionArn());
         return result;
     }
 
-    private InvokeResult awaitDurableResult(String executionArn, String requestId) {
-        DurableExecution finished;
+    private InvokeResult awaitDurableResult(String executionArn, String requestId, boolean logTail) {
         try {
             // A little past the limit, so an execution that times out at 900 s reports its own error.
-            finished = durableExecutionService.awaitCompletion(executionArn)
+            return durableExecutionService.awaitCompletion(executionArn)
+                    .thenCompose(finished -> {
+                        InvokeResult result = durableResult(finished, requestId);
+                        return logTail ? durableExecutionService.invocationLogs(executionArn).thenApply(logs -> {
+                            result.setLogResult(logs);
+                            return result;
+                        }) : CompletableFuture.completedFuture(result);
+                    })
                     .get(MAX_FUNCTION_TIMEOUT_SECONDS + SYNC_DURABLE_GRACE_SECONDS, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             return unhandledDurableResult(DurableErrorObject.of(
@@ -1559,6 +1572,9 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
             return unhandledDurableResult(DurableErrorObject.of(
                     e.getCause() != null ? e.getCause().getMessage() : e.getMessage(), "InvocationError"), requestId);
         }
+    }
+
+    private InvokeResult durableResult(DurableExecution finished, String requestId) {
         if (finished.getStatus() == DurableExecutionStatus.SUCCEEDED) {
             byte[] body = finished.getResult() == null ? new byte[0]
                     : finished.getResult().getBytes(StandardCharsets.UTF_8);
@@ -1615,7 +1631,7 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(
                 arn.accountId(), arn.region(), ref.name(), ref.qualifier());
-        InvokeResult durable = invokeIfDurable(fn, arn.region(), ref.qualifier(), null, payload, type, null);
+        InvokeResult durable = invokeIfDurable(fn, arn.region(), ref.qualifier(), null, payload, type, null, false);
         if (durable != null) {
             return durable;
         }

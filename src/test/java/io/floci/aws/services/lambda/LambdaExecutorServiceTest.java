@@ -226,16 +226,11 @@ class LambdaExecutorServiceTest {
     void requestedLogTailIsReadBeforeTheEnvironmentIsReleased() {
         RuntimeApiServer runtime = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("logs", "test-fn", runtime, ContainerState.WARM);
-        handle.setLogTailReader(since -> {
+        handle.setLogTailReader(initialization -> () -> {
             verify(warmPool, never()).release(handle);
             return "aGVsbG8K";
         });
-        when(warmPool.acquire(fn)).thenReturn(handle);
-        doAnswer(call -> {
-            PendingInvocation invocation = call.getArgument(0);
-            invocation.getResultFuture().complete(new InvokeResult(200, "Unhandled", "{}".getBytes(), null, "logs"));
-            return invocation.getResultFuture();
-        }).when(runtime).enqueue(any());
+        stubInvocationResult(handle, new InvokeResult(200, "Unhandled", "{}".getBytes(), null, "logs"));
 
         InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null, null, true);
 
@@ -248,15 +243,10 @@ class LambdaExecutorServiceTest {
     void anInvocationWithoutTailDoesNotReadTheEnvironmentLogs() {
         RuntimeApiServer runtime = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("no-logs", "test-fn", runtime, ContainerState.WARM);
-        handle.setLogTailReader(since -> {
+        handle.setLogTailReader(initialization -> () -> {
             throw new AssertionError("Logs were not requested");
         });
-        when(warmPool.acquire(fn)).thenReturn(handle);
-        doAnswer(call -> {
-            PendingInvocation invocation = call.getArgument(0);
-            invocation.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, "no-logs"));
-            return invocation.getResultFuture();
-        }).when(runtime).enqueue(any());
+        stubInvocationResult(handle, new InvokeResult(200, null, "{}".getBytes(), null, "no-logs"));
 
         InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
 
@@ -268,15 +258,10 @@ class LambdaExecutorServiceTest {
     void aLogReadFailurePreservesTheFunctionResultAndReleasesItsEnvironment() {
         RuntimeApiServer runtime = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("bad-logs", "test-fn", runtime, ContainerState.WARM);
-        handle.setLogTailReader(since -> {
+        handle.setLogTailReader(initialization -> () -> {
             throw new IllegalStateException("log driver unavailable");
         });
-        when(warmPool.acquire(fn)).thenReturn(handle);
-        doAnswer(call -> {
-            PendingInvocation invocation = call.getArgument(0);
-            invocation.getResultFuture().complete(new InvokeResult(200, null, "{}".getBytes(), null, "bad-logs"));
-            return invocation.getResultFuture();
-        }).when(runtime).enqueue(any());
+        stubInvocationResult(handle, new InvokeResult(200, null, "{}".getBytes(), null, "bad-logs"));
 
         InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, 0, null, null, true);
 
@@ -284,6 +269,15 @@ class LambdaExecutorServiceTest {
         assertNull(result.getFunctionError());
         verify(warmPool).release(handle);
         verify(warmPool, never()).destroyHandle(handle);
+    }
+
+    private void stubInvocationResult(ContainerHandle handle, InvokeResult result) {
+        when(warmPool.acquire(fn)).thenReturn(handle);
+        doAnswer(call -> {
+            PendingInvocation invocation = call.getArgument(0);
+            invocation.getResultFuture().complete(result);
+            return invocation.getResultFuture();
+        }).when(handle.getRuntimeApiServer()).enqueue(any());
     }
 
     @Test

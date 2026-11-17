@@ -3,7 +3,9 @@ package io.floci.aws.services.lambda.launcher;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.LogContainerCmd;
+import com.github.dockerjava.api.exception.DockerException;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -11,7 +13,10 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Base64;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /** A byte-bounded invocation log snapshot, independent of asynchronous CloudWatch forwarding. */
 public final class InvocationLogTail {
@@ -20,27 +25,41 @@ public final class InvocationLogTail {
     private final byte[] tail = new byte[LIMIT];
     private int position;
     private int size;
-    private boolean includeLine;
+    private final TimestampedParser parser = new TimestampedParser();
+    private Instant lastTimestamp = Instant.EPOCH;
+
+    public static Supplier<String> captureDocker(DockerClient docker, String containerId, boolean initialization) {
+        Instant since = initialization ? Instant.EPOCH
+                : dockerSnapshot(docker, containerId, Instant.EPOCH, 1).lastTimestamp().plusNanos(1);
+        return () -> readDocker(docker, containerId, since);
+    }
 
     public static String readDocker(DockerClient docker, String containerId, Instant since) {
+        return dockerSnapshot(docker, containerId, since, LIMIT).encoded();
+    }
+
+    private static InvocationLogTail dockerSnapshot(DockerClient docker, String containerId, Instant since, int lines) {
         InvocationLogTail tail = new InvocationLogTail();
+        Map<StreamType, TimestampedParser> parsers = new EnumMap<>(StreamType.class);
         try (LogContainerCmd command = docker.logContainerCmd(containerId)
                 .withStdOut(true).withStdErr(true).withFollowStream(false).withTimestamps(true)
-                .withSince((int) since.getEpochSecond()).withTail(LIMIT);
+                .withSince((int) Math.min(Integer.MAX_VALUE, since.getEpochSecond())).withTail(lines);
                 ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
                     @Override
                     public void onNext(Frame frame) {
-                        tail.appendTimestamped(frame.getPayload(), since);
+                        parsers.computeIfAbsent(frame.getStreamType(), ignored -> tail.new TimestampedParser())
+                                .acceptFrame(frame.getPayload(), since);
                     }
                 }) {
             if (!command.exec(callback).awaitCompletion(2, TimeUnit.SECONDS)) {
                 throw new IllegalStateException("Timed out reading Lambda invocation logs");
             }
-            return tail.encoded();
+            parsers.values().forEach(TimestampedParser::finish);
+            return tail;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted reading Lambda invocation logs", e);
-        } catch (IOException e) {
+        } catch (IOException | DockerException e) {
             throw new IllegalStateException("Could not read Lambda invocation logs", e);
         }
     }
@@ -55,32 +74,29 @@ public final class InvocationLogTail {
         return tail.encoded();
     }
 
+    public static InvocationLogTail readTimestamped(InputStream logs, Instant since) throws IOException {
+        InvocationLogTail tail = new InvocationLogTail();
+        byte[] chunk = new byte[LIMIT];
+        int count;
+        while ((count = logs.read(chunk)) != -1) {
+            tail.parser.accept(chunk, 0, count, since);
+        }
+        tail.parser.finish();
+        return tail;
+    }
+
+    public Instant lastTimestamp() {
+        return lastTimestamp;
+    }
+
     void appendTimestamped(byte[] bytes, Instant since) {
-        int offset = 0;
-        while (offset < bytes.length) {
-            int end = offset;
-            while (end < bytes.length && bytes[end] != '\n') {
-                end++;
-            }
-            int content = offset;
-            int separator = offset;
-            while (separator < Math.min(end, offset + 40) && bytes[separator] != ' ') {
-                separator++;
-            }
-            if (separator < end && bytes[separator] == ' ') {
-                try {
-                    Instant timestamp = Instant.parse(new String(bytes, offset, separator - offset, StandardCharsets.US_ASCII));
-                    includeLine = !timestamp.isBefore(since);
-                    content = separator + 1;
-                } catch (DateTimeParseException expected) {
-                    // A continuation of a Docker log record carries no timestamp prefix.
-                }
-            }
-            int next = end < bytes.length ? end + 1 : end;
-            if (includeLine) {
-                append(bytes, content, next - content);
-            }
-            offset = next;
+        parser.accept(bytes, 0, bytes.length, since);
+    }
+
+    public void appendEncoded(String logs) {
+        if (logs != null) {
+            byte[] bytes = Base64.getDecoder().decode(logs);
+            append(bytes, 0, bytes.length);
         }
     }
 
@@ -94,12 +110,70 @@ public final class InvocationLogTail {
         size = Math.min(LIMIT, size + count);
     }
 
-    String encoded() {
+    public String encoded() {
+        parser.finish();
         byte[] bytes = new byte[size];
         int start = (position - size + LIMIT) % LIMIT;
         int first = Math.min(size, LIMIT - start);
         System.arraycopy(tail, start, bytes, 0, first);
         System.arraycopy(tail, 0, bytes, first, size - first);
         return Base64.getEncoder().encodeToString(bytes);
+    }
+
+    private final class TimestampedParser {
+        private final byte[] prefix = new byte[40];
+        private int prefixSize;
+        private boolean readingPrefix = true;
+        private boolean include;
+
+        void acceptFrame(byte[] bytes, Instant since) {
+            // Docker timestamps each record, including records that continue an unterminated line.
+            // A prefix already in progress belongs to a transport-split record and must be retained.
+            readingPrefix = true;
+            accept(bytes, 0, bytes.length, since);
+        }
+
+        void accept(byte[] bytes, int offset, int length, Instant since) {
+            int end = offset + length;
+            while (offset < end) {
+                if (readingPrefix) {
+                    byte next = bytes[offset++];
+                    prefix[prefixSize++] = next;
+                    if (next == ' ' || next == '\n' || prefixSize == prefix.length) {
+                        try {
+                            Instant timestamp = Instant.parse(new String(prefix, 0, prefixSize - 1, StandardCharsets.US_ASCII));
+                            include = !timestamp.isBefore(since);
+                            if (timestamp.isAfter(lastTimestamp)) {
+                                lastTimestamp = timestamp;
+                            }
+                        } catch (DateTimeParseException expected) {
+                            // A log record can continue without a timestamp prefix.
+                            if (include) {
+                                append(prefix, 0, prefixSize);
+                            }
+                        }
+                        prefixSize = 0;
+                        readingPrefix = next == '\n';
+                    }
+                } else {
+                    int next = offset;
+                    while (next < end && bytes[next++] != '\n') {
+                        // Append payload bytes in bulk, including any terminating newline.
+                    }
+                    if (include) {
+                        append(bytes, offset, next - offset);
+                    }
+                    readingPrefix = bytes[next - 1] == '\n';
+                    offset = next;
+                }
+            }
+        }
+
+        void finish() {
+            if (prefixSize > 0 && include) {
+                append(prefix, 0, prefixSize);
+            }
+            prefixSize = 0;
+        }
     }
 }

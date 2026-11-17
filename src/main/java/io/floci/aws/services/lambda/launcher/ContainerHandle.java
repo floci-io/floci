@@ -4,9 +4,9 @@ import io.floci.aws.services.lambda.model.ContainerState;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
 
 import java.io.Closeable;
-import java.time.Instant;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * Wraps a running Lambda Docker container and its associated Runtime API server.
@@ -23,7 +23,7 @@ public class ContainerHandle {
     private volatile ContainerState state;
     private volatile long lastUsedMs;
     private Closeable logStream;
-    private Function<Instant, String> logTailReader = since -> "";
+    private Function<Boolean, Supplier<String>> logTailReader = initialization -> () -> "";
     private final AtomicBoolean invoked = new AtomicBoolean();
 
     public ContainerHandle(String containerId, String functionName,
@@ -65,12 +65,12 @@ public class ContainerHandle {
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
 
-    public void setLogTailReader(Function<Instant, String> reader) { this.logTailReader = reader; }
-    public String readLogTail(Instant since) { return logTailReader.apply(since); }
+    public void setLogTailReader(Function<Boolean, Supplier<String>> reader) { this.logTailReader = reader; }
 
     /** The first invocation also owns the environment's initialization logs. */
-    public Instant beginInvocation() {
-        return invoked.getAndSet(true) ? Instant.now() : Instant.EPOCH;
+    public Supplier<String> beginInvocation(boolean captureLogs) {
+        boolean initialization = !invoked.getAndSet(true);
+        return captureLogs ? logTailReader.apply(initialization) : null;
     }
 
     /**

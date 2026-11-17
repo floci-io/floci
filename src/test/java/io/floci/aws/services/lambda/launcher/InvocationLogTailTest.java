@@ -75,4 +75,25 @@ class InvocationLogTailTest {
     private static String decoded(InvocationLogTail tail) {
         return new String(Base64.getDecoder().decode(tail.encoded()), StandardCharsets.UTF_8);
     }
+
+    @Test
+    void aTimestampPrefixSplitAcrossFramesIsRemovedWithoutLosingOutput() {
+        InvocationLogTail tail = new InvocationLogTail();
+        Instant start = Instant.parse("2026-11-16T19:00:00Z");
+        tail.appendTimestamped("2026-11-16T19:".getBytes(StandardCharsets.UTF_8), start);
+        tail.appendTimestamped("00:00.001Z hello\n".getBytes(StandardCharsets.UTF_8), start);
+
+        assertEquals("hello\n", decoded(tail));
+    }
+
+    @Test
+    void everySplitPointPreservesTheSameTimestampedUtf8Output() {
+        byte[] record = "2026-11-16T19:00:00.001Z hello 世界\n".getBytes(StandardCharsets.UTF_8);
+        for (int split = 1; split < record.length; split++) {
+            InvocationLogTail tail = new InvocationLogTail();
+            tail.appendTimestamped(Arrays.copyOfRange(record, 0, split), Instant.EPOCH);
+            tail.appendTimestamped(Arrays.copyOfRange(record, split, record.length), Instant.EPOCH);
+            assertEquals("hello 世界\n", decoded(tail), "split at byte " + split);
+        }
+    }
 }

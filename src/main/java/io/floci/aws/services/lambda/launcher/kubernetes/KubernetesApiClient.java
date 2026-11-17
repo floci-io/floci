@@ -38,6 +38,7 @@ import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -205,12 +206,24 @@ public class KubernetesApiClient {
     }
 
     public String readPodLogTail(String namespace, String podName, Instant since) {
-        String options = "&follow=false&tailLines=4096&sinceTime="
-                + URLEncoder.encode(since.toString(), StandardCharsets.UTF_8);
+        return podLogSnapshot(namespace, podName, since, 4096).encoded();
+    }
+
+    public Supplier<String> capturePodLogTail(String namespace, String podName, boolean initialization) {
+        Instant since = initialization ? Instant.EPOCH
+                : podLogSnapshot(namespace, podName, Instant.EPOCH, 1).lastTimestamp().plusNanos(1);
+        return () -> readPodLogTail(namespace, podName, since);
+    }
+
+    private InvocationLogTail podLogSnapshot(String namespace, String podName, Instant since, int lines) {
+        String options = "&follow=false&timestamps=true&tailLines=" + lines + "&sinceTime="
+                + URLEncoder.encode(since.truncatedTo(ChronoUnit.SECONDS).toString(), StandardCharsets.UTF_8);
         try (InputStream logs = openPodLogs(namespace, podName, "runtime", options)) {
-            return InvocationLogTail.read(logs);
+            return InvocationLogTail.readTimestamped(logs, since);
         } catch (IOException e) {
             throw new UncheckedIOException("Could not read invocation logs for pod " + podName, e);
+        } catch (KubernetesApiException e) {
+            throw new IllegalStateException("Could not read invocation logs for pod " + podName, e);
         }
     }
 
