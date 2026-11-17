@@ -39,7 +39,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * own; after a MapReduce step, the ResourceManager's answer links to the job on the JobHistory server's own host, which
  * opens it, as the JobHistory server's link does; after a Spark step, whose event logs are in the cluster's HDFS, the
  * ResourceManager's answer links to the application on the Spark History Server's own host, which lists and opens it,
- * as the Spark History Server's link does.
+ * as the Spark History Server's link does; after a Hive step, its Tez DAG is in the YARN timeline server, and the Tez
+ * UI's page names the timeline server and the ResourceManager on their own hosts, which answer its page's requests.
  *
  * <p>A nightly check: the cluster's image, its HDFS and YARN, and a MapReduce job and a Spark one take minutes and
  * gigabytes.
@@ -84,7 +85,8 @@ class EmrAppUiNightlyIntegrationTest {
         // Enabled, the check needs Docker: without a daemon it fails rather than pass having run nothing.
         assertTrue(DockerAvailability.isAvailable(), "the nightly check needs a Docker daemon");
         String clusterId = emr("RunJobFlow", "{\"Name\":\"app-uis\",\"ReleaseLabel\":\"emr-7.5.0\","
-                + "\"Applications\":[{\"Name\":\"Hadoop\"},{\"Name\":\"Spark\"}],"
+                + "\"Applications\":[{\"Name\":\"Hadoop\"},{\"Name\":\"Spark\"},{\"Name\":\"Hive\"},"
+                + "{\"Name\":\"Tez\"}],"
                 + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":[{\"Name\":\"primary\","
                 + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
                 .then().statusCode(200).extract().jsonPath().getString("JobFlowId");
@@ -167,6 +169,43 @@ class EmrAppUiNightlyIntegrationTest {
         assertEquals(200, application.statusCode(), application.asString());
         assertTrue(application.asString().contains("Spark Pi"), application.asString());
         assertTrue(follow(sparkTracking).asString().contains("Spark Pi"));
+
+        String hiveStep = EmrRequests.addStep(clusterId, "hive", "command-runner.jar", "hive", "-e",
+                "CREATE TABLE ui_rows AS SELECT 1 AS x");
+        assertEquals("COMPLETED", awaitStep(clusterId, hiveStep).jsonPath().getString("Step.Status.State"));
+        // The timeline server holds the query's Tez DAG, and its application history.
+        String timelineLink = readyLink(clusterId, "YarnTimelineService", null);
+        URI timeline = URI.create(timelineLink);
+        assertEquals("/applicationhistory", timeline.getPath());
+        Response applications = open(timelineLink);
+        assertEquals(200, applications.statusCode(), applications.asString());
+        // The ResourceManager published the query's application to it.
+        Response published = open(timeline.getScheme() + "://" + timeline.getRawAuthority()
+                + "/ws/v1/applicationhistory/apps");
+        assertTrue(published.jsonPath().getList("app.findAll { it.type == 'TEZ' }").size() > 0,
+                published.asString());
+        String dags = timeline.getScheme() + "://" + timeline.getRawAuthority() + "/ws/v1/timeline/TEZ_DAG_ID";
+        Response dagEntities = open(dags);
+        assertEquals(200, dagEntities.statusCode(), dagEntities.asString());
+        assertFalse(dagEntities.jsonPath().getList("entities").isEmpty(), dagEntities.asString());
+        // The Tez UI's page, whose configuration names the timeline server and the ResourceManager on their own hosts
+        // under the same link, which answer a request from its page's host.
+        String tezLink = readyLink(clusterId, "TezUI", null);
+        URI tez = URI.create(tezLink);
+        Response tezPage = open(tezLink);
+        assertEquals(200, tezPage.statusCode(), tezPage.asString());
+        assertTrue(tezPage.asString().contains("<title>Tez UI</title>"), tezPage.asString());
+        String config = open(tez.getScheme() + "://" + tez.getRawAuthority() + "/tez-ui/config/configs.js").asString();
+        // Each link has a secret of its own.
+        String tezHosts = "http://" + tez.getHost().substring(0, 26) + "-%d.emrappui.localhost:" + PORT;
+        assertTrue(config.contains(String.format(tezHosts, EmrClusterStorage.TIMELINE_WEB_PORT)), config);
+        assertTrue(config.contains(String.format(tezHosts, EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT)), config);
+        String tezOrigin = tez.getScheme() + "://" + tez.getRawAuthority();
+        Response crossOrigin = given().header("Host", timeline.getRawAuthority()).header("Origin", tezOrigin)
+                .get("http://localhost:" + PORT + "/ws/v1/timeline/TEZ_DAG_ID");
+        assertEquals(200, crossOrigin.statusCode(), crossOrigin.asString());
+        String allowed = crossOrigin.getHeader("Access-Control-Allow-Origin");
+        assertTrue(tezOrigin.equals(allowed) || "*".equals(allowed), String.valueOf(allowed));
     }
 
     // A browser's request to the link, following the redirects it is sent, each to a link's host.

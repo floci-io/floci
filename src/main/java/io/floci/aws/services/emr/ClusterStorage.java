@@ -118,19 +118,21 @@ public interface ClusterStorage {
      * the primary node too when it {@code primaryWorks}, each offering its containers {@code memoryMb} of memory and
      * {@code vcores} virtual cores, which run its steps' Spark executors; the folder of the nodes' image holding the
      * Hadoop their daemons run from, or null for the image's own; the copies of a block its HDFS keeps; the S3
-     * folder its applications' logs go in, or null; and whether its primary node runs a Spark History Server, as on a
-     * cluster with Spark. A primary node that works runs a DataNode as well.
+     * folder its applications' logs go in, or null; whether its primary node runs a Spark History Server, as on a
+     * cluster with Spark; and whether it runs the YARN timeline server, as on a cluster with Hadoop, and the Tez UI, as
+     * on one with Tez. A primary node that works runs a DataNode as well.
      */
     record Yarn(int memoryMb, int vcores, String hadoopFolder, List<Node> nodes, int replication, String logFolder,
-                boolean primaryWorks, boolean sparkHistory) {
+                boolean primaryWorks, boolean sparkHistory, boolean timelineServer, boolean tezUi) {
 
         Yarn(int memoryMb, int vcores) {
-            this(memoryMb, vcores, null, List.of(), 1, null, true, false);
+            this(memoryMb, vcores, null, List.of(), 1, null, true, false, false, false);
         }
 
         /** This YARN with its daemons run from the Hadoop in {@code folder}. */
         Yarn withHadoopFolder(String folder) {
-            return new Yarn(memoryMb, vcores, folder, nodes, replication, logFolder, primaryWorks, sparkHistory);
+            return new Yarn(memoryMb, vcores, folder, nodes, replication, logFolder, primaryWorks, sparkHistory,
+                    timelineServer, tezUi);
         }
 
         /**
@@ -139,17 +141,25 @@ public interface ClusterStorage {
          */
         Yarn onNodes(List<Node> workers, int copies, String folder) {
             return new Yarn(memoryMb, vcores, hadoopFolder, List.copyOf(workers), copies, folder,
-                    workers.stream().noneMatch(Node::core), sparkHistory);
+                    workers.stream().noneMatch(Node::core), sparkHistory, timelineServer, tezUi);
         }
 
         /** This YARN with its primary node running a DataNode and a NodeManager, or not. */
         Yarn withPrimaryWorking(boolean works) {
-            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, works, sparkHistory);
+            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, works, sparkHistory,
+                    timelineServer, tezUi);
+        }
+
+        /** This YARN with its primary node running the YARN timeline server, and the Tez UI, or not. */
+        Yarn withHistories(boolean timeline, boolean tez) {
+            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, primaryWorks, sparkHistory,
+                    timeline, tez);
         }
 
         /** This YARN with its primary node running a Spark History Server, or not. */
         Yarn withSparkHistory(boolean runs) {
-            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, primaryWorks, runs);
+            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, primaryWorks, runs,
+                    timelineServer, tezUi);
         }
     }
 

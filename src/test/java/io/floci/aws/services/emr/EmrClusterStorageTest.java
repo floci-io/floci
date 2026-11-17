@@ -1369,10 +1369,61 @@ class EmrClusterStorageTest {
                         + "fi; if [ -n \"$FLOCI_SPARK_HISTORY\" ]; then ")
                 && entrypoint.get(2).contains("> /dev/null; do [ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2;"
                         + " done; fi; touch /tmp/floci-hdfs-ready")));
-        // A cluster without Spark runs no Spark History Server.
+        // A cluster without Spark runs no Spark History Server, and one without Hadoop no timeline server.
         assertNull(started.sparkHistoryServer());
+        assertNull(started.timelineServer());
+        verify(spec, never()).withEnv(eq("FLOCI_YARN_TIMELINE"), anyString());
         verify(spec, never()).withEnv(eq("FLOCI_SPARK_HISTORY"), anyString());
         verify(spec, never()).withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+    }
+
+    @Test
+    void aClusterWithHadoopAndTezHasItsPrimaryNodeRunTheTimelineServerAndTheTezUi() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
+        when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-7", hdfsName)).thenReturn("172.18.0.8");
+        ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", null, () -> new ClusterStorage.Yarn(4096, 4).withHistories(true, true), NOT_STOPPED);
+
+        // Tez's application masters log their DAGs to it.
+        assertEquals(HOST, started.timelineServer());
+        verify(spec).withEnv("FLOCI_YARN_TIMELINE", "1");
+        verify(spec).withEnv("FLOCI_TEZ_UI", "1");
+        verify(spec).withLoopbackPortBinding(EmrClusterStorage.TIMELINE_WEB_PORT, 0);
+        verify(spec).withLoopbackPortBinding(EmrClusterStorage.TEZ_UI_PORT, 0);
+        verify(spec).withEntrypoint(argThat(entrypoint -> {
+            String script = entrypoint.get(2);
+            // The timeline server's settings in the node's yarn-site, its store on the node's volume, its REST
+            // interface and the ResourceManager's open to the Tez UI's page on its own host.
+            return script.contains("timeline=; [ -z \"$FLOCI_YARN_TIMELINE\" ] || timeline=\"<property><name>"
+                    + "yarn.timeline-service.enabled</name><value>true</value></property>")
+                    && script.contains("<property><name>yarn.timeline-service.leveldb-timeline-store.path</name>"
+                            + "<value>/mnt/yarn/timeline</value></property>")
+                    && script.contains("<property><name>yarn.timeline-service.http-cross-origin.enabled</name>"
+                            + "<value>true</value></property>")
+                    && script.contains(" \"$timeline\" '</configuration>' > /tmp/floci-hdfs-conf/yarn-site.xml")
+                    // The Tez UI's configuration names both by the node's name.
+                    && script.contains("printf '%s\\n' 'ENV = {' '  hosts: {'"
+                            + " \"    timeline: 'http://$FLOCI_HDFS_HOST:8188',\""
+                            + " \"    rm: 'http://$FLOCI_HDFS_HOST:8088',\" '  },' '};' > /etc/tez-ui/conf/configs.js")
+                    // Started before the ResourceManager, which publishes its applications to the timeline server;
+                    // the Tez UI's files served where HDFS listens; both waited for before the node is ready.
+                    && script.indexOf("yarn timelineserver & n=$((n + 1)); fi; ")
+                            < script.indexOf("yarn resourcemanager & n=$((n + 1)); ")
+                    && script.contains("python3 -m http.server 8080 --bind $FLOCI_HDFS_BIND --directory /usr/lib/tez")
+                    // An image without the Tez UI's files serves none, and is ready without it.
+                    && script.contains("tez_ui=; if [ -n \"$FLOCI_TEZ_UI\" ]; then if [ -d /usr/lib/tez/tez-ui ];"
+                            + " then tez_ui=1; else echo")
+                    && script.contains("<property><name>yarn.resourcemanager.system-metrics-publisher.enabled</name>"
+                            + "<value>true</value></property>")
+                    && script.indexOf("http://$(cat /tmp/floci-hdfs-bind):8188/ws/v1/timeline")
+                            < script.indexOf("touch /tmp/floci-hdfs-ready")
+                    && script.indexOf("http://$(cat /tmp/floci-hdfs-bind):8080/tez-ui/")
+                            < script.indexOf("touch /tmp/floci-hdfs-ready");
+        }));
     }
 
     @Test
