@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
@@ -52,7 +53,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @QuarkusTest
 @TestProfile(ContainerDataPlaneProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class EmrHiveStepsDockerIntegrationTest {
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+class EmrHiveStepsNightlyIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String REGION = "us-east-1";
