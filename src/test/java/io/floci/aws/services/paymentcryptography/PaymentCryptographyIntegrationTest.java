@@ -14,8 +14,10 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -1100,6 +1102,7 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200));
         List<String> listedArns = new ArrayList<>();
         Map<String, Object> request = new HashMap<>(Map.of("KeyState", "CREATE_COMPLETE", "MaxResults", 1));
+        Set<String> seenTokens = new HashSet<>();
         String nextToken;
         do {
             Response page = call("ListKeys", PaymentCryptographyTestFixtures.request(request).toString())
@@ -1108,6 +1111,9 @@ class PaymentCryptographyIntegrationTest {
                         .extract().response();
             listedArns.addAll(page.jsonPath().getList("Keys.KeyArn", String.class));
             nextToken = page.path("NextToken");
+            if (nextToken != null) {
+                assertThat("ListKeys must advance its continuation token", seenTokens.add(nextToken), equalTo(true));
+            }
             request.put("NextToken", nextToken);
         } while (nextToken != null);
         assertThat(listedArns, hasItems(arn, secondArn));
