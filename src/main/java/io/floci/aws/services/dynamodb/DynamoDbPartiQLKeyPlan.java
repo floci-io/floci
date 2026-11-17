@@ -44,7 +44,8 @@ final class DynamoDbPartiQLKeyPlan {
         }
     }
 
-    private record Branch(Key partition, PVal partitionValue, Range sortRange, List<Cond> filters) {
+    private record Branch(Key partition, PVal partitionValue, Range sortRange, List<Cond.Leaf> sortConditions,
+                          List<Cond> filters) {
 
         static final Comparator<Branch> IN_KEY_ORDER = Comparator.comparing(Branch::partition)
                 .thenComparing(Branch::sortRange, Range.BY_LOWER);
@@ -58,7 +59,7 @@ final class DynamoDbPartiQLKeyPlan {
         this.everyBranchPinsPartition = everyBranchPinsPartition(conditions);
         List<Spread> spread = spread(conditions);
         this.branches = tooManyBranches
-                ? List.of(new Branch(null, null, Range.ALL, where))
+                ? List.of(new Branch(null, null, Range.ALL, List.of(), where))
                 : spread.stream().map(this::branchOf).toList();
     }
 
@@ -186,6 +187,21 @@ final class DynamoDbPartiQLKeyPlan {
         return Optional.of(branches.getFirst().partitionValue());
     }
 
+    /**
+     * @return the sort-key condition of each read, in the order DynamoDB reads them, when every
+     *         branch reads the same partition with one sort-key condition
+     */
+    Optional<List<Cond.Leaf>> sortKeyReads(boolean descending) {
+        if (singlePartition().isEmpty() || branches.stream().anyMatch(this::testsAKeyOutsideARange)
+                || branches.stream().anyMatch(branch -> branch.sortConditions().size() != 1)) {
+            return Optional.empty();
+        }
+        return Optional.of(branches.stream()
+                .sorted(descending ? Branch.IN_KEY_ORDER.reversed() : Branch.IN_KEY_ORDER)
+                .map(branch -> branch.sortConditions().getFirst())
+                .toList());
+    }
+
     static Stream<Path> attributePaths(Cond cond) {
         return DynamoDbPartiQLParser.leaves(cond).map(Cond.Leaf::path);
     }
@@ -207,6 +223,7 @@ final class DynamoDbPartiQLKeyPlan {
         PVal partitionValue = null;
         boolean conflicting = false;
         Range sortRange = Range.ALL;
+        List<Cond.Leaf> sortConditions = new ArrayList<>();
         for (Cond.Leaf condition : spread.keyConditions()) {
             if (condition.path().root().equals(partitionKey)) {
                 PVal value = ((Cond.Eq) condition).val();
@@ -218,9 +235,13 @@ final class DynamoDbPartiQLKeyPlan {
                 }
             } else {
                 sortRange = sortRange.intersect(rangeOf(condition));
+                if (!sortConditions.contains(condition)) {
+                    sortConditions.add(condition);
+                }
             }
         }
-        return new Branch(conflicting ? null : partition, partitionValue, sortRange, spread.filters());
+        return new Branch(conflicting ? null : partition, partitionValue, sortRange, sortConditions,
+                spread.filters());
     }
 
     private List<Spread> spread(Cond cond) {
