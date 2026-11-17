@@ -1,13 +1,5 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.ecs.container.EcsContainerManager;
-import io.floci.aws.services.ecs.exec.EcsExecSessionRegistry;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.ContainerInstance;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
@@ -20,9 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -31,14 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
  * A task's service ownership comes from the reconciler-stamped {@code owningServiceArn}, never
@@ -435,46 +423,18 @@ class EcsServiceTaskOwnershipTest {
     }
 
     private static EcsService newMockModeService() {
-        return newMockModeService(null, Clock.systemUTC());
+        return EcsServiceFixtures.mockModeService();
     }
 
     private static EcsService newMockModeService(EcsEventPublisher publisher) {
-        return newMockModeService(publisher, Clock.systemUTC());
+        return EcsServiceFixtures.builder().eventPublisher(publisher).build();
     }
 
     private static EcsService newMockModeService(Clock clock) {
-        return newMockModeService(null, clock);
+        return EcsServiceFixtures.builder().clock(clock).build();
     }
 
     private static EcsService newMockModeService(EcsEventPublisher publisher, Clock clock) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(true);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        EcsService service = new EcsService(
-                new RegionResolver(REGION, "000000000000"),
-                mock(EcsContainerManager.class),
-                config,
-                mock(EcsLoadBalancerRegistrar.class),
-                new InMemoryStorageFactory(),
-                publisher, new EcsExecSessionRegistry(), null, null, clock);
-        service.initializeStorage();
-        return service;
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName,
-                                                    String fileName,
-                                                    TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
+        return EcsServiceFixtures.builder().eventPublisher(publisher).clock(clock).build();
     }
 }
