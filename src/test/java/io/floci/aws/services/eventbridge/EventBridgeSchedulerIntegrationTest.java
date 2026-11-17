@@ -360,6 +360,8 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public EmulatorConfig.InitHooksConfig initHooks() { return null; }
             @Override
+            public RequestLogConfig requestLog() { return null; }
+            @Override
             public ProtocolsConfig protocols() {
                 return new ProtocolsConfig() {
                     @Override public int maxRequestSize() { return 512; }
