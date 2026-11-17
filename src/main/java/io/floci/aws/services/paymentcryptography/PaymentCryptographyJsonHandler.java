@@ -287,8 +287,9 @@ public class PaymentCryptographyJsonHandler {
      * Attaches or replaces the resource-based policy of a key.
      *
      * <p>The policy is a JSON document in a string, and a document that does not parse is
-     * refused before it is attached. A policy that hands the key to everyone is refused with
-     * the reference's own error, so the key is never left open by a policy no one bounds.
+     * refused before it is attached. A policy that hands the key to everyone and carries no
+     * condition is refused with the reference's own error, so the key is never left open by
+     * a policy no one bounds.
      */
     private Map<String, Object> putResourcePolicy(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
@@ -333,7 +334,6 @@ public class PaymentCryptographyJsonHandler {
         return Map.of("ResourceArn", key.getArn(), "Policy", key.getResourcePolicy());
     }
 
-
     /**
      * Whether every statement of a policy names the key the policy is attached to.
      *
@@ -345,19 +345,46 @@ public class PaymentCryptographyJsonHandler {
      * @return whether the policy names the key
      */
     private static boolean namesTheKey(JsonNode policy, String arn) {
-        JsonNode statements = policy.path("Statement");
-        if (statements.isObject()) {
-            return statementNamesTheKey(statements, arn);
-        }
-        if (!statements.isArray()) {
+        if (!carriesStatements(policy)) {
+            // A document that carries no statement names no resource.
             return false;
         }
-        for (JsonNode statement : statements) {
+        for (JsonNode statement : statementsOf(policy)) {
             if (!statementNamesTheKey(statement, arn)) {
                 return false;
             }
         }
         return true;
+    }
+
+    /**
+     * Whether a policy document carries the statements a policy is made of: one alone, or
+     * a list of them.
+     *
+     * @param policy the policy document
+     * @return whether the document carries statements
+     */
+    private static boolean carriesStatements(JsonNode policy) {
+        JsonNode statements = policy.path("Statement");
+        return statements.isObject() || statements.isArray();
+    }
+
+    /**
+     * The statements of a policy, whether it carries one alone or a list of them.
+     *
+     * @param policy the policy document
+     * @return the statements, empty when the document carries none
+     */
+    private static List<JsonNode> statementsOf(JsonNode policy) {
+        JsonNode statements = policy.path("Statement");
+        if (statements.isObject()) {
+            return List.of(statements);
+        }
+        List<JsonNode> out = new ArrayList<>();
+        if (statements.isArray()) {
+            statements.forEach(out::add);
+        }
+        return out;
     }
 
     /** Whether a statement names the key, either alone or in a list of resources. */
@@ -378,20 +405,13 @@ public class PaymentCryptographyJsonHandler {
     }
 
     /**
-     * Whether a policy hands the key to every principal without a condition that bounds it.
+     * Whether a policy hands the key to every principal without a condition.
      *
      * <p>The reference refuses such a policy, so the service does too: an Allow statement
-     * whose principal is everyone, and that no condition narrows, is public access.
+     * whose principal is everyone, and that carries no condition, is public access.
      */
     private static boolean grantsPublicAccess(JsonNode policy) {
-        JsonNode statements = policy.path("Statement");
-        if (statements.isObject()) {
-            return statementGrantsPublicAccess(statements);
-        }
-        if (!statements.isArray()) {
-            return false;
-        }
-        for (JsonNode statement : statements) {
+        for (JsonNode statement : statementsOf(policy)) {
             if (statementGrantsPublicAccess(statement)) {
                 return true;
             }

@@ -396,14 +396,6 @@ class PaymentCryptographyServiceTest {
                 "the key is in the store again after it was deleted");
     }
 
-
-    /** The cross-account grant the reference's own page shows. */
-    private static final String CROSS_ACCOUNT_POLICY = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-             "Principal":{"AWS":"arn:aws:iam::111122223333:role/ExampleRole"},
-             "Action":["payment-cryptography:GenerateCardValidationData",
-              "payment-cryptography:VerifyCardValidationData"],"Resource":"*"}]}""";
-
     /** The policy that grants different permissions to different accounts. */
     private static final String TWO_ACCOUNTS_POLICY = """
             {"Version":"2012-10-17","Statement":[
@@ -414,7 +406,6 @@ class PaymentCryptographyServiceTest {
               "Principal":{"AWS":"arn:aws:iam::444455556666:role/PaymentAuthRole"},
               "Action":["payment-cryptography:VerifyAuthRequestCryptogram"],"Resource":"*"}]}""";
 
-
     @Test
     void aPolicyIsNotAttachedToAReplica() {
         // The reference attaches a policy to the primary key alone, so a replica takes none.
@@ -422,7 +413,7 @@ class PaymentCryptographyServiceTest {
         PaymentCryptographyKey replica = service.findKey("us-west-2", primary.getKeyId());
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.putResourcePolicy(replica, CROSS_ACCOUNT_POLICY));
+                () -> service.putResourcePolicy(replica, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
         assertEquals("ValidationException", refused.getErrorCode());
     }
 
@@ -431,11 +422,10 @@ class PaymentCryptographyServiceTest {
         // The reference's own page shows these two policies, and the service keeps the
         // document as it was given.
         PaymentCryptographyKey key = createKey("us-east-1");
+        String policy = PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY;
 
-        assertEquals(CROSS_ACCOUNT_POLICY,
-                service.putResourcePolicy(key, CROSS_ACCOUNT_POLICY).getResourcePolicy());
-        assertEquals(CROSS_ACCOUNT_POLICY,
-                service.resourcePolicy(key).getResourcePolicy());
+        assertEquals(policy, service.putResourcePolicy(key, policy).getResourcePolicy());
+        assertEquals(policy, service.resourcePolicy(key).getResourcePolicy());
         assertEquals(TWO_ACCOUNTS_POLICY,
                 service.putResourcePolicy(key, TWO_ACCOUNTS_POLICY).getResourcePolicy());
     }

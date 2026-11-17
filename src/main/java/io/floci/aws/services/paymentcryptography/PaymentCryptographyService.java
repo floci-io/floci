@@ -651,14 +651,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized PaymentCryptographyKey putResourcePolicy(PaymentCryptographyKey key,
                                                                   String policy) {
         PaymentCryptographyKey current = liveKey(key);
-        if ("REPLICA".equals(current.getMultiRegionKeyType())) {
-            // A replica is read-only, and the reference attaches a policy to the primary
-            // alone.
-            throw new AwsException("ValidationException",
-                    "the key " + current.getArn() + " is a replica of a key in "
-                            + current.getPrimaryRegion() + ", and a policy may only be attached to "
-                            + "the primary", 400);
-        }
+        // A replica is read-only, and the reference attaches a policy to the primary alone.
+        requireNotReplica(current, "a policy may only be attached to the primary");
         current.setResourcePolicy(policy);
         storeKey(current);
         return current;
@@ -671,12 +665,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * answered with an empty policy: the two are different answers.
      */
     public PaymentCryptographyKey resourcePolicy(PaymentCryptographyKey key) {
-        PaymentCryptographyKey current = liveKey(key);
-        if (current.getResourcePolicy() == null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Resource policy for key " + key.getArn() + " is not found", 400);
-        }
-        return current;
+        return keyWithPolicy(key);
     }
 
     /**
@@ -685,16 +674,29 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * <p>A key without a policy is refused, as it is by the read.
      */
     public synchronized PaymentCryptographyKey deleteResourcePolicy(PaymentCryptographyKey key) {
-        PaymentCryptographyKey current = liveKey(key);
-        if (current.getResourcePolicy() == null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "Resource policy for key " + key.getArn() + " is not found", 400);
-        }
+        PaymentCryptographyKey current = keyWithPolicy(key);
         current.setResourcePolicy(null);
         storeKey(current);
         return current;
     }
 
+    /**
+     * The key as it is in the store now, with the policy it carries.
+     *
+     * <p>A key without a policy is refused as the resource the reference cannot find, not
+     * answered with an empty policy: the two are different answers.
+     *
+     * @param key the key the request named
+     * @return the key, with its policy
+     */
+    private PaymentCryptographyKey keyWithPolicy(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = liveKey(key);
+        if (current.getResourcePolicy() == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Resource policy for key " + key.getArn() + " is not found", 400);
+        }
+        return current;
+    }
 
     // ---- the key exchange ----------------------------------------------------
 

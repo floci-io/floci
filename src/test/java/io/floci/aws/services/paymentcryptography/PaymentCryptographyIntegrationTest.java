@@ -13,6 +13,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.aMapWithSize;
@@ -78,6 +79,21 @@ class PaymentCryptographyIntegrationTest {
              "KeyUsage":"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
              "KeyModesOfUse":{"Sign":true,"Verify":true}},
              "Exportable":true}""";
+
+    /**
+     * The body of a request that puts a resource policy on a key.
+     *
+     * <p>The policy is a JSON document in a string, so the body that carries it escapes
+     * the quotes and the line breaks the document holds.
+     *
+     * @param arn the ARN of the key the policy is put on
+     * @param policy the policy document
+     * @return the body of the request
+     */
+    private static String putPolicyBody(String arn, String policy) {
+        return PaymentCryptographyTestFixtures.request(Map.of(
+                "ResourceArn", arn, "Policy", policy)).toString();
+    }
 
     @Test
     void aKeyIsCreatedAndReadBack() {
@@ -652,9 +668,7 @@ class PaymentCryptographyIntegrationTest {
         String arn = keyArn();
         String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
 
-        call("PutResourcePolicy", """
-                {"ResourceArn":"%s","Policy":"{\\"Version\\":\\"2012-10-17\\",\\"Statement\\":[]}"}"""
-                .formatted(arn))
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
                 .then().statusCode(200)
                     .body("ResourceArn", equalTo(arn))
                     .body("Policy", equalTo(policy));
@@ -672,26 +686,20 @@ class PaymentCryptographyIntegrationTest {
                     .body("__type", containsString("ResourceNotFoundException"));
     }
 
-
     @Test
     void thePolicyOfTheReferenceIsAttachedAndReadBack() {
         // The reference's own page shows this policy, and the service keeps the document as
         // it was given.
         String arn = keyArn();
-        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
-                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\","
-                + "\"payment-cryptography:VerifyCardValidationData\"],\"Resource\":\"*\"}]}";
 
-        call("PutResourcePolicy", """
-                {"ResourceArn":"%s","Policy":"%s"}""".formatted(arn, policy.replace("\"", "\\\"")))
+        call("PutResourcePolicy", putPolicyBody(arn, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY))
                 .then().statusCode(200)
                     .body("ResourceArn", equalTo(arn))
-                    .body("Policy", equalTo(policy));
+                    .body("Policy", equalTo(PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
 
         call("GetResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
-                    .body("Policy", equalTo(policy));
+                    .body("Policy", equalTo(PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
     }
 
     @Test
@@ -705,18 +713,19 @@ class PaymentCryptographyIntegrationTest {
                 + "\"Resource\":\"arn:aws:payment-cryptography:us-east-1:000000000000:"
                 + "key/1234abcd1234abcd\"}]}";
 
-        call("PutResourcePolicy", """
-                {"ResourceArn":"%s","Policy":"%s"}""".formatted(arn, policy.replace("\"", "\\\"")))
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
     }
+
     @Test
     void aPolicyThatGrantsPublicAccessIsRefused() {
         String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":\"*\",\"Action\":[\"payment-cryptography:EncryptData\"],"
+                + "\"Resource\":\"*\"}]}";
 
-        call("PutResourcePolicy", """
-                {"ResourceArn":"%s","Policy":"{\\"Statement\\":[{\\"Effect\\":\\"Allow\\",\\"Principal\\":\\"*\\"}]}"}"""
-                .formatted(arn))
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
                 .then().statusCode(400)
                     .body("__type", containsString("PublicPolicyException"));
     }
@@ -725,7 +734,7 @@ class PaymentCryptographyIntegrationTest {
     void aPolicyThatIsNotJsonIsRefused() {
         String arn = keyArn();
 
-        call("PutResourcePolicy", "{\"ResourceArn\":\"" + arn + "\",\"Policy\":\"not json\"}")
+        call("PutResourcePolicy", putPolicyBody(arn, "not json"))
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
     }
