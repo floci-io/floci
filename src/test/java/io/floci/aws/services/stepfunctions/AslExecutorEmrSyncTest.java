@@ -3,6 +3,7 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.emr.EmrAppUiService;
 import io.floci.aws.services.emr.EmrHandler;
 import io.floci.aws.services.emr.EmrNotebookExecutionService;
 import io.floci.aws.services.emr.EmrService;
@@ -75,7 +76,8 @@ class AslExecutorEmrSyncTest {
                 .customResourceLiveness(null)
                 .emrTaskInvoker(new EmrTaskInvoker(
                         new EmrHandler(emrService, mock(EmrStudioService.class),
-                                mock(EmrNotebookExecutionService.class), objectMapper), objectMapper))
+                                mock(EmrNotebookExecutionService.class), mock(EmrAppUiService.class), objectMapper),
+                        objectMapper))
                 .nanoTime(testNanos::get)
                 .sleeper(testNanos::addAndGet)
                 .build();

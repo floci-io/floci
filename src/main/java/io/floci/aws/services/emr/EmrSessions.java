@@ -137,7 +137,7 @@ final class EmrSessions {
     }
 
     // More than one primary node: a primary instance group of more than one instance, or a primary fleet's capacity.
-    private static boolean highlyAvailable(EmrCluster cluster) {
+    static boolean highlyAvailable(EmrCluster cluster) {
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
             if (EmrService.isMasterGroup(group) && group.getRequestedInstanceCount() > 1) {
                 return true;

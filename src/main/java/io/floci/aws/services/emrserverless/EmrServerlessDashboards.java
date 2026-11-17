@@ -1,19 +1,14 @@
 package io.floci.aws.services.emrserverless;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.LinkSigner;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.HexFormat;
 
 /**
  * The links {@code GetDashboardForJobRun} gives, "a URL that you can use to access the application UIs for a job run",
@@ -30,22 +25,24 @@ public class EmrServerlessDashboards {
     /** Where Floci serves the page a link opens. */
     static final String PATH = "/_aws/emr-serverless/dashboard";
     static final Duration VALIDITY = Duration.ofHours(1);
-    private static final String ALGORITHM = "HmacSHA256";
-    private static final int KEY_BYTES = 32;
 
     private final String baseUrl;
     private final Clock clock;
-    private final byte[] key;
+    private final LinkSigner signer;
 
     @Inject
     public EmrServerlessDashboards(EmulatorConfig config, Clock clock) {
-        this(config.effectiveBaseUrl(), clock, newKey());
+        this(config.effectiveBaseUrl(), clock, LinkSigner.withNewKey());
     }
 
     EmrServerlessDashboards(String baseUrl, Clock clock, byte[] key) {
+        this(baseUrl, clock, new LinkSigner(key));
+    }
+
+    private EmrServerlessDashboards(String baseUrl, Clock clock, LinkSigner signer) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.clock = clock;
-        this.key = key.clone();
+        this.signer = signer;
     }
 
     /**
@@ -86,8 +83,7 @@ public class EmrServerlessDashboards {
         } catch (NumberFormatException e) {
             return null;
         }
-        byte[] expected = signature(link).getBytes(StandardCharsets.US_ASCII);
-        if (!MessageDigest.isEqual(expected, signature.getBytes(StandardCharsets.US_ASCII))
+        if (!signer.verifies(signature, signedFields(link))
                 || clock.instant().getEpochSecond() >= link.expires()) {
             return null;
         }
@@ -109,23 +105,14 @@ public class EmrServerlessDashboards {
 
     // Over what the link names; a run's link and a session's are told apart, so neither opens as the other.
     private String signature(Link link) {
-        String signed = String.join("\n", link.accountId(), link.region(), link.applicationId(),
-                link.jobRunId() != null ? "jobRun" : "session",
-                link.jobRunId() != null ? link.jobRunId() : link.sessionId(),
-                String.valueOf(link.attempt()), String.valueOf(link.expires()));
-        try {
-            Mac mac = Mac.getInstance(ALGORITHM);
-            mac.init(new SecretKeySpec(key, ALGORITHM));
-            return HexFormat.of().formatHex(mac.doFinal(signed.getBytes(StandardCharsets.UTF_8)));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("Could not sign an EMR Serverless dashboard link", e);
-        }
+        return signer.sign(signedFields(link));
     }
 
-    private static byte[] newKey() {
-        byte[] key = new byte[KEY_BYTES];
-        new SecureRandom().nextBytes(key);
-        return key;
+    private static String[] signedFields(Link link) {
+        return new String[]{link.accountId(), link.region(), link.applicationId(),
+                link.jobRunId() != null ? "jobRun" : "session",
+                link.jobRunId() != null ? link.jobRunId() : link.sessionId(),
+                String.valueOf(link.attempt()), String.valueOf(link.expires())};
     }
 
     private static String encoded(String value) {

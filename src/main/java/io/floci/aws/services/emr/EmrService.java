@@ -115,7 +115,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // The service a step's driver belongs to, which names it and labels it.
     private static final String SERVICE = "emr";
     // The resource of a cluster's ARN, before its id.
-    private static final String CLUSTER_RESOURCE = "cluster/";
+    static final String CLUSTER_RESOURCE = "cluster/";
     // The reason of a cluster a failed bootstrap action ended, as Terraform reported a real one's
     // (hashicorp/terraform-provider-aws#4378) and the Management Guide's VPC errors page quotes it.
     private static final String BOOTSTRAP_ACTION_FAILED =
@@ -501,6 +501,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     public EmrCluster describeCluster(String id) {
         return call(() -> snapshotOf(requireCluster(id)));
+    }
+
+    /**
+     * The cluster of that id in the request's Region, as DescribeCluster gives it, or empty when there is none: what a
+     * notebook execution or an application UI asks of the cluster it names, which may have gone since.
+     */
+    public Optional<EmrCluster> findDescribedCluster(String id) {
+        return id == null ? Optional.empty() : call(() -> findCluster(id).map(EmrService::snapshotOf));
     }
 
     public List<EmrCluster> listClusters(String region, List<String> states,
@@ -1046,6 +1054,23 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         sc.setCreationDateTime(Instant.now());
         secConfigStore.put(key, sc);
         return sc;
+    }
+
+    /**
+     * Whether the cluster's security configuration turns on runtime roles, its
+     * {@code AuthorizationConfiguration.IAMConfiguration.EnableApplicationScopedIAMRole}: false for a cluster with
+     * none, or whose configuration has since been deleted.
+     */
+    public boolean runtimeRoleEnabled(EmrCluster cluster) {
+        if (cluster.getSecurityConfiguration() == null) {
+            return false;
+        }
+        return secConfigStore.get(securityConfigurationKey(regionOf(cluster), cluster.getSecurityConfiguration()))
+                .map(SecurityConfiguration::getSecurityConfiguration)
+                .map(EmrService::rawJson)
+                .map(json -> json.path("AuthorizationConfiguration").path("IAMConfiguration")
+                        .path("EnableApplicationScopedIAMRole").asBoolean(false))
+                .orElse(false);
     }
 
     public SecurityConfiguration describeSecurityConfiguration(String name, String region) {
