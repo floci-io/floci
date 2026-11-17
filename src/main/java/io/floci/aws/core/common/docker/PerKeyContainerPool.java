@@ -80,17 +80,36 @@ public class PerKeyContainerPool {
         if (retired == null) {
             return;
         }
+        RuntimeException failure = null;
         for (StartedContainer container : List.copyOf(retired)) {
-            if (strict) {
+            try {
                 lifecycleManager.stopAndRemoveStrict(container.containerId(), null);
-            } else {
-                lifecycleManager.stopAndRemove(container.containerId(), null);
+                retired.remove(container);
+            } catch (RuntimeException e) {
+                if (strict) {
+                    failure = accumulateFailure(failure, e);
+                } else {
+                    LOG.warnv(e, "Could not remove retired sidecar container {0} for key {1}; cleanup can retry",
+                            container.containerId(), key);
+                }
             }
-            retired.remove(container);
         }
         if (retired.isEmpty()) {
             retiredContainers.remove(key, retired);
         }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private static RuntimeException accumulateFailure(RuntimeException failure, RuntimeException next) {
+        if (failure == null) {
+            return next;
+        }
+        if (failure != next) {
+            failure.addSuppressed(next);
+        }
+        return failure;
     }
 
     /**
@@ -189,15 +208,27 @@ public class PerKeyContainerPool {
         }
         Object lock = startLocks.computeIfAbsent(key, k -> new Object());
         synchronized (lock) {
-            stopRetired(key, strict);
+            RuntimeException failure = null;
+            try {
+                stopRetired(key, strict);
+            } catch (RuntimeException e) {
+                failure = e;
+            }
             StartedContainer container = containers.get(key);
             if (container != null) {
-                if (strict) {
-                    lifecycleManager.stopAndRemoveStrict(container.containerId(), null);
-                } else {
-                    lifecycleManager.stopAndRemove(container.containerId(), null);
+                try {
+                    if (strict) {
+                        lifecycleManager.stopAndRemoveStrict(container.containerId(), null);
+                    } else {
+                        lifecycleManager.stopAndRemove(container.containerId(), null);
+                    }
+                    containers.remove(key, container);
+                } catch (RuntimeException e) {
+                    failure = accumulateFailure(failure, e);
                 }
-                containers.remove(key, container);
+            }
+            if (failure != null) {
+                throw failure;
             }
         }
     }
