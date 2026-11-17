@@ -519,6 +519,10 @@ floci:
       #   namespace: default                  # Namespace Lambda pods are created in
       #   labels:                             # Extra pod labels, key=value entries
       #     - team=platform
+      #   node-selector:                      # Pod node selector, key=value entries
+      #     - workload-type=lambda
+      #   tolerations:                        # Taints the pods tolerate: key=value:Effect (Equal) or key:Effect (Exists)
+      #     - workload-type=lambda:NoSchedule
       #   floci-address:                      # Host/IP pods use to reach Floci; auto-detected in-cluster
       #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
       hot-reload:

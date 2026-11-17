@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -34,6 +35,7 @@ public class LambdaPodSpecFactory {
     /** Label value: empty, or 63-char-max alphanumeric-bounded. */
     private static final Pattern LABEL_VALUE =
             Pattern.compile("([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?");
+    private static final Set<String> TAINT_EFFECTS = Set.of("NoSchedule", "PreferNoSchedule", "NoExecute");
 
     static final String MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
     static final String MANAGED_BY_VALUE = "floci";
@@ -163,6 +165,19 @@ public class LambdaPodSpecFactory {
         ObjectNode spec = nodes.objectNode()
                 .put("restartPolicy", "Never")
                 .put("terminationGracePeriodSeconds", 5);
+                
+        Map<String, String> nodeSelector = podNodeSelector();
+        if (!nodeSelector.isEmpty()) {
+            ObjectNode selector = nodes.objectNode();
+            nodeSelector.forEach(selector::put);
+            spec.set("nodeSelector", selector);
+        }
+
+        ArrayNode tolerations = podTolerations(nodes);
+        if (!tolerations.isEmpty()) {
+            spec.set("tolerations", tolerations);
+        }
+
         spec.set("initContainers", initContainers);
         spec.set("containers", nodes.arrayNode().add(runtime));
         spec.set("volumes", volumes);
@@ -212,27 +227,76 @@ public class LambdaPodSpecFactory {
     }
 
     Map<String, String> podLabels(String functionName) {
-        LinkedHashMap<String, String> labels = new LinkedHashMap<>();
-        config.services().lambda().kubernetes().labels().orElse(List.of()).forEach(entry -> {
-            int eq = entry.indexOf('=');
-            String key = eq > 0 ? entry.substring(0, eq).trim() : "";
-            String value = eq > 0 ? entry.substring(eq + 1).trim() : "";
-            // Invalid entries are dropped, not sanitized: a silently rewritten label
-            // would no longer match the NetworkPolicy/selector the user wrote it for,
-            // and the API server would reject the pod at cold start otherwise.
-            if (LABEL_KEY.matcher(key).matches() && LABEL_VALUE.matcher(value).matches()) {
-                labels.put(key, value);
-            } else {
-                LOG.warnv("Ignoring invalid Lambda pod label entry ''{0}'' "
-                        + "(expected key=value with Kubernetes label syntax)", entry);
-            }
-        });
+        LinkedHashMap<String, String> labels =
+                keyValues(config.services().lambda().kubernetes().labels(), "label");
         // Managed labels go last so user entries can never overwrite them — the
         // orphan sweep selects on these, and an overwritten label leaks pods forever.
         labels.put(MANAGED_BY_LABEL, MANAGED_BY_VALUE);
         labels.put(SERVICE_LABEL, SERVICE_VALUE);
         labels.put(FUNCTION_LABEL, sanitizeLabelValue(functionName));
         return labels;
+    }
+
+    Map<String, String> podNodeSelector() {
+        return keyValues(config.services().lambda().kubernetes().nodeSelector(), "node selector");
+    }
+
+    /**
+     * Each entry is the taint it tolerates in {@code kubectl taint} syntax:
+     * {@code key=value:Effect} (Equal), {@code key:Effect} (Exists), with {@code :Effect}
+     * optional to tolerate every effect.
+     */
+    ArrayNode podTolerations(JsonNodeFactory nodes) {
+        ArrayNode tolerations = nodes.arrayNode();
+        config.services().lambda().kubernetes().tolerations().orElse(List.of()).forEach(entry -> {
+            String taint = entry.trim();
+            String effect = null;
+            int colon = taint.lastIndexOf(':');
+            if (colon >= 0) {
+                effect = taint.substring(colon + 1).trim();
+                taint = taint.substring(0, colon).trim();
+            }
+            int eq = taint.indexOf('=');
+            String key = eq >= 0 ? taint.substring(0, eq).trim() : taint;
+            String value = eq >= 0 ? taint.substring(eq + 1).trim() : null;
+            if (!LABEL_KEY.matcher(key).matches()
+                    || (value != null && !LABEL_VALUE.matcher(value).matches())
+                    || (effect != null && !TAINT_EFFECTS.contains(effect))) {
+                LOG.warnv("Ignoring invalid Lambda pod toleration entry ''{0}'' "
+                        + "(expected key[=value][:NoSchedule|PreferNoSchedule|NoExecute])", entry);
+                return;
+            }
+            ObjectNode toleration = nodes.objectNode().put("key", key);
+            if (value == null) {
+                toleration.put("operator", "Exists");
+            } else {
+                toleration.put("operator", "Equal").put("value", value);
+            }
+            if (effect != null) {
+                toleration.put("effect", effect);
+            }
+            tolerations.add(toleration);
+        });
+        return tolerations;
+    }
+
+    private static LinkedHashMap<String, String> keyValues(Optional<List<String>> entries, String kind) {
+        LinkedHashMap<String, String> result = new LinkedHashMap<>();
+        entries.orElse(List.of()).forEach(entry -> {
+            int eq = entry.indexOf('=');
+            String key = eq > 0 ? entry.substring(0, eq).trim() : "";
+            String value = eq > 0 ? entry.substring(eq + 1).trim() : "";
+            // Invalid entries are dropped, not sanitized: a silently rewritten entry
+            // would no longer match the NetworkPolicy/selector or node it was written
+            // for, and the API server would reject the pod at cold start otherwise.
+            if (LABEL_KEY.matcher(key).matches() && LABEL_VALUE.matcher(value).matches()) {
+                result.put(key, value);
+            } else {
+                LOG.warnv("Ignoring invalid Lambda pod {0} entry ''{1}'' "
+                        + "(expected key=value with Kubernetes label syntax)", kind, entry);
+            }
+        });
+        return result;
     }
 
     /** Selector matching every pod this Floci instance's Lambda executor manages. */

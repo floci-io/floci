@@ -46,6 +46,8 @@ class LambdaPodSpecFactoryTest {
         when(tls.enabled()).thenReturn(false);
         when(kubernetes.initImage()).thenReturn("busybox:1.36");
         when(kubernetes.labels()).thenReturn(Optional.empty());
+        when(kubernetes.nodeSelector()).thenReturn(Optional.empty());
+        when(kubernetes.tolerations()).thenReturn(Optional.empty());
         factory = new LambdaPodSpecFactory(config);
     }
 
@@ -142,6 +144,46 @@ class LambdaPodSpecFactoryTest {
         assertThat(labels)
                 .containsEntry("team", "platform")
                 .doesNotContainKeys("malformed", "a", "bad key");
+    }
+
+    @Test
+    void podHasNoNodeSelectorOrTolerationsByDefault() {
+        JsonNode spec = spec(buildZipPod());
+        assertThat(spec.has("nodeSelector")).isFalse();
+        assertThat(spec.has("tolerations")).isFalse();
+    }
+
+    @Test
+    void nodeSelectorIsParsedAndInvalidEntriesAreDropped() {
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(
+                List.of("workload-type=backend", "kubernetes.io/arch=amd64", "bad key=x", "a=b=c")));
+        assertThat(stringMap(spec(buildZipPod()).path("nodeSelector")))
+                .containsExactly(Map.entry("workload-type", "backend"),
+                        Map.entry("kubernetes.io/arch", "amd64"));
+    }
+
+    @Test
+    void tolerationsAreWrittenAsTheToleratedTaint() {
+        when(kubernetes.tolerations()).thenReturn(Optional.of(
+                List.of("workload-type=backend:NoSchedule", "dedicated:NoExecute", "example.com/spot")));
+        assertThat(elements(spec(buildZipPod()).path("tolerations")))
+                .extracting(n -> n.path("key").asText(), n -> n.path("operator").asText(),
+                        n -> n.path("value").asText(null), n -> n.path("effect").asText(null))
+                .containsExactly(
+                        tuple("workload-type", "Equal", "backend", "NoSchedule"),
+                        tuple("dedicated", "Exists", null, "NoExecute"),
+                        tuple("example.com/spot", "Exists", null, null));
+    }
+
+    @Test
+    void invalidTolerationsAreDropped() {
+        // The API server rejects an unknown effect or a key with spaces, so such
+        // entries must never reach the pod spec.
+        when(kubernetes.tolerations()).thenReturn(Optional.of(
+                List.of("a=b:Sometimes", "bad key:NoSchedule", "=x:NoSchedule", "team=a=b", "spot:NoSchedule")));
+        assertThat(elements(spec(buildZipPod()).path("tolerations")))
+                .extracting(n -> n.path("key").asText())
+                .containsExactly("spot");
     }
 
     @Test

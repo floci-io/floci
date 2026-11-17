@@ -81,6 +81,8 @@
                 "namespace": { "type": "string" },
                 "initImage": { "type": "string" },
                 "labels": { "type": "array", "items": { "type": "string", "pattern": "^[^=,]+=[^,]*$" } },
+                "nodeSelector": { "type": "array", "items": { "type": "string", "pattern": "^[^=,]+=[^,]*$" } },
+                "tolerations": { "type": "array", "items": { "type": "string", "pattern": "^[^=:,]+(=[^:,]*)?(:(NoSchedule|PreferNoSchedule|NoExecute))?$" } },
                 "flociAddress": { "type": "string", "pattern": "^$|^[A-Za-z0-9.-]+$" }
               }
             }
