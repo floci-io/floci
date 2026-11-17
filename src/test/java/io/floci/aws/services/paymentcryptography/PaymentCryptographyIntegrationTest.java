@@ -59,11 +59,13 @@ class PaymentCryptographyIntegrationTest {
             .when().post("/");
     }
 
-    private static final String CREATE_KEY = """
+    private static final String CREATE_KEY_BODY = """
             {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
              "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
              "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
-             "Exportable":true}""";
+             "Exportable":true%s}""";
+
+    private static final String CREATE_KEY = CREATE_KEY_BODY.formatted("");
 
     private static final String CREATE_WRAPPING_KEY = """
             {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
@@ -380,11 +382,7 @@ class PaymentCryptographyIntegrationTest {
      * @param regions the member that names the regions, as the request spells it
      */
     private static String createReplicatedKeyBody(String regions) {
-        return """
-                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
-                 "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
-                 "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
-                 "Exportable":true,"ReplicationRegions":%s}""".formatted(regions);
+        return CREATE_KEY_BODY.formatted(",\"ReplicationRegions\":" + regions);
     }
 
     /** The ARN of a key the request may name. */
