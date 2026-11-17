@@ -3615,12 +3615,55 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
     }
 
-    public List<String> listServicesByNamespace(String namespace, String region) {
-        return services.values().stream()
-                .filter(s -> namespace.equals(s.getNamespace()))
-                .filter(s -> !"INACTIVE".equals(s.getStatus()))
+    /**
+     * Lists the Region's services whose Service Connect configuration joined the namespace a name or ARN gives, its
+     * own or, when it names none, its cluster's default. Pages ten at a time when the request names no
+     * {@code maxResults}, as ListServices does.
+     */
+    public ListPage listServicesByNamespace(String namespace, Integer maxResults, String nextToken, String region) {
+        if (namespace == null || namespace.isBlank()) {
+            throw new AwsException("InvalidParameterException", "namespace can not be blank.", 400);
+        }
+        if (AwsArnUtils.looksLikeArn(namespace) && !isNamespaceArn(namespace)) {
+            throw new AwsException("InvalidParameterException", "Namespace is not a valid namespace ARN.", 400);
+        }
+        String namespaceArn = discoveryRegistrar == null ? null : discoveryRegistrar.namespaceArn(namespace, region);
+        if (namespaceArn == null) {
+            throw new AwsException("NamespaceNotFoundException", "Failed to retrieve namespace for " + namespace, 400);
+        }
+        List<String> arns = services.entrySet().stream()
+                .filter(e -> e.getKey().startsWith(region + "::"))
+                .map(Map.Entry::getValue)
+                .filter(svc -> !"INACTIVE".equals(svc.getStatus()))
+                .filter(svc -> namespaceArn.equals(serviceConnectNamespaceArn(svc, region)))
                 .map(EcsServiceModel::getServiceArn)
                 .toList();
+        return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
+    }
+
+    private static boolean isNamespaceArn(String value) {
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
+            return "servicediscovery".equals(arn.service()) && arn.resource().startsWith("namespace/");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /** The ARN of the namespace the service's enabled Service Connect configuration joined; null when none. */
+    private String serviceConnectNamespaceArn(EcsServiceModel svc, String region) {
+        Map<String, Object> config = svc.getServiceConnectConfiguration();
+        if (config == null || !Boolean.TRUE.equals(config.get("enabled"))) {
+            return null;
+        }
+        Object namespace = config.get("namespace");
+        if (namespace == null || namespace.toString().isBlank()) {
+            EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
+            Map<String, Object> defaults = cluster == null ? null : cluster.getServiceConnectDefaults();
+            namespace = defaults == null ? null : defaults.get("namespace");
+        }
+        return namespace == null || namespace.toString().isBlank()
+                ? null : discoveryRegistrar.namespaceArn(namespace.toString(), region);
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────

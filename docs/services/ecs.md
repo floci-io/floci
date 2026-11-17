@@ -513,7 +513,7 @@ Deliberate limits:
 | `DeleteService` | Delete a service (supports `force`) |
 | `DescribeServices` | Describe one or more services (includes `deployments`, see below) |
 | `ListServices` | List service ARNs in a cluster |
-| `ListServicesByNamespace` | List services filtered by Cloud Map namespace |
+| `ListServicesByNamespace` | List the Region's services whose Service Connect configuration joined a Cloud Map namespace, given by name or ARN (a service with no namespace of its own joins its cluster's default); pages with `maxResults` and `nextToken` |
 
 `ListServices` filters on `launchType` and `schedulingStrategy` as well as `cluster`, and pages
 with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
