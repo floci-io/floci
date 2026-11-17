@@ -101,6 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # A pull request's merge commit and its first parent, the base branch, so the step below
           # can tell which files the pull request changes.
           fetch-depth: 2
