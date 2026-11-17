@@ -234,7 +234,9 @@ manages roles and databases on it.
 
 A cluster's start waits up to 90 seconds for the server to let Floci's superuser in, as a server
 started alongside Floci may still be starting; a login the server refuses, such as a wrong
-password, fails the cluster at once.
+password, fails the cluster at once. Each login to the server may take up to 10 seconds and each
+call up to 120 seconds, so a server that accepts connections but never answers, such as a paused
+sidecar, fails the start, deletion or shutdown that waits for it instead of holding it.
 
 Each cluster gets a database `dsql_<cluster-id>`, a role `d<cluster-id>_<name>` for each of its
 roles (`d<cluster-id>_admin` for `admin`), a hidden owner role `dsqlowner_<cluster-id>`, and a

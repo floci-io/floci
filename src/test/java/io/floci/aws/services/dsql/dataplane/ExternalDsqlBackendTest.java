@@ -11,6 +11,8 @@ import javax.crypto.Mac;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.net.InetAddress;
+import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
@@ -38,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -215,6 +218,33 @@ class ExternalDsqlBackendTest {
         }, Duration.ZERO, ExternalDsqlBackend.READY_INTERVAL, "db.example:5432"));
 
         assertEquals(1, attempts.get());
+    }
+
+    @Test
+    void aServerThatAcceptsButNeverAnswersDoesNotHoldACallForever() throws Exception {
+        // A listening socket that is never accepted from: TCP connects, and no reply ever comes, as from
+        // a paused sidecar.
+        try (ServerSocket silent = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+            EmulatorConfig config = unreachableExternalServer();
+            when(config.services().dsql().external().port()).thenReturn(silent.getLocalPort());
+            ExternalDsqlBackend backend = new ExternalDsqlBackend(config, Duration.ofSeconds(1));
+            DsqlCluster cluster = cluster();
+
+            assertTimeoutPreemptively(Duration.ofSeconds(30), () -> {
+                assertThrows(SQLException.class, () -> backend.start(cluster));
+                assertThrows(SQLException.class, () -> backend.rolesToDrop(cluster));
+                assertThrows(IllegalStateException.class, () -> backend.stop(cluster, true));
+            }, "every call gives up on the server instead of waiting for it forever");
+            assertEquals(0, backend.lockedClusters(), "and lets go of the cluster's lock");
+        }
+    }
+
+    @Test
+    void aSingleConnectionAttemptNeverOutlastsTheStartsWait() {
+        assertEquals(1, ExternalDsqlBackend.loginTimeoutSeconds(Duration.ZERO), "zero would mean no limit");
+        assertEquals(1, ExternalDsqlBackend.loginTimeoutSeconds(Duration.ofMillis(300)));
+        assertEquals(5, ExternalDsqlBackend.loginTimeoutSeconds(Duration.ofSeconds(5)));
+        assertEquals(10, ExternalDsqlBackend.loginTimeoutSeconds(ExternalDsqlBackend.READY_TIMEOUT));
     }
 
     @Test

@@ -28,6 +28,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -58,6 +59,13 @@ public class ExternalDsqlBackend implements DsqlBackend {
     /** As long as {@link DockerDsqlBackend} waits for a cluster's container. */
     static final Duration READY_TIMEOUT = Duration.ofSeconds(90);
     static final Duration READY_INTERVAL = Duration.ofMillis(250);
+    /** The longest one login to the server may take. */
+    static final Duration LOGIN_TIMEOUT = Duration.ofSeconds(10);
+    /**
+     * The longest Floci waits for the server to answer one call, such as the bootstrap or dropping a
+     * database: far longer than any of them takes on a server that works.
+     */
+    static final Duration SOCKET_TIMEOUT = Duration.ofSeconds(120);
 
     private final EmulatorConfig config;
     private final Duration readyTimeout;
@@ -622,9 +630,32 @@ public class ExternalDsqlBackend implements DsqlBackend {
         }
     }
 
+    /**
+     * Opens a connection to the server. Neither the login nor any later call waits for an answer
+     * without limit, as the driver would by default: these calls run holding the cluster's lock,
+     * and at shutdown, so a server that accepts connections and never answers, as a paused sidecar
+     * does, would otherwise hold a start, a deletion or Floci's shutdown forever.
+     */
     private Connection connect(String database) throws SQLException {
         String url = "jdbc:postgresql://" + host() + ":" + external().port() + "/" + database;
-        return DriverManager.getConnection(url, external().username(), external().password().orElse(""));
+        Properties properties = new Properties();
+        properties.setProperty("user", external().username());
+        properties.setProperty("password", external().password().orElse(""));
+        String login = String.valueOf(loginTimeoutSeconds(readyTimeout));
+        properties.setProperty("loginTimeout", login);
+        properties.setProperty("connectTimeout", login);
+        properties.setProperty("socketTimeout", String.valueOf(SOCKET_TIMEOUT.toSeconds()));
+        return DriverManager.getConnection(url, properties);
+    }
+
+    /**
+     * How long one login may take, in whole seconds as the driver counts them: at most
+     * {@link #LOGIN_TIMEOUT}, and no longer than a start waits for the server, but at least one
+     * second, since zero would mean no limit.
+     */
+    static int loginTimeoutSeconds(Duration readyTimeout) {
+        long seconds = Math.min(LOGIN_TIMEOUT.toSeconds(), readyTimeout.toSeconds());
+        return (int) Math.max(1, seconds);
     }
 
     private String host() {
