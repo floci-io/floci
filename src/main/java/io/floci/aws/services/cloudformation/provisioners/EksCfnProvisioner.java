@@ -43,13 +43,6 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** Every attribute {@code publishNodegroup} writes for a nodegroup. */
     private static final List<String> NODEGROUP_ATTRIBUTES = List.of("Id", "ClusterName", "NodegroupName", "Arn");
-    /**
-     * Nodegroup properties EksService cannot update (it has no UpdateNodegroupConfig or
-     * UpdateNodegroupVersion), so a change to one is accepted with a warning and not applied.
-     */
-    private static final List<String> UNSUPPORTED_NODEGROUP_UPDATES = List.of("ScalingConfig", "Labels", "Taints",
-            "UpdateConfig", "Version", "ReleaseVersion", "ForceUpdateEnabled", "LaunchTemplate",
-            "NodeRepairConfig", "WarmPoolConfig");
     private static final String SNAPSHOT_ATTR = CfnRollback.EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR;
     private static final String NODEGROUP_SNAPSHOT_ATTR = CfnRollback.EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR;
     // The tag keys the last deployment resolved, reserved ones included, as Ec2Tags.recordKeys records
@@ -93,7 +86,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         // Name, RoleArn, EncryptionConfig, BootstrapSelfManagedAddons, OutpostConfig, the network
         // family and CIDR and the bootstrap admin permission are create-only in the registry: a change
         // to one replaces the cluster.
-        boolean replaces = updates && ctx.changes(CLUSTER, props).requiresReplacement();
+        PropertyChanges changes = updates ? ctx.changes(CLUSTER, props) : null;
+        boolean replaces = changes != null && changes.requiresReplacement();
         String name = ctx.resolveOptional(props, "Name");
         if (name == null || name.isBlank()) {
             // The name is the physical id, so an update that replaces nothing keeps it rather than
@@ -106,7 +100,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         }
         Cluster live = updates && !replaces ? liveCluster(ctx.priorPhysicalId()) : null;
         if (live != null) {
-            updateInPlace(r, props, ctx, live);
+            updateInPlace(r, props, ctx, live, changes);
             return;
         }
         CreateClusterRequest request = new CreateClusterRequest();
@@ -168,19 +162,31 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The update AWS makes for the properties it does not replace on: the cluster keeps its name.
      * EksService has no UpdateClusterVersion or UpdateClusterConfig, so the one mutable property
-     * floci honors is Tags, and a changed Version is accepted with a warning and not applied.
+     * floci honors is Tags, and a change to any other property is accepted with a warning.
      */
-    private void updateInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Cluster live) {
-        JsonNode priorProps = ctx.priorProperties();
-        String version = ctx.resolveOptional(props, "Version");
-        String priorVersion = ctx.resolveOptional(priorProps, "Version");
-        boolean versionChanged = version != null && (priorVersion == null || !version.trim().equals(priorVersion.trim()));
-        if (version != null && !version.isBlank() && versionChanged) {
-            LOG.warnv("EKS cluster {0}: in-place modification is not supported, the change to Version is ignored and"
-                    + " the cluster keeps version {1}", live.getName(), live.getVersion());
-        }
+    private void updateInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Cluster live,
+                               PropertyChanges changes) {
+        warnIgnoredChanges("cluster", live.getName(), changes);
         updateTagsInPlace(r, props, ctx, live.getArn(), live.getTags(), live.getName(), TAG_KEYS_ATTR, SNAPSHOT_ATTR,
                 () -> publish(r, live), true);
+    }
+
+    /**
+     * Nothing create-only changed on the in-place path, so every other property the engine reports
+     * as added, changed or dropped is one EksService has no call to apply: it is accepted with a
+     * warning. Tags are applied by {@link #updateTagsInPlace}.
+     */
+    private static void warnIgnoredChanges(String kind, String name, PropertyChanges changes) {
+        List<String> ignored = new ArrayList<>();
+        for (PropertyChanges.PropertyChange change : changes.byName().values()) {
+            if (change.kind() != PropertyChanges.Kind.UNCHANGED && !"Tags".equals(change.name())) {
+                ignored.add(change.name());
+            }
+        }
+        if (!ignored.isEmpty()) {
+            LOG.warnv("EKS {0} {1}: in-place modification is not supported, changes to {2} are ignored",
+                    kind, name, String.join(", ", ignored));
+        }
     }
 
     /**
@@ -416,18 +422,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      */
     private void updateNodegroupInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Nodegroup live,
                                         PropertyChanges changes) {
-        List<String> changed = new ArrayList<>();
-        for (String property : UNSUPPORTED_NODEGROUP_UPDATES) {
-            // The engine's own comparison, which resolves parameters and Refs on both sides.
-            PropertyChanges.Kind kind = changes.kindOf(property);
-            if (kind != null && kind != PropertyChanges.Kind.UNCHANGED) {
-                changed.add(property);
-            }
-        }
-        if (!changed.isEmpty()) {
-            LOG.warnv("EKS nodegroup {0}: in-place modification is not supported, changes to {1} are ignored",
-                    live.getNodegroupName(), String.join(", ", changed));
-        }
+        warnIgnoredChanges("nodegroup", live.getNodegroupName(), changes);
         updateTagsInPlace(r, props, ctx, live.getNodegroupArn(), live.getTags(), live.getNodegroupName(),
                 NODEGROUP_TAG_KEYS_ATTR, NODEGROUP_SNAPSHOT_ATTR, () -> publishNodegroup(r, live), false);
     }
