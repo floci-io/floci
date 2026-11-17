@@ -23,10 +23,11 @@ import java.util.Optional;
  * connections and API destinations; Application Auto Scaling, for its scalable targets; Redshift Data, for the
  * Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment Cryptography, for
  * the key an alias names; EMR, for the clusters of its instance groups and a tag call's resource and the tags of a
- * cluster; IAM Identity Center, for the accounts its permission sets are provisioned to; Resource Explorer, for its
- * default view; OAM and RAM, for the sinks, invitations and shares of other accounts they act on; Secrets Manager,
- * for the secret a name or an ARN names, random suffix included, and its tags; EventBridge Scheduler, for its
- * default schedule group and its groups' tags;
+ * cluster; IAM Identity Center, for the accounts its permission sets are provisioned to and the tags of an instance,
+ * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view; OAM and RAM,
+ * for the sinks, invitations and shares of other accounts they act on; Secrets Manager, for the secret a name or an
+ * ARN names, random suffix included, and its tags; EventBridge Scheduler, for its default schedule group and its
+ * groups' tags;
  * CloudFormation, for the stack or the stack set a name names, whose id it minted, and the tags of a stack, a stack set
  * or a change set; S3 Tables, for the table a request names by its table bucket, namespace and name, and the tags of a
  * table bucket or a table; Lambda, for the layer version a layer version ARN selects, the image of a MicroVM and the

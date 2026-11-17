@@ -1810,6 +1810,34 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags IAM Identity Center holds on the permission set a request
+     * names, so an allow on one team's tag lets the caller describe that team's permission set and not another's.
+     */
+    @Test
+    void anIdentityCenterResourceTagConditionReadsTheTagsOfThePermissionSet() {
+        String instance = ssoInstance();
+        String tagged = taggedPermissionSet(instance, "data");
+        String other = taggedPermissionSet(instance, "web");
+
+        User user = user("res-sso-tags");
+        user.policy(allowOn("sso:DescribePermissionSet", instance) + ",{\"Effect\":\"Allow\","
+                + "\"Action\":\"sso:DescribePermissionSet\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        String describe = "{\"InstanceArn\":\"" + instance + "\",\"PermissionSetArn\":\"";
+        ssoAdmin(user, "DescribePermissionSet", describe + tagged + "\"}").statusCode(200);
+        refusedJson(ssoAdmin(user, "DescribePermissionSet", describe + other + "\"}"), "sso:DescribePermissionSet");
+    }
+
+    /** A permission set of the instance, tagged with the team by an administrator's TagResource. */
+    private String taggedPermissionSet(String instance, String team) {
+        String permissionSet = permissionSet(instance);
+        adminJson("sso", "SWBExternalService.TagResource").body("{\"InstanceArn\":\"" + instance
+                + "\",\"ResourceArn\":\"" + permissionSet + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"" + team
+                + "\"}]}").post("/").then().statusCode(200);
+        return permissionSet;
+    }
+
+    /**
      * An IAM Identity Center account assignment is checked on the account its {@code TargetId} names beside the
      * instance and the permission set, so a grant scoped to one account does not reach another, and a deny on an
      * account holds.
