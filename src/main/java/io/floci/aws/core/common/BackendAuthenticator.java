@@ -159,21 +159,28 @@ public final class BackendAuthenticator {
         String serverFirst = new String(body, 4, body.length - 4, StandardCharsets.UTF_8);
         String nonce = null;
         byte[] salt = null;
-        int iterations = 0;
+        Integer iterations = null;
         try {
             for (String attribute : serverFirst.split(",")) {
+                if (attribute.startsWith("m=")) {
+                    // RFC 5802, section 5.1: an extension the client does not support must fail it.
+                    throw new IOException("backend SCRAM message asks for a mandatory extension");
+                }
                 if (attribute.startsWith("r=")) {
+                    requireFirst(nonce);
                     nonce = attribute.substring(2);
                 } else if (attribute.startsWith("s=")) {
+                    requireFirst(salt);
                     salt = Base64.getDecoder().decode(attribute.substring(2));
                 } else if (attribute.startsWith("i=")) {
+                    requireFirst(iterations);
                     iterations = Integer.parseInt(attribute.substring(2));
                 }
             }
         } catch (IllegalArgumentException e) {
             throw new IOException("malformed SCRAM message from the backend", e);
         }
-        if (nonce == null || salt == null || iterations <= 0) {
+        if (nonce == null || salt == null || iterations == null || iterations <= 0) {
             throw new IOException("malformed SCRAM message from the backend");
         }
         if (salt.length == 0) {
@@ -205,6 +212,13 @@ public final class BackendAuthenticator {
             return new PostgresWire.Message((byte) 'p', clientFinal.getBytes(StandardCharsets.UTF_8));
         } catch (GeneralSecurityException e) {
             throw new IOException("SCRAM-SHA-256 is not available", e);
+        }
+    }
+
+    /** A server-first attribute given twice makes the message malformed. */
+    private static void requireFirst(Object earlier) throws IOException {
+        if (earlier != null) {
+            throw new IOException("malformed SCRAM message from the backend");
         }
     }
 

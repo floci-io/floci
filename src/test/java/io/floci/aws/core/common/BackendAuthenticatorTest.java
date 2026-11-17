@@ -135,6 +135,35 @@ class BackendAuthenticatorTest {
     }
 
     @Test
+    void aMandatoryExtensionIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+
+        IOException refused = assertThrows(IOException.class,
+                () -> authenticator.answer(auth(11, text("m=ext," + SERVER_FIRST))));
+        assertEquals("backend SCRAM message asks for a mandatory extension", refused.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {",r=" + NONCE + "y", ",s=QUJD", ",i=1"})
+    void aRepeatedServerFirstAttributeIsRefused(String repeated) throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+
+        IOException refused = assertThrows(IOException.class,
+                () -> authenticator.answer(auth(11, text(SERVER_FIRST + repeated))));
+        assertEquals("malformed SCRAM message from the backend", refused.getMessage());
+    }
+
+    @Test
+    void anOptionalServerFirstExtensionIsIgnored() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+
+        assertTrue(authenticator.answer(auth(11, text(SERVER_FIRST + ",x=future"))).isPresent());
+    }
+
+    @Test
     void unsupportedMechanismFails() {
         BackendAuthenticator authenticator = new BackendAuthenticator("u", "p");
 
