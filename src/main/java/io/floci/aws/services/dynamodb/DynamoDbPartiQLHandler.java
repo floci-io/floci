@@ -101,11 +101,11 @@ class DynamoDbPartiQLHandler {
         Optional<List<Cond.Leaf>> sortKeyReads = routing.partition() == null
                 ? Optional.empty()
                 : keys.sortKeyReads(descending);
+        if (!stmt.orderBy().isEmpty()) {
+            requireOrderByShape(stmt, accessPath, keys.readsWholeTable());
+        }
         Page page;
         if (sortKeyReads.isPresent()) {
-            if (!stmt.orderBy().isEmpty()) {
-                requireOrderByShape(stmt, accessPath);
-            }
             page = readSortKeyReads(stmt, table, accessPath, routing.partition(), sortKeyReads.get(), descending,
                     startKey.get(), ctx.limit(), region);
         } else if (stmt.orderBy().isEmpty()) {
@@ -361,7 +361,6 @@ class DynamoDbPartiQLHandler {
 
     private Page readOrdered(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                              Routing routing, JsonNode after, Integer limit, String region) {
-        requireOrderByShape(stmt, accessPath);
         List<JsonNode> rows = new ArrayList<>();
         long scannedBytes = 0;
         List<JsonNode> scannedItems = new ArrayList<>();
@@ -388,7 +387,8 @@ class DynamoDbPartiQLHandler {
         return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, List.of(scannedBytes), scannedItems);
     }
 
-    private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath) {
+    private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath,
+                                            boolean readsWholeTable) {
         if (stmt.where().isEmpty()) {
             throw new AwsException("ValidationException",
                     "Must have WHERE clause in the statement when using ORDER BY clause.", 400);
@@ -401,7 +401,9 @@ class DynamoDbPartiQLHandler {
             }
         }
         String pkName = accessPath.partitionKeyName();
-        int hashKeyConditions = stmt.where().stream().mapToInt(c -> hashKeyConditionCount(c, pkName)).sum();
+        int hashKeyConditions = readsWholeTable
+                ? 0
+                : stmt.where().stream().mapToInt(c -> hashKeyConditionCount(c, pkName)).sum();
         if (hashKeyConditions == 0) {
             throw new AwsException("ValidationException",
                     "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause.",
