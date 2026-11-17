@@ -331,4 +331,41 @@ class CloudFrontDistributionConfigMembersTest {
                 .statusCode(200)
                 .body(hasXPath(summaryAcl, equalTo("")));
     }
+
+    @Test
+    void legacyWebAclIdUpdateRetainsAssociationAndCanonicalValueTakesPrecedence() {
+        String originId = "origin-legacy-web-acl-" + UUID.randomUUID();
+        String firstAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/first";
+        String legacyAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/legacy";
+        String id = postDistribution(distributionConfigBody(originId,
+                "<WebACLId>" + firstAcl + "</WebACLId>"));
+        String etag = given().when().get(API + id + "/config").then()
+                .statusCode(200).extract().header("ETag");
+
+        given().contentType(ContentType.XML).header("If-Match", etag)
+                .body(distributionConfigBody(originId,
+                        "<WebAclId>" + legacyAcl + "</WebAclId>"))
+        .when()
+            .put(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(WEB_ACL_ID, equalTo(legacyAcl)));
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo(legacyAcl)));
+
+        etag = given().when().get(API + id + "/config").then()
+                .statusCode(200).extract().header("ETag");
+        given().contentType(ContentType.XML).header("If-Match", etag)
+                .body(distributionConfigBody(originId,
+                        "<WebACLId></WebACLId><WebAclId>" + legacyAcl + "</WebAclId>"))
+        .when()
+            .put(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(WEB_ACL_ID, equalTo("")));
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath(WEB_ACL_ID, equalTo("")));
+    }
 }

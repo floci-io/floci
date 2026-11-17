@@ -2667,7 +2667,8 @@ public class CloudFrontController {
                 values.getOrDefault("PriceClass", "PriceClass_All"));
         cfg.setIPV6Enabled("true".equalsIgnoreCase(
                 values.getOrDefault("IsIPV6Enabled", "true")));
-        cfg.setWebAclId(values.get("WebACLId"));
+        cfg.setWebAclId(values.containsKey("WebACLId")
+                ? values.get("WebACLId") : values.get("WebAclId"));
         cfg.setContinuousDeploymentPolicyId(
                 values.get("ContinuousDeploymentPolicyId"));
         cfg.setStaging("true".equalsIgnoreCase(
@@ -2747,6 +2748,7 @@ public class CloudFrontController {
                     "PriceClass",
                     "IsIPV6Enabled",
                     "WebACLId",
+                    "WebAclId",
                     "ContinuousDeploymentPolicyId",
                     "Staging" -> true;
             default -> false;
