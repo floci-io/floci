@@ -518,20 +518,46 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     @Test
     void aUserPoolIsCheckedOnTheArnItsIdNames() {
-        String id = admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
-                .contentType("application/x-amz-json-1.1").body("{\"PoolName\":\"res-pool-" + suffix() + "\"}")
-                .post("/").then().statusCode(200).extract().path("UserPool.Id");
+        String id = userPool(null);
         String arn = admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
                 .contentType("application/x-amz-json-1.1").body("{\"UserPoolId\":\"" + id + "\"}")
                 .post("/").then().statusCode(200).extract().path("UserPool.Arn");
-        cleanup.register(() -> admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.DeleteUserPool")
-                .contentType("application/x-amz-json-1.1").body("{\"UserPoolId\":\"" + id + "\"}").post("/"));
         assertEquals("arn:aws:cognito-idp:" + REGION + ":" + ACCOUNT + ":userpool/" + id, arn);
 
         User user = user("res-pool");
         user.policy(allowOn("cognito-idp:DescribeUserPool", arn));
         describeUserPool(user, id).statusCode(200);
         refusedJson(describeUserPool(user, id + "x"), "cognito-idp:DescribeUserPool");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Cognito holds on the user pool a request names by its id, as
+     * a tag call leaves them, so an allow on one team's tag lets the caller describe that team's pool and not
+     * another's.
+     */
+    @Test
+    void aCognitoResourceTagConditionReadsTheTagsOfTheUserPool() {
+        String tagged = userPool("{\"team\":\"web\"}");
+        String other = userPool("{\"team\":\"web\"}");
+        adminJson("cognito-idp", "AWSCognitoIdentityProviderService.TagResource").body("{\"ResourceArn\":\""
+                + "arn:aws:cognito-idp:" + REGION + ":" + ACCOUNT + ":userpool/" + tagged
+                + "\",\"Tags\":{\"team\":\"data\"}}").post("/").then().statusCode(200);
+
+        User user = user("res-pool-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"cognito-idp:DescribeUserPool\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeUserPool(user, tagged).statusCode(200);
+        refusedJson(describeUserPool(user, other), "cognito-idp:DescribeUserPool");
+    }
+
+    /** The id of a user pool an administrator creates, with the {@code tags} object if any, deleted afterwards. */
+    private String userPool(String tags) {
+        String id = adminJson("cognito-idp", "AWSCognitoIdentityProviderService.CreateUserPool")
+                .body("{\"PoolName\":\"res-pool-" + suffix() + "\"" + (tags == null ? "" : ",\"UserPoolTags\":" + tags)
+                        + "}").post("/").then().statusCode(200).extract().path("UserPool.Id");
+        cleanup.register(() -> adminJson("cognito-idp", "AWSCognitoIdentityProviderService.DeleteUserPool")
+                .body("{\"UserPoolId\":\"" + id + "\"}").post("/"));
+        return id;
     }
 
     /**
