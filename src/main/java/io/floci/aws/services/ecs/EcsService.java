@@ -2926,11 +2926,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (nextToken == null || nextToken.isBlank()) {
             return 0;
         }
+        int offset;
         try {
-            return Integer.parseInt(Base64Url.decode(nextToken));
+            offset = Integer.parseInt(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
         }
+        if (offset < 0) {
+            throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
+        }
+        return offset;
     }
 
     // ── Task Protection ───────────────────────────────────────────────────────
@@ -3127,6 +3132,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
                     ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
             svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
+            svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc, cluster, region));
             svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
             svc.setEnableExecuteCommand(request.isEnableExecuteCommand());
             svc.setEnableECSManagedTags(request.isEnableECSManagedTags());
@@ -3319,6 +3325,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
                 if (serviceConnectConfiguration != null) {
                     svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+                    svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc, cluster, region));
                 }
                 boolean taskDefChanged = false;
                 String platformVersionBefore = resolvePlatformVersion(svc.getPlatformVersion());
@@ -3635,7 +3642,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(e -> e.getKey().startsWith(region + "::"))
                 .map(Map.Entry::getValue)
                 .filter(svc -> !"INACTIVE".equals(svc.getStatus()))
-                .filter(svc -> namespaceArn.equals(serviceConnectNamespaceArn(svc, region)))
+                .filter(svc -> namespaceArn.equals(svc.getServiceConnectNamespaceArn()))
                 .map(EcsServiceModel::getServiceArn)
                 .toList();
         return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
@@ -3650,15 +3657,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /** The ARN of the namespace the service's enabled Service Connect configuration joined; null when none. */
-    private String serviceConnectNamespaceArn(EcsServiceModel svc, String region) {
+    /**
+     * The ARN of the namespace the service's enabled Service Connect configuration joins, its own or its cluster's
+     * default; null when it joins none.
+     */
+    private String serviceConnectNamespaceArn(EcsServiceModel svc, EcsCluster cluster, String region) {
         Map<String, Object> config = svc.getServiceConnectConfiguration();
-        if (config == null || !Boolean.TRUE.equals(config.get("enabled"))) {
+        if (discoveryRegistrar == null || config == null || !Boolean.TRUE.equals(config.get("enabled"))) {
             return null;
         }
         Object namespace = config.get("namespace");
         if (namespace == null || namespace.toString().isBlank()) {
-            EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
             Map<String, Object> defaults = cluster == null ? null : cluster.getServiceConnectDefaults();
             namespace = defaults == null ? null : defaults.get("namespace");
         }
@@ -5375,6 +5384,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setServiceRegistries(revision.getServiceRegistries());
         svc.setNetworkConfiguration(revision.getNetworkConfiguration());
         svc.setServiceConnectConfiguration(revision.getServiceConnectConfiguration());
+        svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc, resolveClusterByArn(svc.getClusterArn()),
+                serviceRegion(svc)));
         svc.setDeploymentId("ecs-svc/" + taskSetId);
         svc.setLastDeploymentAt(revision.getCreatedAt());
         svc.setLastCompletedDeploymentId(null);

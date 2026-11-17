@@ -47,6 +47,11 @@ public class EcsServiceModel {
      * it; the Service shape itself has no member for it.
      */
     private Map<String, Object> serviceConnectConfiguration;
+    /**
+     * The ARN of the Cloud Map namespace the Service Connect configuration joined, its own or its cluster's default,
+     * resolved when the configuration was set so a later change to the cluster default does not move the service.
+     */
+    private String serviceConnectNamespaceArn;
     private String platformVersion;
     private String platformFamily;
     private List<CapacityProviderStrategyItem> capacityProviderStrategy;
@@ -117,6 +122,9 @@ public class EcsServiceModel {
 
     public String getFailedDeploymentId() { return failedDeploymentId; }
     public void setFailedDeploymentId(String failedDeploymentId) { this.failedDeploymentId = failedDeploymentId; }
+
+    public String getServiceConnectNamespaceArn() { return serviceConnectNamespaceArn; }
+    public void setServiceConnectNamespaceArn(String arn) { this.serviceConnectNamespaceArn = arn; }
 
     public String getNamespace() { return namespace; }
     public void setNamespace(String namespace) { this.namespace = namespace; }

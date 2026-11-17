@@ -516,8 +516,11 @@ Deliberate limits:
 | `ListServicesByNamespace` | List the Region's services whose Service Connect configuration joined a Cloud Map namespace, given by name or ARN (a service with no namespace of its own joins its cluster's default); pages with `maxResults` and `nextToken` |
 
 `ListServices` filters on `launchType` and `schedulingStrategy` as well as `cluster`, and pages
-with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
-time, a request that names no `maxResults` gets ten ARNs and a `nextToken`.
+with `maxResults` and `nextToken`. Like `ListServicesByNamespace`, and unlike every other ECS
+listing, which pages a hundred at a time, a request that names no `maxResults` gets ten ARNs and
+a `nextToken`. A service joins the namespace its Service Connect configuration names, or its
+cluster's default when it names none, at the time the configuration is set: a later change to the
+cluster default does not move it.
 
 With persistent storage, services survive a restart but their tasks do not: task state is
 held in memory. The service scheduler starts at boot, so within a few seconds of startup every

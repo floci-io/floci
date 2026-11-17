@@ -11,7 +11,9 @@ import software.amazon.awssdk.services.ecs.model.ServiceConnectConfiguration;
 import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
 import software.amazon.awssdk.services.servicediscovery.model.NamespaceSummary;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 
@@ -72,6 +74,46 @@ class EcsListServicesByNamespaceIntegrationTest {
                     r -> r.namespace("arn:aws:ecs:us-east-1:" + ACCOUNT + ":cluster/default")));
             assertEquals("InvalidParameterException", notNamespace.awsErrorDetails().errorCode());
             assertEquals("Namespace is not a valid namespace ARN.", notNamespace.awsErrorDetails().errorMessage());
+        }
+    }
+
+    @Test
+    void aServiceKeepsTheNamespaceItJoinedWhenItsClusterDefaultChanges() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String joined = "joined-" + suffix;
+        String later = "later-" + suffix;
+        String cluster = "ns-moved-" + suffix;
+        try (EcsClient ecs = AwsTestClients.create(EcsClient.builder(), ACCOUNT, Region.US_EAST_1);
+             ServiceDiscoveryClient cloudMap = AwsTestClients.create(ServiceDiscoveryClient.builder(), ACCOUNT,
+                     Region.US_EAST_1)) {
+            cloudMap.createHttpNamespace(r -> r.name(joined));
+            cloudMap.createHttpNamespace(r -> r.name(later));
+            ecs.createCluster(r -> r.clusterName(cluster).serviceConnectDefaults(d -> d.namespace(joined)));
+            ecs.registerTaskDefinition(r -> r.family("ns-web-" + suffix)
+                    .containerDefinitions(c -> c.name("web").image("nginx").memory(128)));
+            String service = createService(ecs, cluster, "inherits", suffix,
+                    ServiceConnectConfiguration.builder().enabled(true).build());
+
+            ecs.updateCluster(r -> r.cluster(cluster).serviceConnectDefaults(d -> d.namespace(later)));
+
+            assertEquals(List.of(service), listAll(ecs, joined));
+            assertEquals(List.of(), listAll(ecs, later));
+        }
+    }
+
+    @Test
+    void aPageTokenForANegativeOffsetIsRefused() {
+        String negative = Base64.getUrlEncoder().withoutPadding().encodeToString("-1".getBytes(StandardCharsets.UTF_8));
+        String namespace = "token-" + UUID.randomUUID().toString().substring(0, 8);
+        try (EcsClient ecs = AwsTestClients.create(EcsClient.builder(), ACCOUNT, Region.US_EAST_1);
+             ServiceDiscoveryClient cloudMap = AwsTestClients.create(ServiceDiscoveryClient.builder(), ACCOUNT,
+                     Region.US_EAST_1)) {
+            cloudMap.createHttpNamespace(r -> r.name(namespace));
+
+            EcsException invalid = assertThrows(EcsException.class,
+                    () -> ecs.listServicesByNamespace(r -> r.namespace(namespace).nextToken(negative)));
+
+            assertEquals("InvalidParameterException", invalid.awsErrorDetails().errorCode());
         }
     }
 
