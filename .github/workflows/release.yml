@@ -404,7 +404,7 @@ jobs:
 
       - name: Build and push native multi-arch image
         id: native
-        uses: ./.github/actions/push-zstd-image
+        uses: $/.github/actions/push-zstd-image
         with:
           source-date-epoch: ${{ steps.source_date.outputs.epoch }}
           file: docker/Dockerfile.native-package
@@ -441,7 +441,7 @@ jobs:
 
       - name: Build and push ARMv8.0 baseline image
         id: baseline
-        uses: ./.github/actions/push-zstd-image
+        uses: $/.github/actions/push-zstd-image
         with:
           source-date-epoch: ${{ steps.source_date.outputs.epoch }}
           file: docker/Dockerfile.native-package
@@ -465,7 +465,7 @@ jobs:
 
       - name: Build and push compat multi-arch image
         id: compat
-        uses: ./.github/actions/push-zstd-image
+        uses: $/.github/actions/push-zstd-image
         with:
           source-date-epoch: ${{ steps.source_date.outputs.epoch }}
           file: docker/Dockerfile.compat

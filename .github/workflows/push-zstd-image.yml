@@ -53,7 +53,7 @@ jobs:
 
       - name: Push a two-platform image through the action
         id: push
-        uses: ./.github/actions/push-zstd-image
+        uses: $/.github/actions/push-zstd-image
         with:
           file: .github/actions/push-zstd-image/test/Dockerfile
           platforms: linux/amd64,linux/arm64
