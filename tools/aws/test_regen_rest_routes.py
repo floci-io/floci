@@ -128,7 +128,7 @@ def test_models_sharing_a_scope_must_agree_on_the_denial_status():
         r.build({"lambda": first, "lambda-microvms": second}, "botocore test")
 
 
-@pytest.mark.parametrize("name", ["controltower", "fis", "resource-explorer-2", "signer"])
+@pytest.mark.parametrize("name", ["amp", "controltower", "fis", "resource-explorer-2", "signer"])
 @pytest.mark.parametrize("operation,method,source", [
     ("TagResource", "POST", "body"),
     ("UntagResource", "DELETE", "?resourceArn"),

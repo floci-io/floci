@@ -62,6 +62,7 @@ HAND_ROUTED: dict[str, str] = {
 MODELS: dict[str, str] = {
     "accessanalyzer": "access-analyzer",
     "account": "account",
+    "amp": "aps",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
     "cloudfront": "cloudfront",
@@ -107,6 +108,7 @@ MODELS: dict[str, str] = {
 # vendored at the model's own path all the same: IAM matches it on the path without the prefix the filter
 # records (SignedServiceRoute).
 SHARED_ROUTES: dict[str, frozenset[str]] = {
+    "amp": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "apigateway": frozenset({"TagResource", "UntagResource", "GetTags"}),
     "controltower": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "fis": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),

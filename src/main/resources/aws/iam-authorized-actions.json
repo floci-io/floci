@@ -356,6 +356,12 @@
     ],
     "account": [],
     "apigateway": [],
+    "aps": [
+      "CreateWorkspace",
+      "GetDefaultScraperConfiguration",
+      "ListScrapers",
+      "ListWorkspaces"
+    ],
     "cloudfront": [
       "CreateAnycastIpList",
       "CreateCachePolicy",
