@@ -68,7 +68,7 @@ public class PaymentCryptographyKey {
     private long usageStartTimestamp;
     private long deletePendingTimestamp;
     private long deleteTimestamp;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     /** The region of the primary of a multi-region key, and its own region otherwise. */
     private String primaryRegion;
     /** The regions a multi-region key is in, besides the primary's. */

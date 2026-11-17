@@ -43,6 +43,25 @@ class PaymentCryptographyServiceTest {
                 new PaymentCryptographyRequestContext());
     }
 
+    /**
+     * IAM's tag lookup reads the tags held on the key the whole ARN names, without the service's lock: tagging puts a
+     * new map in place of the held one, so a set read before a change stays whole; nothing for another Region's ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheKeyTheArnNamesAndTaggingPutsANewMap() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.tag(key, Map.of("team", "data"));
+        Map<String, String> held = service.storedTags(key.getArn());
+
+        service.tag(key, Map.of("env", "prod"));
+        service.untag(key, List.of("team"));
+
+        assertEquals(Map.of("team", "data"), held);
+        assertEquals(Map.of("env", "prod"), service.storedTags(key.getArn()));
+        assertEquals(Map.of(), service.storedTags(key.getArn().replace(":us-east-1:", ":eu-west-1:")));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::bucket"));
+    }
+
     /** A key of the given algorithm and class, for the tests that need one. */
     private PaymentCryptographyKey createKey(String region, String algorithm, String keyClass,
                                              String usage, Map<String, Boolean> modes) {

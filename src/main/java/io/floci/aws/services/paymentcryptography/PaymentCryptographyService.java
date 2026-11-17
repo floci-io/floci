@@ -8,6 +8,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -516,7 +517,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized void tag(PaymentCryptographyKey key, Map<String, String> tags) {
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
-        current.getTags().putAll(tags);
+        Map<String, String> updated = new LinkedHashMap<>(current.getTags());
+        updated.putAll(tags);
+        current.setTags(updated);
         storeKey(current);
         refreshReplicas(current, current.getReplicationRegions());
     }
@@ -564,9 +567,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized void untag(PaymentCryptographyKey key, List<String> tagKeys) {
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "a replica is read-only");
-        for (String tagKey : tagKeys) {
-            current.getTags().remove(tagKey);
-        }
+        Map<String, String> updated = new LinkedHashMap<>(current.getTags());
+        tagKeys.forEach(updated::remove);
+        current.setTags(updated);
         storeKey(current);
         refreshReplicas(current, current.getReplicationRegions());
     }
@@ -618,8 +621,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /**
      * The tags of a key.
      *
-     * <p>The copy takes the lock the tagging operations take, so it cannot read the map while
-     * another request is writing to it.
+     * <p>The tagging operations put a new map in place of the held one, so the copy is of one
+     * whole set; it still takes their lock, so it reads the set the last of them left.
      */
     public synchronized Map<String, String> listTags(PaymentCryptographyKey key) {
         return new LinkedHashMap<>(key.getTags());
@@ -1104,6 +1107,36 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     private String aliasArn(String region, String name) {
         String alias = name.startsWith("alias/") ? name.substring("alias/".length()) : name;
         return regionResolver.buildArn(SERVICE, region, "alias/" + alias);
+    }
+
+    /**
+     * The tags held on the key stored under {@code arn}, in the account and Region it names, read in place without the
+     * service's lock: the tagging operations put a new map in place of the held one, so the read is of one whole set.
+     * A key saved before the Region became part of its storage name is found as {@link #findKeyRecord} finds it, and
+     * either is matched on its whole stored ARN. Empty for an ARN naming no key.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        if (account.isEmpty() || !parsed.resource().startsWith("key/")) {
+            return Map.of();
+        }
+        String keyId = parsed.resource().substring("key/".length());
+        Map<String, String> held = new LinkedHashMap<>();
+        AccountAwareStorageBackend.readInAccount(keyStore, account, storageKey(parsed.region(), keyId))
+                .or(() -> AccountAwareStorageBackend.readInAccount(keyStore, account, keyId))
+                .filter(key -> arn.equals(key.getArn()))
+                .map(PaymentCryptographyKey::getTags)
+                .ifPresent(tags -> tags.forEach((tagKey, value) -> {
+                    if (tagKey != null && value != null) {
+                        held.put(tagKey, value);
+                    }
+                }));
+        return held;
     }
 
     /**
