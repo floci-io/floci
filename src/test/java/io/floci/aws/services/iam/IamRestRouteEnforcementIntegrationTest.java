@@ -1112,11 +1112,42 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(request(user, "fis", "PATCH", "/safetyLevers/default/state", body), action);
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags OAM holds on the sink a request names: an allow on the team
+     * the sink is tagged with lets the caller read it, one on another team does not, and a deny on its team holds
+     * against an allow on every resource. A Region holds one sink, so the one sink answers each policy.
+     */
+    @Test
+    void anOamResourceTagConditionReadsTheTagsOfTheSink() {
+        String sink = oamSink("{\"team\":\"data\"}");
+        String user = user("route-oam-tags");
+        String getSink = "{\"Identifier\":\"" + sink + "\"}";
+
+        policy(user, onTeam("Allow", "oam:GetSink", "data"));
+        request(user, "oam", "POST", "/GetSink", getSink).statusCode(200);
+        policy(user, onTeam("Allow", "oam:GetSink", "web"));
+        refused(request(user, "oam", "POST", "/GetSink", getSink), "oam:GetSink");
+        policy(user, allow("oam:GetSink", "*") + "," + onTeam("Deny", "oam:GetSink", "data"));
+        refused(request(user, "oam", "POST", "/GetSink", getSink), "oam:GetSink");
+    }
+
+    /** A statement with {@code effect} on {@code action} for every resource whose {@code team} tag is the one given. */
+    private static String onTeam(String effect, String action, String team) {
+        return "{\"Effect\":\"" + effect + "\",\"Action\":\"" + action + "\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"" + team + "\"}}}";
+    }
+
+    /** The ARN of a sink an administrator creates with the {@code tags} JSON object, deleted after the test. */
+    private String oamSink(String tags) {
+        String sink = adminOf("oam").body("{\"Name\":\"route-sink-" + suffix() + "\",\"Tags\":" + tags + "}")
+                .post("/CreateSink").then().statusCode(200).extract().path("Arn");
+        cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + sink + "\"}").post("/DeleteSink"));
+        return sink;
+    }
+
     @Test
     void oamIsCheckedOnTheArnItsIdentifiersHold() {
-        String sink = adminOf("oam").body("{\"Name\":\"route-sink-" + suffix() + "\"}").post("/CreateSink")
-                .then().statusCode(200).extract().path("Arn");
-        cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + sink + "\"}").post("/DeleteSink"));
+        String sink = oamSink("{}");
         String link = "arn:aws:oam:us-east-1:" + ACCOUNT + ":link/absent";
         String other = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/other";
         String user = user("route-oam");
