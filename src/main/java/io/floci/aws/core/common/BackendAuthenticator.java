@@ -34,6 +34,8 @@ public final class BackendAuthenticator {
     private final String scramUserName;
     private final boolean scramOnly;
 
+    /** Whether a request for a password, cleartext, MD5 or SASL, was answered on this connection. */
+    private boolean started;
     private String clientFirstBare;
     private byte[] serverSignature;
     private boolean scramVerified;
@@ -94,14 +96,18 @@ public final class BackendAuthenticator {
                 yield Optional.empty();
             }
             case 3 -> {
-                refuseUnlessScram("a cleartext password");
+                refusePasswordRequest("a cleartext password");
                 yield Optional.of(new PostgresWire.Message((byte) 'p', PostgresWire.cStringBytes(password)));
             }
             case 5 -> {
-                refuseUnlessScram("an MD5 password");
+                refusePasswordRequest("an MD5 password");
                 yield Optional.of(md5(body));
             }
-            case 10 -> Optional.of(saslInitial(body));
+            case 10 -> {
+                PostgresWire.Message initial = saslInitial(body);
+                started = true;
+                yield Optional.of(initial);
+            }
             case 11 -> Optional.of(saslContinue(body));
             case 12 -> {
                 saslFinal(body);
@@ -111,11 +117,20 @@ public final class BackendAuthenticator {
         };
     }
 
-    /** In SCRAM-only mode, a request for any other method is a downgrade, and is refused. */
-    private void refuseUnlessScram(String method) throws IOException {
+    /**
+     * Refuses a cleartext or MD5 request that would be a downgrade. In SCRAM-only mode, any such
+     * request is. In every mode, one that comes once an authentication has started is: a server
+     * asks for one method, so a peer that switches mid-SCRAM wants the password without proving it
+     * knows it.
+     */
+    private void refusePasswordRequest(String method) throws IOException {
         if (scramOnly) {
             throw new IOException("backend asks for " + method + " where only SCRAM-SHA-256 is accepted");
         }
+        if (started) {
+            throw new IOException("backend asks for " + method + " after the authentication started");
+        }
+        started = true;
     }
 
     private PostgresWire.Message md5(byte[] body) throws IOException {

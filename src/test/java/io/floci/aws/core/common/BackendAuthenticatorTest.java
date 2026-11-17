@@ -244,6 +244,30 @@ class BackendAuthenticatorTest {
         assertTrue(new BackendAuthenticator("u", "p", false).answer(auth(0)).isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {3, 5})
+    void aPasswordRequestMidScramIsRefusedWithoutSendingThePassword(int code) throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user", false);
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+
+        IOException afterInitial = assertThrows(IOException.class,
+                () -> authenticator.answer(auth(code, new byte[] {1, 2, 3, 4})));
+        assertTrue(afterInitial.getMessage().endsWith("after the authentication started"));
+        assertFalse(afterInitial.getMessage().contains("pencil"));
+
+        authenticator.answer(auth(11, text(SERVER_FIRST)));
+        assertThrows(IOException.class, () -> authenticator.answer(auth(code, new byte[] {1, 2, 3, 4})));
+    }
+
+    @Test
+    void aSecondPasswordRequestIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("u", "secret");
+        authenticator.answer(auth(5, new byte[] {1, 2, 3, 4}));
+
+        IOException refused = assertThrows(IOException.class, () -> authenticator.answer(auth(3)));
+        assertEquals("backend asks for a cleartext password after the authentication started", refused.getMessage());
+    }
+
     @Test
     void unknownAuthenticationCodeFails() {
         assertThrows(IOException.class, () -> new BackendAuthenticator("u", "p").answer(auth(7)));
