@@ -7,9 +7,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.s3.S3Service;
 
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Expands {@code Fn::Transform} nodes whose {@code Name} is {@code AWS::Include}: splices the
@@ -56,28 +56,39 @@ class AwsIncludeProcessor {
 
     JsonNode mergeIncludes(JsonNode template, Map<String, String> parameters, String region,
                            String accountId, String stackName, String stackId) {
+        return mergeIncludes(template, parameters, region, accountId, stackName, stackId, name -> null);
+    }
+
+    JsonNode mergeIncludes(JsonNode template, Map<String, String> parameters, String region,
+                           String accountId, String stackName, String stackId,
+                           Function<String, String> importValueResolver) {
         if (!containsAwsInclude(template)) {
             return template;
         }
         JsonNode merged = template.deepCopy();
-        merge(merged, merged, parameters, region, accountId, stackName, stackId);
+        merge(merged, merged, parameters, region, accountId, stackName, stackId, importValueResolver);
         return merged;
     }
 
     private void merge(JsonNode node, JsonNode root, Map<String, String> parameters,
-                       String region, String accountId, String stackName, String stackId) {
+                       String region, String accountId, String stackName, String stackId,
+                       Function<String, String> importValueResolver) {
         if (node.isObject()) {
-            mergeObject((ObjectNode) node, root, parameters, region, accountId, stackName, stackId);
+            mergeObject((ObjectNode) node, root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver);
         } else if (node.isArray()) {
-            node.forEach(item -> merge(item, root, parameters, region, accountId, stackName, stackId));
+            node.forEach(item -> merge(item, root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver));
         }
     }
 
     private void mergeObject(ObjectNode obj, JsonNode root, Map<String, String> parameters,
-                             String region, String accountId, String stackName, String stackId) {
+                             String region, String accountId, String stackName, String stackId,
+                             Function<String, String> importValueResolver) {
         JsonNode transform = obj.get(FN_TRANSFORM);
         if (transform != null && AWS_INCLUDE.equals(transform.path("Name").asText(""))) {
-            spliceInclude(obj, transform, root, parameters, region, accountId, stackName, stackId);
+            spliceInclude(obj, transform, root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver);
         }
         // Walk every remaining field, including the snippet's own keys just merged in above:
         // spliceInclude already rejects a snippet carrying its own AWS::Include, so revisiting
@@ -85,18 +96,20 @@ class AwsIncludeProcessor {
         // elsewhere in the template.
         Iterator<Map.Entry<String, JsonNode>> fields = obj.fields();
         while (fields.hasNext()) {
-            merge(fields.next().getValue(), root, parameters, region, accountId, stackName, stackId);
+            merge(fields.next().getValue(), root, parameters, region, accountId, stackName, stackId,
+                    importValueResolver);
         }
     }
 
     private void spliceInclude(ObjectNode obj, JsonNode transform, JsonNode root,
                                Map<String, String> parameters, String region,
-                               String accountId, String stackName, String stackId) {
+                               String accountId, String stackName, String stackId,
+                               Function<String, String> importValueResolver) {
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
                 accountId, region, stackName, stackId,
-                effectiveParameters(root, parameters),
+                CloudFormationService.resolveDefaultParameters(root, parameters),
                 Map.of(), Map.of(), Map.of(), CloudFormationService.templateMappings(root),
-                objectMapper, name -> null);
+                objectMapper, importValueResolver);
         String location = describeLocation(transform, engine);
         S3Location s3Location = parseS3Location(location);
         JsonNode snippet = fetchSnippet(s3Location, location);
@@ -138,7 +151,7 @@ class AwsIncludeProcessor {
         }
         if (isResolvableSub(locationNode)) {
             String resolved = engine.resolve(locationNode);
-            if (!resolved.isBlank()) {
+            if (!engine.hasUnresolvedIntrinsics() && !resolved.isBlank()) {
                 return resolved;
             }
         }
@@ -153,23 +166,6 @@ class AwsIncludeProcessor {
         JsonNode sub = locationNode.get("Fn::Sub");
         return sub.isTextual()
                 || (sub.isArray() && sub.size() == 2 && sub.get(0).isTextual() && sub.get(1).isObject());
-    }
-
-    private static Map<String, String> effectiveParameters(JsonNode template, Map<String, String> parameters) {
-        Map<String, String> resolved = new HashMap<>();
-        JsonNode declared = template.path("Parameters");
-        if (declared.isObject()) {
-            declared.properties().forEach(entry -> {
-                JsonNode defaultValue = entry.getValue().path("Default");
-                if (defaultValue.isValueNode() && !defaultValue.isNull()) {
-                    resolved.put(entry.getKey(), defaultValue.asText());
-                }
-            });
-        }
-        if (parameters != null) {
-            resolved.putAll(parameters);
-        }
-        return resolved;
     }
 
     /**

@@ -2674,7 +2674,7 @@ public class CloudFormationService implements ResourceProvider {
         }
     }
 
-    private Map<String, String> resolveDefaultParameters(JsonNode template, Map<String, String> callerParams) {
+    static Map<String, String> resolveDefaultParameters(JsonNode template, Map<String, String> callerParams) {
         Map<String, String> resolved = new HashMap<>(callerParams != null ? callerParams : Map.of());
         JsonNode paramDefs = template.path("Parameters");
         if (paramDefs.isObject()) {
@@ -2691,9 +2691,14 @@ public class CloudFormationService implements ResourceProvider {
 
     private JsonNode mergeAwsIncludes(JsonNode template, Map<String, String> params, String region,
                                       String accountId, String stackName, String stackId) {
-        return awsIncludeProcessor.mergeIncludes(template,
-                samTransformParameters(template, params, region),
-                region, accountId, stackName, stackId);
+        if (!awsIncludeProcessor.containsAwsInclude(template)) {
+            return template;
+        }
+        Map<String, String> resolvedParams = resolveSsmParameters(template,
+                resolveDefaultParameters(template, params), region);
+        return awsIncludeProcessor.mergeIncludes(template, resolvedParams, region, accountId,
+                stackName, stackId,
+                name -> exports.get(accountExportKey(accountId, exportKey(region, name))));
     }
 
     /**
@@ -5247,10 +5252,11 @@ public class CloudFormationService implements ResourceProvider {
         // CreateStack or UpdateStack would, before the child is created or changed: a parameter
         // without a value, or a Fn::GetStackOutput where the child's template may not hold one
         // (measured: the Child resource fails with the template error, and the parent rolls back).
+        String childStackId = childCreate ? newStackId(childStackName, region, accountId) : childStack.getStackId();
         try {
             requireParameterValues(childTemplate, childParams);
             validateGetStackOutputPlacement(childTemplate, childParams, childStackName,
-                    childCreate ? "" : childStack.getStackId(), region, accountId);
+                    childStackId, region, accountId);
         } catch (AwsException e) {
             resource.setStatus("CREATE_FAILED");
             resource.setStatusReason(e.getMessage());
@@ -5258,7 +5264,7 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         if (childCreate) {
-            childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
+            childStack = newStack(childStackName, childStackId, region, accountId);
             childStack.setParentId(parentStack.getStackId());
             childStack.setStatus("CREATE_IN_PROGRESS");
             stacks.put(stackKey(accountId, childStackName, region), childStack);

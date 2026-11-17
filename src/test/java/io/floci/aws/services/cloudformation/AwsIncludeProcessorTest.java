@@ -272,6 +272,53 @@ class AwsIncludeProcessorTest {
     }
 
     @Test
+    void fnSubLocationWithUnresolvedVariableIsRejected() {
+        String template = """
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location: !Sub s3://snippets-${Missing}/names.yaml
+            """;
+
+        AwsException e = assertThrows(AwsException.class, () -> mergedSubstitutions(template));
+        assertTrue(e.getMessage().contains("\"Fn::Sub\":\"s3://snippets-${Missing}/names.yaml\""),
+                "unresolved Fn::Sub variable must reject the Location node rather than substituting the variable name: "
+                        + e.getMessage());
+    }
+
+    @Test
+    void fnSubLocationWithImportValueResolvesExport() throws Exception {
+        stubSnippet("exported-snippets", "names.yaml", "orderTableName: orders-exported\n");
+        String template = """
+            Resources:
+              OrdersStateMachine:
+                Type: AWS::StepFunctions::StateMachine
+                Properties:
+                  DefinitionSubstitutions:
+                    Fn::Transform:
+                      Name: AWS::Include
+                      Parameters:
+                        Location:
+                          Fn::Sub:
+                            - s3://${Bucket}/names.yaml
+                            - Bucket: { Fn::ImportValue: SharedSnippetBucket }
+            """;
+
+        JsonNode parsed = new CloudFormationYamlParser(mapper).parse(template);
+        JsonNode merged = processor.mergeIncludes(parsed, Map.of(), "us-east-1", "000000000000", "", "",
+                exportName -> "SharedSnippetBucket".equals(exportName) ? "exported-snippets" : null);
+        JsonNode substitutions = merged.at("/Resources/OrdersStateMachine/Properties/DefinitionSubstitutions");
+
+        assertEquals("orders-exported", substitutions.get("orderTableName").asText());
+        assertFalse(substitutions.has("Fn::Transform"));
+    }
+
+    @Test
     void locationAsAMappingNamesTheNodeInTheRejectionMessage() {
         // Location: {Ref: InputValue} is the form AWS's own Fn::Transform documentation uses in its
         // only AWS::Include example. Ref resolution is not implemented; the node must still be named.
