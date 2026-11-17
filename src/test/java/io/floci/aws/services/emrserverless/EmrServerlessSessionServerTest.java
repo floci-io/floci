@@ -171,7 +171,7 @@ class EmrServerlessSessionServerTest {
 
         Session failed = awaitState(applicationId, sessionId, "FAILED");
 
-        assertEquals(String.format(EmrServerlessSessionService.SERVER_NOT_STARTED, "java.lang.IllegalStateException"),
+        assertEquals(String.format(SparkConnectServers.SERVER_NOT_STARTED, "java.lang.IllegalStateException"),
                 failed.getStateDetails());
     }
 
@@ -272,7 +272,7 @@ class EmrServerlessSessionServerTest {
         runner.end(sessionId).complete(SparkJobRunner.Outcome.exitedWith(1));
         Session failed = awaitState(applicationId, sessionId, "FAILED");
 
-        assertEquals(String.format(EmrServerlessSessionService.SERVER_EXITED, 1), failed.getStateDetails());
+        assertEquals(String.format(SparkConnectServers.SERVER_EXITED, 1), failed.getStateDetails());
     }
 
     @Test
