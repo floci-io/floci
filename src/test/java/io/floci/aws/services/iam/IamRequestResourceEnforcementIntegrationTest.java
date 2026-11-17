@@ -1589,6 +1589,31 @@ class IamRequestResourceEnforcementIntegrationTest {
         }
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Application Auto Scaling holds on the scalable target a
+     * request names, so an allow on one team's tag lets the caller list that team's target's tags and not another's.
+     */
+    @Test
+    void anApplicationAutoScalingResourceTagConditionReadsTheTagsOfTheScalableTarget() {
+        String tagged = taggedScalableTarget("data");
+        String other = taggedScalableTarget("web");
+
+        User user = user("res-target-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"application-autoscaling:ListTagsForResource\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + other + "\"}"),
+                "application-autoscaling:ListTagsForResource");
+    }
+
+    /** A scalable target the admin registers and tags with the team; its ARN. */
+    private String taggedScalableTarget(String team) {
+        String arn = registerScalableTarget(scalableTarget("service/res-" + suffix() + "/web"));
+        adminJson("application-autoscaling", "AnyScaleFrontendService.TagResource").body("{\"ResourceARN\":\"" + arn
+                + "\",\"Tags\":{\"team\":\"" + team + "\"}}").post("/").then().statusCode(200);
+        return arn;
+    }
+
     /** The members naming an ECS service's desired count as a scalable target, an open JSON object. */
     private static String scalableTarget(String resourceId) {
         return "{\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"" + resourceId + "\","
