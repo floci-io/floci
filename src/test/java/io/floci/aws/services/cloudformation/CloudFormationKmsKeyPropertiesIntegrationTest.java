@@ -176,6 +176,11 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
                         .getBoolean("KeyRotationEnabled")),
                 () -> assertEquals(List.of("two"), kms(account, "ListResourceTags", keyBody.formatted(keyId))
                         .getList("Tags.TagValue")));
+
+        CfnRequests.deploy("UpdateStack", stack, template("v4", ""), auth, "UPDATE_COMPLETE");
+
+        List<String> tagKeys = kms(account, "ListResourceTags", keyBody.formatted(keyId)).getList("Tags.TagKey");
+        assertTrue(tagKeys == null || !tagKeys.contains("env"), "tags after the drop: " + tagKeys);
     }
 
     private static String policy(String sid) {
