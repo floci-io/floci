@@ -156,17 +156,19 @@ public class SageMakerService {
         if (nameContains != null && !nameContains.isBlank()) {
             models = models.stream().filter(m -> m.modelName.contains(nameContains)).toList();
         }
-        Long createdAfter = epochMillis(request, "CreationTimeAfter");
+        Double createdAfter = epochMillis(request, "CreationTimeAfter");
         if (createdAfter != null) {
             models = models.stream().filter(m -> m.creationTime > createdAfter).toList();
         }
-        Long createdBefore = epochMillis(request, "CreationTimeBefore");
+        Double createdBefore = epochMillis(request, "CreationTimeBefore");
         if (createdBefore != null) {
             models = models.stream().filter(m -> m.creationTime < createdBefore).toList();
         }
+        String creationTimes = createdAfter == null && createdBefore == null ? ""
+                : createdAfter + "/" + createdBefore;
         return paginate(models, request, sortBy, sortOrder,
                 new CursorScope("ListModels", region,
-                        nameContains == null || nameContains.isBlank() ? "" : nameContains, ""),
+                        nameContains == null || nameContains.isBlank() ? "" : nameContains, "", creationTimes),
                 m -> modelCursor(m, sortBy, sortOrder),
                 m -> modelAnchor(m, sortBy), comparator, (m, n) -> {
             n.put("ModelName", m.modelName);
@@ -691,10 +693,20 @@ public class SageMakerService {
     private record SortOptions(String sortBy, String sortOrder) {
     }
 
-    /** A request timestamp, sent as epoch seconds, in epoch milliseconds; null when the request has none. */
-    private static Long epochMillis(JsonNode request, String field) {
+    /**
+     * A request timestamp, sent as epoch seconds, in epoch milliseconds with its fraction kept; null when the request
+     * has none.
+     */
+    private static Double epochMillis(JsonNode request, String field) {
         JsonNode value = request.path(field);
-        return value.isNumber() ? Math.round(value.asDouble() * 1000) : null;
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isNumber()) {
+            throw new AwsException("SerializationException",
+                    value.getNodeType() + "_VALUE can not be converted to a Timestamp", 400);
+        }
+        return value.asDouble() * 1000;
     }
 
     private static Comparator<ModelResource> modelComparator(String sortBy, String sortOrder) {
@@ -847,6 +859,7 @@ public class SageMakerService {
         token.put("sortOrder", cursor.sortOrder());
         token.put("nameContains", scope.nameContains());
         token.put("statusEquals", scope.statusEquals());
+        token.put("creationTimes", scope.creationTimes());
         token.put("value", cursor.value());
         token.put("name", cursor.name());
         return Base64Url.encode(token.toString());
@@ -865,6 +878,7 @@ public class SageMakerService {
                     || !sortOrder.equals(cursor.path("sortOrder").asText(null))
                     || !scope.nameContains().equals(cursor.path("nameContains").asText(null))
                     || !scope.statusEquals().equals(cursor.path("statusEquals").asText(null))
+                    || !scope.creationTimes().equals(cursor.path("creationTimes").asText(""))
                     || !cursor.path("value").isTextual()
                     || !cursor.path("name").isTextual()
                     || cursor.path("name").asText().isBlank()) {
@@ -879,7 +893,12 @@ public class SageMakerService {
     private record SortCursor(String sortBy, String sortOrder, String value, String name) {
     }
 
-    private record CursorScope(String operation, String region, String nameContains, String statusEquals) {
+    private record CursorScope(String operation, String region, String nameContains, String statusEquals,
+                               String creationTimes) {
+
+        CursorScope(String operation, String region, String nameContains, String statusEquals) {
+            this(operation, region, nameContains, statusEquals, "");
+        }
     }
 
     private <T> ObjectNode page(List<T> remaining, int max, BiConsumer<T, ObjectNode> render,

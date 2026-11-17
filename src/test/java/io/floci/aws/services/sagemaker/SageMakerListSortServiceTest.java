@@ -312,6 +312,64 @@ class SageMakerListSortServiceTest {
     }
 
     @Test
+    void listModelsCursorRejectsChangedCreationTimeFilters() throws Exception {
+        SageMakerService service = modelService(model("older", 1000), model("newer", 3000));
+        JsonNode first = service.listModels(mapper.createObjectNode()
+                .put("CreationTimeAfter", 0.5).put("MaxResults", 1), REGION);
+        String cursor = first.path("NextToken").asText();
+
+        JsonNode sameFilter = service.listModels(mapper.createObjectNode()
+                .put("CreationTimeAfter", 0.5).put("NextToken", cursor), REGION);
+        assertEquals(List.of("older"), names(sameFilter, "Models", "ModelName"));
+        AwsException changedAfter = assertThrows(AwsException.class, () -> service.listModels(
+                mapper.createObjectNode().put("CreationTimeAfter", 0.6).put("NextToken", cursor), REGION));
+        assertEquals("ValidationException", changedAfter.getErrorCode());
+        AwsException addedBefore = assertThrows(AwsException.class, () -> service.listModels(
+                mapper.createObjectNode().put("CreationTimeAfter", 0.5).put("CreationTimeBefore", 9.0)
+                        .put("NextToken", cursor), REGION));
+        assertEquals("ValidationException", addedBefore.getErrorCode());
+    }
+
+    @Test
+    void listModelsCreationTimeBoundsKeepTheirSubMillisecondFraction() throws Exception {
+        SageMakerService service = modelService(model("exact", 1000));
+
+        JsonNode after = service.listModels(mapper.createObjectNode().put("CreationTimeAfter", 0.9996), REGION);
+        JsonNode before = service.listModels(mapper.createObjectNode().put("CreationTimeBefore", 1.0004), REGION);
+
+        assertEquals(List.of("exact"), names(after, "Models", "ModelName"));
+        assertEquals(List.of("exact"), names(before, "Models", "ModelName"));
+    }
+
+    @Test
+    void listModelsRejectsACreationTimeThatIsNotATimestamp() throws Exception {
+        SageMakerService service = modelService(model("any", 1000));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listModels(
+                mapper.createObjectNode().put("CreationTimeBefore", "not-a-timestamp"), REGION));
+
+        assertEquals("SerializationException", e.getErrorCode());
+    }
+
+    private SageMakerService modelService(ModelResource... models) {
+        InMemoryStorage<String, ModelResource> store = new InMemoryStorage<>();
+        for (ModelResource m : models) {
+            store.put(REGION + "::" + m.modelName, m);
+        }
+        return new SageMakerService(store, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), mapper,
+                mock(SageMakerEndpointManager.class), mock(SageMakerTrainingRunner.class));
+    }
+
+    private static ModelResource model(String name, long creationTime) {
+        ModelResource m = new ModelResource();
+        m.modelName = name;
+        m.modelArn = "arn:aws:sagemaker:us-east-1:000000000000:model/" + name;
+        m.creationTime = creationTime;
+        return m;
+    }
+
+    @Test
     void listRejectsUnmodeledSortValues() throws Exception {
         SageMakerService service = service(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
         AwsException invalidConfigKey = assertThrows(AwsException.class, () -> service.listEndpointConfigs(
