@@ -42,7 +42,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -2470,12 +2469,7 @@ class PostgresProtocolHandlerTest {
             byte[] salt = {9, 8, 7, 6};
             writeAuthentication(out, 5, salt);
 
-            MessageDigest md5 = MessageDigest.getInstance("MD5");
-            String inner = HexFormat.of().formatHex(
-                    md5.digest((password + user).getBytes(StandardCharsets.UTF_8)));
-            md5.update(inner.getBytes(StandardCharsets.UTF_8));
-            md5.update(salt);
-            String expected = "md5" + HexFormat.of().formatHex(md5.digest());
+            String expected = BackendAuthenticator.md5Answer(user, password, salt);
             assertArrayEquals(PostgresWire.cStringBytes(expected), readPasswordMessageBody(in));
             writeAuthentication(out, 0);
             writeReadyForQuery(out);

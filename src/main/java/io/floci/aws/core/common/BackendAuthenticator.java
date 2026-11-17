@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Optional;
@@ -148,13 +149,7 @@ public final class BackendAuthenticator {
         if (body.length < 8) {
             throw new IOException("malformed backend MD5 authentication request");
         }
-        MessageDigest md5 = Digests.md5Digest();
-        md5.update(password.getBytes(StandardCharsets.UTF_8));
-        md5.update(user.getBytes(StandardCharsets.UTF_8));
-        String inner = HexFormat.of().formatHex(md5.digest());
-        md5.update(inner.getBytes(StandardCharsets.US_ASCII));
-        md5.update(body, 4, 4);
-        String hashed = "md5" + HexFormat.of().formatHex(md5.digest());
+        String hashed = md5Answer(user, password, Arrays.copyOfRange(body, 4, 8));
         return new PostgresWire.Message((byte) 'p', PostgresWire.cStringBytes(hashed));
     }
 
@@ -291,6 +286,20 @@ public final class BackendAuthenticator {
             throw new IOException("backend server signature mismatch");
         }
         scramVerified = true;
+    }
+
+    /**
+     * The answer PostgreSQL expects to an MD5 password request: {@code "md5"} followed by the hex
+     * MD5 of the hex MD5 of the password and user name, and the request's 4-byte salt.
+     */
+    public static String md5Answer(String user, String password, byte[] salt) {
+        MessageDigest md5 = Digests.md5Digest();
+        md5.update(password.getBytes(StandardCharsets.UTF_8));
+        md5.update(user.getBytes(StandardCharsets.UTF_8));
+        String inner = HexFormat.of().formatHex(md5.digest());
+        md5.update(inner.getBytes(StandardCharsets.US_ASCII));
+        md5.update(salt);
+        return "md5" + HexFormat.of().formatHex(md5.digest());
     }
 
     /**
