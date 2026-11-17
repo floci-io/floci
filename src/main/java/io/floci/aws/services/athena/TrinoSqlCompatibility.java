@@ -199,8 +199,11 @@ final class TrinoSqlCompatibility {
                 .append(')').toString(), columnsClose + 1);
     }
 
-    /** The index of the first character at or after {@code i} that is neither whitespace nor in a comment. */
-    private static int skipSpaceAndComments(String sql, int i) {
+    /**
+     * The index of the first character at or after {@code i} that is neither whitespace nor in a comment.
+     * {@link AthenaIcebergStatements} finds where a statement starts with it.
+     */
+    static int skipSpaceAndComments(String sql, int i) {
         while (i < sql.length()) {
             if (Character.isWhitespace(sql.charAt(i))) {
                 i++;
@@ -213,10 +216,26 @@ final class TrinoSqlCompatibility {
         return i;
     }
 
-    /** The index just past the bare or double-quoted identifier at {@code i}, or {@code i} when none starts there. */
-    private static int identifierEnd(String sql, int i) {
+    /**
+     * The index just past the bare or double-quoted identifier at {@code i}, or {@code i} when none starts there.
+     * A double quote that never closes starts none, so neither an {@code UNNEST} alias nor a table name can run on
+     * to the end of the query. {@link AthenaIcebergStatements} reads the table a statement writes with it.
+     */
+    static int identifierEnd(String sql, int i) {
         if (i < sql.length() && sql.charAt(i) == '"') {
-            return skipQuoted(sql, i);
+            // Not skipQuoted, which runs to the end of an unclosed quote rather than reporting it.
+            int j = i + 1;
+            while (j < sql.length()) {
+                if (sql.charAt(j) == '"') {
+                    if (j + 1 < sql.length() && sql.charAt(j + 1) == '"') {
+                        j += 2;
+                        continue;
+                    }
+                    return j + 1;
+                }
+                j++;
+            }
+            return i;
         }
         int end = i;
         while (end < sql.length() && isIdentifierChar(sql.charAt(end))) {

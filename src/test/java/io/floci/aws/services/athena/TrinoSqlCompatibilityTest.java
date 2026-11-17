@@ -143,8 +143,8 @@ class TrinoSqlCompatibilityTest {
 
     /**
      * Without a column list there is nothing to name the subquery's columns; with WITH ORDINALITY, a list that
-     * doesn't name every array, or a clause keyword where an alias would be, the source is left for DuckDB to report.
-     * So is a function only named like it.
+     * doesn't name every array, a clause keyword where an alias would be, or an alias whose quote never closes, the
+     * source is left for DuckDB to report. So is a function only named like it.
      */
     @Test
     void unnestSourcesTheRewriteCannotKeepFaithfulAreLeftAsWritten() {
@@ -154,6 +154,7 @@ class TrinoSqlCompatibilityTest {
                 "SELECT * FROM t CROSS JOIN UNNEST(a, b) WITH ORDINALITY AS u (x, y, n)",
                 "SELECT * FROM t CROSS JOIN UNNEST(a, b) AS u (x)",
                 "SELECT * FROM t CROSS JOIN UNNEST(a, b) AS u (x, y + 1)",
+                "SELECT * FROM t CROSS JOIN UNNEST(a, b) AS \"u (x, y)",
                 "SELECT * FROM t CROSS JOIN UNNEST(a) AS u (x)",
                 "SELECT * FROM t CROSS JOIN my_unnest(a, b) AS u (x, y)",
                 "SELECT * FROM t CROSS JOIN my_schema.unnest(a, b) AS u (x, y)",
