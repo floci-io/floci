@@ -604,6 +604,7 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # advertise-requested-port: false         # FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT; true = Describe* reports the requested Port, not the proxy port
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.
