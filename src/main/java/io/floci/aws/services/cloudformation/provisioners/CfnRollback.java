@@ -177,6 +177,12 @@ public final class CfnRollback {
      */
     public static final String EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR = "__FlociEksClusterUpdateSnapshot";
 
+    /**
+     * The tags an EKS nodegroup carried before an in-place update changed them, so a failed stack
+     * update can put them back. Written and spent by {@code EksCfnProvisioner}.
+     */
+    public static final String EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR = "__FlociEksNodegroupUpdateSnapshot";
+
     public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
 
     /**
