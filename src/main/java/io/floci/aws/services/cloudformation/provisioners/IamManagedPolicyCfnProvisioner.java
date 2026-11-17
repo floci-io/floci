@@ -20,6 +20,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -129,12 +130,27 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
             createdVersionForRollback = iamService.createPolicyVersion(existingArn, document, true);
             // Targets this stack attached on the previous pass but no longer listed in the
             // template are detached, matching CloudFormation's update semantics.
-            for (String previousRole : resolvePreviousTargets(previousRoleTargets, previousRoleTargetIds,
-                    priorEntities.roles(), IamRole::getRoleId, IamRole::getRoleName)) {
-                if (!roleNames.contains(previousRole)) {
+            List<PrincipalDetachAction> detachActions = List.of(
+                    new PrincipalDetachAction(IamManagedPolicyDeletes.recordedTargets(
+                            previousRoleTargets, previousRoleTargetIds, priorEntities.roles(),
+                            IamRole::getRoleId, IamRole::getRoleName),
+                            roleNames, iamService::detachRolePolicy, changes.detachedRoles),
+                    new PrincipalDetachAction(IamManagedPolicyDeletes.recordedTargets(
+                            previousUserTargets, previousUserTargetIds, priorEntities.users(),
+                            IamUser::getUserId, IamUser::getUserName),
+                            userNames, iamService::detachUserPolicy, changes.detachedUsers),
+                    new PrincipalDetachAction(IamManagedPolicyDeletes.recordedTargets(
+                            previousGroupTargets, previousGroupTargetIds, priorEntities.groups(),
+                            IamGroup::getGroupId, IamGroup::getGroupName),
+                            groupNames, iamService::detachGroupPolicy, changes.detachedGroups));
+            for (PrincipalDetachAction action : detachActions) {
+                for (String previousName : action.previousNames()) {
+                    if (action.desiredNames().contains(previousName)) {
+                        continue;
+                    }
                     try {
-                        iamService.detachRolePolicy(previousRole, existingArn);
-                        changes.detachedRoles.add(previousRole);
+                        action.detach().accept(previousName, existingArn);
+                        action.detachedNames().add(previousName);
                     } catch (AwsException detachFailure) {
                         if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
                             restoreOnUpdateFailure(detachFailure, r, existingArn,
@@ -148,44 +164,6 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                     }
                 }
             }
-            for (String previousUser : resolvePreviousTargetsWithIds(previousUserTargets, previousUserTargetIds,
-                    priorEntities.users(), IamUser::getUserId, IamUser::getUserName)) {
-                    if (!userNames.contains(previousUser)) {
-                        try {
-                            iamService.detachUserPolicy(previousUser, existingArn);
-                            changes.detachedUsers.add(previousUser);
-                        } catch (AwsException detachFailure) {
-                            if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
-                                restoreOnUpdateFailure(detachFailure, r, existingArn,
-                                        false, changes,
-                                        previousRoleTargets, previousUserTargets, previousGroupTargets,
-                                        previousRoleTargetIds, previousUserTargetIds, previousGroupTargetIds,
-                                        previousDefaultVersionId, createdVersionForRollback,
-                                        prunedVersionsForRollback);
-                                throw detachFailure;
-                            }
-                        }
-                    }
-                }
-            for (String previousGroup : resolvePreviousTargetsWithIds(previousGroupTargets, previousGroupTargetIds,
-                    priorEntities.groups(), IamGroup::getGroupId, IamGroup::getGroupName)) {
-                    if (!groupNames.contains(previousGroup)) {
-                        try {
-                            iamService.detachGroupPolicy(previousGroup, existingArn);
-                            changes.detachedGroups.add(previousGroup);
-                        } catch (AwsException detachFailure) {
-                            if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
-                                restoreOnUpdateFailure(detachFailure, r, existingArn,
-                                        false, changes,
-                                        previousRoleTargets, previousUserTargets, previousGroupTargets,
-                                        previousRoleTargetIds, previousUserTargetIds, previousGroupTargetIds,
-                                        previousDefaultVersionId, createdVersionForRollback,
-                                        prunedVersionsForRollback);
-                                throw detachFailure;
-                            }
-                        }
-                    }
-                }
         }
         r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         r.getAttributes().put("PolicyId", policy.getPolicyId());
@@ -350,45 +328,6 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         return entities.stream().map(idGetter).collect(Collectors.joining("\n"));
     }
 
-    private static <T> List<String> resolvePreviousTargets(String names, String ids, List<T> attached,
-                                                            Function<T, String> idGetter,
-                                                            Function<T, String> nameGetter) {
-        List<String> targetNames = splitTargets(names);
-        if (targetNames.isEmpty()) {
-            return List.of();
-        }
-        if (ids == null) {
-            return targetNames;
-        }
-        Map<String, String> currentNames = attached.stream().collect(Collectors.toMap(
-                idGetter, nameGetter, (first, ignored) -> first));
-        List<String> targetIds = splitTargets(ids);
-        List<String> resolved = new ArrayList<>();
-        for (int i = 0; i < targetNames.size(); i++) {
-            String id = i < targetIds.size() ? targetIds.get(i) : null;
-            if (id == null || id.isBlank()) {
-                resolved.add(targetNames.get(i));
-            } else if (currentNames.containsKey(id)) {
-                resolved.add(currentNames.get(id));
-            }
-        }
-        return resolved;
-    }
-
-    private static <T> List<String> resolvePreviousTargetsWithIds(String names, String ids, List<T> attached,
-                                                                   Function<T, String> idGetter,
-                                                                   Function<T, String> nameGetter) {
-        if (names == null) {
-            return List.of();
-        }
-        return ids == null || ids.isBlank()
-                ? splitTargets(names) : resolvePreviousTargets(names, ids, attached, idGetter, nameGetter);
-    }
-
-    private static List<String> splitTargets(String targets) {
-        return targets == null ? List.of() : targets.lines().filter(target -> !target.isBlank()).toList();
-    }
-
     private static void putTargetIds(StackResource resource, String key, String ids) {
         if (ids == null) {
             resource.getAttributes().remove(key);
@@ -420,6 +359,10 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         private final List<String> detachedRoles = new ArrayList<>();
         private final List<String> detachedUsers = new ArrayList<>();
         private final List<String> detachedGroups = new ArrayList<>();
+    }
+
+    private record PrincipalDetachAction(List<String> previousNames, List<String> desiredNames,
+                                         BiConsumer<String, String> detach, List<String> detachedNames) {
     }
 
     @Override

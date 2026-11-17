@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -60,29 +61,26 @@ final class IamManagedPolicyDeletes {
     }
 
     static List<String> userTargets(IamService iamService, StackResource resource) {
-        String targets = resource.getAttributes().get("ManagedPolicyUserTargets");
-        String ids = resource.getAttributes().get("ManagedPolicyUserTargetIds");
-        if (targets == null || splitTargets(targets).isEmpty()) {
-            return List.of();
-        }
-        if (ids == null || ids.isBlank()) {
-            return splitTargets(targets);
-        }
-        return recordedTargets(targets, ids,
-                iamService.listUsers("/"), IamUser::getUserId, IamUser::getUserName);
+        return principalTargets(resource, "ManagedPolicyUserTargets", "ManagedPolicyUserTargetIds",
+                () -> iamService.listUsers("/"), IamUser::getUserId, IamUser::getUserName);
     }
 
     static List<String> groupTargets(IamService iamService, StackResource resource) {
-        String targets = resource.getAttributes().get("ManagedPolicyGroupTargets");
-        String ids = resource.getAttributes().get("ManagedPolicyGroupTargetIds");
-        if (targets == null || splitTargets(targets).isEmpty()) {
+        return principalTargets(resource, "ManagedPolicyGroupTargets", "ManagedPolicyGroupTargetIds",
+                () -> iamService.listGroups("/"), IamGroup::getGroupId, IamGroup::getGroupName);
+    }
+
+    private static <T> List<String> principalTargets(StackResource resource, String namesKey, String idsKey,
+                                                     Supplier<List<T>> listPrincipals,
+                                                     Function<T, String> idGetter,
+                                                     Function<T, String> nameGetter) {
+        String names = resource.getAttributes().get(namesKey);
+        String ids = resource.getAttributes().get(idsKey);
+        if (splitTargets(names).isEmpty()) {
             return List.of();
         }
-        if (ids == null || ids.isBlank()) {
-            return splitTargets(targets);
-        }
-        return recordedTargets(targets, ids,
-                iamService.listGroups("/"), IamGroup::getGroupId, IamGroup::getGroupName);
+        return recordedTargets(names, ids, ids == null || ids.isBlank() ? List.of() : listPrincipals.get(),
+                idGetter, nameGetter);
     }
 
     /**
@@ -98,14 +96,14 @@ final class IamManagedPolicyDeletes {
         deletePolicyTolerating(iamService, policyArn);
     }
 
-    private static <T> List<String> recordedTargets(String targets, String ids, List<T> attached,
-                                                     Function<T, String> idGetter,
-                                                     Function<T, String> nameGetter) {
+    static <T> List<String> recordedTargets(String targets, String ids, List<T> attached,
+                                            Function<T, String> idGetter,
+                                            Function<T, String> nameGetter) {
         List<String> targetNames = splitTargets(targets);
         if (targetNames.isEmpty()) {
             return List.of();
         }
-        if (ids == null) {
+        if (ids == null || ids.isBlank()) {
             return targetNames;
         }
         Map<String, String> currentNames = attached.stream().collect(Collectors.toMap(

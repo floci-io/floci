@@ -375,13 +375,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
                                     request.groupName(groupName)).attachedPolicies().stream()
                             .map(policy -> policy.policyArn()).toList()));
 
-            given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DeleteStack")
-                .formParam("StackName", stackName)
-            .when().post("/").then().statusCode(200);
-            awaitManagedPolicyGone(policyArn);
+            CfnStackWaits.deleteStack(stackName, CFN_AUTH);
 
             assertAll(
                     () -> assertTrue(iam.listAttachedUserPolicies(request ->
@@ -427,14 +421,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
                             request.userName(userName)).attachedPolicies().stream()
                     .map(policy -> policy.policyArn()).toList());
 
-            given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DeleteStack")
-                .formParam("StackName", stackName)
-            .when().post("/").then().statusCode(200);
-            awaitManagedPolicyGone(policyArn);
-            awaitUserGone(userName);
+            CfnStackWaits.deleteStack(stackName, CFN_AUTH);
         }
     }
 
@@ -476,14 +463,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
         createStack(stackName, template);
         assertStackComplete(stackName);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DeleteStack")
-            .formParam("StackName", stackName)
-        .when().post("/").then().statusCode(200);
-
-        awaitManagedPolicyGone(policyArn);
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -863,38 +843,6 @@ class CloudFormationIamInlinePolicyIntegrationTest {
         }
         throw new AssertionError("Timed out waiting for inline policy " + policyName
                 + " to be detached from role " + roleName);
-    }
-
-    private static void awaitManagedPolicyGone(String policyArn) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            int status = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", IAM_AUTH)
-                .formParam("Action", "GetPolicy")
-                .formParam("PolicyArn", policyArn)
-            .when().post("/").then().extract().statusCode();
-            if (status == 404) {
-                return;
-            }
-            Thread.sleep(50);
-        }
-        throw new AssertionError("Timed out waiting for managed policy " + policyArn + " to be deleted");
-    }
-
-    private static void awaitUserGone(String userName) throws InterruptedException {
-        for (int i = 0; i < 100; i++) {
-            int status = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", IAM_AUTH)
-                .formParam("Action", "GetUser")
-                .formParam("UserName", userName)
-            .when().post("/").then().extract().statusCode();
-            if (status == 404) {
-                return;
-            }
-            Thread.sleep(50);
-        }
-        throw new AssertionError("Timed out waiting for IAM user " + userName + " to be deleted");
     }
 
     private static void assertFailedResource(String stackName, String logicalId,
