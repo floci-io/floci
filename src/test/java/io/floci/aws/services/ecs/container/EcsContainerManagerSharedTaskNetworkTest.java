@@ -20,14 +20,10 @@ import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.NetworkInterfaceListResult;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
-import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
-import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.FirelensConfiguration;
 import io.floci.aws.services.ecs.model.LogConfiguration;
-import io.floci.aws.services.ecs.model.NetworkConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
-import io.floci.aws.services.ecs.model.PortMapping;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.floci.aws.services.s3.S3Service;
@@ -42,6 +38,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.floci.aws.services.ecs.container.AwsvpcTaskFixtures.TASK_ARN;
+import static io.floci.aws.services.ecs.container.AwsvpcTaskFixtures.awsvpcTask;
+import static io.floci.aws.services.ecs.container.AwsvpcTaskFixtures.container;
+import static io.floci.aws.services.ecs.container.AwsvpcTaskFixtures.taskDef;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -69,7 +69,6 @@ import static org.mockito.Mockito.when;
  */
 class EcsContainerManagerSharedTaskNetworkTest {
 
-    private static final String TASK_ARN = "arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123";
     private static final String NETWORK = "floci-net";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/task-role";
     private static final String RELATIVE_URI = "/v2/credentials/abc";
@@ -148,7 +147,7 @@ class EcsContainerManagerSharedTaskNetworkTest {
         assertEquals(expected, ports.getValue());
         // Each container's network bindings are read off the helper, which publishes them.
         verify(dockerClient, atLeastOnce()).inspectContainerCmd("helper-id");
-        verify(firewallManager, never()).createNamespace(any(), any(), any(), any(), any(), any(), any(), any());
+        verify(firewallManager, never()).createNamespace(any(), any(), any(), any(), any(), any(), any(), any(), any());
         verify(firewallManager, never()).register(any(), any(), any());
         verify(ec2Service, never()).createNetworkInterface(any(), any(), any(), any(), any(), any(), any());
         assertEquals("eni-1", handle.getNetworkInterfaceId());
@@ -331,7 +330,7 @@ class EcsContainerManagerSharedTaskNetworkTest {
     @Test
     void enforcementGivesTheTaskItsProtectedNamespaceInstead() {
         when(firewallManager.enabled()).thenReturn(true);
-        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any()))
+        when(firewallManager.createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("stop once the protected path is taken"));
         NetworkInterface eni = new NetworkInterface();
         eni.setNetworkInterfaceId("eni-1");
@@ -342,7 +341,7 @@ class EcsContainerManagerSharedTaskNetworkTest {
         assertThrows(IllegalStateException.class, () -> manager.startTask(awsvpcTask(),
                 taskDef(null, container("app", 80)), List.of(), "us-east-1"));
 
-        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any());
+        verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any(), any());
         verify(firewallManager, never()).createSharedNamespace(any(), any(), any(), any(), any(), any(), any(), any(),
                 any());
     }
@@ -357,40 +356,5 @@ class EcsContainerManagerSharedTaskNetworkTest {
         verify(firewallManager, never()).createSharedNamespace(any(), any(), any(), any(), any(), any(), any(), any(),
                 any());
         verify(builder, never()).withNetworkMode(anyString());
-    }
-
-    private static EcsTask awsvpcTask() {
-        AwsVpcConfiguration awsvpc = new AwsVpcConfiguration();
-        awsvpc.setSubnets(List.of("subnet-1"));
-        awsvpc.setSecurityGroups(List.of("sg-1"));
-        NetworkConfiguration network = new NetworkConfiguration();
-        network.setAwsvpcConfiguration(awsvpc);
-        EcsTask task = new EcsTask();
-        task.setTaskArn(TASK_ARN);
-        task.setNetworkConfiguration(network);
-        // As attachTaskNetwork leaves it before the containers start.
-        task.setNetworkInterfaceId("eni-1");
-        task.setPrivateIpAddress("10.0.0.10");
-        return task;
-    }
-
-    private static ContainerDefinition container(String name, int port) {
-        ContainerDefinition container = new ContainerDefinition();
-        container.setName(name);
-        container.setImage(name + ":latest");
-        if (port > 0) {
-            container.setPortMappings(List.of(new PortMapping(port, port, "tcp")));
-        }
-        return container;
-    }
-
-    private static TaskDefinition taskDef(String taskRoleArn, ContainerDefinition... containers) {
-        TaskDefinition taskDef = new TaskDefinition();
-        taskDef.setFamily("shared-family");
-        taskDef.setRevision(1);
-        taskDef.setNetworkMode(NetworkMode.awsvpc);
-        taskDef.setTaskRoleArn(taskRoleArn);
-        taskDef.setContainerDefinitions(List.of(containers));
-        return taskDef;
     }
 }
