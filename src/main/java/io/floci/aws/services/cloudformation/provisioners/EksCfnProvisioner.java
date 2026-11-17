@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Supplier;
 
 /**
  * CloudFormation provisioning for the EKS control-plane types. {@code AWS::EKS::Cluster} and
@@ -149,8 +150,13 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     /** The cluster an update starts from, or null when it is gone and the update creates one. */
     private Cluster liveCluster(String name) {
+        return orNullWhenGone(() -> eksService.describeCluster(name));
+    }
+
+    /** What {@code lookup} returns, or null when it reports the entity gone; any other failure is thrown. */
+    private static <T> T orNullWhenGone(Supplier<T> lookup) {
         try {
-            return eksService.describeCluster(name);
+            return lookup.get();
         } catch (AwsException e) {
             if ("ResourceNotFoundException".equals(e.getErrorCode())) {
                 return null;
@@ -400,14 +406,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     /** The nodegroup an update starts from, or null when it or its cluster is gone and the update creates one. */
     private Nodegroup liveNodegroup(String clusterName, String nodegroupName) {
-        try {
-            return eksService.describeNodeGroup(clusterName, nodegroupName);
-        } catch (AwsException e) {
-            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
-                return null;
-            }
-            throw e;
-        }
+        return orNullWhenGone(() -> eksService.describeNodeGroup(clusterName, nodegroupName));
     }
 
     /**
