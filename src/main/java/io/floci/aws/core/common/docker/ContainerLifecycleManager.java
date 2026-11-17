@@ -58,6 +58,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 /**
@@ -97,6 +98,8 @@ public class ContainerLifecycleManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final long archiveRetryBackoffMillis;
+    private final LongSupplier nanoTime;
+    private final CreateWait createWait;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -121,11 +124,30 @@ public class ContainerLifecycleManager {
                               ContainerDetector containerDetector,
                               EmulatorConfig config,
                               long archiveRetryBackoffMillis) {
+        this(dockerClient, imageCacheService, containerDetector, config, archiveRetryBackoffMillis,
+                System::nanoTime, TimeUnit.NANOSECONDS::sleep);
+    }
+
+    ContainerLifecycleManager(DockerClient dockerClient,
+                              ImageCacheService imageCacheService,
+                              ContainerDetector containerDetector,
+                              EmulatorConfig config,
+                              long archiveRetryBackoffMillis,
+                              LongSupplier nanoTime,
+                              CreateWait createWait) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
         this.config = config;
         this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
+        this.nanoTime = nanoTime;
+        this.createWait = createWait;
+    }
+
+    /** Pause between creation checks; tests advance the monotonic clock instead of sleeping. */
+    @FunctionalInterface
+    interface CreateWait {
+        void sleep(long nanos) throws InterruptedException;
     }
 
     /**
@@ -380,8 +402,13 @@ public class ContainerLifecycleManager {
      * non-transient and rethrows it immediately, so without this it surfaces as a spurious build
      * failure, and leaks the container the first attempt actually created, untracked.
      *
-     * <p>Recovery only fires for a named spec, and only adopts a candidate whose image, labels, and
-     * this exact call's {@link #CREATE_ATTEMPT_LABEL} all match. Image and labels alone cannot tell
+     * <p>Docker can reserve the name before the original create becomes visible to list or inspect.
+     * Successful empty lookups may be retried for one additional configured Docker API timeout,
+     * using monotonic elapsed time. Each lookup retains the transport's own timeout and retries;
+     * this budget bounds polling, not an already running lookup.
+     *
+     * <p>Recovery only fires for a named spec, and only adopts a candidate whose labels and
+     * this exact call's {@link #CREATE_ATTEMPT_LABEL} all match. Image and spec labels alone cannot tell
      * this call's own lost-response replay apart from a second, genuinely concurrent
      * {@code create()} racing on the same fixed name/image/labels, which would otherwise be adopted
      * as if it were this invocation's container.
@@ -391,13 +418,52 @@ public class ContainerLifecycleManager {
         try {
             return createCmd.exec().getId();
         } catch (ConflictException e) {
-            if (spec.name() != null) {
-                Optional<Container> existing = findByName(spec.name());
-                if (existing.isPresent() && matchesSpec(existing.get(), spec, createAttemptId)) {
-                    LOG.infov("Create for {0} hit a name conflict; an earlier attempt''s response "
-                            + "was lost but the container exists, adopting {1}",
-                            spec.name(), existing.get().getId());
-                    return existing.get().getId();
+            if (spec.name() == null) {
+                throw e;
+            }
+            long started = nanoTime.getAsLong();
+            long budget = TimeUnit.SECONDS.toNanos(config.docker().apiTimeoutSeconds());
+            int attempt = 0;
+            while (!Thread.currentThread().isInterrupted()) {
+                if (attempt > 0 && nanoTime.getAsLong() - started >= budget) {
+                    break;
+                }
+                Optional<Container> existing;
+                try {
+                    existing = findByNameStrict(spec.name());
+                } catch (RuntimeException lookupFailure) {
+                    // An unreadable inventory is not evidence that creation is still pending.
+                    e.addSuppressed(lookupFailure);
+                    throw e;
+                }
+                if (Thread.currentThread().isInterrupted()) {
+                    break;
+                }
+                if (existing.isPresent()) {
+                    if (matchesSpec(existing.get(), spec, createAttemptId)) {
+                        LOG.infov("Create for {0} hit a name conflict; an earlier attempt''s response "
+                                + "was lost but the container exists, adopting {1}",
+                                spec.name(), existing.get().getId());
+                        return existing.get().getId();
+                    }
+                    break;
+                }
+                long remaining = budget - (nanoTime.getAsLong() - started);
+                if (remaining <= 0) {
+                    break;
+                }
+                if (attempt == 0) {
+                    LOG.infov("Reconciling reserved name {0} while its container creation finishes", spec.name());
+                }
+                attempt++;
+                long delay = TimeUnit.MILLISECONDS.toNanos(DockerRetry.backoffDelay(
+                        attempt, RetryingDockerHttpClient.BACKOFF_MS, DockerRetry.BACKOFF_CAP_MS));
+                try {
+                    createWait.sleep(Math.min(remaining, delay));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    e.addSuppressed(interrupted);
+                    break;
                 }
             }
             throw e;
@@ -1170,24 +1236,28 @@ public class ContainerLifecycleManager {
      */
     public Optional<Container> findByName(String name) {
         try {
-            List<Container> containers = dockerClient.listContainersCmd()
-                    .withShowAll(true)
-                    .exec();
-
-            for (Container c : containers) {
-                String[] names = c.getNames();
-                if (names == null) {
-                    continue;
-                }
-                for (String n : names) {
-                    // Docker prefixes names with /
-                    if (n.equals("/" + name) || n.equals(name)) {
-                        return Optional.of(c);
-                    }
-                }
-            }
+            return findByNameStrict(name);
         } catch (Exception e) {
             LOG.debugv("Error searching for container {0}: {1}", name, e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    private Optional<Container> findByNameStrict(String name) {
+        List<Container> containers = dockerClient.listContainersCmd()
+                .withShowAll(true)
+                .exec();
+        for (Container c : containers) {
+            String[] names = c.getNames();
+            if (names == null) {
+                continue;
+            }
+            for (String n : names) {
+                // Docker prefixes names with /
+                if (n.equals("/" + name) || n.equals(name)) {
+                    return Optional.of(c);
+                }
+            }
         }
         return Optional.empty();
     }
