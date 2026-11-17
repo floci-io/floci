@@ -9,8 +9,12 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.common.SparkConnectEndpoint;
+import io.floci.aws.core.common.SparkConnectProxy;
+import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
@@ -19,6 +23,7 @@ import io.floci.aws.services.emrserverless.model.SessionRecord;
 import io.floci.aws.services.emrserverless.model.SessionSummary;
 import io.floci.aws.services.emrserverless.model.StartSessionRequest;
 import io.floci.aws.services.iam.IamService;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -28,28 +33,54 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * EMR Serverless sessions: "a managed connection between your local PySpark client and a Spark driver running on Amazon
  * EMR Serverless", through Spark Connect (EMR Serverless user guide, "Run interactive sessions with Amazon EMR
- * Serverless through Spark Connect"). Floci keeps each session and its lifecycle but starts no Spark driver for it: a
- * session is IDLE once started, nothing answers Spark Connect at its endpoint, and it ends when it is terminated, when
- * its idle timeout or its 24 hours pass, or when its application stops.
+ * Serverless through Spark Connect"). A session ends when it is terminated, when its idle timeout or its 24 hours pass,
+ * or when its application stops.
+ *
+ * <p>In the docker runner mode a session runs a Spark Connect server, its driver, in a container, as a job run's driver
+ * runs ({@link EmrServerlessJobRunService#sessionJob}): it is SUBMITTED, then STARTING once its container runs, and
+ * IDLE once the server answers. A client reaches the server through {@link SparkConnectProxy}, with a token
+ * GetSessionEndpoint gave; the session is BUSY while a call runs there, and IDLE again, its idle timeout counting from
+ * then, once none does. A server that exits on its own fails its session. In the immediate runner mode no server runs:
+ * a session is IDLE once started, and a call to it is refused.
  */
 @ApplicationScoped
-public class EmrServerlessSessionService {
+public class EmrServerlessSessionService implements SparkConnectTargets, Resettable {
 
     private static final Logger LOG = Logger.getLogger(EmrServerlessSessionService.class);
 
+    static final String STATE_SUBMITTED = "SUBMITTED";
+    static final String STATE_STARTING = "STARTING";
     static final String STATE_IDLE = "IDLE";
+    static final String STATE_BUSY = "BUSY";
+    static final String STATE_FAILED = "FAILED";
+    static final String STATE_TERMINATING = "TERMINATING";
     static final String STATE_TERMINATED = "TERMINATED";
-    private static final List<String> STATES =
-            List.of("SUBMITTED", "STARTING", "STARTED", STATE_IDLE, "BUSY", "FAILED", "TERMINATING", STATE_TERMINATED);
-    private static final Set<String> ENDED = Set.of("FAILED", STATE_TERMINATED);
+    private static final List<String> STATES = List.of(STATE_SUBMITTED, STATE_STARTING, "STARTED", STATE_IDLE,
+            STATE_BUSY, STATE_FAILED, STATE_TERMINATING, STATE_TERMINATED);
+    private static final Set<String> ENDED = Set.of(STATE_FAILED, STATE_TERMINATED);
+    // The port a session's Spark Connect server listens on in its container, Spark Connect's own default.
+    static final int SPARK_CONNECT_PORT = 15002;
+    // How long a server may take to answer once its container runs, and how often it is asked meanwhile.
+    static final Duration SERVER_START_LIMIT = Duration.ofMinutes(10);
+    private static final long SERVER_PROBE_INTERVAL_MILLIS = 500;
     private static final List<String> RESOURCE_TYPES = List.of("SESSION");
     // SessionStateSet holds 1 to 8 states; a ListSessions page holds 1 to 50 sessions.
     private static final int MAX_FILTER_STATES = 8;
@@ -64,13 +95,21 @@ public class EmrServerlessSessionService {
     static final Duration HARD_LIMIT = Duration.ofHours(24);
     // "Authentication tokens are time-limited to 1 hour."
     static final Duration TOKEN_VALIDITY = Duration.ofHours(1);
-    // Where GetSessionEndpoint points; nothing answers Spark Connect there, as Floci runs no driver for a session.
-    static final String ENDPOINT_PATH = "/_aws/emr-serverless/sessions/";
     private static final String SPARK_TYPE = "SPARK";
     // No source gives AWS's wording for these ends; they are Floci's.
     static final String IDLE_TIMED_OUT = "The session was idle for its idle timeout.";
     static final String HARD_LIMIT_REACHED = "The session reached its 24 hour limit.";
     static final String APPLICATION_STOPPED = "The session's application was stopped.";
+    static final String INTERRUPTED = "Floci stopped while the session was running.";
+    static final String SERVER_EXITED = "The session's Spark Connect server exited with code %d.";
+    static final String SERVER_NOT_STARTED = "The session's Spark Connect server could not start: %s";
+    static final String SERVER_SILENT = "The session's Spark Connect server did not answer within "
+            + SERVER_START_LIMIT.toMinutes() + " minutes: %s";
+    static final String SERVER_ENDED = "The session's Spark Connect server ended with no exit code.";
+    static final String TOKEN_EXPIRED = "The authentication token has expired. Call GetSessionEndpoint for a new one.";
+    static final String NO_SERVER = "Floci runs no Spark Connect server for session %s, as the EMR Serverless runner"
+            + " mode is immediate; floci.services.emrserverless.runner-mode docker runs one.";
+    static final String NOT_READY = "Session %s is %s, not ready for calls.";
 
     private final AccountAwareStorageBackend<SessionRecord> store;
     private final EmrServerlessService applications;
@@ -81,21 +120,51 @@ public class EmrServerlessSessionService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String baseUrl;
+    // The docker runner mode's runner, which runs each session's Spark Connect server; null in the immediate mode.
+    private final SparkJobRunner sparkRunner;
+    private final Executor serverExecutor;
+    // Ends each session at its next deadline, its idle timeout or its 24 hours, and its server with it.
+    private final ScheduledExecutorService idleChecks;
+    private final ServerProbe probe;
+    // The sessions whose server a thread of this process runs; one not here that has not ended was left by a restart.
+    private final Map<String, Server> servers = new HashMap<>();
+    // The authentication tokens GetSessionEndpoint gave, until they expire or their session ends.
+    private final Map<String, Grant> grants = new ConcurrentHashMap<>();
+    // Raised by each reset, so a server's thread from before it writes nothing back after the wipe.
+    private long generation;
 
     @Inject
     public EmrServerlessSessionService(StorageFactory storageFactory, EmrServerlessService applications,
                                        EmrServerlessJobRunService jobRuns, IamService iamService,
                                        RegionResolver regionResolver, RequestContext requestContext,
-                                       ObjectMapper objectMapper, EmulatorConfig config, Clock clock) {
+                                       ObjectMapper objectMapper, EmulatorConfig config, Clock clock,
+                                       SparkConnectProxy proxy) {
         this(storageFactory.create("emrserverless", "emr-serverless-sessions.json", new TypeReference<>() {}),
                 applications, jobRuns, iamService, regionResolver, requestContext, objectMapper, clock,
-                config.effectiveBaseUrl());
+                config.effectiveBaseUrl(), jobRuns.containerRunner(),
+                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-serverless-session-", 0)
+                        .factory()),
+                sessionChecks(),
+                (host, port) -> unanswered(proxy, host, port));
     }
 
     EmrServerlessSessionService(AccountAwareStorageBackend<SessionRecord> store, EmrServerlessService applications,
                                 EmrServerlessJobRunService jobRuns, IamService iamService,
                                 RegionResolver regionResolver, RequestContext requestContext,
                                 ObjectMapper objectMapper, Clock clock, String baseUrl) {
+        this(store, applications, jobRuns, iamService, regionResolver, requestContext, objectMapper, clock, baseUrl,
+                null, Runnable::run, null, (host, port) -> "no server runs");
+    }
+
+    EmrServerlessSessionService(AccountAwareStorageBackend<SessionRecord> store, EmrServerlessService applications,
+                                EmrServerlessJobRunService jobRuns, IamService iamService,
+                                RegionResolver regionResolver, RequestContext requestContext,
+                                ObjectMapper objectMapper, Clock clock, String baseUrl, SparkJobRunner sparkRunner,
+                                Executor serverExecutor, ScheduledExecutorService idleChecks, ServerProbe probe) {
+        this.sparkRunner = sparkRunner;
+        this.serverExecutor = serverExecutor;
+        this.idleChecks = idleChecks;
+        this.probe = probe;
         this.store = store;
         this.applications = applications;
         this.jobRuns = jobRuns;
@@ -105,6 +174,32 @@ public class EmrServerlessSessionService {
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.baseUrl = baseUrl;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        if (serverExecutor instanceof ExecutorService executor) {
+            executor.shutdownNow();
+        }
+        if (idleChecks != null) {
+            idleChecks.shutdownNow();
+        }
+    }
+
+    /**
+     * A reset has begun: the servers' threads from before it write nothing more, and their tokens go. The runner's
+     * teardown stops their containers.
+     */
+    @Override
+    public synchronized void beforeReset() {
+        generation++;
+        servers.clear();
+        grants.clear();
+    }
+
+    @Override
+    public void clear() {
+        // The sessions live in storage, which the reset wipes.
     }
 
     /**
@@ -179,14 +274,29 @@ public class EmrServerlessSessionService {
 
     /**
      * Terminates a session that has not ended: "After you terminate a session, it enters the TERMINATING state and
-     * then the TERMINATED state." With no driver to stop, Floci's is TERMINATED at once. One that has already ended
-     * is refused; no source gives AWS's answer for it, so the wording is Floci's.
+     * then the TERMINATED state." One whose server runs is TERMINATING until its container has stopped; with no
+     * server, it is TERMINATED at once. One that has already ended is refused; no source gives AWS's answer for it,
+     * so the wording is Floci's.
      */
     public synchronized Session terminateSession(String applicationId, String sessionId) {
         applications.getApplication(applicationId);
         SessionRecord record = settle(findSession(applicationId, sessionId));
         if (ENDED.contains(record.getSession().getState())) {
             throw new AwsException("ValidationException", "Session " + sessionId + " has already ended.", 400);
+        }
+        Server server = servers.get(sessionId);
+        if (server != null) {
+            cancelCheck(server);
+            Session session = record.getSession();
+            session.setState(STATE_TERMINATING);
+            session.setStateDetails("");
+            session.setIdleSince(null);
+            session.setUpdatedAt(now());
+            store.put(sessionId, record);
+            dropGrants(sessionId);
+            sparkRunner.stop(sessionId);
+            LOG.infov("Terminating EMR Serverless session {0} on application {1}", sessionId, applicationId);
+            return copy(session);
         }
         end(record, STATE_TERMINATED, null, now());
         LOG.infov("Terminated EMR Serverless session {0} on application {1}", sessionId, applicationId);
@@ -195,17 +305,91 @@ public class EmrServerlessSessionService {
 
     /**
      * Where a client connects to a session that has not ended, with an authentication token, which is "time-limited
-     * to 1 hour". The endpoint is on Floci's own address, where nothing answers Spark Connect, as Floci runs no driver
-     * for a session. No source gives AWS's answer for a session that has ended, so the refusal's wording is Floci's.
+     * to 1 hour". The endpoint is Floci's own address, where {@link SparkConnectProxy} takes a call carrying the token
+     * on to the session's server: Spark Connect's {@code sc://} URL holds a host and a port but no path, so the token
+     * alone names the session. No source gives AWS's answer for a session that has ended, so the refusal's wording is
+     * Floci's.
      */
     public synchronized SparkConnectEndpoint sessionEndpoint(String applicationId, String sessionId) {
         applications.getApplication(applicationId);
         Session session = settle(findSession(applicationId, sessionId)).getSession();
-        if (ENDED.contains(session.getState())) {
+        if (ENDED.contains(session.getState()) || STATE_TERMINATING.equals(session.getState())) {
             throw new AwsException("ValidationException", "Session " + sessionId + " has ended.", 400);
         }
-        return SparkConnectEndpoint.issue(baseUrl, ENDPOINT_PATH + applicationId + "/" + sessionId, now(),
-                TOKEN_VALIDITY);
+        Instant now = now();
+        SparkConnectEndpoint endpoint = SparkConnectEndpoint.issue(baseUrl, "", now, TOKEN_VALIDITY);
+        grants.values().removeIf(grant -> !now.isBefore(grant.expiresAt()));
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(session.getArn());
+        grants.put(endpoint.authToken(), new Grant(arn.accountId(), arn.region(), sessionId,
+                endpoint.authTokenExpiresAt()));
+        return endpoint;
+    }
+
+    /**
+     * Where a Spark Connect call carrying {@code token} goes: the server of the session the token was given for, while
+     * the token has not expired and the session is IDLE or BUSY. The call makes the session BUSY until it ends. No
+     * source gives AWS's answer for a session that has not started or has ended, so the refusals' wording is Floci's.
+     */
+    @Override
+    public Optional<Route> route(String token) {
+        Grant grant = grants.get(token);
+        if (grant == null) {
+            return Optional.empty();
+        }
+        return Optional.of(RequestScopes.callAs(grant.accountId(), grant.region(), () -> callStarted(token, grant)));
+    }
+
+    private synchronized Route callStarted(String token, Grant grant) {
+        if (!clock.instant().isBefore(grant.expiresAt())) {
+            grants.remove(token);
+            return Route.refused(Route.UNAUTHENTICATED, TOKEN_EXPIRED);
+        }
+        SessionRecord record = store.get(grant.sessionId()).orElse(null);
+        if (record == null) {
+            grants.remove(token);
+            return Route.refused(Route.UNAUTHENTICATED, SparkConnectProxy.UNKNOWN_TOKEN);
+        }
+        Session session = settle(record).getSession();
+        if (!record.isContainerSession()) {
+            return Route.refused(Route.UNAVAILABLE, String.format(NO_SERVER, grant.sessionId()));
+        }
+        Server server = servers.get(grant.sessionId());
+        boolean ready = STATE_IDLE.equals(session.getState()) || STATE_BUSY.equals(session.getState());
+        if (server == null || server.host == null || !ready) {
+            return Route.refused(Route.UNAVAILABLE, String.format(NOT_READY, grant.sessionId(), session.getState()));
+        }
+        server.calls++;
+        if (STATE_IDLE.equals(session.getState())) {
+            session.setState(STATE_BUSY);
+            session.setIdleSince(null);
+            session.setUpdatedAt(now());
+            store.put(session.getSessionId(), record);
+            // A busy session's idle timeout does not run, so only its 24 hours are left to check.
+            checkLater(record);
+        }
+        long launchedIn = generation;
+        return Route.to(server.host, server.port, () -> RequestScopes.runAs(grant.accountId(), grant.region(),
+                () -> callEnded(grant.sessionId(), launchedIn)));
+    }
+
+    // A call has ended: with none left, the session is IDLE again from now.
+    private synchronized void callEnded(String sessionId, long launchedIn) {
+        Server server = servers.get(sessionId);
+        if (launchedIn != generation || server == null) {
+            return;
+        }
+        server.calls = Math.max(0, server.calls - 1);
+        if (server.calls > 0) {
+            return;
+        }
+        store.get(sessionId).filter(record -> STATE_BUSY.equals(record.getSession().getState())).ifPresent(record -> {
+            Instant now = now();
+            record.getSession().setState(STATE_IDLE);
+            record.getSession().setIdleSince(now);
+            record.getSession().setUpdatedAt(now);
+            store.put(sessionId, record);
+            checkLater(record);
+        });
     }
 
     /**
@@ -386,8 +570,6 @@ public class EmrServerlessSessionService {
         session.setArn(AwsArnUtils.Arn.of("emr-serverless", applicationArn.region(), applicationArn.accountId(),
                 applicationArn.resource() + "/sessions/" + sessionId).toString());
         session.setName(request.getName());
-        // With no driver to start, a session is ready, and idle, as it starts.
-        session.setState(STATE_IDLE);
         session.setStateDetails("");
         session.setReleaseLabel(app.getReleaseLabel());
         session.setExecutionRoleArn(request.getExecutionRoleArn());
@@ -395,8 +577,14 @@ public class EmrServerlessSessionService {
                 applicationArn.accountId()));
         session.setCreatedAt(now);
         session.setUpdatedAt(now);
-        session.setStartedAt(now);
-        session.setIdleSince(now);
+        if (sparkRunner == null) {
+            // With no driver to start, a session is ready, and idle, as it starts.
+            session.setState(STATE_IDLE);
+            session.setStartedAt(now);
+            session.setIdleSince(now);
+        } else {
+            session.setState(STATE_SUBMITTED);
+        }
         // "Only runtime configuration overrides are supported."
         if (request.getConfigurationOverrides() != null
                 && request.getConfigurationOverrides().get("runtimeConfiguration") != null) {
@@ -412,8 +600,222 @@ public class EmrServerlessSessionService {
         record.setSession(session);
         record.setClientToken(request.getClientToken());
         record.setRequest(original);
+        record.setContainerSession(sparkRunner != null);
         store.put(sessionId, record);
+        if (sparkRunner != null) {
+            launch(record, app);
+        }
         return record;
+    }
+
+    // Hands a session's server to a thread of its own, which runs it until the session ends.
+    private void launch(SessionRecord record, Application app) {
+        Session session = record.getSession();
+        // The session's 24 hours count from when its server answers, where settle() reads them, so the runner sets
+        // none of its own.
+        SparkJobRunner.Job job = jobRuns.sessionJob(app, session, Duration.ZERO, SPARK_CONNECT_PORT);
+        servers.put(session.getSessionId(), new Server());
+        long launchedIn = generation;
+        serverExecutor.execute(() -> runServer(job, launchedIn));
+    }
+
+    private void runServer(SparkJobRunner.Job job, long launchedIn) {
+        SparkJobRunner.Outcome outcome;
+        try {
+            outcome = sparkRunner.run(job, new ServerProgress(job, launchedIn));
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "The Spark Connect server of EMR Serverless session {0} could not run", job.runId());
+            outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage() != null ? e.getMessage() : e.toString());
+        }
+        SparkJobRunner.Outcome ended = outcome;
+        RequestScopes.runAs(job.accountId(), job.region(), () -> serverEnded(job.runId(), ended, launchedIn));
+    }
+
+    // Asks the server whether it answers until it does, its session stops starting, or its time to start is up.
+    private void awaitServer(SparkJobRunner.Job job, String host, int port, long launchedIn) {
+        long giveUp = System.nanoTime() + SERVER_START_LIMIT.toNanos();
+        while (RequestScopes.callAs(job.accountId(), job.region(), () -> starting(job.runId(), launchedIn))) {
+            String unanswered = probe.unanswered(host, port);
+            if (unanswered == null) {
+                RequestScopes.runAs(job.accountId(), job.region(), () -> serverReady(job.runId(), launchedIn));
+                return;
+            }
+            if (System.nanoTime() - giveUp >= 0) {
+                LOG.warnv("The Spark Connect server of EMR Serverless session {0} did not answer: {1}", job.runId(),
+                        unanswered);
+                RequestScopes.runAs(job.accountId(), job.region(),
+                        () -> serverSilent(job.runId(), unanswered, launchedIn));
+                return;
+            }
+            try {
+                Thread.sleep(SERVER_PROBE_INTERVAL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    private synchronized boolean starting(String sessionId, long launchedIn) {
+        return launchedIn == generation && store.get(sessionId)
+                .map(record -> STATE_STARTING.equals(record.getSession().getState())).orElse(false);
+    }
+
+    // Whether a session's server may still start, or go on.
+    private synchronized boolean stillGoing(String sessionId, long launchedIn) {
+        return launchedIn == generation && servers.containsKey(sessionId) && store.get(sessionId)
+                .map(record -> !ENDED.contains(record.getSession().getState())
+                        && !STATE_TERMINATING.equals(record.getSession().getState()))
+                .orElse(false);
+    }
+
+    private synchronized void serverStarted(String sessionId, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        store.get(sessionId).filter(record -> STATE_SUBMITTED.equals(record.getSession().getState()))
+                .ifPresent(record -> {
+                    record.getSession().setState(STATE_STARTING);
+                    record.getSession().setUpdatedAt(now());
+                    store.put(sessionId, record);
+                });
+    }
+
+    private synchronized boolean serverListening(String sessionId, String host, int port, long launchedIn) {
+        Server server = servers.get(sessionId);
+        if (launchedIn != generation || server == null) {
+            return false;
+        }
+        server.host = host;
+        server.port = port;
+        return true;
+    }
+
+    // The server answers: the session is ready, and IDLE, its idle timeout counting from now.
+    private synchronized void serverReady(String sessionId, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        store.get(sessionId).filter(record -> STATE_STARTING.equals(record.getSession().getState()))
+                .ifPresent(record -> {
+                    Instant now = now();
+                    Session session = record.getSession();
+                    session.setState(STATE_IDLE);
+                    session.setStartedAt(now);
+                    session.setIdleSince(now);
+                    session.setUpdatedAt(now);
+                    store.put(sessionId, record);
+                    checkLater(record);
+                    LOG.infov("EMR Serverless session {0} is ready", sessionId);
+                });
+    }
+
+    private synchronized void serverSilent(String sessionId, String unanswered, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        store.get(sessionId).filter(record -> STATE_STARTING.equals(record.getSession().getState()))
+                .ifPresent(record -> end(record, STATE_FAILED, String.format(SERVER_SILENT, unanswered), now()));
+    }
+
+    /**
+     * A session's server has stopped: a session being terminated is TERMINATED, as is one whose server Floci stopped or
+     * that ran past its 24 hours, and one whose server stopped on its own, or never started, has FAILED.
+     */
+    private synchronized void serverEnded(String sessionId, SparkJobRunner.Outcome outcome, long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        Server server = servers.remove(sessionId);
+        if (server != null) {
+            cancelCheck(server);
+        }
+        dropGrants(sessionId);
+        store.get(sessionId).ifPresent(record -> {
+            String state = record.getSession().getState();
+            if (ENDED.contains(state)) {
+                return;
+            }
+            Instant now = now();
+            if (STATE_TERMINATING.equals(state)) {
+                end(record, STATE_TERMINATED, null, now);
+            } else if (outcome.timedOut()) {
+                end(record, STATE_TERMINATED, HARD_LIMIT_REACHED, now);
+            } else if (outcome.stopped()) {
+                end(record, STATE_TERMINATED, null, now);
+            } else if (outcome.failure() != null) {
+                end(record, STATE_FAILED, String.format(SERVER_NOT_STARTED, outcome.failure()), now);
+            } else if (outcome.exitCode() != null) {
+                end(record, STATE_FAILED, String.format(SERVER_EXITED, outcome.exitCode()), now);
+            } else {
+                end(record, STATE_FAILED, SERVER_ENDED, now);
+            }
+        });
+    }
+
+    /**
+     * Checks a session with a server again at its next deadline: once its idle timeout passes, while it is idle, or
+     * once its 24 hours pass, whichever comes first, so it ends then, its server with it. Each session keeps one check,
+     * which this replaces, and which ending it cancels.
+     */
+    private void checkLater(SessionRecord record) {
+        Session session = record.getSession();
+        Server server = servers.get(session.getSessionId());
+        if (idleChecks == null || server == null || session.getStartedAt() == null) {
+            return;
+        }
+        Instant deadline = session.getStartedAt().plus(HARD_LIMIT);
+        Long minutes = session.getIdleTimeoutMinutes();
+        if (STATE_IDLE.equals(session.getState()) && session.getIdleSince() != null && minutes != null
+                && minutes > 0) {
+            Instant idleLimit = session.getIdleSince().plus(Duration.ofMinutes(minutes));
+            deadline = idleLimit.isBefore(deadline) ? idleLimit : deadline;
+        }
+        if (server.check != null) {
+            server.check.cancel(false);
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(session.getArn());
+        String sessionId = session.getSessionId();
+        server.check = idleChecks.schedule(
+                () -> RequestScopes.runAs(arn.accountId(), arn.region(), () -> checkNow(sessionId)),
+                Math.max(0, Duration.between(clock.instant(), deadline).toMillis()), TimeUnit.MILLISECONDS);
+    }
+
+    private static void cancelCheck(Server server) {
+        if (server.check != null) {
+            server.check.cancel(false);
+            server.check = null;
+        }
+    }
+
+    private synchronized void checkNow(String sessionId) {
+        store.get(sessionId).ifPresent(this::settle);
+    }
+
+    // One thread that ends sessions at their deadlines; a check a later one replaces leaves its queue at once.
+    private static ScheduledExecutorService sessionChecks() {
+        ScheduledThreadPoolExecutor checks = new ScheduledThreadPoolExecutor(1,
+                Thread.ofPlatform().daemon().name("emr-serverless-session-checks").factory());
+        checks.setRemoveOnCancelPolicy(true);
+        return checks;
+    }
+
+    private void dropGrants(String sessionId) {
+        grants.values().removeIf(grant -> grant.sessionId().equals(sessionId));
+    }
+
+    // Why no server answers at host and port yet, or null once one does.
+    private static String unanswered(SparkConnectProxy proxy, String host, int port) {
+        try {
+            return proxy.unanswered(host, port).toCompletionStage().toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return "interrupted";
+        } catch (Exception e) {
+            LOG.debugv(e, "Probing the Spark Connect server at {0}:{1} failed", host, port);
+            return e.toString();
+        }
     }
 
     /**
@@ -424,6 +826,16 @@ public class EmrServerlessSessionService {
     private SessionRecord settle(SessionRecord record) {
         Session session = record.getSession();
         if (ENDED.contains(session.getState())) {
+            return record;
+        }
+        // Its thread ends it; without one, Floci stopped while its server ran, and nothing is left to. A server
+        // container the startup's cleanup left behind goes now.
+        if (record.isContainerSession() && !servers.containsKey(session.getSessionId())) {
+            boolean terminating = STATE_TERMINATING.equals(session.getState());
+            end(record, terminating ? STATE_TERMINATED : STATE_FAILED, terminating ? null : INTERRUPTED, now());
+            if (sparkRunner != null) {
+                sparkRunner.removeLeftoverDriver(EmrServerlessJobRunService.SERVICE, session.getSessionId());
+            }
             return record;
         }
         Instant hardLimit = session.getStartedAt() != null ? session.getStartedAt().plus(HARD_LIMIT) : null;
@@ -451,6 +863,13 @@ public class EmrServerlessSessionService {
             session.setTotalExecutionDurationSeconds(Duration.between(session.getStartedAt(), at).toSeconds());
         }
         store.put(session.getSessionId(), record);
+        dropGrants(session.getSessionId());
+        // An ended session's server goes with it, and its check; its thread finds the session ended and leaves it so.
+        Server server = servers.get(session.getSessionId());
+        if (server != null) {
+            cancelCheck(server);
+            sparkRunner.stop(session.getSessionId());
+        }
     }
 
     private SessionRecord findSession(String applicationId, String sessionId) {
@@ -481,5 +900,59 @@ public class EmrServerlessSessionService {
 
     private Session copy(Session session) {
         return objectMapper.convertValue(session, Session.class);
+    }
+
+    /** Why no Spark Connect server answers at a host and port, or null once one does. */
+    @FunctionalInterface
+    interface ServerProbe {
+        String unanswered(String host, int port);
+    }
+
+    // A session's running server: where Floci reaches it, once its container runs, how many calls it is taking, and
+    // the check that ends the session at its next deadline.
+    private static final class Server {
+        String host;
+        int port;
+        int calls;
+        ScheduledFuture<?> check;
+    }
+
+    // What an authentication token was given for: a session, in its account and Region, until it expires.
+    private record Grant(String accountId, String region, String sessionId, Instant expiresAt) {
+    }
+
+    /** What the thread running a session's server tells the service, and asks it, as that session. */
+    private final class ServerProgress implements SparkJobRunner.Progress {
+
+        private final SparkJobRunner.Job job;
+        private final long launchedIn;
+
+        ServerProgress(SparkJobRunner.Job job, long launchedIn) {
+            this.job = job;
+            this.launchedIn = launchedIn;
+        }
+
+        @Override
+        public void started() {
+            RequestScopes.runAs(job.accountId(), job.region(), () -> serverStarted(job.runId(), launchedIn));
+        }
+
+        @Override
+        public void listening(String host, int port) {
+            if (RequestScopes.callAs(job.accountId(), job.region(),
+                    () -> serverListening(job.runId(), host, port, launchedIn))) {
+                serverExecutor.execute(() -> awaitServer(job, host, port, launchedIn));
+            }
+        }
+
+        @Override
+        public void timedOut() {
+            // The run's outcome says so, which serverEnded reads.
+        }
+
+        @Override
+        public boolean cancelled() {
+            return !RequestScopes.callAs(job.accountId(), job.region(), () -> stillGoing(job.runId(), launchedIn));
+        }
     }
 }

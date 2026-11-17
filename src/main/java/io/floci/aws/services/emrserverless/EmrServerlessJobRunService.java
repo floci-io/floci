@@ -26,6 +26,7 @@ import io.floci.aws.services.emrserverless.model.JobRunRecord;
 import io.floci.aws.services.emrserverless.model.JobRunSummary;
 import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
+import io.floci.aws.services.emrserverless.model.Session;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
 import io.floci.aws.services.iam.IamService;
@@ -85,8 +86,15 @@ public class EmrServerlessJobRunService implements Resettable {
     private static final String MODE_STREAMING = "STREAMING";
     private static final String RUNNER_DOCKER = "docker";
     // The service a container run's driver belongs to, which names it and labels it.
-    private static final String SERVICE = "emr-serverless";
+    static final String SERVICE = "emr-serverless";
     private static final String SPARK_DEFAULTS = "spark-defaults";
+    private static final String SPARK_CONNECT_SERVER = "org.apache.spark.sql.connect.service.SparkConnectServer";
+    // Where an emr- release's image keeps the Spark Connect server, as emr-7.13.0's does.
+    static final String SPARK_CONNECT_JAR = "/usr/lib/spark/connector/lib/spark-connect.jar";
+    // spark-submit's application for a class among Spark's own jars.
+    private static final String SPARK_INTERNAL = "spark-internal";
+    private static final String SPARK_CONNECT_PORT = "spark.connect.grpc.binding.port";
+    private static final String SPARK_CONNECT_ADDRESS = "spark.connect.grpc.binding.address";
     private static final String S3_MONITORING = "s3MonitoringConfiguration";
     private static final String CLOUD_WATCH_LOGGING = "cloudWatchLoggingConfiguration";
     // "If you don't specify the optional values, then CloudWatch publishes the logs to a default log group".
@@ -622,6 +630,48 @@ public class EmrServerlessJobRunService implements Resettable {
         runExecutor.execute(() -> execute(onPlatform, launchedIn));
     }
 
+    /** The runner of the docker runner mode, or null in the immediate one. */
+    SparkJobRunner containerRunner() {
+        return sparkRunner;
+    }
+
+    /**
+     * What runs a session's Spark Connect server in a container, as a run's driver runs: in the application's image,
+     * on its network, with the session's execution role and its executors as a run's are, for {@code limit} at most.
+     * Its {@code spark-defaults} are the application's, then the session's {@code runtimeConfiguration}, merged as a
+     * run's {@code applicationConfiguration} is, with the server's port {@code port}; a
+     * {@code spark.connect.grpc.binding.address} is dropped, as "The Spark configuration
+     * spark.connect.grpc.binding.address is reserved by EMR Serverless and cannot be overridden by users" (EMR
+     * Serverless user guide, "Run interactive sessions with Amazon EMR Serverless through Spark Connect").
+     */
+    SparkJobRunner.Job sessionJob(Application app, Session session, Duration limit, int port) {
+        Object overrides = session.getConfigurationOverrides() != null
+                ? session.getConfigurationOverrides().get("runtimeConfiguration") : null;
+        Map<String, String> sparkDefaults = classificationProperties(app, overrides, session.getReleaseLabel(),
+                SPARK_DEFAULTS);
+        sparkDefaults.remove(SPARK_CONNECT_ADDRESS);
+        sparkDefaults.put(SPARK_CONNECT_PORT, String.valueOf(port));
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(session.getArn());
+        SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, session.getSessionId(), arn.accountId(),
+                arn.region(), session.getReleaseLabel(), SparkJobRunner.Engine.SPARK, imageTemplate, customImage(app),
+                dockerNetwork, session.getExecutionRoleArn(), sparkDefaults,
+                sparkConnectServer(session.getReleaseLabel()), null, limit, null, null,
+                driverEnvironment(sparkDefaults), archives(sparkDefaults), null, Map.of(), Map.of(), Map.of(),
+                Map.of(), Map.of(), executors(app, executorContainers));
+        return job.withPlatform(honourArchitectures ? DockerPlatforms.forArchitecture(app.getArchitecture()) : null)
+                .listeningOn(port);
+    }
+
+    /**
+     * What starts the Spark Connect server on {@code spark-submit}'s command line: its class, and, on an emr- release,
+     * whose Spark 3.5 keeps the server in {@value #SPARK_CONNECT_JAR}, that jar as the application; the AWS runtime
+     * for Apache Spark's Spark 4 carries the server among its own jars.
+     */
+    static List<String> sparkConnectServer(String releaseLabel) {
+        return List.of("--class", SPARK_CONNECT_SERVER,
+                sparkRuntime(releaseLabel) ? SPARK_INTERNAL : SPARK_CONNECT_JAR);
+    }
+
     private void execute(SparkJobRunner.Job job, long launchedIn) {
         SparkJobRunner.Outcome outcome;
         try {
@@ -1057,16 +1107,26 @@ public class EmrServerlessJobRunService implements Resettable {
      * considered for this classification." From emr-spark-8.1.0 they merge by property, the run's winning.
      */
     private static Map<String, String> classificationProperties(Application app, JobRun run, String classification) {
+        Object overrides = run.getConfigurationOverrides() != null
+                ? run.getConfigurationOverrides().get("applicationConfiguration") : null;
+        return classificationProperties(app, overrides, run.getReleaseLabel(), classification);
+    }
+
+    /**
+     * A {@code classification}'s properties: the application's runtime configuration, then {@code overrides}, a
+     * workload's own configuration list on {@code releaseLabel}, merged as {@link #classificationProperties} merges a
+     * run's.
+     */
+    private static Map<String, String> classificationProperties(Application app, Object overrides,
+                                                                String releaseLabel, String classification) {
         Map<String, String> properties = new LinkedHashMap<>();
         if (app.getRuntimeConfiguration() != null) {
             for (RuntimeConfiguration configuration : app.getRuntimeConfiguration()) {
                 addProperties(properties, configuration.getMembers(), classification);
             }
         }
-        Object overrides = run.getConfigurationOverrides() != null
-                ? run.getConfigurationOverrides().get("applicationConfiguration") : null;
         if (overrides instanceof List<?> configurations) {
-            boolean replaces = !releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, run.getReleaseLabel(), 8, 1);
+            boolean replaces = !releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 1);
             for (Object configuration : configurations) {
                 if (configuration instanceof Map<?, ?> members
                         && classification.equals(members.get("classification"))) {

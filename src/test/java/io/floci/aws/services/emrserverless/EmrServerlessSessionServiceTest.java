@@ -6,6 +6,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SparkConnectEndpoint;
+import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.emrserverless.model.AutoStartConfiguration;
 import io.floci.aws.services.emrserverless.model.CreateApplicationRequest;
@@ -240,12 +241,27 @@ class EmrServerlessSessionServiceTest {
 
         SparkConnectEndpoint endpoint = sessions.sessionEndpoint(applicationId, sessionId);
 
-        assertEquals("http://localhost:4566/_aws/emr-serverless/sessions/" + applicationId + "/" + sessionId,
-                endpoint.url());
+        // Spark Connect's sc:// URL holds no path, so the endpoint is Floci's address and the token names the session.
+        assertEquals("http://localhost:4566", endpoint.url());
         assertEquals(64, endpoint.authToken().length());
         assertTrue(Duration.between(clock.instant(), endpoint.authTokenExpiresAt()).compareTo(Duration.ofMinutes(59))
                 > 0);
         assertNotEquals(endpoint.authToken(), sessions.sessionEndpoint(applicationId, sessionId).authToken());
+    }
+
+    @Test
+    void aCallToASessionWithNoServerIsRefusedAsUnavailableAndAnUnknownTokenNamesNone() {
+        String applicationId = application("emr-7.13.0", "SPARK", true);
+        String sessionId = sessions.startSession(applicationId, request()).getSessionId();
+        String token = sessions.sessionEndpoint(applicationId, sessionId).authToken();
+
+        SparkConnectTargets.Route route = sessions.route(token).orElseThrow();
+
+        assertEquals(SparkConnectTargets.Route.UNAVAILABLE, route.status());
+        assertEquals(String.format(EmrServerlessSessionService.NO_SERVER, sessionId), route.refusal());
+        assertTrue(sessions.route("not-a-token").isEmpty());
+        clock.advance(EmrServerlessSessionService.TOKEN_VALIDITY);
+        assertEquals(EmrServerlessSessionService.TOKEN_EXPIRED, sessions.route(token).orElseThrow().refusal());
     }
 
     @Test
