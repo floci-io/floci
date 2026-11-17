@@ -4,14 +4,17 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A stored job run: the run as GetJobRun reports it, plus what only Floci needs. The client token
  * and the request it came with decide whether a repeated StartJobRun is a retry or a conflict; the
  * application type fills ListJobRuns' {@code type}. A container run is one the {@code docker} runner
  * mode runs, whose state its container decides. A run retried after a failed attempt keeps each earlier
- * attempt as GetJobRun reports it for that attempt, oldest first; {@code jobRun} is the latest.
+ * attempt as GetJobRun reports it for that attempt, oldest first; {@code jobRun} is the latest. Each attempt's
+ * driver log destinations are kept as it was admitted, by attempt number.
  */
 @RegisterForReflection
 public class JobRunRecord {
@@ -21,6 +24,7 @@ public class JobRunRecord {
     private String applicationType;
     private boolean containerRun;
     private List<JobRun> earlierAttempts = new ArrayList<>();
+    private Map<Integer, DriverLogDestinations> driverLogs = new LinkedHashMap<>();
 
     public JobRun getJobRun() { return jobRun; }
     public void setJobRun(JobRun jobRun) { this.jobRun = jobRun; }
@@ -34,4 +38,6 @@ public class JobRunRecord {
     public void setContainerRun(boolean containerRun) { this.containerRun = containerRun; }
     public List<JobRun> getEarlierAttempts() { return earlierAttempts; }
     public void setEarlierAttempts(List<JobRun> earlierAttempts) { this.earlierAttempts = earlierAttempts; }
+    public Map<Integer, DriverLogDestinations> getDriverLogs() { return driverLogs; }
+    public void setDriverLogs(Map<Integer, DriverLogDestinations> driverLogs) { this.driverLogs = driverLogs; }
 }

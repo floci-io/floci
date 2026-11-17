@@ -33,6 +33,7 @@ The emulator implements the standard AWS `emr-serverless` service endpoints:
 * `GET /applications/{applicationId}/jobruns/{jobRunId}` (GetJobRun)
 * `DELETE /applications/{applicationId}/jobruns/{jobRunId}` (CancelJobRun)
 * `GET /applications/{applicationId}/jobruns/{jobRunId}/attempts` (ListJobRunAttempts)
+* `GET /applications/{applicationId}/jobruns/{jobRunId}/dashboard` (GetDashboardForJobRun)
 * `POST /tags/{resourceArn}` (TagResource)
 * `DELETE /tags/{resourceArn}?tagKeys=...` (UntagResource)
 * `GET /tags/{resourceArn}` (ListTagsForResource)
@@ -130,6 +131,16 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   No source says whether a run's timeout spans its attempts; Floci applies it to each.
 * `createdBy` is the caller's ARN, as `GetCallerIdentity` reports it. `releaseLabel` and
   `networkConfiguration` come from the application.
+* **Dashboard**: `GetDashboardForJobRun` gives "a URL that you can use to access the application UIs for a job run",
+  for the latest attempt or the `attempt` asked for, checked as `GetJobRun` checks it, and, as AWS's, "The URL is
+  valid for one hour after you generate it". EMR Serverless opens the run's live Spark or Tez UI while it runs and its
+  Spark History Server or persistent Tez UI once it has ended; Floci keeps neither, so the URL opens a page Floci
+  serves at `/_aws/emr-serverless/dashboard` on its own address (`base-url`, or `hostname`), with the attempt's
+  state, its times and where its driver's logs go in S3 and in CloudWatch Logs, kept as the attempt was admitted, so
+  a later change to the application's monitoring configuration does not move them. The link names the run and is signed
+  with a key Floci makes as it starts: one changed, or past its hour, or given before Floci restarted, opens a `403`
+  page asking for a new one, and one whose run has gone a `404`. Like the rest of Floci, the page asks for no
+  credentials. `accessSystemProfileLogs`, for jobs on Lake Formation, changes nothing.
 
 A state machine drives applications and job runs through the `emr-serverless:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR Serverless tasks](step-functions.md#amazon-emr-serverless-tasks).

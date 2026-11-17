@@ -2,6 +2,7 @@ package io.floci.aws.services.emrserverless;
 
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.ApplicationSummary;
 import io.floci.aws.services.emrserverless.model.CancelJobRunResponse;
@@ -9,6 +10,7 @@ import io.floci.aws.services.emrserverless.model.CreateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.CreateApplicationResponse;
 import io.floci.aws.services.emrserverless.model.DeleteApplicationResponse;
 import io.floci.aws.services.emrserverless.model.GetApplicationResponse;
+import io.floci.aws.services.emrserverless.model.GetDashboardForJobRunResponse;
 import io.floci.aws.services.emrserverless.model.GetJobRunResponse;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
@@ -46,11 +48,16 @@ public class EmrServerlessController {
 
     private final EmrServerlessService service;
     private final EmrServerlessJobRunService jobRuns;
+    private final EmrServerlessDashboards dashboards;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public EmrServerlessController(EmrServerlessService service, EmrServerlessJobRunService jobRuns) {
+    public EmrServerlessController(EmrServerlessService service, EmrServerlessJobRunService jobRuns,
+                                   EmrServerlessDashboards dashboards, RegionResolver regionResolver) {
         this.service = service;
         this.jobRuns = jobRuns;
+        this.dashboards = dashboards;
+        this.regionResolver = regionResolver;
     }
 
     @POST
@@ -164,6 +171,23 @@ public class EmrServerlessController {
         GetJobRunResponse response = new GetJobRunResponse();
         response.setJobRun(jobRuns.getJobRun(applicationId, jobRunId,
                 EmrServerlessJobRunService.parseAttempt(attempt)));
+        return response;
+    }
+
+    /**
+     * The link to a run's application UI, for the attempt asked for or else the latest, the run and attempt checked as
+     * GetJobRun checks them ({@link EmrServerlessDashboards}). {@code accessSystemProfileLogs} is for jobs on Lake
+     * Formation, which Floci runs none of, so it changes nothing.
+     */
+    @GET
+    @Path("/{applicationId}/jobruns/{jobRunId}/dashboard")
+    public GetDashboardForJobRunResponse getDashboardForJobRun(@PathParam("applicationId") String applicationId,
+                                                               @PathParam("jobRunId") String jobRunId,
+                                                               @QueryParam("attempt") String attempt) {
+        JobRun run = jobRuns.getJobRun(applicationId, jobRunId, EmrServerlessJobRunService.parseAttempt(attempt));
+        GetDashboardForJobRunResponse response = new GetDashboardForJobRunResponse();
+        response.setUrl(dashboards.url(regionResolver.getAccountId(), regionResolver.getRegion(), applicationId,
+                jobRunId, run.getAttempt() != null ? run.getAttempt() : 1));
         return response;
     }
 

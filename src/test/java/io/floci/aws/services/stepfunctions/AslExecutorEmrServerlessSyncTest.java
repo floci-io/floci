@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.emrserverless.EmrServerlessController;
+import io.floci.aws.services.emrserverless.EmrServerlessDashboards;
 import io.floci.aws.services.emrserverless.EmrServerlessJobRunService;
 import io.floci.aws.services.emrserverless.EmrServerlessService;
 import io.floci.aws.services.emrserverless.model.Application;
@@ -77,7 +79,8 @@ class AslExecutorEmrServerlessSyncTest {
                 .sfnService(instance)
                 .customResourceLiveness(null)
                 .emrServerlessTaskInvoker(new EmrServerlessTaskInvoker(
-                        new EmrServerlessController(applications, jobRuns), objectMapper))
+                        new EmrServerlessController(applications, jobRuns, mock(EmrServerlessDashboards.class),
+                                mock(RegionResolver.class)), objectMapper))
                 .nanoTime(testNanos::get)
                 .sleeper(testNanos::addAndGet)
                 .build();
