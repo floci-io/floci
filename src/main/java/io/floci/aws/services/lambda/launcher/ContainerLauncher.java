@@ -516,6 +516,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 lambdaAccountId, containerId, cwLogGroup, cwLogStream,
                 lambdaRegion, "lambda:" + fn.getFunctionName());
         handle.setLogStream(logHandle);
+        handle.setLogTailReader(initialization -> InvocationLogTail.captureDocker(dockerClient, handle.getContainerId(), initialization));
 
         return handle;
         } catch (RuntimeException e) {

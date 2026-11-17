@@ -1076,6 +1076,19 @@ exist, and `AWS_LAMBDA_LOG_GROUP_NAME` names that group. Once a group is named, 
 functions can share, each stream's name carries the function's name, as on AWS:
 `2026/10/16/my-fn[$LATEST]<id>` rather than the default group's `2026/10/16/[$LATEST]<id>`.
 
+For a synchronous `Invoke`, `LogType=Tail` returns the last 4,096 bytes of that invocation's
+standard output and standard error, base64-encoded in `X-Amz-Log-Result` (`LogResult` in
+the SDK and CLI). The first invocation also includes initialization output. A warm
+invocation's tail excludes earlier invocations in the same environment. `LogType=None`,
+an omitted log type, `Event` and `DryRun` omit the header. CloudWatch log forwarding
+continues independently.
+
+Warm invocation boundaries come from the Docker daemon's or kubelet's log timestamps,
+so differences between Floci's clock and the log source's clock do not affect filtering.
+Kubernetes snapshots also filter timestamps locally at nanosecond precision. Synchronous
+durable invocations return a bounded tail across their handler invocations, including
+logs produced after a checkpoint completes the execution and before the handler returns.
+
 The execution environment gets `AWS_LAMBDA_LOG_FORMAT` from `LogFormat` and, under `LogFormat=JSON`,
 `AWS_LAMBDA_LOG_LEVEL` from `ApplicationLogLevel` (`INFO` when unset, the level the API reports).
 The runtime interface clients read both: a Python function writes each record as a JSON object,
