@@ -3,6 +3,7 @@ package io.floci.aws.services.emrserverless;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -179,6 +180,8 @@ public class EmrServerlessJobRunService implements Resettable {
     private final Set<String> executing = new HashSet<>();
     // Raised by each reset, so a run's thread from before it writes nothing back after the wipe.
     private long generation;
+    // The latest sequence a run was given, nextSequence.
+    private long lastSequence;
 
     @Inject
     public EmrServerlessJobRunService(StorageFactory storageFactory, EmrServerlessService applications,
@@ -282,7 +285,7 @@ public class EmrServerlessJobRunService implements Resettable {
         JobRunRecord existing = EmrServerlessService.startedWithClientToken(store.scan(key -> true),
                 body.getClientToken(), JobRunRecord::getClientToken, record -> inRequestRegion(record.getJobRun()));
         if (existing != null) {
-            if (!original.equals(existing.getRequest())) {
+            if (!sameRun(existing.getRequest(), applicationId, body)) {
                 throw new AwsException("ConflictException", "Request did not match the original", 409);
             }
             return settle(existing).getJobRun();
@@ -411,8 +414,8 @@ public class EmrServerlessJobRunService implements Resettable {
                 String.valueOf(createdAtBefore), String.valueOf(mode));
         PaginatedResult<JobRunRecord> page = EmrServerlessService.pageByState(matching,
                 record -> record.getJobRun().getJobRunId(), record -> record.getJobRun().getState(),
-                record -> record.getJobRun().getCreatedAt(), states, maxResults, MAX_LIST_RESULTS, nextToken,
-                namespace);
+                record -> record.getJobRun().getCreatedAt(), JobRunRecord::getSequence, states, maxResults,
+                MAX_LIST_RESULTS, nextToken, namespace);
         return new PaginatedResult<>(page.items().stream().map(EmrServerlessJobRunService::toSummary).toList(),
                 page.nextToken());
     }
@@ -508,6 +511,50 @@ public class EmrServerlessJobRunService implements Resettable {
         }
     }
 
+    /**
+     * Sets on {@code run} what a run takes from the request that starts it, as it holds it: its name, role, policy,
+     * configuration overrides, driver, tags (none where the request gives none), execution timeout
+     * ({@value #DEFAULT_EXECUTION_TIMEOUT_MINUTES} minutes where it gives none), mode and retry policy.
+     */
+    private static void requested(JobRun run, StartJobRunRequest request) {
+        run.setName(request.getName());
+        run.setExecutionRole(request.getExecutionRoleArn());
+        run.setExecutionIamPolicy(request.getExecutionIamPolicy());
+        run.setConfigurationOverrides(request.getConfigurationOverrides());
+        run.setJobDriver(request.getJobDriver());
+        run.setTags(request.getTags() != null ? new LinkedHashMap<>(request.getTags()) : new LinkedHashMap<>());
+        run.setExecutionTimeoutMinutes(request.getExecutionTimeoutMinutes() != null
+                ? request.getExecutionTimeoutMinutes() : DEFAULT_EXECUTION_TIMEOUT_MINUTES);
+        run.setMode(request.getMode());
+        run.setRetryPolicy(request.getRetryPolicy());
+    }
+
+    /**
+     * Whether a retry asks for the run its original started: on the same application, with what the two would have
+     * the run hold alike, {@link #requested}. A member the run holds the same way whether it is left out or given,
+     * the execution timeout at its default or the tags empty, is alike; one the run would hold otherwise, such as a
+     * mode given where the original left it out, is not.
+     */
+    private boolean sameRun(JsonNode original, String applicationId, StartJobRunRequest retried) {
+        ObjectNode first = ((ObjectNode) original).deepCopy();
+        String firstApplication = first.path("applicationId").asText(null);
+        first.remove("applicationId");
+        return applicationId.equals(firstApplication)
+                && held(objectMapper.convertValue(first, StartJobRunRequest.class)).equals(held(retried));
+    }
+
+    private JsonNode held(StartJobRunRequest request) {
+        JobRun run = new JobRun();
+        requested(run, request);
+        return objectMapper.valueToTree(run);
+    }
+
+    // The sequence of a run created at now, after the last this service gave.
+    private long nextSequence(Instant now) {
+        lastSequence = EmrServerlessService.nextSequence(lastSequence, now);
+        return lastSequence;
+    }
+
     private JobRunRecord newRun(Application app, StartJobRunRequest request, JsonNode original) {
         AwsArnUtils.Arn applicationArn = AwsArnUtils.parse(app.getArn());
         String jobRunId = EmrServerlessService.newId();
@@ -516,26 +563,17 @@ public class EmrServerlessJobRunService implements Resettable {
         JobRun run = new JobRun();
         run.setApplicationId(app.getApplicationId());
         run.setJobRunId(jobRunId);
-        run.setName(request.getName());
         run.setArn(AwsArnUtils.Arn.of("emr-serverless", applicationArn.region(), applicationArn.accountId(),
                 applicationArn.resource() + "/jobruns/" + jobRunId).toString());
         run.setCreatedBy(EmrServerlessService.createdBy(iamService, requestContext, regionResolver,
                 applicationArn.accountId()));
         run.setCreatedAt(now);
         run.setUpdatedAt(now);
-        run.setExecutionRole(request.getExecutionRoleArn());
-        run.setExecutionIamPolicy(request.getExecutionIamPolicy());
+        requested(run, request);
         run.setState(sparkRunner != null ? STATE_SCHEDULED : STATE_RUNNING);
         run.setStateDetails("");
         run.setReleaseLabel(app.getReleaseLabel());
-        run.setConfigurationOverrides(request.getConfigurationOverrides());
-        run.setJobDriver(request.getJobDriver());
-        run.setTags(request.getTags() != null ? new LinkedHashMap<>(request.getTags()) : new LinkedHashMap<>());
         run.setNetworkConfiguration(app.getNetworkConfiguration());
-        run.setExecutionTimeoutMinutes(request.getExecutionTimeoutMinutes() != null
-                ? request.getExecutionTimeoutMinutes() : DEFAULT_EXECUTION_TIMEOUT_MINUTES);
-        run.setMode(request.getMode());
-        run.setRetryPolicy(request.getRetryPolicy());
         run.setAttempt(FIRST_ATTEMPT);
         run.setAttemptCreatedAt(now);
         run.setAttemptUpdatedAt(now);
@@ -546,6 +584,7 @@ public class EmrServerlessJobRunService implements Resettable {
 
         JobRunRecord record = new JobRunRecord();
         record.setJobRun(run);
+        record.setSequence(nextSequence(now));
         record.setClientToken(request.getClientToken());
         record.setRequest(original);
         record.setApplicationType(app.getType());

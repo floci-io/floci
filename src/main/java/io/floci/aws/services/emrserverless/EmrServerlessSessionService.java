@@ -3,6 +3,7 @@ package io.floci.aws.services.emrserverless;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -132,6 +133,8 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
     private final Map<String, Grant> grants = new ConcurrentHashMap<>();
     // Raised by each reset, so a server's thread from before it writes nothing back after the wipe.
     private long generation;
+    // The latest sequence a session was given, EmrServerlessService.nextSequence.
+    private long lastSequence;
 
     @Inject
     public EmrServerlessSessionService(StorageFactory storageFactory, EmrServerlessService applications,
@@ -217,7 +220,7 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
         SessionRecord existing = EmrServerlessService.startedWithClientToken(store.scan(key -> true),
                 body.getClientToken(), SessionRecord::getClientToken, record -> inRequestRegion(record.getSession()));
         if (existing != null) {
-            if (!original.equals(existing.getRequest())) {
+            if (!sameSession(existing.getRequest(), applicationId, body)) {
                 throw new AwsException("ConflictException", "Request did not match the original", 409);
             }
             return copy(settle(existing).getSession());
@@ -250,7 +253,7 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
             throw SmithyValidationErrors.validationException(violations);
         }
         applications.getApplication(applicationId);
-        List<Session> matching = new ArrayList<>();
+        List<SessionRecord> matching = new ArrayList<>();
         for (SessionRecord record : store.scan(key -> true)) {
             Session session = record.getSession();
             if (!applicationId.equals(session.getApplicationId()) || !inRequestRegion(session)) {
@@ -262,14 +265,17 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
                     || (createdAtBefore != null && !session.getCreatedAt().isBefore(createdAtBefore))) {
                 continue;
             }
-            matching.add(session);
+            matching.add(record);
         }
         String namespace = String.join("|", "ListSessions", applicationId,
                 String.valueOf(states != null ? states : List.of()), String.valueOf(createdAtAfter),
                 String.valueOf(createdAtBefore));
-        PaginatedResult<Session> page = EmrServerlessService.pageByState(matching, Session::getSessionId,
-                Session::getState, Session::getCreatedAt, states, maxResults, MAX_LIST_RESULTS, nextToken, namespace);
-        return new PaginatedResult<>(page.items().stream().map(SessionSummary::of).toList(), page.nextToken());
+        PaginatedResult<SessionRecord> page = EmrServerlessService.pageByState(matching,
+                record -> record.getSession().getSessionId(), record -> record.getSession().getState(),
+                record -> record.getSession().getCreatedAt(), SessionRecord::getSequence, states, maxResults,
+                MAX_LIST_RESULTS, nextToken, namespace);
+        return new PaginatedResult<>(page.items().stream().map(record -> SessionSummary.of(record.getSession()))
+                .toList(), page.nextToken());
     }
 
     /**
@@ -569,10 +575,9 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
         session.setSessionId(sessionId);
         session.setArn(AwsArnUtils.Arn.of("emr-serverless", applicationArn.region(), applicationArn.accountId(),
                 applicationArn.resource() + "/sessions/" + sessionId).toString());
-        session.setName(request.getName());
+        requested(session, request);
         session.setStateDetails("");
         session.setReleaseLabel(app.getReleaseLabel());
-        session.setExecutionRoleArn(request.getExecutionRoleArn());
         session.setCreatedBy(EmrServerlessService.createdBy(iamService, requestContext, regionResolver,
                 applicationArn.accountId()));
         session.setCreatedAt(now);
@@ -585,19 +590,12 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
         } else {
             session.setState(STATE_SUBMITTED);
         }
-        // "Only runtime configuration overrides are supported."
-        if (request.getConfigurationOverrides() != null
-                && request.getConfigurationOverrides().get("runtimeConfiguration") != null) {
-            session.setConfigurationOverrides(Map.of("runtimeConfiguration",
-                    request.getConfigurationOverrides().get("runtimeConfiguration")));
-        }
         session.setNetworkConfiguration(app.getNetworkConfiguration());
-        session.setIdleTimeoutMinutes(request.getIdleTimeoutMinutes() != null
-                ? request.getIdleTimeoutMinutes() : DEFAULT_IDLE_TIMEOUT_MINUTES);
-        session.setTags(request.getTags() != null ? new LinkedHashMap<>(request.getTags()) : new LinkedHashMap<>());
 
         SessionRecord record = new SessionRecord();
         record.setSession(session);
+        lastSequence = EmrServerlessService.nextSequence(lastSequence, now);
+        record.setSequence(lastSequence);
         record.setClientToken(request.getClientToken());
         record.setRequest(original);
         record.setContainerSession(sparkRunner != null);
@@ -816,6 +814,43 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
             LOG.debugv(e, "Probing the Spark Connect server at {0}:{1} failed", host, port);
             return e.toString();
         }
+    }
+
+    /**
+     * Sets on {@code session} what a session takes from the request that starts it, as it holds it: its name, role,
+     * runtime configuration overrides alone, as "Only runtime configuration overrides are supported", idle timeout
+     * ({@value #DEFAULT_IDLE_TIMEOUT_MINUTES} minutes where the request gives none) and tags (none where it gives
+     * none).
+     */
+    private static void requested(Session session, StartSessionRequest request) {
+        session.setName(request.getName());
+        session.setExecutionRoleArn(request.getExecutionRoleArn());
+        if (request.getConfigurationOverrides() != null
+                && request.getConfigurationOverrides().get("runtimeConfiguration") != null) {
+            session.setConfigurationOverrides(Map.of("runtimeConfiguration",
+                    request.getConfigurationOverrides().get("runtimeConfiguration")));
+        }
+        session.setIdleTimeoutMinutes(request.getIdleTimeoutMinutes() != null
+                ? request.getIdleTimeoutMinutes() : DEFAULT_IDLE_TIMEOUT_MINUTES);
+        session.setTags(request.getTags() != null ? new LinkedHashMap<>(request.getTags()) : new LinkedHashMap<>());
+    }
+
+    /**
+     * Whether a retry asks for the session its original started: on the same application, with what the two would
+     * have the session hold alike, {@link #requested}, as a job run's retry is compared.
+     */
+    private boolean sameSession(JsonNode original, String applicationId, StartSessionRequest retried) {
+        ObjectNode first = ((ObjectNode) original).deepCopy();
+        String firstApplication = first.path("applicationId").asText(null);
+        first.remove("applicationId");
+        return applicationId.equals(firstApplication)
+                && held(objectMapper.convertValue(first, StartSessionRequest.class)).equals(held(retried));
+    }
+
+    private JsonNode held(StartSessionRequest request) {
+        Session session = new Session();
+        requested(session, request);
+        return objectMapper.valueToTree(session);
     }
 
     /**
