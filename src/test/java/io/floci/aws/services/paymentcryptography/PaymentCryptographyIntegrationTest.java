@@ -740,6 +740,85 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aPolicyThatNamesTheKeyItIsOnIsAttached() {
+        // The resource may be the key's own ARN as well as every resource.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"" + arn + "\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyOfOneStatementIsAttached() {
+        // The statement may stand alone rather than in a list.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyThatNamesNoResourceIsRefused() {
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"]}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatCarriesNoStatementIsRefused() {
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn, "{\"Version\":\"2012-10-17\"}"))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatGrantsEveryoneAccessThroughItsPrincipalIsRefused() {
+        // The principal may be written as a list of principals, and a wildcard among them
+        // is everyone.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":[\"arn:aws:iam::111122223333:role/ExampleRole\",\"*\"]},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("PublicPolicyException"));
+    }
+
+    @Test
+    void aPolicyThatCarriesAConditionIsAttached() {
+        // A condition narrows the grant, so the grant is not to everyone.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":\"*\","
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:PrincipalAccount\":\"111122223333\"}}}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
     void aKeyThatDoesNotExistIsNotFound() {
         call("GetKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:000000000000:key/"
                 + "0123456789abcdef0123456789abcdef\"}")
