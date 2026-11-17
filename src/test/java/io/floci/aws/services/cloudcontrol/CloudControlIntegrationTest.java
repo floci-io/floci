@@ -14,13 +14,10 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
-
 import static io.restassured.RestAssured.given;
 import static io.restassured.config.EncoderConfig.encoderConfig;
 import static io.restassured.config.RestAssuredConfig.config;
 import static io.restassured.http.ContentType.TEXT;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -287,7 +284,7 @@ class CloudControlIntegrationTest {
      * the delete removes it.
      */
     @Test
-    void aResourceIsCreatedAndDeletedInTheRequestsRegion() {
+    void aResourceIsCreatedAndDeletedInTheRequestsRegion() throws InterruptedException {
         String ct = "application/x-amz-json-1.0";
         String account = "333333333333";
         String region = "eu-west-1";
@@ -301,26 +298,13 @@ class CloudControlIntegrationTest {
                 .when().post("/").then().statusCode(200)
                 .extract().path("ProgressEvent.RequestToken");
 
-        ExtractableResponse<Response> done = await("the create finishes").atMost(Duration.ofSeconds(10))
-                .pollInterval(Duration.ofMillis(100))
-                .until(() -> given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
-                                .contentType(ct).header("Authorization", auth)
-                                .header("X-Amz-Target", "CloudApiService.GetResourceRequestStatus")
-                                .body("{\"RequestToken\":\"" + token + "\"}")
-                                .when().post("/").then().statusCode(200).extract(),
-                        status -> !"IN_PROGRESS".equals(status.path("ProgressEvent.OperationStatus")));
-        assertEquals("SUCCESS", done.path("ProgressEvent.OperationStatus"), done.asString());
-        String apiId = done.path("ProgressEvent.Identifier");
+        String apiId = awaitIdentifier(token, ct, auth);
+        assertNotNull(apiId, "the create succeeds");
 
         AppSyncRequests.signed(account, region).get("/v1/apis/" + apiId + "/environmentVariables")
                 .then().statusCode(200).body("environmentVariables.STAGE", equalTo("eu"));
 
-        given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
-                .contentType(ct).header("Authorization", auth)
-                .header("X-Amz-Target", "CloudApiService.DeleteResource")
-                .body("{\"TypeName\":\"AWS::AppSync::GraphQLApi\",\"Identifier\":\"" + apiId + "\"}")
-                .when().post("/").then().statusCode(200)
-                .body("ProgressEvent.OperationStatus", equalTo("SUCCESS"));
+        deleteThroughCloudControl(ct, auth, "AWS::AppSync::GraphQLApi", apiId, "SUCCESS");
         AppSyncRequests.signed(account, region).get("/v1/apis/" + apiId).then().statusCode(404);
     }
 
@@ -349,10 +333,14 @@ class CloudControlIntegrationTest {
     }
 
     private void deleteThroughCloudControl(String ct, String auth, String identifier, String status) {
+        deleteThroughCloudControl(ct, auth, "AWS::EC2::VPC", identifier, status);
+    }
+
+    private void deleteThroughCloudControl(String ct, String auth, String typeName, String identifier, String status) {
         given().config(config().encoderConfig(encoderConfig().encodeContentTypeAs(ct, TEXT)))
                 .contentType(ct).header("Authorization", auth)
                 .header("X-Amz-Target", "CloudApiService.DeleteResource")
-                .body("{\"TypeName\":\"AWS::EC2::VPC\",\"Identifier\":\"" + identifier + "\"}")
+                .body("{\"TypeName\":\"" + typeName + "\",\"Identifier\":\"" + identifier + "\"}")
                 .when().post("/").then().statusCode(200)
                 .body("ProgressEvent.OperationStatus", equalTo(status));
     }
