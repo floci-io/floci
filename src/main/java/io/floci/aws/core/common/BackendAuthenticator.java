@@ -210,7 +210,8 @@ public final class BackendAuthenticator {
             throw new IOException("backend asks for " + iterations + " SCRAM iterations, more than "
                     + MAX_ITERATIONS);
         }
-        if (!nonce.startsWith(clientNonce)) {
+        // The server appends its own part (RFC 5802, section 5.1); the client's nonce alone is not one.
+        if (nonce.length() <= clientNonce.length() || !nonce.startsWith(clientNonce)) {
             throw new IOException("backend SCRAM nonce does not extend the client nonce");
         }
         String withoutProof = "c=biws,r=" + nonce;

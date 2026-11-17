@@ -88,6 +88,16 @@ class BackendAuthenticatorTest {
                 () -> authenticator.answer(auth(11, text("r=other,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"))));
     }
 
+    @Test
+    void aServerNonceEqualToTheClientNonceFails() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+
+        IOException refused = assertThrows(IOException.class,
+                () -> authenticator.answer(auth(11, text("r=" + NONCE + ",s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"))));
+        assertEquals("backend SCRAM nonce does not extend the client nonce", refused.getMessage());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void authenticationOkBeforeTheServerSignatureIsRefused(boolean scramOnly) throws Exception {
