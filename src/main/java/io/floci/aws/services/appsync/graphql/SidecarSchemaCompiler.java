@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
  * Prepares a customer's SDL for the (AWS-agnostic) GraphQL sidecar and validates it against it
  * (issue #2917): what {@code AppSyncSchemaParser} used to do in-process. AppSync provides its
  * directive declarations ({@code @aws_auth} etc.) and the 17 custom scalar type declarations
- * implicitly: customers never write {@code scalar AWSDateTime} themselves. That injection is
+ * implicitly, though customers may also declare these scalar types in their own SDL. That injection is
  * pure AWS-specific knowledge (which directives exist, their exact argument shapes) with no
  * business living in the sidecar, so it happens here, before the SDL is ever sent anywhere.
  */
@@ -58,7 +58,6 @@ public class SidecarSchemaCompiler {
             Map.entry("AWSByte", "base64"));
 
     private static final Pattern DIRECTIVE_USE = Pattern.compile("@(\\w+)");
-    private static final Pattern GRAPHQL_NAME = Pattern.compile("[_A-Za-z][_0-9A-Za-z]*");
 
     private final GraphqlSidecarClient sidecarClient;
 
@@ -149,10 +148,12 @@ public class SidecarSchemaCompiler {
                 if (braces == 0 && parentheses == 0 && brackets == 0) {
                     if (token.equals("scalar") && !previousTopLevelToken.equals("extend")) {
                         int nameStart = skipIgnored(clean, index);
-                        Matcher name = GRAPHQL_NAME.matcher(clean);
-                        name.region(nameStart, clean.length());
-                        if (name.lookingAt()) {
-                            declaredScalars.add(name.group());
+                        if (nameStart < clean.length() && isGraphqlNameStart(clean.charAt(nameStart))) {
+                            int nameEnd = nameStart + 1;
+                            while (nameEnd < clean.length() && isGraphqlNamePart(clean.charAt(nameEnd))) {
+                                nameEnd++;
+                            }
+                            declaredScalars.add(clean.substring(nameStart, nameEnd));
                         }
                     }
                     previousTopLevelToken = token;
