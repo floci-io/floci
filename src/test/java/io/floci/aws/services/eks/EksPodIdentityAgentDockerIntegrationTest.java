@@ -10,6 +10,7 @@ import io.floci.aws.services.eks.model.CreatePodIdentityAssociationRequest;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EksTestNode;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -21,7 +22,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -95,6 +95,7 @@ class EksPodIdentityAgentDockerIntegrationTest {
     IamService iamService;
 
     private Cluster cluster;
+    private EksTestNode node;
     private String roleName;
 
     @BeforeEach
@@ -137,22 +138,14 @@ class EksPodIdentityAgentDockerIntegrationTest {
         String roleArn = "arn:aws:iam::" + ACCOUNT + ":role/" + roleName;
         iamService.createRole(roleName, "/", "{\"Version\":\"2012-10-17\",\"Statement\":[]}", null, 3600, null);
 
-        cluster = new Cluster();
-        cluster.setName(clusterName);
-        cluster.setAccountId(ACCOUNT);
-        cluster.setArn("arn:aws:eks:us-east-1:" + ACCOUNT + ":cluster/" + clusterName);
-        cluster.setCreatedAt(Instant.now());
-        cluster.setRoleArn("arn:aws:iam::" + ACCOUNT + ":role/eks-service-role");
+        cluster = EksTestNode.cluster(ACCOUNT, clusterName);
         // The default version, so the node runs the configured stock image.
         cluster.setVersion(EksService.DEFAULT_K8S_VERSION);
         String issuer = "https://oidc.eks.us-east-1.amazonaws.com/id/"
                 + UUID.randomUUID().toString().replace("-", "").toUpperCase(Locale.ROOT);
         cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
 
-        eksClusterManager.startCluster(cluster);
-        String node = cluster.getContainerId();
-        assertNotNull(node, "Container ID must not be null");
-        awaitClusterReady(node);
+        node = EksTestNode.start(dockerClient, eksClusterManager, cluster);
         cluster.setStatus(ClusterStatus.ACTIVE);
         eksService.putClusterForAccount(ACCOUNT, cluster);
 
@@ -162,44 +155,36 @@ class EksPodIdentityAgentDockerIntegrationTest {
                 clusterName, "default", "workload-sa", roleArn, null, null, null, null, null));
         String token = oidcService.mintServiceAccountToken(clusterKey, issuer, "default", "workload-sa",
                 "pods.eks.amazonaws.com", 3600);
-        startClientPod(node);
+        startClientPod();
 
         // Without the agent nothing answers, as on an EKS node.
-        assertEquals(List.of(), podIdentityRules(node));
-        assertNotAnswered(node, token);
+        assertEquals(List.of(), podIdentityRules());
+        assertNotAnswered(token);
 
         createAgent(clusterName);
-        assertForwarded(node, token);
+        assertForwarded(token);
 
         deleteAgent(clusterName, false);
-        assertEquals(List.of(), podIdentityRules(node));
-        assertNotAnswered(node, token);
+        assertEquals(List.of(), podIdentityRules());
+        assertNotAnswered(token);
 
         // With preserve, EKS leaves the agent running, so the address keeps answering.
         createAgent(clusterName);
         deleteAgent(clusterName, true);
-        assertForwarded(node, token);
+        assertForwarded(token);
 
         // A restart forwards only while the add-on is stored, which it no longer is.
-        restartFloci(node);
-        assertEquals(List.of(), podIdentityRules(node));
+        restartFloci();
+        assertEquals(List.of(), podIdentityRules());
 
         createAgent(clusterName);
-        restartFloci(node);
-        assertForwarded(node, token);
-    }
-
-    private void awaitClusterReady(String node) {
-        await("k3s API server ready").atMost(Duration.ofSeconds(90)).pollInterval(Duration.ofSeconds(2))
-                .until(() -> eksClusterManager.isReady(cluster));
-        eksClusterManager.finalizeCluster(cluster);
-        await("default serviceaccount created").atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(2))
-                .until(() -> kubectl(node, "get", "serviceaccount", "default").exitCode() == 0);
+        restartFloci();
+        assertForwarded(token);
     }
 
     /** A pod on the pod network, whose requests take the node's PREROUTING rule. */
-    private void startClientPod(String node) {
-        String podYaml = """
+    private void startClientPod() {
+        node.apply("""
                 apiVersion: v1
                 kind: Pod
                 metadata:
@@ -210,16 +195,8 @@ class EksPodIdentityAgentDockerIntegrationTest {
                   - name: client
                     image: alpine:3.21
                     command: ["sleep", "3600"]
-                """.formatted(POD);
-        ContainerExec.Result applied = exec(node, "sh", "-c", "cat << 'EOF' | kubectl apply -f -\n" + podYaml + "\nEOF");
-        assertEquals(0, applied.exitCode(), "kubectl apply failed: " + applied.stderr());
-        awaitPodRunning(node);
-    }
-
-    private void awaitPodRunning(String node) {
-        await("client pod running").atMost(Duration.ofSeconds(120)).pollInterval(Duration.ofSeconds(2))
-                .untilAsserted(() -> assertEquals("Running",
-                        kubectl(node, "get", "pod", POD, "-o", "jsonpath={.status.phase}").stdout().trim()));
+                """.formatted(POD));
+        node.awaitPodRunning(POD);
     }
 
     private void createAgent(String clusterName) {
@@ -240,8 +217,8 @@ class EksPodIdentityAgentDockerIntegrationTest {
      * network and the node itself, where a {@code hostNetwork} pod's requests come from, both get
      * the association's credentials.
      */
-    private void assertForwarded(String node, String token) {
-        List<String> rules = podIdentityRules(node);
+    private void assertForwarded(String token) {
+        List<String> rules = podIdentityRules();
         assertEquals(2, rules.size(), "expected one PREROUTING and one OUTPUT rule, got: " + rules);
         String target = rules.get(0).substring(rules.get(0).indexOf("--to-destination ") + "--to-destination ".length());
         assertTrue(target.endsWith(":4595"), target);
@@ -250,9 +227,9 @@ class EksPodIdentityAgentDockerIntegrationTest {
                 "-A OUTPUT -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination " + target), rules);
 
         await("credentials from the pod network").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
-                .untilAsserted(() -> assertCredentials(kubectl(node, "exec", POD, "--", "wget", "-q", "-T", "5",
+                .untilAsserted(() -> assertCredentials(node.kubectl("exec", POD, "--", "wget", "-q", "-T", "5",
                         "-O", "-", "--header", "Authorization: " + token, CREDENTIALS_URL)));
-        assertCredentials(exec(node, "wget", "-q", "-T", "5", "-O", "-", "--header", "Authorization: " + token,
+        assertCredentials(node.exec("wget", "-q", "-T", "5", "-O", "-", "--header", "Authorization: " + token,
                 CREDENTIALS_URL));
     }
 
@@ -261,16 +238,16 @@ class EksPodIdentityAgentDockerIntegrationTest {
         assertTrue(result.stdout().contains("\"AccessKeyId\"") && result.stdout().contains("ASIA"), result.stdout());
     }
 
-    private void assertNotAnswered(String node, String token) {
-        ContainerExec.Result result = kubectl(node, "exec", POD, "--", "wget", "-q", "-T", "3", "-O", "-",
+    private void assertNotAnswered(String token) {
+        ContainerExec.Result result = node.kubectl("exec", POD, "--", "wget", "-q", "-T", "3", "-O", "-",
                 "--header", "Authorization: " + token, CREDENTIALS_URL);
         assertNotEquals(0, result.exitCode(), result.summary());
         assertFalse(result.stdout().contains("AccessKeyId"), result.stdout());
     }
 
     /** The node's PREROUTING and OUTPUT rules for the Pod Identity address, as iptables lists them. */
-    private List<String> podIdentityRules(String node) {
-        ContainerExec.Result listed = exec(node, "sh", "-c",
+    private List<String> podIdentityRules() {
+        ContainerExec.Result listed = node.exec("sh", "-c",
                 "IPTABLES=$(command -v iptables || command -v /bin/aux/iptables);"
                         + " $IPTABLES -t nat -S PREROUTING && $IPTABLES -t nat -S OUTPUT");
         assertEquals(0, listed.exitCode(), listed.summary());
@@ -284,29 +261,18 @@ class EksPodIdentityAgentDockerIntegrationTest {
      * Floci stops with the cluster left running, Docker stops the node, and Floci starts again and
      * adopts it, which starts it, as {@code restoreCluster} does for a cluster that survived.
      */
-    private void restartFloci(String node) {
+    private void restartFloci() {
+        String containerId = node.containerId();
         eksClusterManager.detachCluster(cluster);
-        dockerClient.stopContainerCmd(node).withTimeout(30).exec();
+        dockerClient.stopContainerCmd(containerId).withTimeout(30).exec();
         eksClusterManager.restoreCluster(cluster);
-        assertEquals(node, cluster.getContainerId(), "the surviving node is adopted, not replaced");
-        await("k3s API server ready again").atMost(Duration.ofSeconds(90)).pollInterval(Duration.ofSeconds(2))
-                .until(() -> eksClusterManager.isReady(cluster));
-        awaitPodRunning(node);
+        assertEquals(containerId, cluster.getContainerId(), "the surviving node is adopted, not replaced");
+        node.awaitApiServer();
+        node.awaitPodRunning(POD);
     }
 
     private static String auth() {
         return "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
                 + "/20260920/us-east-1/eks/aws4_request, SignedHeaders=host, Signature=fake";
-    }
-
-    private ContainerExec.Result kubectl(String node, String... args) {
-        String[] cmd = new String[args.length + 1];
-        cmd[0] = "kubectl";
-        System.arraycopy(args, 0, cmd, 1, args.length);
-        return exec(node, cmd);
-    }
-
-    private ContainerExec.Result exec(String node, String... cmd) {
-        return ContainerExec.run(dockerClient, node, cmd, 30).throwIfTimedOut(node);
     }
 }
