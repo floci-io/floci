@@ -128,7 +128,7 @@ public class CloudWatchMetricsJsonHandler {
      * to a value other than {@code null} or {@code false}, is refused rather than answered as if it
      * were unset, and a top-level {@code null} member is dropped. {@code PutMetricData} also checks
      * the complete batch for supported scalar or statistic-set shapes before storing any metrics;
-     * {@code Values} and {@code Counts} are refused because this handler does not parse them.
+     * {@code Values} and {@code Counts} remain outside this compatibility subset.
      * Other operations pass nested members on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
      * an alarm defined with {@code Metrics} is refused too, since the console's API gives those
      * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The
@@ -964,7 +964,7 @@ public class CloudWatchMetricsJsonHandler {
                 datum.setMaximum(MetricNumberValidation.parse(statsValues.path("Maximum"), statsPath + ".Maximum"));
             }
 
-            datums.add(datum);
+            datums.addAll(MetricValues.fromJson(item, datum));
         }
         return datums;
     }

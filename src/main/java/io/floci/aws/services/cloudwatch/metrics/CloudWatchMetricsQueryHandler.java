@@ -797,7 +797,7 @@ public class CloudWatchMetricsQueryHandler {
             }
             datum.setDimensions(dims);
 
-            datums.add(datum);
+            datums.addAll(MetricValues.fromQuery(params, memberPrefix, datum));
         }
         return datums;
     }

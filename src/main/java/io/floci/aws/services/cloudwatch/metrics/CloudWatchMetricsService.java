@@ -150,7 +150,7 @@ public class CloudWatchMetricsService {
                 datum.setTimestamp(nowSeconds);
             }
             // Synthesize StatisticValues if only a scalar value was provided
-            if (datum.getSampleCount() == 0 && datum.getSum() == 0) {
+            if (!datum.hasSampleCount() && datum.getSum() == 0) {
                 datum.setSampleCount(1);
                 datum.setSum(datum.getValue());
                 datum.setMinimum(datum.getValue());
