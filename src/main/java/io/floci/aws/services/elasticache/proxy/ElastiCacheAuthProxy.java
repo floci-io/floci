@@ -30,7 +30,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     private final PasswordValidator passwordValidator;
     private final SigV4Validator sigV4Validator;
     private final Supplier<SSLContext> tlsContext;
-    private final ElastiCacheBackendAcl backendAcl = new ElastiCacheBackendAcl();
+    private final ElastiCacheBackendAcl backendAcl;
 
     public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
                                 String backendHost, int backendPort,
@@ -49,6 +49,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         this.passwordValidator = passwordValidator;
         this.sigV4Validator = sigV4Validator;
         this.tlsContext = tlsContext;
+        this.backendAcl = new ElastiCacheBackendAcl(passwordValidator::clusterMode);
     }
 
     @Override
@@ -90,10 +91,13 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         if (!members && !backendAcl.initialized()) {
             return;
         }
-        // Disabling default without configuring replication credentials breaks cluster nodes.
-        // Until that path is implemented, fail closed rather than ignore the user's ACL.
-        if (passwordValidator.clusterMode()) {
-            throw new IOException("Cluster-mode user ACL transport is not supported yet");
+        if (!backendAcl.initialized() && passwordValidator.clusterMode()) {
+            try {
+                passwordValidator.prepareClusterReplication();
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not give the nodes of {0} their replication credentials", groupId);
+                throw new IOException("Cluster replication is not ready for access strings", e);
+            }
         }
         String name = username == null || username.isEmpty() ? "default" : username;
         backendAcl.authenticate(backend, name,
@@ -205,6 +209,14 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
 
         default boolean clusterMode() {
             return false;
+        }
+
+        /**
+         * Readies every node of a cluster-mode cache for replication without the {@code default} user,
+         * before a node turns it off for its first session under an access string. Called again by
+         * every node's first such session, so it does its work once per cluster.
+         */
+        default void prepareClusterReplication() {
         }
 
         default boolean hasMembers() {

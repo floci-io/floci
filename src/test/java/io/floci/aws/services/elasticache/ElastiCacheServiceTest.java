@@ -1063,6 +1063,25 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void aClusterModeGroupGetsItsReplicationPasswordOnlyWhenAUserFirstSignsInToANode() {
+        stubPerNodeContainers();
+
+        service.createReplicationGroup(clusterRequest("grp", 2, 1));
+
+        // Until then every session is the node's unrestricted default user, which could read the password.
+        verify(clusterFormation, never()).secureReplication(anyString(), any());
+        ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validators =
+                ArgumentCaptor.forClass(ElastiCacheAuthProxy.PasswordValidator.class);
+        verify(proxyManager, times(4)).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(),
+                validators.capture());
+        validators.getAllValues().get(0).prepareClusterReplication();
+        validators.getAllValues().get(2).prepareClusterReplication();
+
+        Endpoint node = new Endpoint("localhost", 6379);
+        verify(clusterFormation, times(1)).secureReplication("grp", List.of(node, node, node, node));
+    }
+
+    @Test
     void clusterOnParameterGroupEnablesClusterModeForSingleShard() {
         stubPerNodeContainers();
 
@@ -1536,6 +1555,26 @@ class ElastiCacheServiceTest {
         service.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
 
         verify(proxyManager).refreshUser("serverless-backing", "app");
+    }
+
+    @Test
+    void modifyUserAccessStringIsAppliedOnEveryNodeOfAClusterModeGroup() {
+        stubPerNodeContainers();
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD, List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("app-group", "valkey", List.of("default-user-id", "app-user-id"), "us-east-1");
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest("grp", "test",
+                AuthMode.PASSWORD, null, "us-east-1", "valkey", "8.2", "cache.t4g.micro",
+                "default.valkey8.cluster.on", null, null, 2, 1,
+                null, true, null, null, ReplicationGroupSettings.defaults(), Map.of(), List.of("app-group"), null));
+
+        service.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
+
+        // Each node has a proxy and a backend ACL of its own, so each one installs the new rules.
+        for (String node : List.of("grp-0001-001", "grp-0001-002", "grp-0002-001", "grp-0002-002")) {
+            verify(proxyManager).refreshUser(node, "app");
+        }
     }
 
     @Test

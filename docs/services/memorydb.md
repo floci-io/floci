@@ -10,6 +10,20 @@ Floci manages real Valkey/Redis Docker containers and proxies TCP connections to
 
 Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only resources — no Redis container is started. The management API (`CreateCluster`, `DescribeClusters`, tagging, etc.) behaves normally and returns a `ClusterEndpoint` of `<hostname>:6379` (defaults to `localhost:6379`, controlled by `FLOCI_HOSTNAME`), but there is no live data plane to connect to. This is intended for Infrastructure-as-Code tools like Terraform and OpenTofu running in environments without a Docker socket, where you only need the AWS resources to exist and return consistent attributes.
 
+## User access strings
+
+A cluster bound to an ACL of its own runs each connection under the `AccessString` of the user it
+signs in as. The proxy installs that access string on a private backend ACL user, and the backend
+answers a command, key or channel outside it with `NOPERM`, as on AWS. A connection that does not
+authenticate runs as the ACL's `default` user. Once the first connection is set up, the backend's
+own `default` account is disabled, so an `AUTH` sent after the proxy has bridged the connection
+cannot reach unrestricted permissions.
+
+The backend user is the same kind ElastiCache uses, so the same commands are denied to every
+session, and an access string with an ACL selector is refused. See
+[User access strings](elasticache.md#user-access-strings) on the ElastiCache page.
+Clusters on the `open-access` ACL are relayed without a backend ACL user, as before.
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->

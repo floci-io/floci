@@ -14,10 +14,12 @@ import io.floci.aws.services.memorydb.model.AuthMode;
 import io.floci.aws.services.memorydb.model.Cluster;
 import io.floci.aws.services.memorydb.model.ClusterStatus;
 import io.floci.aws.services.memorydb.model.User;
+import io.floci.aws.services.memorydb.proxy.MemoryDbAuthProxy;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.mockito.ArgumentCaptor;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -274,6 +277,50 @@ class MemoryDbServiceTest {
         assertTrue(service.authenticate("secure", "app-user", "s3cret"));
         assertFalse(service.authenticate("secure", "app-user", "wrong"));
         assertFalse(service.authenticate("secure", "unknown-user", "s3cret"));
+    }
+
+    @Test
+    void theProxyOfAClusterWithAnAclOfItsOwnGetsItsMembersAccessStrings() {
+        User userSpec = new User();
+        userSpec.setName("reader");
+        userSpec.setAuthMode(AuthMode.PASSWORD);
+        userSpec.setPasswords(List.of("s3cret"));
+        userSpec.setAccessString("on ~app:* -@all +get");
+        service.createUser(userSpec, "us-east-1");
+        Acl aclSpec = new Acl();
+        aclSpec.setName("reader-acl");
+        aclSpec.setUserNames(List.of("default", "reader"));
+        service.createAcl(aclSpec, "us-east-1");
+        Cluster spec = new Cluster();
+        spec.setName("reads");
+        spec.setAclName("reader-acl");
+
+        service.createCluster(spec, "us-east-1");
+
+        MemoryDbAuthProxy.AuthValidator validator = startedProxyValidator();
+        assertTrue(validator.enforcesAccessStrings());
+        assertEquals("on ~app:* -@all +get", validator.accessString("reader"));
+        assertEquals("on ~* &* +@all", validator.accessString("default"));
+        assertNull(validator.accessString("stranger"), "a user the ACL does not hold has no access string");
+        assertTrue(validator.authenticate("reader", "s3cret"));
+    }
+
+    @Test
+    void theProxyOfAnOpenAccessClusterLeavesItsSessionsUnrestricted() {
+        Cluster spec = new Cluster();
+        spec.setName("open");
+        spec.setAclName("open-access");
+
+        service.createCluster(spec, "us-east-1");
+
+        assertFalse(startedProxyValidator().enforcesAccessStrings());
+    }
+
+    private MemoryDbAuthProxy.AuthValidator startedProxyValidator() {
+        ArgumentCaptor<MemoryDbAuthProxy.AuthValidator> validator =
+                ArgumentCaptor.forClass(MemoryDbAuthProxy.AuthValidator.class);
+        verify(proxyManager).startProxy(anyString(), anyBoolean(), anyInt(), anyString(), anyInt(), validator.capture());
+        return validator.getValue();
     }
 
     @Test

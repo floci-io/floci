@@ -36,7 +36,7 @@ transport. This does not add Memcached transit encryption.
 
 ## User access strings
 
-For non-cluster-mode Redis/Valkey replication groups and serverless caches, the auth
+For Redis/Valkey replication groups, cluster-mode groups included, and serverless caches, the auth
 proxy applies each associated user's `AccessString` to a private backend ACL identity.
 Valkey enforces command, key and Pub/Sub channel permissions. Authenticating a
 subscribe-only user does not grant `SET` or `FLUSHALL`. The backend default account
@@ -52,10 +52,22 @@ are denied as well, preventing backend persistence operations and outbound key m
 These restrictions protect private backend credentials and key boundaries. AWS lists these among its
 [restricted cache commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html).
 
+In a cluster-mode group, each node has a proxy of its own, which applies the access string on that
+node when the user signs in there. A client that follows a `MOVED` redirect signs in to the other
+node's proxy, as it does on AWS. Sessions on a cluster node also cannot run the `CLUSTER`
+subcommands ElastiCache restricts, which change the cluster's topology, slots or failover state:
+`ADDSLOTS`, `ADDSLOTSRANGE`, `BUMPEPOCH`, `DELSLOTS`, `DELSLOTSRANGE`, `FAILOVER`, `FLUSHSLOTS`,
+`FORGET`, `LINKS`, `MEET`, `REPLICATE`, `RESET`, `SAVECONFIG`, `SET-CONFIG-EPOCH` and `SETSLOT`.
+Before the first node disables its `default` account, Floci gives every node a private replication
+user and sets `masteruser` and `masterauth` to it, so replication keeps authenticating. A
+cluster-mode group nobody signs in to with a user never gets that password, which its unrestricted
+sessions could otherwise read with `CONFIG GET masterauth`.
+
 `ModifyUser` with `AccessString` or `AppendAccessString` is installed on the backend at once
-for every replication group and serverless cache that holds the user, so it applies to connections
-that are already open. A change that cannot be installed, such as one with a selector, is logged and
-the open sessions keep their old permissions until the user authenticates again. Other
+for every replication group, every node of a cluster-mode group and every serverless cache that
+holds the user, so it applies to connections that are already open. A change that cannot be
+installed, such as one with a selector, is logged and the open sessions keep their old permissions
+until the user authenticates again. Other
 changes, such as adding a user to a group or associating a user group with a cache, are
 installed on the next successful authentication; reconnect to apply them promptly.
 Re-authentication on an already relayed connection uses the backend protocol directly, so
@@ -64,11 +76,6 @@ Revoked members' existing sessions are not proactively disconnected by this chan
 ACL selectors are rejected before backend changes: a selector can grant permissions
 independently of the root rules used to protect private backend credentials. Read-only
 `ACL` commands are also unavailable through these sessions.
-
-**Known limitation:** cluster-mode RBAC fails closed. Configuring replication credentials
-across all nodes is still required before disabling their default accounts. Such connections
-are rejected rather than being relayed with unrestricted permissions. Cluster-mode caches
-without user associations retain their existing behavior.
 
 ## Supported Management Actions
 

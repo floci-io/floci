@@ -1,50 +1,47 @@
 package io.floci.aws.services.elasticache.proxy;
 
+import io.floci.aws.services.elasticache.model.AuthMode;
+import io.floci.aws.testing.FakeRespServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class ElastiCacheBackendAclTest {
 
-    private static final int WAIT_MILLIS = 5000;
-
-    private ServerSocket server;
-    private final List<List<String>> commands = new CopyOnWriteArrayList<>();
-    private final List<Socket> accepted = new CopyOnWriteArrayList<>();
+    private FakeRespServer server;
+    private List<List<String>> commands;
     private volatile boolean refuseNextCommands;
     private ElastiCacheBackendAcl acl;
 
     @BeforeEach
     void startBackend() throws IOException {
-        server = new ServerSocket(0);
+        server = new FakeRespServer(command -> refuseNextCommands ? "-ERR refused\r\n" : "+OK\r\n");
+        commands = server.commands();
         acl = new ElastiCacheBackendAcl();
-        Thread acceptor = new Thread(this::acceptConnections, "fake-backend");
-        acceptor.setDaemon(true);
-        acceptor.start();
     }
 
     @AfterEach
     void stopBackend() throws IOException {
         server.close();
-        for (Socket socket : accepted) {
-            socket.close();
-        }
     }
 
     @Test
@@ -53,7 +50,7 @@ class ElastiCacheBackendAclTest {
         int afterLogin = commands.size();
         String sessionPassword = passwordOf("app");
 
-        acl.reapply("localhost", server.getLocalPort(), "app", "on ~app:* -@all +get +set");
+        acl.reapply("localhost", server.port(), "app", "on ~app:* -@all +get +set");
 
         List<List<String>> sent = commands.subList(afterLogin, commands.size());
         assertEquals(2, sent.size());
@@ -73,37 +70,37 @@ class ElastiCacheBackendAclTest {
                 .findFirst().orElseThrow().get(2);
         int afterLogin = commands.size();
 
-        acl.reapply("localhost", server.getLocalPort(), "default", "on ~allowed:* +get");
+        acl.reapply("localhost", server.port(), "default", "on ~allowed:* +get");
 
         assertEquals(backendUser, commands.get(afterLogin + 1).get(2));
     }
 
     @Test
     void nothingIsSentBeforeTheBackendIsSetUp() throws Exception {
-        acl.reapply("localhost", server.getLocalPort(), "app", "on ~* +@all");
+        acl.reapply("localhost", server.port(), "app", "on ~* +@all");
 
-        assertEquals(0, accepted.size());
+        assertEquals(0, server.connections());
     }
 
     @Test
     void nothingIsSentForAUserNobodyHasAuthenticatedAs() throws Exception {
         login("app", "on ~* +@all");
-        int connections = accepted.size();
+        int connections = server.connections();
 
-        acl.reapply("localhost", server.getLocalPort(), "other", "on ~* +@all");
+        acl.reapply("localhost", server.port(), "other", "on ~* +@all");
 
-        assertEquals(connections, accepted.size());
+        assertEquals(connections, server.connections());
     }
 
     @Test
     void selectorsAreRefusedWithoutTouchingTheBackend() throws Exception {
         login("app", "on ~* +@all");
-        int connections = accepted.size();
+        int connections = server.connections();
 
         assertThrows(IOException.class,
-                () -> acl.reapply("localhost", server.getLocalPort(), "app", "on ~* -@all (+get ~*)"));
+                () -> acl.reapply("localhost", server.port(), "app", "on ~* -@all (+get ~*)"));
 
-        assertEquals(connections, accepted.size());
+        assertEquals(connections, server.connections());
     }
 
     @Test
@@ -112,7 +109,7 @@ class ElastiCacheBackendAclTest {
         refuseNextCommands = true;
 
         IOException failure = assertThrows(IOException.class,
-                () -> acl.reapply("localhost", server.getLocalPort(), "app", "on ~* +@all"));
+                () -> acl.reapply("localhost", server.port(), "app", "on ~* +@all"));
 
         assertEquals("Could not establish the backend cache user's permissions", failure.getMessage());
     }
@@ -123,10 +120,10 @@ class ElastiCacheBackendAclTest {
         int afterLogin = commands.size();
 
         AtomicReference<String> currentRules = new AtomicReference<>("on ~app:* -@all +get +set");
-        acl.reapply("localhost", server.getLocalPort(), "app", currentRules::get);
+        acl.reapply("localhost", server.port(), "app", currentRules::get);
 
         currentRules.set("on ~app:* -@all +get");
-        acl.reapply("localhost", server.getLocalPort(), "app", currentRules::get);
+        acl.reapply("localhost", server.port(), "app", currentRules::get);
 
         List<List<String>> sent = commands.subList(afterLogin, commands.size());
         assertEquals(4, sent.size());
@@ -139,7 +136,7 @@ class ElastiCacheBackendAclTest {
         login("app", "on ~app:* -@all +get");
         int afterLogin = commands.size();
 
-        acl.reapply("localhost", server.getLocalPort(), "app", "off -@all");
+        acl.reapply("localhost", server.port(), "app", "off -@all");
 
         List<List<String>> sent = commands.subList(afterLogin, commands.size());
         assertEquals(2, sent.size());
@@ -151,78 +148,116 @@ class ElastiCacheBackendAclTest {
         assertEquals("-@all", sent.get(1).get(5));
     }
 
+    @Test
+    void sessionsOnAClusterNodeCannotChangeTheClusterTopology() throws Exception {
+        acl = new ElastiCacheBackendAcl(() -> true);
+
+        login("ops", "on ~* &* +@all");
+
+        // The CLUSTER subcommands ElastiCache lists among its restricted commands.
+        List<String> rules = setUserOf("ops");
+        for (String subcommand : List.of("addslots", "addslotsrange", "bumpepoch", "delslots", "delslotsrange",
+                "failover", "flushslots", "forget", "links", "meet", "replicate", "reset", "saveconfig",
+                "set-config-epoch", "setslot")) {
+            assertTrue(rules.contains("-cluster|" + subcommand), "cluster " + subcommand + " must be denied");
+        }
+        assertTrue(rules.indexOf("-cluster|meet") > rules.indexOf("+@all"),
+                "the restrictions must follow the user's own rules so +@all cannot grant them back");
+    }
+
+    @Test
+    void aChangedAccessStringOnAClusterNodeKeepsTheClusterRestrictions() throws Exception {
+        acl = new ElastiCacheBackendAcl(() -> true);
+        login("ops", "on ~* &* +@all");
+        int afterLogin = commands.size();
+
+        acl.reapply("localhost", server.port(), "ops", "on ~* &* +@all -flushall");
+
+        assertTrue(commands.get(afterLogin + 1).contains("-cluster|failover"));
+    }
+
+    @Test
+    void sessionsOnAStandaloneBackendGetNoSubcommandRulesAnOlderEngineWouldRefuse() throws Exception {
+        login("ops", "on ~* &* +@all");
+
+        assertTrue(setUserOf("ops").stream().noneMatch(rule -> rule.startsWith("-cluster|")));
+    }
+
+    @Test
+    void aClusterModeCacheInstallsItsUserOnTheNodeItsProxyServes() throws Exception {
+        ElastiCacheAuthProxy.PasswordValidator validator = clusterValidator(true);
+        ElastiCacheAuthProxy proxy = clusterNodeProxy(validator);
+
+        initialize(proxy, "app");
+        initialize(proxy, "app");
+
+        List<String> rules = setUserOf("app");
+        assertEquals(List.of("ACL", "SETUSER", "app", "reset", "on", "~app:*", "-@all", "+get"), rules.subList(0, 8));
+        assertTrue(rules.contains("-cluster|failover"));
+        assertEquals(List.of("ACL", "SETUSER", "default", "reset", "off"), commands.get(2));
+        assertEquals(List.of("AUTH", "app", passwordOf("app")), commands.getLast());
+        InOrder order = inOrder(validator);
+        order.verify(validator).prepareClusterReplication();
+        order.verify(validator, atLeastOnce()).accessString("app");
+        verify(validator, times(1)).prepareClusterReplication();
+    }
+
+    @Test
+    void aClusterWhoseReplicationIsNotReadyRefusesTheSessionBeforeTurningDefaultOff() {
+        ElastiCacheAuthProxy.PasswordValidator validator = clusterValidator(true);
+        doThrow(new IllegalStateException("a node refused the replication credentials"))
+                .when(validator).prepareClusterReplication();
+        ElastiCacheAuthProxy proxy = clusterNodeProxy(validator);
+
+        assertThrows(IOException.class, () -> initialize(proxy, "app"));
+
+        assertEquals(List.of(), commands, "the node's default user must stay on for its replication");
+    }
+
+    @Test
+    void aClusterModeCacheWithoutUsersNeverGetsAReplicationPassword() throws Exception {
+        ElastiCacheAuthProxy.PasswordValidator validator = clusterValidator(false);
+        ElastiCacheAuthProxy proxy = clusterNodeProxy(validator);
+
+        initialize(proxy, null);
+
+        verify(validator, never()).prepareClusterReplication();
+        assertEquals(List.of(), commands);
+    }
+
+    private static ElastiCacheAuthProxy.PasswordValidator clusterValidator(boolean members) {
+        ElastiCacheAuthProxy.PasswordValidator validator = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        when(validator.hasMembers()).thenReturn(members);
+        when(validator.clusterMode()).thenReturn(true);
+        when(validator.accessString("app")).thenReturn("on ~app:* -@all +get");
+        return validator;
+    }
+
+    private ElastiCacheAuthProxy clusterNodeProxy(ElastiCacheAuthProxy.PasswordValidator validator) {
+        return new ElastiCacheAuthProxy("grp-0001-001", AuthMode.PASSWORD, "localhost", server.port(), validator,
+                mock(SigV4Validator.class));
+    }
+
+    private void initialize(ElastiCacheAuthProxy proxy, String username) throws IOException {
+        try (Socket backend = new Socket("localhost", server.port())) {
+            proxy.initializeBackend(backend, username);
+        }
+    }
+
+    private List<String> setUserOf(String backendUser) {
+        return commands.stream()
+                .filter(c -> c.size() > 2 && "SETUSER".equals(c.get(1)) && backendUser.equals(c.get(2)))
+                .reduce((first, second) -> second).orElseThrow();
+    }
+
     private void login(String username, String accessString) throws IOException {
-        try (Socket backend = new Socket("localhost", server.getLocalPort())) {
+        try (Socket backend = new Socket("localhost", server.port())) {
             acl.authenticate(backend, username, accessString);
         }
     }
 
     private String passwordOf(String backendUser) {
-        return commands.stream()
-                .filter(c -> c.size() > 2 && "SETUSER".equals(c.get(1)) && backendUser.equals(c.get(2)))
-                .map(c -> c.get(c.indexOf("resetpass") + 1).substring(1))
-                .reduce((first, second) -> second).orElseThrow();
-    }
-
-    private void acceptConnections() {
-        while (!server.isClosed()) {
-            try {
-                Socket socket = server.accept();
-                accepted.add(socket);
-                Thread handler = new Thread(() -> serve(socket), "fake-backend-connection");
-                handler.setDaemon(true);
-                handler.start();
-            } catch (IOException e) {
-                return;
-            }
-        }
-    }
-
-    private void serve(Socket socket) {
-        try {
-            InputStream in = socket.getInputStream();
-            OutputStream out = socket.getOutputStream();
-            while (true) {
-                List<String> command = readCommand(in);
-                if (command == null) {
-                    return;
-                }
-                commands.add(command);
-                out.write((refuseNextCommands ? "-ERR refused\r\n" : "+OK\r\n").getBytes(StandardCharsets.US_ASCII));
-                out.flush();
-            }
-        } catch (IOException expected) {
-            // The test closed the connection, which is how every fake connection ends.
-        }
-    }
-
-    private static List<String> readCommand(InputStream in) throws IOException {
-        String header = readLine(in);
-        if (header == null) {
-            return null;
-        }
-        int count = Integer.parseInt(header.substring(1));
-        List<String> arguments = new ArrayList<>();
-        for (int i = 0; i < count; i++) {
-            int length = Integer.parseInt(readLine(in).substring(1));
-            byte[] bytes = in.readNBytes(length);
-            readLine(in);
-            arguments.add(new String(bytes, StandardCharsets.UTF_8));
-        }
-        return arguments;
-    }
-
-    private static String readLine(InputStream in) throws IOException {
-        StringBuilder line = new StringBuilder();
-        int value;
-        while ((value = in.read()) != -1) {
-            if (value == '\n') {
-                return line.toString();
-            }
-            if (value != '\r') {
-                line.append((char) value);
-            }
-        }
-        return null;
+        List<String> rules = setUserOf(backendUser);
+        return rules.get(rules.indexOf("resetpass") + 1).substring(1);
     }
 }

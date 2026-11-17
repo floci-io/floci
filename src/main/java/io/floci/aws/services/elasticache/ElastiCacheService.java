@@ -125,6 +125,9 @@ public class ElastiCacheService implements ResourceProvider {
      */
     private final Set<String> recordsHoldingTheirPort = ConcurrentHashMap.newKeySet();
 
+    /** Running cluster-mode clusters whose nodes have replication credentials: see {@link #secureClusterReplication}. */
+    private final Set<String> securedClusterReplication = ConcurrentHashMap.newKeySet();
+
     /**
      * A record's entry in {@link #recordsHoldingTheirPort}: its owning account, then its id. Ids
      * are unique only within an account, so two accounts' records of the same name each hold
@@ -2772,6 +2775,10 @@ public class ElastiCacheService implements ResourceProvider {
         for (ReplicationGroup group : groups.scan(k -> true)) {
             if (effectiveUserIds(groups.accountId(), group).contains(userId)) {
                 proxyManager.refreshUser(group.getReplicationGroupId(), user.getUserName());
+                // Each node of a cluster-mode group has a proxy and a backend ACL of its own.
+                for (ClusterNode node : group.getClusterNodes()) {
+                    proxyManager.refreshUser(node.getMemberClusterId(), user.getUserName());
+                }
             }
         }
         for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
@@ -3311,10 +3318,37 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             @Override
+            public void prepareClusterReplication() {
+                secureClusterReplication(accountId, groupId);
+            }
+
+            @Override
             public String ownerAccountId() {
                 return accountId;
             }
         };
+    }
+
+    /**
+     * Gives the nodes of a cluster-mode group their replication credentials the first time one of them
+     * is about to turn its default user off. The nodes' container ids name the running cluster, so a
+     * cluster restored with new containers is secured again.
+     */
+    private void secureClusterReplication(String accountId, String groupId) {
+        ReplicationGroup group = groups.getForAccount(accountId, groupId).orElse(null);
+        if (group == null || group.getClusterNodes().isEmpty()) {
+            return;
+        }
+        List<ClusterNode> nodes = group.getClusterNodes();
+        String running = accountId + "/" + String.join(",", nodes.stream().map(ClusterNode::getContainerId).toList());
+        synchronized (lockFor("rg-replication:" + accountId + "/" + groupId)) {
+            if (securedClusterReplication.contains(running)) {
+                return;
+            }
+            clusterFormation.secureReplication(groupId, nodes.stream()
+                    .map(node -> new Endpoint(node.getContainerHost(), node.getContainerPort())).toList());
+            securedClusterReplication.add(running);
+        }
     }
 
     // AWS allows only redis and valkey.
