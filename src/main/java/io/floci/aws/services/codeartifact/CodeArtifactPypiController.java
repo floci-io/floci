@@ -1,6 +1,7 @@
 package io.floci.aws.services.codeartifact;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Html;
 import io.floci.aws.core.common.MultipartFormParser;
 import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
@@ -203,13 +204,13 @@ public class CodeArtifactPypiController {
             extra.append("<a href=\"").append(pathPrefix).append("/packages/")
                     .append(SidecarUriUtils.encodeSegment(file.filename())).append("\"");
             if (file.requiresPythonOrNull() != null) {
-                extra.append(" data-requires-python=\"").append(escapeHtml(file.requiresPythonOrNull()))
+                extra.append(" data-requires-python=\"").append(Html.escape(file.requiresPythonOrNull()))
                         .append("\"");
             }
             if (file.yanked()) {
                 extra.append(" data-yanked=\"\"");
             }
-            extra.append(">").append(escapeHtml(file.filename())).append("</a><br>\n");
+            extra.append(">").append(Html.escape(file.filename())).append("</a><br>\n");
         }
         if (bodyHtmlOrNull == null) {
             return "<!DOCTYPE html><html><body>\n" + extra + "</body></html>";
@@ -219,10 +220,6 @@ public class CodeArtifactPypiController {
             return bodyHtmlOrNull + extra;
         }
         return bodyHtmlOrNull.substring(0, bodyClose) + extra + bodyHtmlOrNull.substring(bodyClose);
-    }
-
-    private static String escapeHtml(String value) {
-        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
     /**

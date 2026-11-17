@@ -19,6 +19,7 @@ import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
+import io.floci.aws.services.emrserverless.model.DriverLogDestinations;
 import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.JobDriver;
 import io.floci.aws.services.emrserverless.model.JobRun;
@@ -325,6 +326,24 @@ public class EmrServerlessJobRunService implements Resettable {
         return objectMapper.convertValue(run, JobRun.class);
     }
 
+    /**
+     * What a run's dashboard page shows of one attempt, which must still be there: the attempt, as GetJobRun gives
+     * it, and where its driver's logs go.
+     */
+    public synchronized DashboardView dashboard(String applicationId, String jobRunId, int attempt) {
+        JobRun run = getJobRun(applicationId, jobRunId, attempt);
+        DriverLogDestinations logs = findRun(applicationId, jobRunId).getDriverLogs().get(attempt);
+        if (logs == null) {
+            // A run stored before Floci kept its attempts' destinations: where its application now sends them.
+            logs = driverLogDestinations(applications.getApplication(applicationId), run);
+        }
+        return new DashboardView(run, logs);
+    }
+
+    /** An attempt of a run, and where its driver's logs go, as the attempt was admitted. */
+    public record DashboardView(JobRun run, DriverLogDestinations logs) {
+    }
+
     /** A run's attempts, oldest first: "information about all attempts related to a job run". */
     public synchronized PaginatedResult<JobRunAttemptSummary> listJobRunAttempts(String applicationId,
                                                                                String jobRunId,
@@ -533,8 +552,37 @@ public class EmrServerlessJobRunService implements Resettable {
         record.setRequest(original);
         record.setApplicationType(app.getType());
         record.setContainerRun(sparkRunner != null);
+        keepDriverLogs(record, app);
         store.put(jobRunId, record);
         return record;
+    }
+
+    /**
+     * Keeps where the run's latest attempt sends its driver's logs, from the configuration it is admitted with, so that
+     * a later change to its application's monitoring configuration moves neither the logs nor what its dashboard says
+     * of them.
+     */
+    private static void keepDriverLogs(JobRunRecord record, Application app) {
+        JobRun run = record.getJobRun();
+        record.getDriverLogs().put(run.getAttempt(), driverLogDestinations(app, run));
+    }
+
+    private static DriverLogDestinations driverLogDestinations(Application app, JobRun run) {
+        SparkJobRunner.CloudWatchLogs cloudWatch = driverCloudWatchLogs(app, run);
+        return new DriverLogDestinations(driverLogFolder(app, run), cloudWatch != null ? cloudWatch.logGroup() : null,
+                cloudWatch != null ? cloudWatch.stdoutStream() : null,
+                cloudWatch != null ? cloudWatch.stderrStream() : null);
+    }
+
+    // Where the run's latest attempt sends its driver's logs, as it was admitted.
+    private static DriverLogDestinations keptDriverLogs(JobRunRecord record, Application app) {
+        DriverLogDestinations logs = record.getDriverLogs().get(record.getJobRun().getAttempt());
+        return logs != null ? logs : driverLogDestinations(app, record.getJobRun());
+    }
+
+    private static SparkJobRunner.CloudWatchLogs cloudWatchLogs(DriverLogDestinations logs) {
+        return logs.logGroup() != null
+                ? new SparkJobRunner.CloudWatchLogs(logs.logGroup(), logs.stdoutStream(), logs.stderrStream()) : null;
     }
 
     /**
@@ -556,12 +604,13 @@ public class EmrServerlessJobRunService implements Resettable {
         Long minutes = run.getExecutionTimeoutMinutes();
         Duration timeout = MODE_STREAMING.equals(run.getMode()) || minutes == null || minutes == 0
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
+        DriverLogDestinations logs = keptDriverLogs(record, app);
         SparkJobRunner.Job job;
         if (hive != null) {
             job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
                     run.getReleaseLabel(), SparkJobRunner.Engine.HIVE, hiveImageTemplate, customImage(app),
                     dockerNetwork, run.getExecutionRole(), Map.of(), hiveArguments(app, run, hive), null, timeout,
-                    driverLogFolder(app, run), driverCloudWatchLogs(app, run), Map.of(), List.of(), null, Map.of(),
+                    logs.s3Folder(), cloudWatchLogs(logs), Map.of(), List.of(), null, Map.of(),
                     Map.of(), Map.of(), Map.of(), Map.of(), null);
         } else {
             JobDriver.SparkSubmit sparkSubmit = run.getJobDriver().getSparkSubmit();
@@ -570,7 +619,7 @@ public class EmrServerlessJobRunService implements Resettable {
             job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
                     run.getReleaseLabel(), SparkJobRunner.Engine.SPARK, imageTemplate, customImage(app),
                     dockerNetwork, run.getExecutionRole(), sparkDefaults, application(sparkSubmit), null, timeout,
-                    driverLogFolder(app, run), driverCloudWatchLogs(app, run), driverEnvironment(sparkProperties),
+                    logs.s3Folder(), cloudWatchLogs(logs), driverEnvironment(sparkProperties),
                     archives(sparkProperties), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
                     executors(app, executorContainers));
         }
@@ -999,6 +1048,7 @@ public class EmrServerlessJobRunService implements Resettable {
         run.setEndedAt(null);
         run.setTotalExecutionDurationSeconds(null);
         applyImages(run, app);
+        keepDriverLogs(record, app);
         store.put(run.getJobRunId(), record);
         LOG.infov("EMR Serverless job run {0} failed its attempt {1}; attempt {2} starts", run.getJobRunId(),
                 failed.getAttempt(), run.getAttempt());
