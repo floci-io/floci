@@ -2082,12 +2082,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final List<String> RESERVED_PREFIX_LIST_NAME_PREFIXES =
             List.of("com.amazonaws.", "com.amazon.", "com.aws.");
 
-    /** AWS's default "Inbound or outbound rules per security group" quota, per direction and address family. */
-    private static final int RULES_PER_SECURITY_GROUP = 60;
     private static final String CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_ID = "pl-3b927c52";
     private static final String CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_NAME = "com.amazonaws.global.cloudfront.origin-facing";
-    /** AWS sizes this list at 55 entries, which is also its weight against security group rule quotas. */
-    private static final int CLOUDFRONT_ORIGIN_FACING_MAX_ENTRIES = 55;
     /** The {@code CLOUDFRONT_ORIGIN_FACING} IPv4 ranges of ip-ranges.json (syncToken 1794843425). */
     private static final List<String> CLOUDFRONT_ORIGIN_FACING_CIDRS = List.of(
             "3.29.57.0/26", "3.172.0.0/18", "3.172.64.0/18", "13.124.199.0/24", "15.158.0.0/16",
@@ -2203,14 +2199,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         List.of("3.218.182.0/24", "52.94.0.0/22"))));
         if (AwsRegions.DEFAULT_PARTITION.equals(partitionForRegion(region))) {
             lists.add(awsManagedPrefixList(region, CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_ID,
-                    CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_NAME, CLOUDFRONT_ORIGIN_FACING_CIDRS,
-                    CLOUDFRONT_ORIGIN_FACING_MAX_ENTRIES));
+                    CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_NAME, CLOUDFRONT_ORIGIN_FACING_CIDRS));
         }
         return lists;
-    }
-
-    private ManagedPrefixList awsManagedPrefixList(String region, String id, String name, List<String> cidrs) {
-        return awsManagedPrefixList(region, id, name, cidrs, cidrs.size());
     }
 
     /** The partition a request in {@code region} is scoped to, an accepted unknown region taking the deployment's. */
@@ -2218,8 +2209,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return regionResolver != null ? regionResolver.partitionForRegion(region) : AwsRegions.partitionFor(region);
     }
 
-    private ManagedPrefixList awsManagedPrefixList(String region, String id, String name, List<String> cidrs,
-                                                   int maxEntries) {
+    private ManagedPrefixList awsManagedPrefixList(String region, String id, String name, List<String> cidrs) {
         ManagedPrefixList list = new ManagedPrefixList();
         list.setPrefixListId(id);
         list.setPrefixListName(name);
@@ -2229,7 +2219,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 "prefix-list/" + id).toString());
         list.setAddressFamily("IPv4");
         list.setState("create-complete");
-        list.setMaxEntries(maxEntries);
+        list.setMaxEntries(cidrs.size());
         list.setVersion(1);
         list.setRegion(region);
         list.setAwsManaged(true);
@@ -8566,7 +8556,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             synchronized (lockFor(key(region, groupId))) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
                 requireKnownPrefixLists(region, permissions);
-                requireRuleQuota(region, sg.getIpPermissions(), permissions);
                 List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
                 for (IpPermission perm : permissions) {
                     resolveGroupReferences(region, sg.getVpcId(), perm);
@@ -8588,7 +8577,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             synchronized (lockFor(key(region, groupId))) {
                 SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
                 requireKnownPrefixLists(region, permissions);
-                requireRuleQuota(region, sg.getIpPermissionsEgress(), permissions);
                 List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
                 for (IpPermission perm : permissions) {
                     resolveGroupReferences(region, sg.getVpcId(), perm);
@@ -8674,58 +8662,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             for (PrefixListId prefixList : perm.getPrefixListIds()) {
                 getRequiredManagedPrefixList(region, prefixList.getPrefixListId());
             }
-        }
-    }
-
-    /**
-     * Rejects an authorization that takes one direction of a group past the AWS default quota of
-     * rules per security group, before anything is stored. AWS counts IPv4 and IPv6 rules
-     * separately: a CIDR counts as one rule in its family, a group reference as one in each, and a
-     * prefix list as its maximum entries (the weight, for an AWS-managed list) in the list's family.
-     * A family the request adds nothing to is left alone, so a group stored over the quota can
-     * still take rules of the other family.
-     */
-    private void requireRuleQuota(String region, List<IpPermission> existing, List<IpPermission> added) {
-        RuleUsage addedUsage = ruleUsage(region, added);
-        RuleUsage total = ruleUsage(region, existing).plus(addedUsage);
-        if ((addedUsage.ipv4() > 0 && total.ipv4() > RULES_PER_SECURITY_GROUP)
-                || (addedUsage.ipv6() > 0 && total.ipv6() > RULES_PER_SECURITY_GROUP)) {
-            throw new AwsException("RulesPerSecurityGroupLimitExceeded",
-                    "The maximum number of rules per security group has been reached.", 400);
-        }
-    }
-
-    private RuleUsage ruleUsage(String region, List<IpPermission> permissions) {
-        RuleUsage usage = new RuleUsage(0, 0);
-        for (IpPermission perm : permissions) {
-            long groups = nullToEmpty(perm.getUserIdGroupPairs()).size();
-            usage = usage.plus(new RuleUsage(nullToEmpty(perm.getIpRanges()).size() + groups,
-                    nullToEmpty(perm.getIpv6Ranges()).size() + groups));
-            for (PrefixListId reference : nullToEmpty(perm.getPrefixListIds())) {
-                usage = usage.plus(prefixListRuleUsage(region, reference.getPrefixListId()));
-            }
-        }
-        return usage;
-    }
-
-    /** A list deleted while still referenced (Floci allows it) no longer weighs anything. */
-    private RuleUsage prefixListRuleUsage(String region, String prefixListId) {
-        ManagedPrefixList list = managedPrefixLists.get(key(region, prefixListId))
-                .orElseGet(() -> awsManagedPrefixLists(region).stream()
-                        .filter(candidate -> candidate.getPrefixListId().equals(prefixListId))
-                        .findFirst()
-                        .orElse(null));
-        if (list == null || list.getMaxEntries() == null) {
-            return new RuleUsage(0, 0);
-        }
-        return "IPv6".equals(list.getAddressFamily())
-                ? new RuleUsage(0, list.getMaxEntries())
-                : new RuleUsage(list.getMaxEntries(), 0);
-    }
-
-    private record RuleUsage(long ipv4, long ipv6) {
-        RuleUsage plus(RuleUsage other) {
-            return new RuleUsage(ipv4 + other.ipv4, ipv6 + other.ipv6);
         }
     }
 

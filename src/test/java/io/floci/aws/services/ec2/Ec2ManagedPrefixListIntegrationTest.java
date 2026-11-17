@@ -103,7 +103,7 @@ class Ec2ManagedPrefixListIntegrationTest {
             .statusCode(200)
             .body("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListId", equalTo("pl-3b927c52"))
             .body("DescribeManagedPrefixListsResponse.prefixListSet.item.ownerId", equalTo("AWS"))
-            .body("DescribeManagedPrefixListsResponse.prefixListSet.item.maxEntries", equalTo("55"));
+            .body("DescribeManagedPrefixListsResponse.prefixListSet.item.maxEntries", equalTo("49"));
 
         given()
             .formParam("Action", "GetManagedPrefixListEntries")

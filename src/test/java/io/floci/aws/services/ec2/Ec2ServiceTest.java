@@ -7783,7 +7783,7 @@ class Ec2ServiceTest {
         List<ManagedPrefixList> cloudFront = service.describeManagedPrefixLists("eu-west-1",
                 List.of("pl-3b927c52"), Map.of());
         assertEquals(1, cloudFront.size());
-        assertEquals(55, cloudFront.getFirst().getMaxEntries());
+        assertEquals(49, cloudFront.getFirst().getMaxEntries());
         List<String> cidrs = service.getManagedPrefixListEntries("eu-west-1", "pl-3b927c52", null).stream()
                 .map(PrefixListEntry::getCidr)
                 .toList();
@@ -8184,7 +8184,7 @@ class Ec2ServiceTest {
             assertEquals("AWS", list.getOwnerId());
             assertTrue(list.isAwsManaged());
             assertEquals("IPv4", list.getAddressFamily());
-            assertEquals(55, list.getMaxEntries());
+            assertEquals(49, list.getMaxEntries());
             assertEquals("arn:aws:ec2:" + region + ":aws:prefix-list/pl-3b927c52", list.getPrefixListArn());
         }
 
@@ -8192,7 +8192,7 @@ class Ec2ServiceTest {
                 .map(PrefixListEntry::getCidr)
                 .toList();
         assertTrue(cidrs.containsAll(List.of("130.176.0.0/18", "15.158.0.0/16", "64.252.64.0/18")), cidrs.toString());
-        assertTrue(cidrs.size() <= 55, cidrs.toString());
+        assertEquals(49, cidrs.size(), cidrs.toString());
     }
 
     @Test
@@ -8353,144 +8353,6 @@ class Ec2ServiceTest {
         // allow-all egress rule, so the check is for an ingress rule rather than for none.
         assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
                 .noneMatch(r -> !r.isEgress() || r.getPrefixListId() != null));
-    }
-
-    private static final String CLOUDFRONT_PREFIX_LIST = "pl-3b927c52";
-
-    /** One permission holding {@code count} distinct sources of one kind, each a separate rule. */
-    private static IpPermission sources(String kind, int count) {
-        IpPermission perm = basePermission();
-        for (int i = 0; i < count; i++) {
-            switch (kind) {
-                case "ipv4" -> perm.getIpRanges().add(new IpRange("10.0." + i + ".0/24", null));
-                case "ipv6" -> {
-                    Ipv6Range range = new Ipv6Range();
-                    range.setCidrIpv6("2001:db8:" + Integer.toHexString(i) + "::/48");
-                    perm.getIpv6Ranges().add(range);
-                }
-                default -> {
-                    UserIdGroupPair pair = new UserIdGroupPair();
-                    pair.setGroupId("sg-peer" + i);
-                    perm.getUserIdGroupPairs().add(pair);
-                }
-            }
-        }
-        return perm;
-    }
-
-    private static IpPermission prefixListPermission(String prefixListId) {
-        IpPermission perm = basePermission();
-        perm.getPrefixListIds().add(new PrefixListId(prefixListId, null));
-        return perm;
-    }
-
-    private static long ingressRuleCount(Ec2Service service, String groupId) {
-        return service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
-                .filter(rule -> !rule.isEgress())
-                .count();
-    }
-
-    @Test
-    void theSixtyFirstIngressRuleExceedsTheRuleQuota() {
-        Ec2Service service = prefixListService();
-        String groupId = service.createSecurityGroup("us-east-1", "full", "full", null).getGroupId();
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 60)));
-
-        IpPermission extra = basePermission();
-        extra.getIpRanges().add(new IpRange("192.0.2.0/24", null));
-        AwsException error = assertThrows(AwsException.class,
-                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(extra)));
-
-        assertEquals("RulesPerSecurityGroupLimitExceeded", error.getErrorCode());
-        assertEquals("The maximum number of rules per security group has been reached.", error.getMessage());
-        assertEquals(60, ingressRuleCount(service, groupId));
-    }
-
-    @Test
-    void cloudFrontReferenceOnAGroupWithSixRulesIsRejectedAtomically() {
-        Ec2Service service = prefixListService();
-        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 6)));
-
-        IpPermission cidr = basePermission();
-        cidr.getIpRanges().add(new IpRange("192.0.2.0/24", null));
-        AwsException error = assertThrows(AwsException.class, () -> service.authorizeSecurityGroupIngress(
-                "us-east-1", groupId, List.of(cidr, prefixListPermission(CLOUDFRONT_PREFIX_LIST))));
-
-        assertEquals("RulesPerSecurityGroupLimitExceeded", error.getErrorCode());
-        assertEquals(6, ingressRuleCount(service, groupId));
-        SecurityGroup group = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
-                .getFirst();
-        assertEquals(6, group.getIpPermissions().stream().mapToInt(p -> p.getIpRanges().size()).sum());
-        assertTrue(group.getIpPermissions().stream().allMatch(p -> p.getPrefixListIds().isEmpty()));
-    }
-
-    @Test
-    void cloudFrontReferenceFitsBesideFiveRules() {
-        Ec2Service service = prefixListService();
-        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 5)));
-
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)));
-
-        assertEquals(6, ingressRuleCount(service, groupId));
-    }
-
-    @Test
-    void ingressAndEgressHaveSeparateRuleQuotas() {
-        Ec2Service service = prefixListService();
-        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 59)));
-
-        // Egress holds only the default allow-all rule, so 55 more still fit there.
-        service.authorizeSecurityGroupEgress("us-east-1", groupId, List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)));
-
-        assertThrows(AwsException.class, () -> service.authorizeSecurityGroupEgress("us-east-1", groupId,
-                List.of(sources("ipv4", 5))));
-    }
-
-    @Test
-    void ipv4AndIpv6RulesHaveSeparateQuotas() {
-        Ec2Service service = prefixListService();
-        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv6", 60)));
-
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)));
-
-        assertEquals(61, ingressRuleCount(service, groupId));
-        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
-                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv6", 1))))
-                .getErrorCode());
-    }
-
-    @Test
-    void aGroupReferenceCountsTowardBothAddressFamilies() {
-        Ec2Service service = prefixListService();
-        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("group", 6)));
-
-        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
-                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId,
-                        List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)))).getErrorCode());
-        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
-                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv6", 55))))
-                .getErrorCode());
-    }
-
-    @Test
-    void aCustomerPrefixListCountsAsItsMaxEntries() {
-        Ec2Service service = prefixListService();
-        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
-        ManagedPrefixList fits = service.createManagedPrefixList("us-east-1", "fits", "IPv4", 60,
-                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
-        ManagedPrefixList tooBig = service.createManagedPrefixList("us-east-1", "too-big", "IPv4", 61,
-                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
-
-        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
-                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId,
-                        List.of(prefixListPermission(tooBig.getPrefixListId())))).getErrorCode());
-        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(prefixListPermission(fits.getPrefixListId())));
-        assertEquals(1, ingressRuleCount(service, groupId));
     }
 
     /** AWS emits one rule per source, so a permission naming both expands to two. */
