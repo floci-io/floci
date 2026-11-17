@@ -106,6 +106,71 @@ class EcsServicePersistenceTest {
                 "deleted attribute must not reappear after restart");
     }
 
+    /**
+     * IAM's tag lookup reads the tags of the cluster, task definition or container instance whose ARN it is given, as
+     * tag calls leave them and a restart keeps them. A tag call gives the resource a new map rather than changing the
+     * one a reader already holds, and an ARN of another account or of no resource reads nothing.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheResourceTheArnNamesAndTaggingPutsANewMap() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        EcsService first = serviceWithStorage(storage);
+        String cluster = first.createCluster("tagged", Map.of("team", "web"), REGION).getClusterArn();
+        String td = first.registerTaskDefinition("tagged", List.of(container("app", "nginx:latest")),
+                NetworkMode.awsvpc, "256", "512", null, null, List.of("FARGATE"), Map.of("tier", "web"), REGION)
+                .getTaskDefinitionArn();
+        String instance = first.registerContainerInstance("tagged", null, List.of(), REGION).getContainerInstanceArn();
+        Map<String, String> held = first.listTagsForResource(cluster);
+
+        first.tagResource(cluster, Map.of("team", "data"));
+        first.untagResource(td, List.of("tier"));
+        first.tagResource(instance, Map.of("rack", "a"));
+
+        assertEquals(Map.of("team", "web"), held);
+        assertEquals(Map.of("team", "data"), first.storedTags(cluster));
+        assertEquals(Map.of(), first.storedTags(td));
+        assertEquals(Map.of("rack", "a"), first.storedTags(instance));
+        assertEquals(Map.of("team", "data"), serviceWithStorage(storage).storedTags(cluster));
+        assertEquals(Map.of(), first.storedTags(cluster.replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), first.storedTags(cluster + "0"));
+        assertEquals(Map.of(), first.storedTags("arn:aws:s3:::tagged"));
+    }
+
+    /**
+     * A cluster saved before storage was account-aware, and a task definition saved before that and before its key
+     * named its Region, are read in place for the default account and never migrated; another account's ARN reads
+     * nothing.
+     */
+    @Test
+    void storedTagsReadsPreAccountAwareResourcesOfTheDefaultAccountInPlace() {
+        InMemoryStorage<String, EcsCluster> rawClusters = new InMemoryStorage<>();
+        InMemoryStorage<String, TaskDefinition> rawDefinitions = new InMemoryStorage<>();
+        SharedStorageFactory storage = new SharedStorageFactory();
+        storage.stores.put("ecs-clusters.json", new AccountAwareStorageBackend<>(rawClusters, null, "000000000000"));
+        storage.stores.put("ecs-task-definitions.json",
+                new AccountAwareStorageBackend<>(rawDefinitions, null, "000000000000"));
+        String clusterArn = "arn:aws:ecs:" + REGION + ":000000000000:cluster/legacy";
+        EcsCluster cluster = new EcsCluster();
+        cluster.setClusterName("legacy");
+        cluster.setClusterArn(clusterArn);
+        cluster.setTags(Map.of("team", "data"));
+        rawClusters.put(REGION + "::legacy", cluster);
+        String definitionArn = "arn:aws:ecs:" + REGION + ":000000000000:task-definition/legacy:1";
+        TaskDefinition definition = new TaskDefinition();
+        definition.setFamily("legacy");
+        definition.setRevision(1);
+        definition.setTaskDefinitionArn(definitionArn);
+        definition.setTags(Map.of("tier", "web"));
+        rawDefinitions.put("legacy:1", definition);
+        EcsService service = serviceWithStorage(storage);
+
+        assertEquals(Map.of("team", "data"), service.storedTags(clusterArn));
+        assertEquals(Map.of("tier", "web"), service.storedTags(definitionArn));
+        assertEquals(Map.of(), service.storedTags(clusterArn.replace(":000000000000:", ":111122223333:")));
+        assertTrue(rawClusters.get(REGION + "::legacy").isPresent());
+        assertTrue(rawDefinitions.get("legacy:1").isPresent());
+    }
+
     @Test
     void persistedServiceGetsItsTasksBackAfterRestartWithoutAnEcsRequest() {
         SharedStorageFactory storage = new SharedStorageFactory();

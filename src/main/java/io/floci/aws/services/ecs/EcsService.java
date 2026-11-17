@@ -15,6 +15,7 @@ import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackedMap;
+import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
@@ -171,8 +172,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     // region::clusterName → EcsCluster
     private Map<String, EcsCluster> clusters = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<EcsCluster> clustersStore;
     // region::family:revision → TaskDefinition (entries persisted before regions were keyed: family:revision)
     private Map<String, TaskDefinition> taskDefinitions = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<TaskDefinition> taskDefinitionsStore;
     // region::family → latest revision number
     private Map<String, Integer> latestRevisions = new ConcurrentHashMap<>();
     // taskArn → EcsTask
@@ -257,6 +260,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final Map<String, ContainerInstance> containerInstances = new ConcurrentHashMap<>();
     // name → CapacityProvider (excludes built-ins FARGATE, FARGATE_SPOT)
     private Map<String, CapacityProvider> capacityProviders = new ConcurrentHashMap<>();
+    private AccountAwareStorageBackend<CapacityProvider> capacityProvidersStore;
     // taskSetArn → TaskSet
     private final Map<String, TaskSet> taskSets = new ConcurrentHashMap<>();
     // Serializes create/update/delete of one service key (region, cluster, name). A fixed set of
@@ -414,17 +418,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
         }
-        this.clusters = storageBacked("ecs-clusters.json",
+        this.clustersStore = storageFactory.create("ecs", "ecs-clusters.json",
                 new TypeReference<Map<String, EcsCluster>>() {});
-        this.taskDefinitions = storageBacked("ecs-task-definitions.json",
+        this.clusters = new StorageBackedMap<>(this.clustersStore);
+        this.taskDefinitionsStore = storageFactory.create("ecs", "ecs-task-definitions.json",
                 new TypeReference<Map<String, TaskDefinition>>() {});
+        this.taskDefinitions = new StorageBackedMap<>(this.taskDefinitionsStore);
         this.latestRevisions = storageBacked("ecs-latest-revisions.json",
                 new TypeReference<Map<String, Integer>>() {});
         this.servicesStore = storageFactory.create("ecs", "ecs-services.json",
                 new TypeReference<Map<String, EcsServiceModel>>() {});
         this.services = new StorageBackedMap<>(this.servicesStore);
-        this.capacityProviders = storageBacked("ecs-capacity-providers.json",
+        this.capacityProvidersStore = storageFactory.create("ecs", "ecs-capacity-providers.json",
                 new TypeReference<Map<String, CapacityProvider>>() {});
+        this.capacityProviders = new StorageBackedMap<>(this.capacityProvidersStore);
         this.attributes = storageBacked("ecs-attributes.json",
                 new TypeReference<Map<String, List<Attribute>>>() {});
         this.accountSettings = storageBacked("ecs-account-settings.json",
@@ -3572,7 +3579,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     // ── Tags ──────────────────────────────────────────────────────────────────
 
-    public void tagResource(String resourceArn, Map<String, String> tags) {
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
             throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
@@ -3580,7 +3587,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         mergeTagsOnResource(resource, tags);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         Object resource = findByArn(resourceArn);
         if (resource == null) {
             throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
@@ -3594,6 +3601,63 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterException", "Resource not found: " + resourceArn, 400);
         }
         return getTagsFromResource(resource);
+    }
+
+    /**
+     * The tags of the cluster, task definition, service, capacity provider, task or container instance whose ARN is
+     * {@code arn}, among the resources of the request's account, where every ECS handler reads: an ARN of another
+     * account names none of them. Each is read under the key its ARN gives: a stored one in place, one saved before
+     * storage was account-aware or before a definition's key named its Region included, and matched on the whole
+     * ARN. Reads only.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "ecs")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String resource = parsed.resource();
+        int slash = resource.indexOf('/');
+        if (!account.equals(regionResolver.getAccountId()) || slash < 0) {
+            return Map.of();
+        }
+        String region = parsed.region();
+        String id = resource.substring(slash + 1);
+        int idSlash = id.indexOf('/');
+        Optional<Map<String, String>> tags = switch (resource.substring(0, slash)) {
+            case "cluster" -> readStored(clustersStore, clusters, account, clusterKey(region, id))
+                    .filter(c -> arn.equals(c.getClusterArn())).map(EcsCluster::getTags);
+            // The key taskDefinitionKey builds from the family and revision the ARN ends in, then the one without the
+            // Region a definition was saved under before.
+            case "task-definition" -> readStored(taskDefinitionsStore, taskDefinitions, account, region + "::" + id)
+                    .or(() -> readStored(taskDefinitionsStore, taskDefinitions, account, id))
+                    .filter(td -> arn.equals(td.getTaskDefinitionArn())).map(TaskDefinition::getTags);
+            case "service" -> idSlash < 0 ? Optional.empty()
+                    : readStored(servicesStore, services, account,
+                            serviceKey(region, id.substring(0, idSlash), id.substring(idSlash + 1)))
+                    .filter(s -> arn.equals(s.getServiceArn())).map(EcsServiceModel::getTags);
+            case "capacity-provider" -> readStored(capacityProvidersStore, capacityProviders, account, id)
+                    .filter(cp -> arn.equals(cp.getCapacityProviderArn())).map(CapacityProvider::getTags);
+            case "task" -> Optional.ofNullable(tasks.get(arn)).map(EcsTask::getTags);
+            // Kept under its cluster's ARN, which the instance's names: the cluster's name, in the same coordinates.
+            case "container-instance" -> idSlash < 0 ? Optional.empty()
+                    : Optional.ofNullable(containerInstances.get(containerInstanceKey(new AwsArnUtils.Arn(
+                            parsed.partition(), "ecs", region, account, "cluster/" + id.substring(0, idSlash))
+                            .toString(), arn))).map(ContainerInstance::getTags);
+            default -> Optional.empty();
+        };
+        return new LinkedHashMap<>(tags.orElse(Map.of()));
+    }
+
+    /**
+     * The value under {@code key} in {@code account}, a pre-account-aware one of the default account included, read
+     * in place; the map's when the service runs without storage.
+     */
+    private static <V> Optional<V> readStored(StorageBackend<String, V> store, Map<String, V> map, String account,
+                                              String key) {
+        return store == null ? Optional.ofNullable(map.get(key))
+                : AccountAwareStorageBackend.readInAccount(store, account, key);
     }
 
     private Object findByArn(String arn) {
@@ -3618,24 +3682,38 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return null;
     }
 
+    /** Gives the resource a new map, its tags with {@code tags} added, so a reader holds one whole set of tags. */
     private void mergeTagsOnResource(Object resource, Map<String, String> tags) {
-        if (resource instanceof EcsCluster c) { c.getTags().putAll(tags); }
-        else if (resource instanceof TaskDefinition td) { td.getTags().putAll(tags); }
-        else if (resource instanceof EcsTask t) { t.getTags().putAll(tags); }
-        else if (resource instanceof EcsServiceModel s) { s.getTags().putAll(tags); }
-        else if (resource instanceof ContainerInstance ci) { ci.getTags().putAll(tags); }
-        else if (resource instanceof CapacityProvider cp) { cp.getTags().putAll(tags); }
+        Map<String, String> merged = new LinkedHashMap<>(tagsOf(resource));
+        merged.putAll(tags);
+        setTagsOnResource(resource, merged);
         persistTaggedResource(resource);
     }
 
+    /** Gives the resource a new map, its tags without {@code tagKeys}, so a reader holds one whole set of tags. */
     private void removeTagsFromResource(Object resource, List<String> tagKeys) {
-        if (resource instanceof EcsCluster c) { tagKeys.forEach(c.getTags()::remove); }
-        else if (resource instanceof TaskDefinition td) { tagKeys.forEach(td.getTags()::remove); }
-        else if (resource instanceof EcsTask t) { tagKeys.forEach(t.getTags()::remove); }
-        else if (resource instanceof EcsServiceModel s) { tagKeys.forEach(s.getTags()::remove); }
-        else if (resource instanceof ContainerInstance ci) { tagKeys.forEach(ci.getTags()::remove); }
-        else if (resource instanceof CapacityProvider cp) { tagKeys.forEach(cp.getTags()::remove); }
+        Map<String, String> kept = new LinkedHashMap<>(tagsOf(resource));
+        tagKeys.forEach(kept::remove);
+        setTagsOnResource(resource, kept);
         persistTaggedResource(resource);
+    }
+
+    private static void setTagsOnResource(Object resource, Map<String, String> tags) {
+        switch (resource) {
+            case EcsCluster c -> c.setTags(tags);
+            case TaskDefinition td -> td.setTags(tags);
+            case EcsTask t -> t.setTags(tags);
+            case EcsServiceModel s -> s.setTags(tags);
+            case ContainerInstance ci -> ci.setTags(tags);
+            case CapacityProvider cp -> cp.setTags(tags);
+            default -> throw new IllegalArgumentException("Not a taggable ECS resource: " + resource);
+        }
+    }
+
+    /** The resource's tags, none when a stored record holds no map. */
+    private Map<String, String> tagsOf(Object resource) {
+        Map<String, String> tags = getTagsFromResource(resource);
+        return tags == null ? Map.of() : tags;
     }
 
     /** Writes back a tag mutation to the owning durable map. Tasks and container instances are

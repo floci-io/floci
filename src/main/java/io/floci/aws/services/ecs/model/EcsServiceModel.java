@@ -38,7 +38,7 @@ public class EcsServiceModel {
     private String deploymentController;
     private String schedulingStrategy;
     private String availabilityZoneRebalancing;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
     private NetworkConfiguration networkConfiguration;
     /**
