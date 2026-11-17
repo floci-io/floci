@@ -1673,11 +1673,6 @@ public class PostgresProtocolHandler {
      * token never granted. Watching the server's own {@code session_authorization} report catches
      * that whatever SQL produced it; the session is then terminated, since a handover that already
      * happened cannot be taken back.
-     *
-     * <p>An IAM replication session also gets its client→backend direction read message by
-     * message. Its WAL sender started as the master, which may stream every database, so the
-     * proxy hands PostgreSQL any physical replication command as SQL that fails with PostgreSQL's
-     * own permission error, which keeps the session and its transaction state as PostgreSQL has them.
      */
     public static void bridge(AuthenticatedSession session) {
         Socket client = session.client();
@@ -1820,11 +1815,7 @@ public class PostgresProtocolHandler {
             "START_REPLICATION", "CREATE_REPLICATION_SLOT", "DROP_REPLICATION_SLOT", "ALTER_REPLICATION_SLOT",
             "READ_REPLICATION_SLOT", "TIMELINE_HISTORY", "UPLOAD_MANIFEST", "SHOW");
 
-    /**
-     * Copies framed client messages, replacing each Query that carries a physical replication
-     * command with {@link #PHYSICAL_REPLICATION_REFUSAL}. Only a Query can carry one: a WAL sender
-     * refuses the extended query protocol.
-     */
+    /** A WAL sender refuses the extended query protocol, so only a Query can carry a replication command. */
     private static void relayRefusingPhysicalReplication(InputStream clientIn, OutputStream backendOut,
                                                          String iamRole, Runnable onDone) {
         RelayInputStream from = new RelayInputStream(clientIn);
@@ -1884,10 +1875,8 @@ public class PostgresProtocolHandler {
     }
 
     /**
-     * Whether a WAL sender would run {@code query} as SQL or as a logical replication command,
-     * read the way {@code repl_scanner.l} reads it: whitespace, then words. Keywords are matched
-     * ignoring ASCII case, which PostgreSQL does not, so a lowercase command PostgreSQL would run
-     * as SQL and refuse as a syntax error is refused here instead.
+     * Keywords are matched ignoring ASCII case, which PostgreSQL does not, so a lowercase command
+     * PostgreSQL would run as SQL and refuse as a syntax error is refused here instead.
      */
     static boolean permittedOnLogicalReplication(String query) {
         List<String> words = leadingReplicationWords(query, 4);
@@ -1904,11 +1893,7 @@ public class PostgresProtocolHandler {
         };
     }
 
-    /**
-     * Up to {@code limit} leading words of {@code query}, ASCII letters upper-cased, stopping at
-     * the first token that is not a word. A double-quoted identifier is kept with its quotes, so
-     * it never reads as a keyword.
-     */
+    /** A double-quoted identifier keeps its quotes, so it never reads as a keyword. */
     private static List<String> leadingReplicationWords(String query, int limit) {
         List<String> words = new ArrayList<>();
         int i = 0;
