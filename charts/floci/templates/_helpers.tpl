@@ -248,10 +248,26 @@ sets fails the render and names the value to use instead.
 {{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS" (join "," .) }}
 {{- end }}
 {{- with $k8s.nodeSelector }}
-{{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR" (join "," .) }}
+{{- $terms := list }}
+{{- range $key, $value := . }}
+{{- $terms = append $terms (printf "%s=%s" $key $value) }}
+{{- end }}
+{{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR" (join "," $terms) }}
 {{- end }}
 {{- with $k8s.tolerations }}
-{{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS" (join "," .) }}
+{{- /* Each toleration becomes the taint it tolerates in kubectl taint syntax, the form Floci parses. */}}
+{{- $taints := list }}
+{{- range . }}
+{{- $taint := .key }}
+{{- if ne (default "Equal" .operator) "Exists" }}
+{{- $taint = printf "%s=%s" $taint (default "" .value) }}
+{{- end }}
+{{- with .effect }}
+{{- $taint = printf "%s:%s" $taint . }}
+{{- end }}
+{{- $taints = append $taints $taint }}
+{{- end }}
+{{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS" (join "," $taints) }}
 {{- end }}
 {{- with $k8s.flociAddress }}
 {{- $_ := set $env "FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS" . }}

@@ -81,8 +81,23 @@
                 "namespace": { "type": "string" },
                 "initImage": { "type": "string" },
                 "labels": { "type": "array", "items": { "type": "string", "pattern": "^[^=,]+=[^,]*$" } },
-                "nodeSelector": { "type": "array", "items": { "type": "string", "pattern": "^[^=,]+=[^,]*$" } },
-                "tolerations": { "type": "array", "items": { "type": "string", "pattern": "^[^=:,]+(=[^:,]*)?(:(NoSchedule|PreferNoSchedule|NoExecute))?$" } },
+                "nodeSelector": { "type": "object", "propertyNames": { "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?$" }, "additionalProperties": { "type": "string", "pattern": "^([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?$" } },
+                "tolerations": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["key"],
+                    "properties": {
+                      "key": { "type": "string", "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?$" },
+                      "operator": { "enum": ["Equal", "Exists"] },
+                      "value": { "type": "string", "pattern": "^([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?$" },
+                      "effect": { "enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"] }
+                    },
+                    "if": { "required": ["operator"], "properties": { "operator": { "const": "Exists" } } },
+                    "then": { "not": { "required": ["value"] } }
+                  }
+                },
                 "flociAddress": { "type": "string", "pattern": "^$|^[A-Za-z0-9.-]+$" }
               }
             }

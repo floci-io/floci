@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -165,7 +166,7 @@ public class LambdaPodSpecFactory {
         ObjectNode spec = nodes.objectNode()
                 .put("restartPolicy", "Never")
                 .put("terminationGracePeriodSeconds", 5);
-                
+
         Map<String, String> nodeSelector = podNodeSelector();
         if (!nodeSelector.isEmpty()) {
             ObjectNode selector = nodes.objectNode();
@@ -228,7 +229,9 @@ public class LambdaPodSpecFactory {
 
     Map<String, String> podLabels(String functionName) {
         LinkedHashMap<String, String> labels =
-                keyValues(config.services().lambda().kubernetes().labels(), "label");
+                keyValues(config.services().lambda().kubernetes().labels(), entry -> LOG.warnv(
+                        "Ignoring invalid Lambda pod label entry ''{0}'' "
+                        + "(expected key=value with Kubernetes label syntax)", entry));
         // Managed labels go last so user entries can never overwrite them — the
         // orphan sweep selects on these, and an overwritten label leaks pods forever.
         labels.put(MANAGED_BY_LABEL, MANAGED_BY_VALUE);
@@ -238,7 +241,10 @@ public class LambdaPodSpecFactory {
     }
 
     Map<String, String> podNodeSelector() {
-        return keyValues(config.services().lambda().kubernetes().nodeSelector(), "node selector");
+        return keyValues(config.services().lambda().kubernetes().nodeSelector(), entry -> {
+            throw new IllegalStateException("Invalid Lambda pod node selector entry '" + entry
+                    + "' in FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR (expected key=value with Kubernetes label syntax)");
+        });
     }
 
     /**
@@ -280,7 +286,8 @@ public class LambdaPodSpecFactory {
         return tolerations;
     }
 
-    private static LinkedHashMap<String, String> keyValues(Optional<List<String>> entries, String kind) {
+    private static LinkedHashMap<String, String> keyValues(Optional<List<String>> entries,
+                                                           Consumer<String> onInvalid) {
         LinkedHashMap<String, String> result = new LinkedHashMap<>();
         entries.orElse(List.of()).forEach(entry -> {
             int eq = entry.indexOf('=');
@@ -292,8 +299,7 @@ public class LambdaPodSpecFactory {
             if (LABEL_KEY.matcher(key).matches() && LABEL_VALUE.matcher(value).matches()) {
                 result.put(key, value);
             } else {
-                LOG.warnv("Ignoring invalid Lambda pod {0} entry ''{1}'' "
-                        + "(expected key=value with Kubernetes label syntax)", kind, entry);
+                onInvalid.accept(entry);
             }
         });
         return result;

@@ -6,6 +6,8 @@ import io.floci.aws.config.EmulatorConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -18,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -154,12 +157,23 @@ class LambdaPodSpecFactoryTest {
     }
 
     @Test
-    void nodeSelectorIsParsedAndInvalidEntriesAreDropped() {
+    void nodeSelectorIsParsed() {
         when(kubernetes.nodeSelector()).thenReturn(Optional.of(
-                List.of("workload-type=backend", "kubernetes.io/arch=amd64", "bad key=x", "a=b=c")));
+                List.of("workload-type=backend", " kubernetes.io/arch = amd64 ")));
         assertThat(stringMap(spec(buildZipPod()).path("nodeSelector")))
                 .containsExactly(Map.entry("workload-type", "backend"),
                         Map.entry("kubernetes.io/arch", "amd64"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"bad key=x", "a=b=c", "Kubernetes.io/arch=amd64", "=x", "no-equals"})
+    void invalidNodeSelectorEntryFailsTheColdStart(String invalid) {
+        // Dropping a selector term would widen where the pod may run, so it fails instead.
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(List.of("workload-type=backend", invalid)));
+        assertThatThrownBy(this::buildZipPod)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("'" + invalid + "'")
+                .hasMessageContaining("FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR");
     }
 
     @Test

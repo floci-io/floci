@@ -72,11 +72,12 @@ floci:
       initImage: ""
       # -- Extra labels for Lambda pods, as "key=value" strings.
       labels: []
-      # -- Node selector of Lambda pods, as "key=value" strings.
-      nodeSelector: []
-      # -- Tolerations of Lambda pods, each the taint it tolerates in `kubectl taint`
-      # syntax: "key=value:NoSchedule" (Equal), "key:NoSchedule" (Exists). Leave out
-      # ":Effect" to tolerate every effect.
+      # -- Node selector of Lambda pods
+      nodeSelector: {}
+      # -- Tolerations of Lambda pods, the same list as a pod's `tolerations`. Each takes
+      # `key` (required), `operator` (`Equal`, the default, or `Exists`), `value` and
+      # `effect`; leave out `effect` to tolerate every effect. `tolerationSeconds` and an
+      # empty `key` are not supported.
       tolerations: []
       # -- Address Lambda pods use to reach Floci. Empty lets Floci advertise its own pod
       # IP, which is right for an in-cluster install.

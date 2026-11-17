@@ -335,7 +335,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend for Lambda environments: `docker` (containers) or `kubernetes` (pods) |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | _(none)_ | Extra pod labels as comma-separated `key=value` entries |
-| `FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR` | _(none)_ | Pod node selector as comma-separated `key=value` entries |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR` | _(none)_ | Pod node selector as comma-separated `key=value` entries; an invalid entry fails the cold start to avoid scheduling the pod on unsupported nodes |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS` | _(none)_ | Pod tolerations as comma-separated taints in `kubectl taint` syntax: `key=value:Effect` (operator `Equal`) or `key:Effect` (operator `Exists`); leave out `:Effect` to tolerate every effect |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | _(none)_ | Host/IP Lambda pods use to reach Floci; auto-detected when Floci runs in-cluster |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code into the pod (needs `sh`, `wget`, `unzip`) |
