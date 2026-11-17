@@ -118,25 +118,32 @@ public class SidecarSchemaCompiler {
         int parentheses = 0;
         int brackets = 0;
         String previousTopLevelToken = "";
+        boolean expectingScalarName = false;
         int index = 0;
         while (index < clean.length()) {
             char current = clean.charAt(index);
             if (current == '{') {
+                expectingScalarName = false;
                 braces++;
                 index++;
             } else if (current == '}') {
+                expectingScalarName = false;
                 braces--;
                 index++;
             } else if (current == '(') {
+                expectingScalarName = false;
                 parentheses++;
                 index++;
             } else if (current == ')') {
+                expectingScalarName = false;
                 parentheses--;
                 index++;
             } else if (current == '[') {
+                expectingScalarName = false;
                 brackets++;
                 index++;
             } else if (current == ']') {
+                expectingScalarName = false;
                 brackets--;
                 index++;
             } else if (isGraphqlNameStart(current)) {
@@ -146,35 +153,22 @@ public class SidecarSchemaCompiler {
                 }
                 String token = clean.substring(tokenStart, index);
                 if (braces == 0 && parentheses == 0 && brackets == 0) {
-                    if (token.equals("scalar") && !previousTopLevelToken.equals("extend")) {
-                        int nameStart = skipIgnored(clean, index);
-                        if (nameStart < clean.length() && isGraphqlNameStart(clean.charAt(nameStart))) {
-                            int nameEnd = nameStart + 1;
-                            while (nameEnd < clean.length() && isGraphqlNamePart(clean.charAt(nameEnd))) {
-                                nameEnd++;
-                            }
-                            declaredScalars.add(clean.substring(nameStart, nameEnd));
-                        }
+                    if (expectingScalarName) {
+                        declaredScalars.add(token);
                     }
+                    expectingScalarName = token.equals("scalar") && !previousTopLevelToken.equals("extend");
                     previousTopLevelToken = token;
                 }
             } else {
                 if (braces == 0 && parentheses == 0 && brackets == 0
                         && !Character.isWhitespace(current) && current != ',') {
+                    expectingScalarName = false;
                     previousTopLevelToken = String.valueOf(current);
                 }
                 index++;
             }
         }
         return declaredScalars;
-    }
-
-    private int skipIgnored(String sdl, int index) {
-        while (index < sdl.length()
-                && (Character.isWhitespace(sdl.charAt(index)) || sdl.charAt(index) == ',')) {
-            index++;
-        }
-        return index;
     }
 
     private boolean isGraphqlNameStart(char value) {
