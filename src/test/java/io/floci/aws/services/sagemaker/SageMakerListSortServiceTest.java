@@ -131,7 +131,7 @@ class SageMakerListSortServiceTest {
         second.trainingJobStatus = "InProgress";
         jobs.put(REGION + "::b-job", first);
         jobs.put(REGION + "::a-job", second);
-        SageMakerService service = service(new InMemoryStorage<>(), new InMemoryStorage<>(), jobs,
+        SageMakerService service = service(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), jobs,
                 mapperMutatingBeforeRender(() -> first.trainingJobStatus = "Completed"));
         ObjectNode request = mapper.createObjectNode()
                 .put("SortBy", "Status").put("SortOrder", "Descending").put("MaxResults", 1);
@@ -153,8 +153,8 @@ class SageMakerListSortServiceTest {
         EndpointResource second = endpoint("a-endpoint");
         endpoints.put(REGION + "::b-endpoint", first);
         endpoints.put(REGION + "::a-endpoint", second);
-        SageMakerService service = service(new InMemoryStorage<>(), endpoints, new InMemoryStorage<>(),
-                mapperMutatingBeforeRender(() -> first.endpointStatus = "Creating"));
+        SageMakerService service = service(new InMemoryStorage<>(), new InMemoryStorage<>(), endpoints,
+                new InMemoryStorage<>(), mapperMutatingBeforeRender(() -> first.endpointStatus = "Creating"));
         ObjectNode request = mapper.createObjectNode()
                 .put("SortBy", "Status").put("SortOrder", "Descending").put("MaxResults", 1);
 
@@ -331,14 +331,14 @@ class SageMakerListSortServiceTest {
     }
 
     @Test
-    void listModelsCreationTimeBoundsKeepTheirSubMillisecondFraction() throws Exception {
+    void listModelsCreationTimeAfterIncludesAModelCreatedAtItsTimeAndBeforeExcludesIt() throws Exception {
         SageMakerService service = modelService(model("exact", 1000));
 
-        JsonNode after = service.listModels(mapper.createObjectNode().put("CreationTimeAfter", 0.9996), REGION);
-        JsonNode before = service.listModels(mapper.createObjectNode().put("CreationTimeBefore", 1.0004), REGION);
+        JsonNode after = service.listModels(mapper.createObjectNode().put("CreationTimeAfter", 1.0), REGION);
+        JsonNode before = service.listModels(mapper.createObjectNode().put("CreationTimeBefore", 1.0), REGION);
 
         assertEquals(List.of("exact"), names(after, "Models", "ModelName"));
-        assertEquals(List.of("exact"), names(before, "Models", "ModelName"));
+        assertEquals(List.of(), names(before, "Models", "ModelName"));
     }
 
     @Test
@@ -356,9 +356,7 @@ class SageMakerListSortServiceTest {
         for (ModelResource m : models) {
             store.put(REGION + "::" + m.modelName, m);
         }
-        return new SageMakerService(store, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver(REGION, "000000000000"), mapper,
-                mock(SageMakerEndpointManager.class), mock(SageMakerTrainingRunner.class));
+        return service(store, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), mapper);
     }
 
     private static ModelResource model(String name, long creationTime) {
@@ -413,14 +411,15 @@ class SageMakerListSortServiceTest {
     private SageMakerService service(InMemoryStorage<String, EndpointConfigResource> configs,
                                      InMemoryStorage<String, EndpointResource> endpoints,
                                      InMemoryStorage<String, TrainingJobResource> jobs) {
-        return service(configs, endpoints, jobs, mapper);
+        return service(new InMemoryStorage<>(), configs, endpoints, jobs, mapper);
     }
 
-    private SageMakerService service(InMemoryStorage<String, EndpointConfigResource> configs,
+    private SageMakerService service(InMemoryStorage<String, ModelResource> models,
+                                     InMemoryStorage<String, EndpointConfigResource> configs,
                                      InMemoryStorage<String, EndpointResource> endpoints,
                                      InMemoryStorage<String, TrainingJobResource> jobs,
                                      ObjectMapper serviceMapper) {
-        return new SageMakerService(new InMemoryStorage<String, ModelResource>(), configs, endpoints, jobs,
+        return new SageMakerService(models, configs, endpoints, jobs,
                 new RegionResolver(REGION, "000000000000"), serviceMapper,
                 mock(SageMakerEndpointManager.class), mock(SageMakerTrainingRunner.class));
     }

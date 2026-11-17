@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsJsonTimestamp;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
@@ -23,6 +24,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -156,13 +158,13 @@ public class SageMakerService {
         if (nameContains != null && !nameContains.isBlank()) {
             models = models.stream().filter(m -> m.modelName.contains(nameContains)).toList();
         }
-        Double createdAfter = epochMillis(request, "CreationTimeAfter");
+        Instant createdAfter = AwsJsonTimestamp.epochSeconds(request, "CreationTimeAfter", "SerializationException");
         if (createdAfter != null) {
-            models = models.stream().filter(m -> m.creationTime > createdAfter).toList();
+            models = models.stream().filter(m -> m.creationTime >= createdAfter.toEpochMilli()).toList();
         }
-        Double createdBefore = epochMillis(request, "CreationTimeBefore");
+        Instant createdBefore = AwsJsonTimestamp.epochSeconds(request, "CreationTimeBefore", "SerializationException");
         if (createdBefore != null) {
-            models = models.stream().filter(m -> m.creationTime < createdBefore).toList();
+            models = models.stream().filter(m -> m.creationTime < createdBefore.toEpochMilli()).toList();
         }
         String creationTimes = createdAfter == null && createdBefore == null ? ""
                 : createdAfter + "/" + createdBefore;
@@ -693,21 +695,6 @@ public class SageMakerService {
     private record SortOptions(String sortBy, String sortOrder) {
     }
 
-    /**
-     * A request timestamp, sent as epoch seconds, in epoch milliseconds with its fraction kept; null when the request
-     * has none.
-     */
-    private static Double epochMillis(JsonNode request, String field) {
-        JsonNode value = request.path(field);
-        if (value.isMissingNode() || value.isNull()) {
-            return null;
-        }
-        if (!value.isNumber()) {
-            throw new AwsException("SerializationException",
-                    value.getNodeType() + "_VALUE can not be converted to a Timestamp", 400);
-        }
-        return value.asDouble() * 1000;
-    }
 
     private static Comparator<ModelResource> modelComparator(String sortBy, String sortOrder) {
         Comparator<ModelResource> comparator = "Name".equals(sortBy)
