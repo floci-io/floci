@@ -936,6 +936,82 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                     "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause."));
     }
 
+    @Test
+    @Order(36)
+    void readsTheWholeIndexForABranchThatNamesItsSortKeyTwice() {
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName": "partiql-edge-cases-index-sort",
+                  "AttributeDefinitions": [
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"sk","AttributeType":"S"},
+                    {"AttributeName":"g","AttributeType":"S"},
+                    {"AttributeName":"gs","AttributeType":"S"},
+                    {"AttributeName":"l","AttributeType":"S"}
+                  ],
+                  "KeySchema": [
+                    {"AttributeName":"pk","KeyType":"HASH"},
+                    {"AttributeName":"sk","KeyType":"RANGE"}
+                  ],
+                  "GlobalSecondaryIndexes": [{
+                    "IndexName": "gix",
+                    "KeySchema": [{"AttributeName":"g","KeyType":"HASH"},{"AttributeName":"gs","KeyType":"RANGE"}],
+                    "Projection": {"ProjectionType":"ALL"}
+                  }],
+                  "LocalSecondaryIndexes": [{
+                    "IndexName": "lix",
+                    "KeySchema": [{"AttributeName":"pk","KeyType":"HASH"},{"AttributeName":"l","KeyType":"RANGE"}],
+                    "Projection": {"ProjectionType":"ALL"}
+                  }],
+                  "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+            .statusCode(200);
+        for (List<String> item : List.of(List.of("r1", "a", "0"), List.of("r2", "b", "1"), List.of("r3", "c", "2"))) {
+            request("DynamoDB_20120810.PutItem", """
+                    {"TableName":"partiql-edge-cases-index-sort","Item":{"pk":{"S":"p"},"sk":{"S":"%1$s"},
+                     "g":{"S":"ga"},"gs":{"S":"%2$s"},"l":{"S":"%2$s"},"x":{"S":"%3$s"}}}
+                    """.formatted(item.get(0), item.get(1), item.get(2)))
+                .statusCode(200);
+        }
+        String gsi = "SELECT sk FROM \"partiql-edge-cases-index-sort\".\"gix\" WHERE ";
+        String lsi = "SELECT sk FROM \"partiql-edge-cases-index-sort\".\"lix\" WHERE ";
+
+        statement(gsi + "g = 'ga' AND gs >= 'a' AND gs <= 'b'")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("r1", "r2"));
+        statement(lsi + "pk = 'p' AND l >= 'a' AND l <= 'b'")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("r1", "r2"));
+        for (String select : List.of(gsi + "g = 1 AND gs >= 'a' AND gs <= 'b'",
+                gsi + "g = 'ga' AND (gs = 'a' OR x = '0') AND (gs = 'b' OR x = '1')",
+                lsi + "pk = 1 AND l >= 'a' AND l <= 'b'",
+                lsi + "pk = 'p' AND (l = 'a' OR x = '0') AND (l = 'b' OR x = '1')")) {
+            statement(select).statusCode(200).body("Items", empty());
+        }
+
+        for (String select : List.of(gsi + "g = 1 AND gs >= 'a'", gsi + "g = 1 AND sk >= 'r1' AND sk <= 'r2'")) {
+            statement(select)
+                .statusCode(400)
+                .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key g"));
+        }
+        for (String select : List.of(lsi + "pk = 1 AND l >= 'a'", lsi + "pk = 1 AND sk >= 'r1' AND sk <= 'r2'")) {
+            statement(select)
+                .statusCode(400)
+                .body("message", equalTo("Key attribute's data type should match its data type in table's schema: Key pk"));
+        }
+        statement(gsi + "g = 'ga' AND (gs = 'a' OR x = '0') AND (gs = 'a' OR x = '1')")
+            .statusCode(400)
+            .body("message", equalTo("Overlapping conditions with range keys are not supported in where clause"));
+        for (String select : List.of(gsi + "g = 'ga' AND gs >= 'a' AND gs <= 'b' ORDER BY gs DESC",
+                lsi + "pk = 'p' AND l >= 'a' AND l <= 'b' ORDER BY l DESC")) {
+            statement(select)
+                .statusCode(400)
+                .body("message", equalTo(
+                        "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause."));
+        }
+    }
+
     private static void putItem(String pk, String attributes) {
         putItem(pk, "1", attributes);
     }
