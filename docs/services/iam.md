@@ -3190,9 +3190,9 @@ floci populates:
   state machines, their versions and executions (the state machine's tags) and activities, CodeBuild for its
   projects and report groups, Athena for its workgroups and data catalogs, Redshift Serverless for its namespaces,
   workgroups and snapshots, DynamoDB for its tables and their indexes (the table's tags), ECR for its
-  repositories, and Redshift for its clusters, snapshots, parameter groups, subnet groups, snapshot copy grants,
-  snapshot schedules, event subscriptions and integrations. Tag keys differing only in case are one condition key
-  holding every value.
+  repositories, Redshift for its clusters, snapshots, parameter groups, subnet groups, snapshot copy grants,
+  snapshot schedules, event subscriptions and integrations, and SSM for its parameters, documents and associations.
+  Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

@@ -36,9 +36,10 @@ import java.util.Optional;
  * workgroup or a data catalog; Redshift Serverless, for the tags of a namespace, a workgroup or a snapshot; DynamoDB,
  * for the tags of a table and its indexes; ECR, for the tags of a repository; Redshift, for the key a snapshot records
  * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
- * schedule, an event subscription or an integration); looked up lazily by {@code ResourceArnBuilder} and
- * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
- * ARN is of, so IAM never depends on that service directly.</p>
+ * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
+ * another account an association runs and the tags of a parameter, a document or an association); looked up lazily
+ * by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>}
+ * for the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

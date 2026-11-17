@@ -59,7 +59,7 @@ public class Parameter {
 
     @JsonProperty("Tags")
     @JsonAlias({"tags", "Tags"})
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     // The SecureString value as KMS encrypted it on PutParameter, returned by a read without WithDecryption.
     @JsonProperty("EncryptedValue")

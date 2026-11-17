@@ -664,14 +664,66 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"resourceArn\":\"" + arns + other + "\"}"), "ecr:ListTagsForResource");
     }
 
+    /**
+     * An {@code ssm:resourceTag} or {@code aws:ResourceTag} condition reads the tags SSM holds on the parameter or the
+     * document a request names, so an allow on one team's tag lets the caller read that team's and not another's.
+     */
+    @Test
+    void anSsmResourceTagConditionReadsTheTagsOfTheParameterAndTheDocument() {
+        String tagged = ssmParameter("/res-tag/" + suffix(), "data");
+        String other = ssmParameter("/res-tag/" + suffix(), "web");
+        String taggedDocument = ssmDocument("res-tag-doc-" + suffix(), "data");
+        String otherDocument = ssmDocument("res-tag-doc-" + suffix(), "web");
+
+        User user = user("res-ssm-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameter\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"ssm:resourceTag/team\":\"data\"}}},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"ssm:DescribeDocument\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "ssm", "AmazonSSM.GetParameter", "1.1", "{\"Name\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "ssm", "AmazonSSM.GetParameter", "1.1", "{\"Name\":\"" + other + "\"}"),
+                "ssm:GetParameter");
+        send(user, "ssm", "AmazonSSM.DescribeDocument", "1.1", "{\"Name\":\"" + taggedDocument + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "ssm", "AmazonSSM.DescribeDocument", "1.1", "{\"Name\":\"" + otherDocument + "\"}"),
+                "ssm:DescribeDocument");
+    }
+
+    /** An SSM String parameter of the name, tagged with the team, deleted afterwards. */
+    private String ssmParameter(String name, String team) {
+        return created("ssm", "AmazonSSM.PutParameter", "{\"Name\":\"" + name + "\",\"Value\":\"v\",\"Type\":"
+                + "\"String\",\"Tags\":" + teamTag(team) + "}", "AmazonSSM.DeleteParameter",
+                "{\"Name\":\"" + name + "\"}", name);
+    }
+
+    /** An SSM Command document of the name, tagged with the team, deleted afterwards. */
+    private String ssmDocument(String name, String team) {
+        return created("ssm", "AmazonSSM.CreateDocument", "{\"Name\":\"" + name + "\",\"DocumentType\":\"Command\","
+                + "\"Content\":\"{\\\"schemaVersion\\\":\\\"2.2\\\",\\\"mainSteps\\\":[]}\",\"Tags\":"
+                + teamTag(team) + "}", "AmazonSSM.DeleteDocument", "{\"Name\":\"" + name + "\"}", name);
+    }
+
     /** An ECR repository of the name, tagged with the team, deleted afterwards. */
     private String ecrRepository(String name, String team) {
-        adminJson("ecr", "AmazonEC2ContainerRegistry_V20150921.CreateRepository").body("{\"repositoryName\":\""
-                + name + "\",\"tags\":[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}").post("/").then()
-                .statusCode(200);
-        cleanup.register(() -> adminJson("ecr", "AmazonEC2ContainerRegistry_V20150921.DeleteRepository")
-                .body("{\"repositoryName\":\"" + name + "\",\"force\":true}").post("/"));
+        return created("ecr", "AmazonEC2ContainerRegistry_V20150921.CreateRepository", "{\"repositoryName\":\""
+                + name + "\",\"tags\":" + teamTag(team) + "}", "AmazonEC2ContainerRegistry_V20150921.DeleteRepository",
+                "{\"repositoryName\":\"" + name + "\",\"force\":true}", name);
+    }
+
+    /**
+     * {@code name}, after an administrator creates the resource with the JSON 1.1 {@code create} call and registers
+     * the {@code delete} call that removes it after the test.
+     */
+    private String created(String service, String create, String createBody, String delete, String deleteBody,
+                           String name) {
+        adminJson(service, create).body(createBody).post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson(service, delete).body(deleteBody).post("/"));
         return name;
+    }
+
+    /** A tag list holding the one tag {@code team=<team>}. */
+    private static String teamTag(String team) {
+        return "[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]";
     }
 
     @Test

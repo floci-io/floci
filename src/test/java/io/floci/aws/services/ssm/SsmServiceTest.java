@@ -1661,6 +1661,54 @@ class SsmServiceTest {
     }
 
     @Test
+    void storedTagsAreTheTagsOfTheParameterDocumentOrAssociationTheWholeArnNamesAndTaggingPutsANewMap() {
+        String region = "us-east-1";
+        String arns = "arn:aws:ssm:us-east-1:000000000000:";
+        ssmService.putParameter("/app/db", "v", "String", null, false, Map.of("team", "data"), region);
+        ssmService.putParameter("plain", "v", "String", null, false, Map.of("team", "web"), region);
+        ssmService.createDocument("RunIt", "{}", "Command", region);
+        ssmService.addTagsToResource("Document", "RunIt", Map.of("owner", "ops"), region);
+        String associationId = ssmService.createAssociation("RunIt", "nightly", null, "i-123", null, null, null, region)
+                .getAssociationId();
+        ssmService.addTagsToResource("Association", associationId, Map.of("cadence", "daily"), region);
+
+        assertEquals(Map.of("team", "data"), ssmService.storedTags(arns + "parameter/app/db"));
+        assertEquals(Map.of("team", "web"), ssmService.storedTags(arns + "parameter/plain"));
+        assertEquals(Map.of("owner", "ops"), ssmService.storedTags(arns + "document/RunIt"));
+        assertEquals(Map.of("cadence", "daily"), ssmService.storedTags(arns + "association/" + associationId));
+        // Another Region, another account's parameter of that name, an ARN whose partition is not its Region's and a
+        // type Floci keeps no record of hold none.
+        assertEquals(Map.of(), ssmService.storedTags("arn:aws:ssm:us-west-2:000000000000:parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags("arn:aws:ssm:us-east-1:111122223333:parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags("arn:aws-us-gov:ssm:us-east-1:000000000000:parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags(arns + "maintenancewindow/mw-0123456789abcdef0"));
+
+        Map<String, String> heldParameterTags = ssmService.listTagsForResource("/app/db", region);
+        Map<String, String> heldDocumentTags = ssmService.listTagsForResource("Document", "RunIt", region);
+        ssmService.addTagsToResource("/app/db", Map.of("env", "prod"), region);
+        ssmService.removeTagsFromResource("Document", "RunIt", List.of("owner"), region);
+
+        assertEquals(Map.of("team", "data"), heldParameterTags);
+        assertEquals(Map.of("owner", "ops"), heldDocumentTags);
+        assertEquals(Map.of("team", "data", "env", "prod"), ssmService.storedTags(arns + "parameter/app/db"));
+        assertEquals(Map.of(), ssmService.storedTags(arns + "document/RunIt"));
+    }
+
+    /**
+     * A top-level name stored both with and without its leading slash has one ARN, which AWS's format gives both; it
+     * names the slashed parameter, as the tagging operations read that ARN.
+     */
+    @Test
+    void storedTagsOfATopLevelArnAreTheSlashedParametersWhenBothFormsAreStored() {
+        ssmService.putParameter("twin", "v", "String", null, false, Map.of("form", "bare"), "us-east-1");
+        ssmService.putParameter("/twin", "v", "String", null, false, Map.of("form", "slashed"), "us-east-1");
+        String arn = "arn:aws:ssm:us-east-1:000000000000:parameter/twin";
+
+        assertEquals(Map.of("form", "slashed"), ssmService.storedTags(arn));
+        assertEquals(Map.of("form", "slashed"), ssmService.listTagsForResource(arn, "us-east-1"));
+    }
+
+    @Test
     void putParameterOverwriteClearsDescriptionWhenOmitted() {
         String region = "eu-west-1";
         ssmService.putParameter("/app/desc-test", "val1", "String", "Initial description", false, null, region);
