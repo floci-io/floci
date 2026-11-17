@@ -619,6 +619,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     container.withEnv(HADOOP_ENV_VARIABLE, hadoopEnvFile(job));
                 }
             }
+            if (job.listenPort() > 0) {
+                // Reached through Floci alone, so published on the host's loopback interface only.
+                container.withLoopbackPortBinding(job.listenPort(), 0);
+            }
             ContainerSpec spec = container
                     .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))
                     .withHostDockerInternalOnLinux()
@@ -649,9 +653,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (stopped.getAsBoolean()) {
                 return Outcome.halted();
             }
-            lifecycleManager.startCreated(containerId, spec);
+            ContainerLifecycleManager.ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             logHandle = attachLog(containerId, job);
             progress.started();
+            if (job.listenPort() > 0) {
+                ContainerLifecycleManager.EndpointInfo listening = info.getEndpoint(job.listenPort());
+                progress.listening(listening.host(), listening.port());
+            }
             if (job.executors() != null) {
                 capacity = joinCapacity(job.executors().application());
                 executors = new SparkExecutors(job.executors(), driver(containerId),
@@ -748,6 +756,24 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         } catch (RuntimeException e) {
             LOG.warnv("Could not remove the {0} Spark drivers an earlier Floci process left: {1}", service,
                     e.getMessage());
+        }
+    }
+
+    @Override
+    public void removeLeftoverDriver(String service, String runId) {
+        if (launches.get(runId) != null) {
+            return;
+        }
+        try {
+            lifecycleManager.findByName(ContainerStorageHelper.dockerName(config, service + "-" + runId))
+                    .ifPresent(container -> {
+                        lifecycleManager.removeIfExists(container.getId());
+                        LOG.infov("Removed {0} Spark driver {1} of {2}, left running by an earlier Floci process",
+                                service, container.getId(), runId);
+                    });
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove the {0} Spark driver of {1} an earlier Floci process left: {2}", service,
+                    runId, e.getMessage());
         }
     }
 

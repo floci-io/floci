@@ -9,7 +9,7 @@ EMR Serverless is an AWS service that provides serverless data analytics environ
 | `floci.emrserverless.enabled` | Whether the EMR Serverless API is enabled | `true` |
 | `floci.emrserverless.port` | The port the service is exposed on | `4566` |
 | `floci.services.emrserverless.job-run-duration-seconds` | How long a `BATCH` job run stays `RUNNING` before it succeeds; `0` makes it `SUCCESS` as soon as it starts | `0` |
-| `floci.services.emrserverless.runner-mode` | `immediate` moves job runs through their states without running anything; `docker` runs each job run in a container (see [Running Spark job runs](#running-spark-job-runs) and [Running Hive job runs](#running-hive-job-runs)) | `immediate` |
+| `floci.services.emrserverless.runner-mode` | `immediate` moves job runs and sessions through their states without running anything; `docker` runs each job run, and each session's Spark Connect server, in a container (see [Running Spark job runs](#running-spark-job-runs), [Running Hive job runs](#running-hive-job-runs) and [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)) | `immediate` |
 | `floci.services.emrserverless.docker-network` | Docker network for job run containers | the global default |
 | `floci.services.emrserverless.image-template` | Image for a `docker` job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release |
 | `floci.services.emrserverless.hive-image-template` | Image for a `docker` Hive job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/hive/%s:latest` |
@@ -151,8 +151,10 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
 ## Sessions
 
 A session is "a managed connection between your local PySpark client and a Spark driver running on Amazon EMR
-Serverless", through Spark Connect. Floci keeps a session and its lifecycle, but runs no Spark driver for it, so
-nothing answers Spark Connect at its endpoint.
+Serverless", through Spark Connect. With `runner-mode` set to `docker`, Floci runs that driver, a Spark Connect server,
+in a container, and a client reaches it through Floci (see [Running a session's Spark
+Connect server](#running-a-sessions-spark-connect-server)). With the default `immediate` mode, Floci keeps a session
+and its lifecycle but runs no driver for it.
 
 * **Starting**: `StartSession` needs a Spark application on `emr-7.13.0` or later, or on the AWS runtime for Apache
   Spark (`emr-spark-8.0.0` on), whose `interactiveConfiguration.sessionEnabled` is `true`. As for a job run, a
@@ -165,22 +167,24 @@ nothing answers Spark Connect at its endpoint.
   JSON type is refused with `SerializationException`, and a configuration without its `classification` with
   `ValidationException`. `releaseLabel` and `networkConfiguration` come from
   the application, and `createdBy` is the caller's ARN.
-* **States**: a session is `IDLE` as soon as it starts, with `startedAt` and `idleSince` set. It is `TERMINATED` once
-  it has been idle for its `idleTimeoutMinutes` (0 to 1,000,000, 60 when not given, as "Default timeout is set to 1
-  hour"), or once 24 hours have passed since it started, as "Each session has a hard limit of 24 hours by default",
-  whichever comes first. No source says what an idle timeout of `0` does; Floci reads it as no idle timeout, as for a
-  job run's `executionTimeoutMinutes`. Floci never reports `SUBMITTED`, `STARTING`, `STARTED`, `BUSY`, `FAILED` or
-  `TERMINATING`.
-* **TerminateSession** ends a session at once as `TERMINATED`; AWS's passes through `TERMINATING` first. A session
-  that has already ended is refused with `ValidationException`, in Floci's own wording.
+* **States**: in the `immediate` mode a session is `IDLE` as soon as it starts, with `startedAt` and `idleSince` set; in
+  the `docker` mode it goes through `SUBMITTED`, `STARTING` and `IDLE`, then `BUSY` and back (see below). It is
+  `TERMINATED` once it has been idle for its `idleTimeoutMinutes` (0 to 1,000,000, 60 when not given, as "Default
+  timeout is set to 1 hour"), or once 24 hours have passed since it started, as "Each session has a hard limit of 24
+  hours by default", whichever comes first. No source says what an idle timeout of `0` does; Floci reads it as no idle
+  timeout, as for a job run's `executionTimeoutMinutes`. Floci never reports `STARTED`.
+* **TerminateSession** ends a session with no server at once as `TERMINATED`; one whose server runs is `TERMINATING`
+  until its container has stopped, as "After you terminate a session, it enters the TERMINATING state and then the
+  TERMINATED state". A session that has already ended is refused with `ValidationException`, in Floci's own wording.
 * **StopApplication** terminates the application's sessions that have not ended, with `stateDetails` saying so. The
   API reference requires a stopping application's job runs to have ended but names no such requirement for sessions,
   and once an application is stopped "no resources are running on the application"; AWS's own handling is not
   recorded.
-* **GetSessionEndpoint** answers for a session that has not ended with an endpoint on Floci's own address
-  (`/_aws/emr-serverless/sessions/<applicationId>/<sessionId>`) and a fresh authentication token that expires in an
-  hour, as "Authentication tokens are time-limited to 1 hour". Nothing answers Spark Connect there. A session that has
-  ended is refused with `ValidationException`, in Floci's own wording.
+* **GetSessionEndpoint** answers for a session that has not ended with Floci's own address as its endpoint, such as
+  `http://localhost:4566`, and a fresh authentication token that expires in an hour, as "Authentication tokens are
+  time-limited to 1 hour". AWS's endpoint is an `https://` URL without a port; a Spark Connect URL holds no path, so
+  Floci's is its address alone, port included, and the token names the session. A session that has ended, or is
+  `TERMINATING`, is refused with `ValidationException`, in Floci's own wording.
 * **ListSessions** returns the newest sessions first, filtered by `states`, `createdAtAfter` and `createdAtBefore`, at
   most 50 per page, grouped by state as `ListJobRuns` groups runs.
 * **GetResourceDashboard** takes a `resourceType` of `SESSION`, the only one, and gives a link like
@@ -189,6 +193,45 @@ nothing answers Spark Connect at its endpoint.
 
 A state machine drives applications and job runs through the `emr-serverless:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR Serverless tasks](step-functions.md#amazon-emr-serverless-tasks).
+
+### Running a session's Spark Connect server
+
+With `runner-mode` set to `docker`, each session runs a Spark Connect server in a container, as a job run's driver runs:
+in the release's image, or the application's custom image, on the same Docker network, with the execution role's
+credentials, and with its executors in containers of their own when `executor-containers` is above 0. Its
+`spark-defaults` are the application's runtime configuration, then the session's `runtimeConfiguration`, merged as a
+job run's `applicationConfiguration` is. Floci sets `spark.connect.grpc.binding.port` itself and drops a
+`spark.connect.grpc.binding.address`, as that setting "is reserved by EMR Serverless and cannot be overridden by users".
+The server's port is published on the Docker host's loopback interface only, and clients reach it through Floci.
+
+* **Connecting**: build the connection string from `GetSessionEndpoint`'s answer as AWS's guide does, with the token in
+  the `x-aws-proxy-auth` parameter, but keep the endpoint's port:
+
+  ```python
+  endpoint = emr.get_session_endpoint(applicationId=app_id, sessionId=session_id)
+  scheme, address = endpoint["endpoint"].split("://", 1)  # http, localhost:4566
+  tls = ";use_ssl=true" if scheme == "https" else ""
+  spark = SparkSession.builder.remote(
+      f"sc://{address}/{tls};x-aws-proxy-auth={endpoint['authToken']}").getOrCreate()
+  ```
+
+  Floci serves plain HTTP unless its TLS is on, so `use_ssl=true` goes only with an `https://` endpoint, and then the
+  client has to trust Floci's CA (`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` for PySpark). The endpoint is `floci.base-url`, as
+  every URL Floci hands out is, so where Floci is reached through another port, as a container's mapped port, set
+  `floci.base-url` to that address. As AWS says, the client's PySpark must match the release's Spark (3.5.6 for
+  `emr-7.13.0`).
+* **Tokens**: a call whose token Floci did not give, or which has expired, fails with gRPC's `UNAUTHENTICATED`, as
+  "When a token expires, gRPC calls fail with an authentication error". A call to a session that is not `IDLE` or
+  `BUSY`, or, in the `immediate` mode, to any session, fails with `UNAVAILABLE`, in Floci's own wording.
+* **States**: a session is `SUBMITTED` until its container runs, `STARTING` until the server answers, then `IDLE`, with
+  `startedAt` and `idleSince` set. No source says when a session is `BUSY`: Floci makes it `BUSY` while a call runs on
+  its server, and `IDLE` again once none does, its idle timeout counting from then. A server that does not answer
+  within 10 minutes, or stops on its own, fails its session with `stateDetails` saying so (why it did not answer, or
+  its exit code); one Floci stopped running when it restarted fails too, and its container, if one is left, goes. The
+  24 hours count from when the server answers.
+* **Logs**: no source gives where a session's driver logs go, so Floci sends the server's output to its own log only,
+  not to the application's monitoring configuration.
+* **Spark UI**: `GetResourceDashboard` still links to Floci's page about the session, not to the server's Spark UI.
 
 ## Running Spark job runs
 
@@ -369,4 +412,4 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
 * **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. An image's digest is resolved as the application starts where its `applicationLevelDigestResolution` is true, or left unset on EMR 7.13 or earlier, as the user guide's table has it, and AWS's "Custom images are resolved to a digest at application start; that digest is used for all jobs until the application restarts": the application's image configuration gets the digest of the image in Floci's ECR as its `resolvedImageDigest`, and each run pulls the image by it until the application starts again; a stopped application reports none. An image outside ECR, one in another account's repository (Floci does not check that the application may pull it), or one Floci's ECR does not hold or cannot read without Docker, has no digest to read and is resolved for each run, as every image is from 7.14 on; any other answer from Floci's ECR fails `StartApplication` with `InternalServerException`; such a run's digest comes from its attempt's own pull (see **Image** above), and a job run's image configurations carry no `applicationLevelDigestResolution`.
 * **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization` (of a job run or a session), and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
-* **Sessions run nothing**: a session is kept with its lifecycle, but no Spark driver runs for it, and nothing answers Spark Connect at the endpoint `GetSessionEndpoint` gives (see [Sessions](#sessions)).
+* **Sessions in the `immediate` mode run nothing**: a session is kept with its lifecycle, but no Spark driver runs for it, and a Spark Connect call to it is refused; the `docker` mode runs one (see [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)).

@@ -127,6 +127,9 @@ starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsDockerIntegrationTest Em
 starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest EmrDockerRunnerDockerIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
+# The nightly EmrServerlessSparkConnectNightlyIntegrationTest runs a session's Spark Connect server, and its client, in
+# the emr-7.13.0 image, 3.7 GB, the first release with sessions.
+starts EmrServerlessSparkConnectNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark/emr-7.13.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
