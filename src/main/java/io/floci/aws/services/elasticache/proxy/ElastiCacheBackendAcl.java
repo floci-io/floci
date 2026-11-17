@@ -81,6 +81,21 @@ public final class ElastiCacheBackendAcl {
     }
 
     /**
+     * Installs the access string of {@code username} over a connection of its own, as a sign-in does, and
+     * returns the backend username and password that a session already relayed sends with {@code AUTH} to
+     * run as that user from then on.
+     */
+    public synchronized List<String> credentials(String backendHost, int backendPort, String username,
+                                                 Supplier<String> accessStringSupplier) throws IOException {
+        try (Socket backend = new Socket()) {
+            backend.connect(new InetSocketAddress(backendHost, backendPort), CONNECT_TIMEOUT_MILLIS);
+            authenticate(backend, username, accessStringSupplier);
+        }
+        String backendName = backendName(username);
+        return List.of(backendName, passwords.get(backendName));
+    }
+
+    /**
      * Installs a changed access string on the backend user that sessions of {@code username} already run
      * as, so it applies to their open connections and not only to the next login. Nothing is done while
      * the backend has not been set up, or for a user nobody has authenticated as yet: the next login

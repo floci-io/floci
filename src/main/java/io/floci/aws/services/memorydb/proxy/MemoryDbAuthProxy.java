@@ -6,6 +6,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.util.List;
 
 /**
  * TCP auth proxy for a single MemoryDB cluster.
@@ -16,8 +17,8 @@ import java.net.Socket;
  *
  * <p>Whether authentication is required at all is decided up front from the cluster's
  * ACL: a cluster bound to {@code open-access} (or any ACL whose users require no
- * password) is created with {@code requireAuth = false}, in which case the proxy is a
- * straight relay.
+ * password) is created with {@code requireAuth = false}, in which case a client need not
+ * sign in, and an {@code open-access} cluster is a straight relay.
  *
  * <p>A cluster bound to an ACL of its own runs each connection as a private backend ACL user
  * that carries the signed-in user's access string, as an ElastiCache cache with user groups does,
@@ -54,8 +55,27 @@ public class MemoryDbAuthProxy extends AbstractRedisAuthProxy {
         if (!authValidator.enforcesAccessStrings()) {
             return;
         }
-        String name = username == null || username.isEmpty() ? "default" : username;
+        String name = userOrDefault(username);
         backendAcl.authenticate(backend, name, () -> authValidator.accessString(name));
+    }
+
+    @Override
+    protected boolean checksCredentials() {
+        return requireAuth || authValidator.enforcesAccessStrings();
+    }
+
+    @Override
+    protected boolean signsInWithIam(String username) {
+        return authValidator.signsInWithIam(username);
+    }
+
+    @Override
+    protected List<String> backendCredentials(String username) throws IOException {
+        if (!authValidator.enforcesAccessStrings()) {
+            return super.backendCredentials(username);
+        }
+        String name = userOrDefault(username);
+        return backendAcl.credentials(backendHost(), backendPort(), name, () -> authValidator.accessString(name));
     }
 
     @Override
@@ -85,6 +105,11 @@ public class MemoryDbAuthProxy extends AbstractRedisAuthProxy {
         /** The access string of {@code username} in the cluster's ACL, or null when the ACL does not hold it. */
         default String accessString(String username) {
             return null;
+        }
+
+        /** Whether {@code username}, null for the {@code default} user, is an IAM user of the cluster's ACL. */
+        default boolean signsInWithIam(String username) {
+            return false;
         }
     }
 }

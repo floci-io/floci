@@ -70,12 +70,21 @@ installed, such as one with a selector, is logged and the open sessions keep the
 until the user authenticates again. Other
 changes, such as adding a user to a group or associating a user group with a cache, are
 installed on the next successful authentication; reconnect to apply them promptly.
-Re-authentication on an already relayed connection uses the backend protocol directly, so
-reconnect through the proxy with frontend credentials.
 Revoked members' existing sessions are not proactively disconnected by this change.
 ACL selectors are rejected before backend changes: a selector can grant permissions
 independently of the root rules used to protect private backend credentials. Read-only
 `ACL` commands are also unavailable through these sessions.
+
+## Signing in again
+
+A connection can send `AUTH`, or `HELLO` with `AUTH`, again after it has signed in, to refresh an
+IAM token or to switch to another user. The proxy checks those credentials as it does at sign-in,
+for caches with users and for caches with an AUTH token. Accepted credentials switch the
+connection to that user and its access string. Refused credentials get `WRONGPASS` and leave the
+connection signed in as before, as Valkey does. An `AUTH` or `HELLO` over 64 KiB, too large to
+check, is refused the same way. The client's password or token never reaches the backend: the proxy
+relays the command with the backend user's private credentials instead. A cache
+without authentication relays these commands to the engine as sent.
 
 ## Supported Management Actions
 
@@ -535,6 +544,21 @@ aws elasticache create-user \
   --no-no-password-required \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+### IAM connection lifetime and transactions
+
+As on AWS, a connection signed in with an IAM token is closed 12 hours after it signed in. Sending
+`AUTH` or `HELLO` with a new token gives it another 12 hours, and signing in again as a user
+without IAM ends the limit.
+
+IAM re-authentication is not supported inside `MULTI`/`EXEC`. An `AUTH` or `HELLO` for an IAM user
+inside a transaction is refused with `ERR Command not allowed inside a transaction`, and `EXEC` then
+aborts the transaction with `EXECABORT`. AWS does not document its reply, so this one is Floci's
+reading. An image older than Valkey 8 refuses it with `ERR MULTI calls can not be nested` instead,
+and runs the rest of the transaction. Another user's `AUTH` inside a transaction is queued and runs
+with `EXEC`, as in Valkey. It leaves the 12 hours as they were, since Floci cannot see whether
+`EXEC` runs it. Lua scripts cannot send `AUTH` or `HELLO` at all: the engine refuses both from a
+script.
 
 ### Transit encryption mode metadata
 

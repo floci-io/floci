@@ -753,7 +753,8 @@ public class MemoryDbService {
             return true;
         }
         User user = aclMember(cluster, username, region, accountId);
-        if (user == null) {
+        if (user == null || DEFAULT_USER.equals(user.getName())) {
+            // AWS lets the built-in default user belong only to the open-access ACL, so it signs in nowhere else.
             return false;
         }
         return switch (user.getAuthMode()) {
@@ -800,10 +801,17 @@ public class MemoryDbService {
 
             @Override
             public String accessString(String username) {
+                return member(username).map(User::getAccessString).orElse(null);
+            }
+
+            @Override
+            public boolean signsInWithIam(String username) {
+                return member(username).map(user -> user.getAuthMode() == AuthMode.IAM).orElse(false);
+            }
+
+            private Optional<User> member(String username) {
                 return ownedResourceGet(clusters, accountId, name, region)
-                        .map(current -> aclMember(current, username, region, accountId))
-                        .map(User::getAccessString)
-                        .orElse(null);
+                        .map(current -> aclMember(current, username, region, accountId));
             }
         };
     }
