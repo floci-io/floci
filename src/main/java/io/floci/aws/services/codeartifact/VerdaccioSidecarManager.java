@@ -15,6 +15,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 /**
  * Starts and stops one Verdaccio container per CodeArtifact npm repository, unlike Reposilite's one
@@ -124,8 +125,8 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String npmRepositoryId, String publicUrl) {
         String image = config.services().codeartifact().npmImage();
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-verdaccio-" + npmRepositoryId);
-        lifecycleManager.removeIfExists(containerName);
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-verdaccio-" + npmRepositoryId
+                + "-" + UUID.randomUUID());
 
         // Loopback-only: this container has no auth of its own (open $all access, matching the
         // Maven proxy's own deliberate choice not to resolve upstreams), so the Bearer check in

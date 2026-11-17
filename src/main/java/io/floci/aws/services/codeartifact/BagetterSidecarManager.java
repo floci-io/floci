@@ -13,6 +13,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.UUID;
+
 /**
  * Starts and stops one BaGetter container per CodeArtifact repository backing the {@code nuget}
  * format, the same per-repository shape as Verdaccio (npm) and pypiserver (pypi) rather than
@@ -101,8 +103,8 @@ public class BagetterSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String nugetRepositoryId) {
         String image = config.services().codeartifact().nugetImage();
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-bagetter-" + nugetRepositoryId);
-        lifecycleManager.removeIfExists(containerName);
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-bagetter-" + nugetRepositoryId
+                + "-" + UUID.randomUUID());
 
         // Loopback-only: this container authenticates nothing on its own (ApiKey left empty
         // below), so the Bearer/Basic check in CodeArtifactNuGetController is the only thing

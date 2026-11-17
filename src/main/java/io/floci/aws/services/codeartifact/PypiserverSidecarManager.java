@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Starts and stops one pypiserver container per CodeArtifact repository backing the {@code pypi}
@@ -93,8 +94,8 @@ public class PypiserverSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String pypiRepositoryId) {
         String image = config.services().codeartifact().pypiImage();
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-pypiserver-" + pypiRepositoryId);
-        lifecycleManager.removeIfExists(containerName);
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-pypiserver-" + pypiRepositoryId
+                + "-" + UUID.randomUUID());
 
         // Loopback-only: this container authenticates nothing on its own (auth disabled below), so
         // the Bearer check in CodeArtifactPypiController is the only thing standing between a

@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -146,8 +147,8 @@ public class KellnrSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String cargoRepositoryId) {
         String image = config.services().codeartifact().cargoImage();
-        String containerName = ContainerStorageHelper.dockerName(config, "floci-kellnr-" + cargoRepositoryId);
-        lifecycleManager.removeIfExists(containerName);
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-kellnr-" + cargoRepositoryId
+                + "-" + UUID.randomUUID());
 
         // Set before the container is created, not after: KellnrSidecarClient's own adminLogin
         // reads this map directly, so the new password must already be visible to it the moment
