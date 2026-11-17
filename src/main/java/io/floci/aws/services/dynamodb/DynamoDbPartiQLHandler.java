@@ -383,7 +383,7 @@ class DynamoDbPartiQLHandler {
                 start++;
             }
         }
-        int end = limit == null ? rows.size() : Math.min(rows.size(), start + limit);
+        int end = limit == null ? rows.size() : start + Math.min(rows.size() - start, limit);
         JsonNode resumeAfter = start < end && end < rows.size() ? orderingKey(rows.get(end - 1), accessPath, table) : null;
         return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, List.of(scannedBytes), scannedItems);
     }

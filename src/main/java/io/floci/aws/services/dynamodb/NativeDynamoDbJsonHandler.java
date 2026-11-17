@@ -4284,10 +4284,15 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
-    private static void addLimitError(JsonNode request, List<String> validationErrors) {
+    // DynamoDB drops the fraction of Limit and holds it to the int range.
+    private static Integer partiQLLimit(JsonNode request) {
         JsonNode limit = request.get("Limit");
-        if (limit != null && !limit.isNull() && limit.asLong() < 1) {
-            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", limit.asText(), 1));
+        return limit == null || limit.isNull() ? null : (int) limit.doubleValue();
+    }
+
+    private static void addLimitError(Integer limit, List<String> validationErrors) {
+        if (limit != null && limit < 1) {
+            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", String.valueOf(limit), 1));
         }
     }
 
@@ -4333,7 +4338,8 @@ public class NativeDynamoDbJsonHandler {
         List<String> validationErrors = new ArrayList<>();
         addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
         addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
-        addLimitError(request, validationErrors);
+        Integer limit = partiQLLimit(request);
+        addLimitError(limit, validationErrors);
         addStatementError(request, "statement", validationErrors);
         addReturnConsumedCapacityError(request, validationErrors);
         addParametersError(request, "parameters", validationErrors);
@@ -4342,7 +4348,7 @@ public class NativeDynamoDbJsonHandler {
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement, parameters, region);
         PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
-                .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
+                .limit(limit)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
                 .consistentRead(request.path("ConsistentRead").asBoolean(false))
                 .returnValuesOnConditionCheckFailure(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE"))
