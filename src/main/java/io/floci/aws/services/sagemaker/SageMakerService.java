@@ -156,6 +156,14 @@ public class SageMakerService {
         if (nameContains != null && !nameContains.isBlank()) {
             models = models.stream().filter(m -> m.modelName.contains(nameContains)).toList();
         }
+        Long createdAfter = epochMillis(request, "CreationTimeAfter");
+        if (createdAfter != null) {
+            models = models.stream().filter(m -> m.creationTime > createdAfter).toList();
+        }
+        Long createdBefore = epochMillis(request, "CreationTimeBefore");
+        if (createdBefore != null) {
+            models = models.stream().filter(m -> m.creationTime < createdBefore).toList();
+        }
         return paginate(models, request, sortBy, sortOrder,
                 new CursorScope("ListModels", region,
                         nameContains == null || nameContains.isBlank() ? "" : nameContains, ""),
@@ -681,6 +689,12 @@ public class SageMakerService {
     }
 
     private record SortOptions(String sortBy, String sortOrder) {
+    }
+
+    /** A request timestamp, sent as epoch seconds, in epoch milliseconds; null when the request has none. */
+    private static Long epochMillis(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        return value.isNumber() ? Math.round(value.asDouble() * 1000) : null;
     }
 
     private static Comparator<ModelResource> modelComparator(String sortBy, String sortOrder) {
