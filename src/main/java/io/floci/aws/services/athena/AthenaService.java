@@ -291,7 +291,9 @@ public class AthenaService {
                     // The parameters are bound into the statement, so the Iceberg rewrite and the engine both read
                     // literals. A count that doesn't match fails the query here, before the checks below, as Trino
                     // checks parameters before it analyzes a statement. Hive DDL never gets this far, and binds none.
-                    // The checks read the unbound query, where `col = ?` already counts as a static equality.
+                    // Everything after this reads the bound statement, as if the values had been written in place: a
+                    // value bound as an expression can name a column, which must not pass the projection checks as
+                    // the `?` would, or a table, whose view the engine needs.
                     String statement = TrinoSqlCompatibility.bindParameters(query, parameters);
                     // A value bound as Athena binds it cannot add a statement (see bindParameters). The engine runs
                     // every statement of a write, so the bound statement is checked again rather than trusted.
@@ -300,18 +302,18 @@ public class AthenaService {
                                 "Only one sql statement is allowed. Got: " + statement, 400);
                     }
                     List<Table> projectionTables = tablesForProjectionCheck(database);
-                    PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
-                    PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
+                    PartitionProjection.assertLocationTemplatesComplete(statement, projectionTables);
+                    PartitionProjection.assertInjectedColumnsFiltered(statement, projectionTables);
                     // S3 Tables catalogs the query names are attached under their own names; a write to an Iceberg
                     // table of the default catalog goes through the engine's attachment of Glue's Iceberg catalog.
-                    AthenaIcebergStatements.S3TablesAttachment s3Tables = icebergStatements.s3TablesAttachment(query,
-                            resolvedContext.getCatalog(), database);
+                    AthenaIcebergStatements.S3TablesAttachment s3Tables = icebergStatements.s3TablesAttachment(
+                            statement, resolvedContext.getCatalog(), database);
                     AthenaIcebergStatements.IcebergWrite icebergWrite = null;
                     try {
                         icebergWrite = icebergStatements.write(statement, resolvedContext.getCatalog(), database);
                         String setupDdl = (s3Tables != null ? s3Tables.attachSql() : "")
                                 + (icebergWrite != null ? icebergWrite.setupSql() : "")
-                                + TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, query)
+                                + TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, statement)
                                 + (s3Tables != null ? s3Tables.searchPathSql() : "");
                         String duckQuery = TrinoSqlCompatibility.translate(
                                 icebergWrite != null ? icebergWrite.query() : statement);

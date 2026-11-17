@@ -7,12 +7,16 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.athena.model.CreateWorkGroupRequest;
+import io.floci.aws.services.athena.model.QueryExecutionContext;
 import io.floci.aws.services.athena.model.QueryExecutionState;
 import io.floci.aws.services.athena.model.ResultConfiguration;
 import io.floci.aws.services.athena.model.ResultSet;
 import io.floci.aws.services.athena.model.WorkGroupTag;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.glue.GlueService;
+import io.floci.aws.services.glue.model.Column;
+import io.floci.aws.services.glue.model.StorageDescriptor;
+import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.vertx.core.Vertx;
@@ -48,6 +52,9 @@ class AthenaServiceTest {
 
     private Vertx vertx;
     private FlociDuckClient duckClient;
+    private GlueService glueService;
+    private GlueViewDdlBuilder ddlBuilder;
+    private AthenaIcebergStatements icebergStatements;
     private S3Service s3Service;
     private AthenaService service;
 
@@ -60,10 +67,11 @@ class AthenaServiceTest {
         doAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"))
                 .when(storageFactory).create(anyString(), anyString(), any());
 
-        GlueService glueService = mock(GlueService.class);
+        glueService = mock(GlueService.class);
         when(glueService.getTables(anyString())).thenReturn(List.of());
         s3Service = mock(S3Service.class);
-        GlueViewDdlBuilder ddlBuilder = mock(GlueViewDdlBuilder.class);
+        ddlBuilder = mock(GlueViewDdlBuilder.class);
+        icebergStatements = mock(AthenaIcebergStatements.class);
 
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -73,7 +81,7 @@ class AthenaServiceTest {
         when(athena.mock()).thenReturn(false);
 
         service = new AthenaService(storageFactory, duckClient, glueService, s3Service,
-                config, vertx, ddlBuilder, mock(RegionResolver.class), mock(AthenaIcebergStatements.class),
+                config, vertx, ddlBuilder, mock(RegionResolver.class), icebergStatements,
                 mock(IamEnforcementFilter.class));
     }
 
@@ -300,6 +308,64 @@ class AthenaServiceTest {
         assertEquals("INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 2 but found 1",
                 service.getQueryExecution(id).getStatus().getStateChangeReason());
         verifyNoInteractions(duckClient);
+    }
+
+    /**
+     * A value naming a column is bound as written (a TODO at {@code usingListEntry}), so the projection checks read
+     * the bound statement: {@code tenant = ?} would pass as a static equality, while {@code tenant = (tenant || '')}
+     * filters nothing and fails as written in place would. A string holding the column's name is a
+     * literal, and passes.
+     */
+    @Test
+    void anInjectedPartitionColumnIsCheckedAgainstTheBoundValue() throws Exception {
+        Table events = new Table();
+        events.setName("audit_events");
+        StorageDescriptor storage = new StorageDescriptor();
+        storage.setLocation("s3://lake/audit_events/");
+        storage.setColumns(List.of(column("id")));
+        events.setStorageDescriptor(storage);
+        events.setPartitionKeys(List.of(column("tenant")));
+        events.setParameters(Map.of("projection.enabled", "true", "projection.tenant.type", "injected"));
+        when(glueService.getTables("analytics")).thenReturn(List.of(events));
+        String query = "SELECT id FROM audit_events WHERE tenant = ?";
+
+        String unfiltered = service.startQueryExecution(query, "primary", context("analytics"),
+                new ResultConfiguration("s3://athena-results/"), List.of("tenant || ''"));
+        awaitState(unfiltered, QueryExecutionState.FAILED);
+        assertTrue(service.getQueryExecution(unfiltered).getStatus().getStateChangeReason()
+                .startsWith("CONSTRAINT_VIOLATION: For the injected projected partition column tenant"));
+        verifyNoInteractions(duckClient);
+
+        String filtered = service.startQueryExecution(query, "primary", context("analytics"),
+                new ResultConfiguration("s3://athena-results/"), List.of("'tenant'"));
+        awaitState(filtered, QueryExecutionState.SUCCEEDED);
+        verify(duckClient).execute(eq("SELECT id FROM audit_events WHERE tenant = 'tenant'\n"), any(), any(), any());
+    }
+
+    /** A value bound as an expression can name a table the query doesn't, and its view is set up all the same. */
+    @Test
+    void theEngineIsSetUpForTheTablesTheBoundStatementNames() throws Exception {
+        String id = service.startQueryExecution("SELECT ? AS n", "primary", context("analytics"),
+                new ResultConfiguration("s3://athena-results/"), List.of("(SELECT count(*) FROM events)"));
+        awaitState(id, QueryExecutionState.SUCCEEDED);
+
+        String bound = "SELECT ((SELECT count(*) FROM events)) AS n";
+        verify(ddlBuilder).build("analytics", bound);
+        verify(icebergStatements).s3TablesAttachment(eq(bound), any(), eq("analytics"));
+        verify(duckClient).execute(eq(bound + "\n"), any(), any(), any());
+    }
+
+    private static QueryExecutionContext context(String database) {
+        QueryExecutionContext context = new QueryExecutionContext();
+        context.setDatabase(database);
+        return context;
+    }
+
+    private static Column column(String name) {
+        Column column = new Column();
+        column.setName(name);
+        column.setType("string");
+        return column;
     }
 
     private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {

@@ -280,6 +280,14 @@ class TrinoSqlCompatibilityTest {
                         List.of("1); SELECT (2", "1; SELECT 2", "1, 2", "'a b', 1")));
     }
 
+    /** Brackets as many as they close but not pairing up make no expression either; nested ones that pair do. */
+    @Test
+    void aValueWhoseBracketsDoNotPairUpIsBoundAsAStringOfItsTokens() {
+        assertEquals("SELECT '(1]' AS a, '([)]' AS b, (f([1], (2))) AS c",
+                TrinoSqlCompatibility.bindParameters("SELECT ? AS a, ? AS b, ? AS c",
+                        List.of("(1]", "([ ) ]", "f([1], (2))")));
+    }
+
     /**
      * An open quote would turn the literals after the placeholder inside out, so the semicolons in them would end
      * the statement. Athena (engine v3) returns {@code 'a} as the string {@code 'a}.

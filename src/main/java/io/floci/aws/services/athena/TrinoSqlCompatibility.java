@@ -226,7 +226,8 @@ final class TrinoSqlCompatibility {
      * {@code 1); SELECT (2} as the string {@code 1);SELECT(2}, {@code 1; SELECT 2} as {@code 1;SELECT2} and
      * {@code 1, 2} as the one parameter {@code 1,2}, so a value can neither end the statement nor add a
      * parameter. A value is taken for more than one expression when, outside its literals and comments, it
-     * holds a semicolon or a comma outside brackets, its brackets don't balance, or it leaves a quote open:
+     * holds a semicolon or a comma outside brackets, its brackets don't balance or pair up ({@code (1]},
+     * {@code ([)]}), or it leaves a quote open:
      * Athena returns {@code 'a} as the string {@code 'a}, and bound as written it would turn the literals after
      * the placeholder inside out.
      *
@@ -236,11 +237,14 @@ final class TrinoSqlCompatibility {
      * on Athena.
      *
      * <p>TODO: Athena reads any value naming a column as a string ({@code x + 1} as {@code x+1}); only a lone
-     * name is here, and a longer expression naming one is bound as written.
+     * name is here, and a longer expression naming one is bound as written. Nor is a value whose tokens make no
+     * expression ({@code 1 +}, {@code 1 2}) told apart, which takes a Trino expression parser: it is bound as
+     * written, and the query fails on DuckDB.
      */
     private static String usingListEntry(String value) {
         StringBuilder tokens = new StringBuilder(value.length());
-        int depth = 0;
+        // The brackets still open, innermost last, so a close must match the latest open of its kind.
+        StringBuilder open = new StringBuilder();
         boolean expression = true;
         int i = 0;
         while (i < value.length()) {
@@ -255,10 +259,14 @@ final class TrinoSqlCompatibility {
                 continue;
             }
             if (c == '(' || c == '[') {
-                depth++;
+                open.append(c);
             } else if (c == ')' || c == ']') {
-                expression &= --depth >= 0;
-            } else if (c == ';' || c == ',' && depth == 0) {
+                boolean pairs = !open.isEmpty() && open.charAt(open.length() - 1) == (c == ')' ? '(' : '[');
+                expression &= pairs;
+                if (pairs) {
+                    open.setLength(open.length() - 1);
+                }
+            } else if (c == ';' || c == ',' && open.isEmpty()) {
                 expression = false;
             }
             if (!Character.isWhitespace(c)) {
@@ -272,7 +280,7 @@ final class TrinoSqlCompatibility {
                 && !EXPRESSION_KEYWORDS.contains(text.toUpperCase(Locale.ROOT));
         boolean quotedName = !text.isEmpty() && (text.charAt(0) == '"' || text.charAt(0) == '`')
                 && skipQuoted(text, 0) == text.length();
-        return expression && depth == 0 && !bareName && !quotedName ? value : "'" + text.replace("'", "''") + "'";
+        return expression && open.isEmpty() && !bareName && !quotedName ? value : "'" + text.replace("'", "''") + "'";
     }
 
     /** Whether the literal or quoted name starting at {@code i} is closed; {@link #skipQuoted} runs off an open one. */
