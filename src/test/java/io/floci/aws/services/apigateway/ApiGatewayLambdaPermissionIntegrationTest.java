@@ -8,7 +8,6 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
-import io.restassured.http.ContentType;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
@@ -23,6 +22,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.services.apigateway.ApiGatewayLambdaFixtures.ACCOUNT;
+import static io.floci.aws.services.apigateway.ApiGatewayLambdaFixtures.REGION;
+import static io.floci.aws.services.apigateway.ApiGatewayLambdaFixtures.apiGateway;
+import static io.floci.aws.services.apigateway.ApiGatewayLambdaFixtures.createLambdaRestApi;
+import static io.floci.aws.services.apigateway.ApiGatewayLambdaFixtures.signed;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.mockito.ArgumentMatchers.any;
@@ -43,8 +47,6 @@ import static org.mockito.Mockito.verify;
 @TestProfile(IamEnforcementProfile.class)
 class ApiGatewayLambdaPermissionIntegrationTest {
 
-    private static final String REGION = "us-east-1";
-    private static final String ACCOUNT = "000000000000";
     private static final String PROXY_RESPONSE = "{\"statusCode\":200,\"body\":\"invoked\"}";
 
     @InjectSpy
@@ -164,35 +166,8 @@ class ApiGatewayLambdaPermissionIntegrationTest {
     }
 
     private String createApi(String httpMethod, String type, String functionArn, String credentials) {
-        String apiId = apiGateway().body("{\"name\":\"lambda-permission-" + suffix() + "\"}")
-                .post("/restapis").then().statusCode(201).extract().path("id");
+        String apiId = createLambdaRestApi(httpMethod, type, functionArn, credentials);
         cleanup.push(() -> apiGateway().delete("/restapis/" + apiId).then().statusCode(202));
-        String rootId = apiGateway().get("/restapis/" + apiId + "/resources")
-                .then().statusCode(200).extract().path("item[0].id");
-        String resourceId = apiGateway().body("{\"pathPart\":\"items\"}")
-                .post("/restapis/" + apiId + "/resources/" + rootId)
-                .then().statusCode(201).extract().path("id");
-        String methodPath = "/restapis/" + apiId + "/resources/" + resourceId + "/methods/" + httpMethod;
-        apiGateway().body("{\"authorizationType\":\"NONE\"}").put(methodPath).then().statusCode(201);
-
-        Map<String, Object> integration = new LinkedHashMap<>();
-        integration.put("type", type);
-        integration.put("httpMethod", "POST");
-        integration.put("uri", "arn:aws:apigateway:" + REGION + ":lambda:path/2015-03-31/functions/"
-                + functionArn + "/invocations");
-        if (credentials != null) {
-            integration.put("credentials", credentials);
-        }
-        apiGateway().body(integration).put(methodPath + "/integration").then().statusCode(201);
-        if ("AWS".equals(type)) {
-            apiGateway().body("{\"selectionPattern\":\"\"}")
-                    .put(methodPath + "/integration/responses/200").then().statusCode(201);
-        }
-
-        String deploymentId = apiGateway().body("{}").post("/restapis/" + apiId + "/deployments")
-                .then().statusCode(201).extract().path("id");
-        apiGateway().body("{\"stageName\":\"test\",\"deploymentId\":\"" + deploymentId + "\"}")
-                .post("/restapis/" + apiId + "/stages").then().statusCode(201);
         return apiId;
     }
 
@@ -220,14 +195,5 @@ class ApiGatewayLambdaPermissionIntegrationTest {
 
     private static RequestSpecification lambda() {
         return signed("lambda").contentType("application/json");
-    }
-
-    private static RequestSpecification apiGateway() {
-        return signed("apigateway").contentType(ContentType.JSON);
-    }
-
-    private static RequestSpecification signed(String service) {
-        return given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20261011/" + REGION
-                + "/" + service + "/aws4_request, SignedHeaders=host, Signature=abc");
     }
 }
