@@ -45,6 +45,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.inject.Provider;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
@@ -107,7 +108,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // gives it to AddInstanceGroups and AddInstanceFleet too, for one shutting down.
     private static final String JOB_FLOW_SHUT_DOWN =
             "A job flow that is shutting down, terminated, or finished may not be modified.";
-    private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
+    // Copies a stored resource for a call to answer from; the Studios' service copies its own with it too.
+    static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
     private static final String RUNNER_DOCKER = "docker";
     // The service a step's driver belongs to, which names it and labels it.
     private static final String SERVICE = "emr";
@@ -264,6 +266,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             };
         }
     }
+
+    // The Studios, whose ARNs and tags this service answers for too, as IAM asks one service per namespace; looked up
+    // as they are needed, and absent in a test that builds this service itself.
+    @Inject
+    Provider<EmrStudioService> studios;
 
     @Inject
     public EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
@@ -929,11 +936,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return switch (member) {
             case "InstanceGroups[].InstanceGroupId" ->
                     call(() -> clusterWithGroup(region, value).map(EmrCluster::getClusterArn).stream().toList());
-            // A tag call's ResourceId is a cluster's id, or a Studio's, which Floci does not serve: the cluster the
-            // tag handlers find by it (findCluster), one recorded with no Region included.
-            case "ResourceId" -> call(() -> clusterStore.get(value)
-                    .filter(cluster -> cluster.getRegion() == null || cluster.getRegion().equals(region))
-                    .map(EmrCluster::getClusterArn).stream().toList());
+            // A tag call's ResourceId is a cluster's id, or a Studio's: the Studio, or the cluster the tag handlers
+            // find by it (findCluster), one recorded with no Region included.
+            case "ResourceId" -> EmrStudioService.isStudioId(value)
+                    ? studioService().map(service -> service.studioArn(value, region)).stream()
+                            .flatMap(Optional::stream).toList()
+                    : call(() -> clusterStore.get(value)
+                            .filter(cluster -> cluster.getRegion() == null || cluster.getRegion().equals(region))
+                            .map(EmrCluster::getClusterArn).stream().toList());
             default -> List.of();
         };
     }
@@ -1213,9 +1223,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * The tags held on the cluster stored under {@code arn}, in the account it names, read in place: the cluster of
-     * that id in the ARN's Region, or one recorded with no Region, as the tag handlers find it; empty for an ARN
-     * naming nothing stored or naming anything but a cluster.
+     * The tags held on the cluster or Studio stored under {@code arn}, in the account it names, read in place: the
+     * cluster of that id in the ARN's Region, or one recorded with no Region, as the tag handlers find it, or the
+     * Studio of that id in the ARN's Region; empty for an ARN naming nothing stored or naming anything else.
      */
     @Override
     public Map<String, String> storedTags(String arn) {
@@ -1224,6 +1234,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
         String resource = parsed.resource();
+        if (resource.startsWith(EmrStudioService.STUDIO_RESOURCE)) {
+            return studioService().map(service -> service.storedTags(arn)).orElse(Map.of());
+        }
         if (!resource.startsWith(CLUSTER_RESOURCE) || resource.indexOf('/', CLUSTER_RESOURCE.length()) >= 0
                 || !arn.equals(AwsArnUtils.Arn.of("elasticmapreduce", parsed.region(), parsed.accountId(), resource)
                         .toString())) {
@@ -1240,6 +1253,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     }
                 }));
         return held;
+    }
+
+    private Optional<EmrStudioService> studioService() {
+        return studios != null ? Optional.of(studios.get()) : Optional.empty();
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -3032,7 +3049,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return clock.instant().truncatedTo(ChronoUnit.MILLIS);
     }
 
-    private String randomId(int length) {
+    /** {@code length} random upper-case letters and digits, as EMR's resource ids carry after their prefix. */
+    static String randomId(int length) {
         StringBuilder sb = new StringBuilder(length);
         for (int i = 0; i < length; i++) {
             sb.append(UPPER_ALNUM.charAt(RANDOM.nextInt(UPPER_ALNUM.length())));
