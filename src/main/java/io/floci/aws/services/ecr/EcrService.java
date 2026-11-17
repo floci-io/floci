@@ -740,39 +740,94 @@ public class EcrService implements ResourceProvider, Resettable {
 
     public PaginatedResult<ImageIdentifier> listImages(String repositoryName, String registryId, String region,
                                                        Integer maxResults, String nextToken) {
+        return listImages(repositoryName, registryId, region, maxResults, nextToken, null);
+    }
+
+    public PaginatedResult<ImageIdentifier> listImages(String repositoryName, String registryId, String region,
+                                                       Integer maxResults, String nextToken, String tagStatus) {
+        String status = normalizeTagStatus(tagStatus);
         int limit = maxResults != null ? maxResults : 100;
         if (limit < 1 || limit > 1000) {
             throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 1000", 400);
         }
-        String namespace = "ListImages:" + region + ":" + effectiveAccount(registryId) + ":" + repositoryName;
+        String namespace = "ListImages:" + region + ":" + effectiveAccount(registryId) + ":" + repositoryName
+                + ":" + status;
         Repository repo = requireRepo(repositoryName, registryId, region);
         requireRegistry();
         String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
-        try {
+        return callRegistry(() -> {
             RegistryHttpClient http = registryManager.httpClient();
-            PaginatedResult<String> page = Pagination.paginate(http.listTags(internal), Function.identity(),
-                    limit, nextToken, namespace,
+            PaginatedResult<String> page = Pagination.paginate(
+                    imageReferences(http, repo.getRegistryId(), region, repositoryName, internal, status),
+                    Function.identity(), limit, nextToken, namespace,
                     token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
             return new PaginatedResult<>(imageIdentifiers(http, internal, page.items()), page.nextToken());
-        } catch (IOException | InterruptedException e) {
-            LOG.warnv("ListImages registry query failed for {0}: {1}", repositoryName, e.getMessage());
-            return new PaginatedResult<>(List.of(), null);
-        }
+        }, EcrService::registryUnavailable);
     }
 
-    private static List<ImageIdentifier> imageIdentifiers(RegistryHttpClient http, String internal, List<String> tags)
+    /** A reference naming an untagged image is its digest; a tag cannot contain a colon, so the two never clash. */
+    private static boolean isDigestReference(String reference) {
+        return reference.startsWith("sha256:");
+    }
+
+    private static List<ImageIdentifier> imageIdentifiers(RegistryHttpClient http, String internal, List<String> refs)
             throws IOException, InterruptedException {
         List<ImageIdentifier> identifiers = new ArrayList<>();
-        for (String tag : tags) {
-            identifiers.add(new ImageIdentifier(tag, http.headManifestDigest(internal, tag, null)));
+        for (String ref : refs) {
+            identifiers.add(isDigestReference(ref)
+                    ? new ImageIdentifier(null, ref)
+                    : new ImageIdentifier(ref, http.headManifestDigestStrict(internal, ref, null)));
         }
         return identifiers;
+    }
+
+    /** The {@code tagStatus} filter, already checked against the model by the handler; absent means {@code ANY}. */
+    private static String normalizeTagStatus(String tagStatus) {
+        return tagStatus == null ? "ANY" : tagStatus;
+    }
+
+    /**
+     * What an enumeration of a repository's images walks: the tags, then the digests of the untagged
+     * images, as the filter asks. The registry lists only tags, so untagged digests come from the
+     * push records, minus every digest a tag resolves to. The registry has no tag-to-digest lookup, so
+     * ANY and UNTAGGED pay one HEAD per tag whenever a recorded digest is still unaccounted for (a
+     * re-pushed tag leaves its old digest recorded); TAGGED pays none. The page of results itself is
+     * resolved afterwards.
+     */
+    private List<String> imageReferences(RegistryHttpClient http, String account, String region,
+                                         String repositoryName, String internal, String status)
+            throws IOException, InterruptedException {
+        List<String> tags = http.listTagsStrict(internal);
+        List<String> refs = new ArrayList<>();
+        if (!status.equals("UNTAGGED")) {
+            refs.addAll(tags);
+        }
+        if (!status.equals("TAGGED")) {
+            Set<String> candidates = recordedDigests(account, region, repositoryName);
+            for (String tag : tags) {
+                if (candidates.isEmpty()) {
+                    break;
+                }
+                candidates.remove(http.headManifestDigestStrict(internal, tag, null));
+            }
+            refs.addAll(heldDigests(http, internal, candidates, Integer.MAX_VALUE));
+        }
+        return refs;
     }
 
     public DescribeImagesResult describeImages(String repositoryName,
                                                 List<ImageIdentifier> requested,
                                                 String registryId,
                                                 String region) {
+        return describeImages(repositoryName, requested, registryId, region, null);
+    }
+
+    public DescribeImagesResult describeImages(String repositoryName,
+                                                List<ImageIdentifier> requested,
+                                                String registryId,
+                                                String region,
+                                                String tagStatus) {
+        String status = normalizeTagStatus(tagStatus);
         Repository repo = requireRepo(repositoryName, registryId, region);
         requireRegistry();
         String internal = resolveRegistryRepoName(repo.getRegistryId(), region, repositoryName);
@@ -780,11 +835,9 @@ public class EcrService implements ResourceProvider, Resettable {
 
         List<String> refs = new ArrayList<>();
         if (requested == null || requested.isEmpty()) {
-            try {
-                refs.addAll(http.listTags(internal));
-            } catch (Exception e) {
-                LOG.warnv("DescribeImages tag enumeration failed for {0}: {1}", repositoryName, e.getMessage());
-            }
+            refs.addAll(callRegistry(
+                    () -> imageReferences(http, repo.getRegistryId(), region, repositoryName, internal, status),
+                    EcrService::registryUnavailable));
         } else {
             for (ImageIdentifier id : requested) {
                 if (id.getImageTag() != null) refs.add(id.getImageTag());
@@ -1978,6 +2031,27 @@ public class EcrService implements ResourceProvider, Resettable {
      */
     private boolean holdsImage(String account, String region, String repositoryName, String internal)
             throws IOException, InterruptedException {
+        return !heldDigests(registryManager.httpClient(), internal,
+                recordedDigests(account, region, repositoryName), 1).isEmpty();
+    }
+
+    /** The first {@code limit} candidates whose manifest the registry still holds. */
+    private static List<String> heldDigests(RegistryHttpClient http, String internal, Set<String> candidates,
+                                            int limit) throws IOException, InterruptedException {
+        List<String> held = new ArrayList<>();
+        for (String digest : candidates) {
+            if (held.size() == limit) {
+                break;
+            }
+            if (http.headManifestDigestStrict(internal, digest, null) != null) {
+                held.add(digest);
+            }
+        }
+        return held;
+    }
+
+    /** Digests the push records and the pending pushes name for one repository; candidates, not proof. */
+    private Set<String> recordedDigests(String account, String region, String repositoryName) {
         String metaPrefix = key(region, account, repositoryName) + "::";
         Set<String> digests = new LinkedHashSet<>();
         synchronized (imageMetaStore) {
@@ -1988,12 +2062,7 @@ public class EcrService implements ResourceProvider, Resettable {
                 }
             });
         }
-        for (String digest : digests) {
-            if (registryManager.httpClient().headManifestDigestStrict(internal, digest, null) != null) {
-                return true;
-            }
-        }
-        return false;
+        return digests;
     }
 
     /**

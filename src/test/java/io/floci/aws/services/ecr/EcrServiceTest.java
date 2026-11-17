@@ -1087,6 +1087,35 @@ class EcrServiceTest {
     }
 
     @Test
+    void aRegistryErrorFailsListAndDescribeImagesInsteadOfListingTaggedImagesAsUntagged() throws Exception {
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        service.recordImagePush(ACCOUNT, REGION, REPO, DELETE_DIGEST, Instant.now());
+
+        // The tag listing fails while a recorded digest is present: the tagged image must not
+        // surface as untagged, so both operations fail instead of answering.
+        when(http.listTagsStrict(anyString())).thenThrow(new ConnectException("Connection refused"));
+        when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        // A manifest HEAD that fails for a tag fails the walk the same way.
+        Executable headFails = () -> {
+            Mockito.doReturn(List.of("release")).when(http).listTagsStrict(anyString());
+            doThrow(new ConnectException("Connection refused"))
+                    .when(http).headManifestDigestStrict(anyString(), anyString(), any());
+            service.listImages(REPO, null, REGION, null, null, "ANY");
+        };
+        List<Executable> calls = List.of(
+                () -> service.listImages(REPO, null, REGION, null, null, "UNTAGGED"),
+                () -> service.describeImages(REPO, null, null, REGION, "ANY"),
+                headFails);
+        for (int i = 0; i < calls.size(); i++) {
+            AwsException ex = assertThrows(AwsException.class, calls.get(i), "call " + i);
+            assertEquals("ServerException", ex.getErrorCode(), "call " + i);
+            assertEquals(500, ex.getHttpStatus(), "call " + i);
+        }
+    }
+
+    @Test
     void batchDeleteImageRefusesTheDeleteWhenTheTagListingFails() throws Exception {
         String repositoryName = "batch-delete/listing-fails";
         RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
