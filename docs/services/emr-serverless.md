@@ -1,6 +1,6 @@
 # EMR Serverless
 
-EMR Serverless is an AWS service that provides serverless data analytics environments. Floci provides an emulator for the management-plane API (REST JSON) which covers the lifecycle of an Application and of the job runs submitted to it.
+EMR Serverless is an AWS service that provides serverless data analytics environments. Floci provides an emulator for the management-plane API (REST JSON) which covers the lifecycle of an Application, of the job runs submitted to it and of its Spark Connect sessions.
 
 ## Configuration
 
@@ -34,21 +34,26 @@ The emulator implements the standard AWS `emr-serverless` service endpoints:
 * `DELETE /applications/{applicationId}/jobruns/{jobRunId}` (CancelJobRun)
 * `GET /applications/{applicationId}/jobruns/{jobRunId}/attempts` (ListJobRunAttempts)
 * `GET /applications/{applicationId}/jobruns/{jobRunId}/dashboard` (GetDashboardForJobRun)
+* `POST /applications/{applicationId}/sessions` (StartSession)
+* `GET /applications/{applicationId}/sessions` (ListSessions)
+* `GET /applications/{applicationId}/sessions/{sessionId}` (GetSession)
+* `DELETE /applications/{applicationId}/sessions/{sessionId}` (TerminateSession)
+* `GET /applications/{applicationId}/sessions/{sessionId}/endpoint` (GetSessionEndpoint)
+* `GET /applications/{applicationId}/dashboard` (GetResourceDashboard)
 * `POST /tags/{resourceArn}` (TagResource)
 * `DELETE /tags/{resourceArn}?tagKeys=...` (UntagResource)
 * `GET /tags/{resourceArn}` (ListTagsForResource)
 
-The tagging operations work on application and job run ARNs, as `CreateApplication` and `StartJobRun`
-return them (`arn:aws:emr-serverless:<region>:<account>:/applications/<id>` and
-`.../applications/<id>/jobruns/<id>`). They share the tags those calls store, so `GetApplication` and
-`GetJobRun` always report the current set. Following the EMR Serverless user guide, a resource holds
-at most 50 tags, and `aws:` in any case is reserved as the prefix of a tag key or value. A session ARN
-(`.../sessions/<id>`) answers `ResourceNotFoundException`, as sessions are not emulated. Once an
-application is deleted, its ARN and its runs' ARNs answer `ResourceNotFoundException` too, while
-`GetApplication` and `GetJobRun` still report them.
+The tagging operations work on application, job run and session ARNs, as `CreateApplication`, `StartJobRun` and
+`StartSession` return them (`arn:aws:emr-serverless:<region>:<account>:/applications/<id>`,
+`.../applications/<id>/jobruns/<id>` and `.../applications/<id>/sessions/<id>`). They share the tags those calls
+store, so `GetApplication`, `GetJobRun` and `GetSession` always report the current set. Following the EMR Serverless
+user guide, a resource holds at most 50 tags, and `aws:` in any case is reserved as the prefix of a tag key or value.
+Once an application is deleted, its ARN and its runs' and sessions' ARNs answer `ResourceNotFoundException` too,
+while `GetApplication`, `GetJobRun` and `GetSession` still report them.
 
-Applications, job runs, creation client tokens, and tags are scoped to the request's AWS Region. An
-application or run created in one Region is not returned by list, get, or tag requests signed for
+Applications, job runs, sessions, creation client tokens, and tags are scoped to the request's AWS Region. An
+application, run or session created in one Region is not returned by list, get, or tag requests signed for
 another.
 
 `ListApplications` refuses a `states` filter naming a state that does not exist, or more than 7, and a
@@ -110,7 +115,8 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   a `CANCELLING` one included, as the API reference says "All scheduled and running jobs must be
   completed or cancelled before stopping an application." It answers `ValidationException`, the one
   error the model declares for this, with that sentence as its message: AWS's own message is not
-  recorded, so the wording is Floci's reading.
+  recorded, so the wording is Floci's reading. It terminates the application's sessions (see
+  [Sessions](#sessions)).
 * **ListJobRuns** returns the newest runs first, filtered by `states`, `createdAtAfter`,
   `createdAtBefore` and `mode`, at most 50 per page. With several `states`, the runs are grouped by
   state in the order the filter names them. A state or mode that does not exist, or more than 8
@@ -141,6 +147,45 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   with a key Floci makes as it starts: one changed, or past its hour, or given before Floci restarted, opens a `403`
   page asking for a new one, and one whose run has gone a `404`. Like the rest of Floci, the page asks for no
   credentials. `accessSystemProfileLogs`, for jobs on Lake Formation, changes nothing.
+
+## Sessions
+
+A session is "a managed connection between your local PySpark client and a Spark driver running on Amazon EMR
+Serverless", through Spark Connect. Floci keeps a session and its lifecycle, but runs no Spark driver for it, so
+nothing answers Spark Connect at its endpoint.
+
+* **Starting**: `StartSession` needs a Spark application on `emr-7.13.0` or later, or on the AWS runtime for Apache
+  Spark (`emr-spark-8.0.0` on), whose `interactiveConfiguration.sessionEnabled` is `true`. As for a job run, a
+  `CREATED` or `STOPPED` application is started unless its auto-start is off, when the session is refused, and so is
+  one on a terminated application. Each of these refusals is `ValidationException` in Floci's own wording, as AWS's is
+  not recorded. `clientToken` is the idempotency token, as for a job run. An application holds at most 25 sessions
+  that have not ended, as "Each EMR Serverless application supports up to 25 concurrent sessions by default"; a 26th
+  is refused with `ServiceQuotaExceededException` (HTTP 402). Of `configurationOverrides`, only `runtimeConfiguration`
+  is kept: "Only runtime configuration overrides are supported." A `runtimeConfiguration` with a member of the wrong
+  JSON type is refused with `SerializationException`, and a configuration without its `classification` with
+  `ValidationException`. `releaseLabel` and `networkConfiguration` come from
+  the application, and `createdBy` is the caller's ARN.
+* **States**: a session is `IDLE` as soon as it starts, with `startedAt` and `idleSince` set. It is `TERMINATED` once
+  it has been idle for its `idleTimeoutMinutes` (0 to 1,000,000, 60 when not given, as "Default timeout is set to 1
+  hour"), or once 24 hours have passed since it started, as "Each session has a hard limit of 24 hours by default",
+  whichever comes first. No source says what an idle timeout of `0` does; Floci reads it as no idle timeout, as for a
+  job run's `executionTimeoutMinutes`. Floci never reports `SUBMITTED`, `STARTING`, `STARTED`, `BUSY`, `FAILED` or
+  `TERMINATING`.
+* **TerminateSession** ends a session at once as `TERMINATED`; AWS's passes through `TERMINATING` first. A session
+  that has already ended is refused with `ValidationException`, in Floci's own wording.
+* **StopApplication** terminates the application's sessions that have not ended, with `stateDetails` saying so. The
+  API reference requires a stopping application's job runs to have ended but names no such requirement for sessions,
+  and once an application is stopped "no resources are running on the application"; AWS's own handling is not
+  recorded.
+* **GetSessionEndpoint** answers for a session that has not ended with an endpoint on Floci's own address
+  (`/_aws/emr-serverless/sessions/<applicationId>/<sessionId>`) and a fresh authentication token that expires in an
+  hour, as "Authentication tokens are time-limited to 1 hour". Nothing answers Spark Connect there. A session that has
+  ended is refused with `ValidationException`, in Floci's own wording.
+* **ListSessions** returns the newest sessions first, filtered by `states`, `createdAtAfter` and `createdAtBefore`, at
+  most 50 per page, grouped by state as `ListJobRuns` groups runs.
+* **GetResourceDashboard** takes a `resourceType` of `SESSION`, the only one, and gives a link like
+  `GetDashboardForJobRun`'s, valid for an hour, to a page about the session on Floci's address, which stands in for
+  the session's Spark UI or Spark History Server. `accessSystemProfileLogs` changes nothing.
 
 A state machine drives applications and job runs through the `emr-serverless:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR Serverless tasks](step-functions.md#amazon-emr-serverless-tasks).
@@ -322,6 +367,6 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
 * **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. An image's digest is resolved as the application starts where its `applicationLevelDigestResolution` is true, or left unset on EMR 7.13 or earlier, as the user guide's table has it, and AWS's "Custom images are resolved to a digest at application start; that digest is used for all jobs until the application restarts": the application's image configuration gets the digest of the image in Floci's ECR as its `resolvedImageDigest`, and each run pulls the image by it until the application starts again; a stopped application reports none. An image outside ECR, one in another account's repository (Floci does not check that the application may pull it), or one Floci's ECR does not hold or cannot read without Docker, has no digest to read and is resolved for each run, as every image is from 7.14 on; any other answer from Floci's ECR fails `StartApplication` with `InternalServerException`; such a run's digest comes from its attempt's own pull (see **Image** above), and a job run's image configurations carry no `applicationLevelDigestResolution`.
-* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
+* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization` (of a job run or a session), and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
-* **Data Plane**: Floci does not implement the data-plane API, such as interactive sessions.
+* **Sessions run nothing**: a session is kept with its lifecycle, but no Spark driver runs for it, and nothing answers Spark Connect at the endpoint `GetSessionEndpoint` gives (see [Sessions](#sessions)).

@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * EMR Serverless on the shared {@code /tags/{resourceArn}} path, for applications and job runs. The
+ * EMR Serverless on the shared {@code /tags/{resourceArn}} path, for applications, job runs and sessions. The
  * wire shape is the common one (a lowercase {@code tags} map, a {@code tagKeys} query and
  * {@code POST}), except that TagResource and UntagResource answer 200 rather than 204, and payloads
  * are validated strictly.
@@ -18,11 +18,14 @@ public class EmrServerlessTagHandler implements TagHandler {
 
     private final EmrServerlessService service;
     private final EmrServerlessJobRunService jobRuns;
+    private final EmrServerlessSessionService sessions;
 
     @Inject
-    public EmrServerlessTagHandler(EmrServerlessService service, EmrServerlessJobRunService jobRuns) {
+    public EmrServerlessTagHandler(EmrServerlessService service, EmrServerlessJobRunService jobRuns,
+                                   EmrServerlessSessionService sessions) {
         this.service = service;
         this.jobRuns = jobRuns;
+        this.sessions = sessions;
     }
 
     @Override
@@ -49,7 +52,10 @@ public class EmrServerlessTagHandler implements TagHandler {
     @Override
     public Map<String, String> listTags(String region, String arn) {
         EmrServerlessService.ResourceArn resource = service.resourceArn(arn);
-        return resource.jobRunId() != null ? jobRuns.listTags(resource) : service.listTags(resource);
+        if (resource.jobRunId() != null) {
+            return jobRuns.listTags(resource);
+        }
+        return resource.sessionId() != null ? sessions.listTags(resource) : service.listTags(resource);
     }
 
     @Override
@@ -57,6 +63,8 @@ public class EmrServerlessTagHandler implements TagHandler {
         EmrServerlessService.ResourceArn resource = service.resourceArn(arn);
         if (resource.jobRunId() != null) {
             jobRuns.tagResource(resource, tags);
+        } else if (resource.sessionId() != null) {
+            sessions.tagResource(resource, tags);
         } else {
             service.tagResource(resource, tags);
         }
@@ -67,6 +75,8 @@ public class EmrServerlessTagHandler implements TagHandler {
         EmrServerlessService.ResourceArn resource = service.resourceArn(arn);
         if (resource.jobRunId() != null) {
             jobRuns.untagResource(resource, tagKeys);
+        } else if (resource.sessionId() != null) {
+            sessions.untagResource(resource, tagKeys);
         } else {
             service.untagResource(resource, tagKeys);
         }

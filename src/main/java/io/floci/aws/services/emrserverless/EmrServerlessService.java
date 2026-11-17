@@ -1,6 +1,10 @@
 package io.floci.aws.services.emrserverless;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -22,6 +26,7 @@ import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.ListApplicationsRequest;
 import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
+import io.floci.aws.services.iam.IamService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -31,6 +36,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +45,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -82,8 +89,8 @@ public class EmrServerlessService {
     private static final int MAX_APPLICATION_STATES = 7;
     private static final int MAX_LIST_RESULTS = 50;
 
-    /** What an EMR Serverless resource ARN names: an application, or one of its job runs. */
-    public record ResourceArn(String arn, String applicationId, String jobRunId) {}
+    /** What an EMR Serverless resource ARN names: an application, or one of its job runs or sessions. */
+    public record ResourceArn(String arn, String applicationId, String jobRunId, String sessionId) {}
 
     private final EmulatorConfig config;
     private final AccountAwareStorageBackend<Application> storage;
@@ -174,15 +181,8 @@ public class EmrServerlessService {
     }
 
     public PaginatedResult<ApplicationSummary> listApplications(ListApplicationsRequest request) {
-        List<String> violations = new ArrayList<>();
-        if (request.getMaxResults() != null) {
-            String violation = SmithyValidationErrors.outOfRange("maxResults", request.getMaxResults(), 1,
-                    MAX_LIST_RESULTS);
-            if (violation != null) {
-                violations.add(violation);
-            }
-        }
-        violations.addAll(statesViolations(request.getStates(), APPLICATION_STATES, MAX_APPLICATION_STATES));
+        List<String> violations = listViolations(request.getMaxResults(), MAX_LIST_RESULTS, request.getStates(),
+                APPLICATION_STATES, MAX_APPLICATION_STATES);
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
@@ -487,15 +487,17 @@ public class EmrServerlessService {
     }
 
     /**
-     * Admits a job run to the application and returns what {@code admit} builds from it. An
+     * Admits a job run or a session to the application and returns what {@code admit} builds from it. An
      * application "only accepts jobs when it's in" STARTED, and auto-start, on unless the
      * application turns it off, starts a CREATED or STOPPED one "on job submission" (EMR Serverless
-     * user guide, "Application states" and "Default application behavior"). {@code check} refuses a
-     * run against the application before auto-start can change it. This service's lock is held
-     * throughout, so the application cannot be updated, stopped or deleted while the run is admitted.
+     * user guide, "Application states" and "Default application behavior"); StartSession's "The application
+     * must be in the STARTED state or have AutoStart enabled" is the same rule. {@code check} refuses the
+     * submission against the application before auto-start can change it, and {@code submission} says what it
+     * is in the refusal of a stopped application. This service's lock is held throughout, so the application
+     * cannot be updated, stopped or deleted while the submission is admitted.
      */
-    public synchronized <T> T admitJobRun(String applicationId, Consumer<Application> check,
-                                          Function<Application, T> admit) {
+    public synchronized <T> T admit(String applicationId, String submission, Consumer<Application> check,
+                                    Function<Application, T> admit) {
         Application app = getApplication(applicationId);
         String state = app.getState();
         if ("TERMINATED".equals(state)) {
@@ -505,7 +507,7 @@ public class EmrServerlessService {
         if (!"STARTED".equals(state)) {
             if (!autoStartEnabled(app)) {
                 throw new AwsException("ValidationException", "Application " + applicationId
-                        + " must be started before a job run is submitted, as its auto-start is disabled.", 400);
+                        + " must be started before " + submission + ", as its auto-start is disabled.", 400);
             }
             startApplication(applicationId);
             app = getApplication(applicationId);
@@ -544,8 +546,8 @@ public class EmrServerlessService {
 
     /**
      * Parses a tagging ARN: {@code arn:<partition>:emr-serverless:<region>:<account>:/applications/<id>},
-     * the form CreateApplication returns, with {@code /jobruns/<id>} for a job run. An ARN of another
-     * Region names nothing here, and neither does a session's, as sessions are not emulated.
+     * the form CreateApplication returns, with {@code /jobruns/<id>} for a job run and {@code /sessions/<id>} for a
+     * session. An ARN of another Region names nothing here.
      */
     public ResourceArn resourceArn(String arn) {
         AwsArnUtils.Arn parsed;
@@ -558,10 +560,12 @@ public class EmrServerlessService {
         if (!"emr-serverless".equals(parsed.service()) || !matcher.matches()) {
             throw new AwsException("ValidationException", "Invalid resourceArn: " + arn, 400);
         }
-        if (!parsed.region().equals(regionResolver.getRegion()) || "sessions".equals(matcher.group(2))) {
+        if (!parsed.region().equals(regionResolver.getRegion())) {
             throw resourceNotFound(arn);
         }
-        return new ResourceArn(arn, matcher.group(1), matcher.group(3));
+        boolean session = "sessions".equals(matcher.group(2));
+        return new ResourceArn(arn, matcher.group(1), session ? null : matcher.group(3),
+                session ? matcher.group(3) : null);
     }
 
     /** Whether the application exists and has not been deleted, which leaves it TERMINATED. */
@@ -571,7 +575,7 @@ public class EmrServerlessService {
 
     /**
      * Runs {@code use} on the application when it exists and has not been deleted, under this service's
-     * lock, so that it cannot be deleted meanwhile, as with {@link #admitJobRun}; returns whether it ran.
+     * lock, so that it cannot be deleted meanwhile, as with {@link #admit}; returns whether it ran.
      */
     public synchronized boolean whileLive(String applicationId, Consumer<Application> use) {
         Optional<Application> app = live(applicationId);
@@ -625,10 +629,46 @@ public class EmrServerlessService {
     }
 
     /**
+     * What is wrong with a ListApplications, ListJobRuns or ListSessions request's {@code maxResults} and
+     * {@code states}.
+     */
+    static List<String> listViolations(Integer maxResults, int maxListResults, List<String> states,
+                                       List<String> allowed, int maxStates) {
+        List<String> violations = new ArrayList<>();
+        if (maxResults != null) {
+            String violation = SmithyValidationErrors.outOfRange("maxResults", maxResults, 1, maxListResults);
+            if (violation != null) {
+                violations.add(violation);
+            }
+        }
+        violations.addAll(statesViolations(states, allowed, maxStates));
+        return violations;
+    }
+
+    /**
+     * A page of ListJobRuns' runs or ListSessions' sessions: {@code matching}, newest first, and, where {@code states}
+     * names any, "grouped by the state", in the order it names them, as each operation's {@code states} member reads.
+     * A {@code nextToken} resumes only the listing {@code namespace} names.
+     */
+    static <T> PaginatedResult<T> pageByState(List<T> matching, Function<T, String> id, Function<T, String> state,
+                                              Function<T, Instant> createdAt, List<String> states, Integer maxResults,
+                                              int defaultMaxResults, String nextToken, String namespace) {
+        Map<String, String> cursors = new HashMap<>();
+        for (T item : matching) {
+            int group = states == null || states.isEmpty() ? 0 : states.indexOf(state.apply(item));
+            cursors.put(id.apply(item), String.format("%02d%020d%s", group,
+                    Long.MAX_VALUE - createdAt.apply(item).toEpochMilli(), id.apply(item)));
+        }
+        return Pagination.paginate(matching, item -> cursors.get(id.apply(item)),
+                maxResults != null ? maxResults : defaultMaxResults, nextToken, namespace,
+                token -> new AwsException("ValidationException", "Invalid nextToken.", 400));
+    }
+
+    /**
      * The violations of a {@code states} filter: at most {@code max} states, each one of
      * {@code allowed}. A typo would otherwise match nothing and list nothing.
      */
-    static List<String> statesViolations(List<String> states, List<String> allowed, int max) {
+    private static List<String> statesViolations(List<String> states, List<String> allowed, int max) {
         List<String> violations = new ArrayList<>();
         if (states == null) {
             return violations;
@@ -717,9 +757,49 @@ public class EmrServerlessService {
         return text.regionMatches(true, 0, RESERVED_PREFIX, 0, RESERVED_PREFIX.length());
     }
 
-    /** An application or job run id: 16 lowercase hexadecimal characters, within the model's [0-9a-z]+. */
+    /** An application, job run or session id: 16 lowercase hexadecimal characters, within the model's [0-9a-z]+. */
     static String newId() {
         return UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+    }
+
+    /** A job run's or session's {@code createdBy}: the caller, as GetCallerIdentity reports it, or else the root. */
+    static String createdBy(IamService iamService, RequestContext requestContext, RegionResolver regionResolver,
+                            String accountId) {
+        String accessKeyId = requestContext != null ? requestContext.getAccessKeyId() : null;
+        return iamService.resolveCallerArn(accessKeyId)
+                .orElseGet(() -> regionResolver.buildGlobalArn("iam", accountId, "root"));
+    }
+
+    /**
+     * The run or session that StartJobRun or StartSession started with {@code clientToken}, which a retry returns, or
+     * null. A client token is the request's Region's: reused on another application, it finds the run or session it
+     * started there, whose request then does not match the retry's.
+     */
+    static <T> T startedWithClientToken(List<T> records, String clientToken, Function<T, String> tokenOf,
+                                        Predicate<T> inRequestRegion) {
+        for (T record : records) {
+            if (clientToken.equals(tokenOf.apply(record)) && inRequestRegion.test(record)) {
+                return record;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * What a retry of StartJobRun or StartSession must repeat: the application and every member of the body but
+     * the client token itself. Read back from its JSON text, so that its numbers compare equal to those of a stored
+     * request once storage has written and read it.
+     */
+    static JsonNode retriedRequest(ObjectMapper objectMapper, String applicationId, Object request) {
+        ObjectNode node;
+        try {
+            node = (ObjectNode) objectMapper.readTree(objectMapper.writeValueAsString(request));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize a " + request.getClass().getSimpleName(), e);
+        }
+        node.remove("clientToken");
+        node.put("applicationId", applicationId);
+        return node;
     }
 
     private String buildArn(String id) {
