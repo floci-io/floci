@@ -5,6 +5,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.emrserverless.model.AutoStartConfiguration;
 import io.floci.aws.services.emrserverless.model.CreateApplicationRequest;
@@ -237,7 +238,7 @@ class EmrServerlessSessionServiceTest {
         String applicationId = application("emr-7.13.0", "SPARK", true);
         String sessionId = sessions.startSession(applicationId, request()).getSessionId();
 
-        EmrServerlessSessionService.Endpoint endpoint = sessions.sessionEndpoint(applicationId, sessionId);
+        SparkConnectEndpoint endpoint = sessions.sessionEndpoint(applicationId, sessionId);
 
         assertEquals("http://localhost:4566/_aws/emr-serverless/sessions/" + applicationId + "/" + sessionId,
                 endpoint.url());

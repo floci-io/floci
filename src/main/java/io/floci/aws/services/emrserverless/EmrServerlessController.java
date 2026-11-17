@@ -3,6 +3,7 @@ package io.floci.aws.services.emrserverless;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.services.emrserverless.model.Application;
 import io.floci.aws.services.emrserverless.model.ApplicationSummary;
 import io.floci.aws.services.emrserverless.model.CancelJobRunResponse;
@@ -282,7 +283,7 @@ public class EmrServerlessController {
     @Path("/{applicationId}/sessions/{sessionId}/endpoint")
     public GetSessionEndpointResponse getSessionEndpoint(@PathParam("applicationId") String applicationId,
                                                          @PathParam("sessionId") String sessionId) {
-        EmrServerlessSessionService.Endpoint endpoint = sessions.sessionEndpoint(applicationId, sessionId);
+        SparkConnectEndpoint endpoint = sessions.sessionEndpoint(applicationId, sessionId);
         GetSessionEndpointResponse response = new GetSessionEndpointResponse();
         response.setApplicationId(applicationId);
         response.setSessionId(sessionId);

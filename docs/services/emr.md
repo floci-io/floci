@@ -4,7 +4,7 @@
 **Endpoint:** `http://localhost:4566/`
 **Target prefix:** `X-Amz-Target: ElasticMapReduce.*`
 
-Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
+Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, Spark Connect sessions, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own, after the cluster's bootstrap actions (see [Running steps](#running-steps)).
 
 ## Supported Actions
 
@@ -24,6 +24,11 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `DescribeStep` | Returns the detail and status of a single step |
 | `ListSteps` | Lists the steps of a cluster, filterable by state |
 | `CancelSteps` | Cancels pending steps |
+| `StartSession` | Starts a Spark Connect session on a cluster with sessions enabled; see [Sessions](#sessions) |
+| `GetSession` | Returns a session's state, times and configuration |
+| `ListSessions` | Lists a cluster's sessions, newest first, filterable by state |
+| `TerminateSession` | Terminates a session that has not ended |
+| `GetSessionEndpoint` | Returns a session's endpoint and an authentication token valid for an hour |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
 | `AddInstanceFleet` | Adds an instance fleet to a cluster |
@@ -180,6 +185,43 @@ still accepted.
 
 A state machine drives clusters and steps through the `elasticmapreduce:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR tasks](step-functions.md#amazon-emr-tasks).
+
+## Sessions
+
+A session is "a managed connection between your local PySpark client and a Spark Connect Server running on your Amazon
+EMR cluster" (Management Guide, "Interactive sessions"). Floci keeps a session and its lifecycle on its cluster, but
+starts no Spark Connect server for it, in either runner mode, so nothing answers Spark Connect at its endpoint.
+
+* **Starting**: `StartSession` needs a cluster created with `SessionEnabled` (which `DescribeCluster` reports), on
+  "release emr-spark-8.0.0 or later", with "The Spark application installed on the cluster", that is `RUNNING` or
+  `WAITING`. A cluster with more than one primary node is refused, as "High Availability (HA) clusters with multiple
+  primary nodes are not supported for Spark Connect sessions", and so is a session past a cluster's 1000 that have not
+  ended ("Amazon EMR enforces a limit of 1000 concurrent active sessions per cluster"). A request without a `Name` is
+  refused, as "The `--name` parameter is required and must be a non-empty value", and so is a
+  `SessionIdleTimeoutInMinutes` outside 1 to 1440, as the idle timeout has "a maximum of 24 hours". Each of these
+  refusals is `InvalidRequestException`, the one error the model declares, in Floci's own wording, as AWS's is not
+  recorded. A member of the wrong JSON type, such as `EngineConfigurations` that is not a list of configurations,
+  `Properties` that are not strings, a `MonitoringConfiguration` member that is not a structure, or a `ClusterId`
+  that is not a string, is refused with `SerializationException`, and the model's length and pattern constraints with
+  `ValidationException`. A retry with the same `ClientRequestToken` that asks for the same session answers as the
+  first call did, a member left out, empty or at its default counting as the same; the token reused for a different
+  session is refused with `InvalidRequestException`.
+* **States**: `StartSession` answers `SUBMITTED`, as "When a session is first created, it enters the SUBMITTED state",
+  and the session is `IDLE` from then on, with `StartedAt` and `IdleSince` its creation time. It is `TERMINATED` once
+  it has been idle for its `SessionIdleTimeoutInMinutes` (60 when not given: "The default timeout is 60 minutes"), when
+  `TerminateSession` ends it, or when its cluster shuts down, its `StateChangeReason` saying which. Floci never reports
+  `STARTING`, `STARTED`, `BUSY`, `TERMINATING` or `FAILED`.
+* **TerminateSession** ends a session at once as `TERMINATED`; AWS's passes through `TERMINATING` first. A session that
+  has already ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **GetSessionEndpoint** answers for a session that has not ended with an endpoint on Floci's own address
+  (`/_aws/emr/sessions/<clusterId>/<sessionId>`) and a fresh `AuthToken` that expires in an hour, as "Authentication
+  tokens expire after 1 hour". Nothing answers Spark Connect there, and no `Credentials` are given. A session that has
+  ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **ListSessions** returns the newest sessions first, as "Newer sessions are returned first", the later of two started
+  in the same millisecond first too, filtered by `SessionStates`, at most `MaxResults` (1 to 100, 100 by default) to a
+  page.
+* A session's `EngineConfigurations`, `MonitoringConfiguration` and `Tags` are kept as given and reported by
+  `GetSession`; none of them configures anything, and no session logs are written.
 
 ## Running steps
 

@@ -13,11 +13,13 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.services.emr.model.EmrBlockPublicAccess;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
+import io.floci.aws.services.emr.model.EmrSession;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emr.model.SecurityConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -73,6 +75,11 @@ public class EmrHandler {
                 case "DescribeStep" -> handleDescribeStep(request);
                 case "ListSteps" -> handleListSteps(request);
                 case "CancelSteps" -> handleCancelSteps(request);
+                case "StartSession" -> handleStartSession(request);
+                case "GetSession" -> handleGetSession(request);
+                case "ListSessions" -> handleListSessions(request);
+                case "TerminateSession" -> handleTerminateSession(request);
+                case "GetSessionEndpoint" -> handleGetSessionEndpoint(request);
                 case "AddInstanceGroups" -> handleAddInstanceGroups(request);
                 case "ListInstanceGroups" -> handleListInstanceGroups(request);
                 case "AddInstanceFleet" -> handleAddInstanceFleet(request);
@@ -160,6 +167,7 @@ public class EmrHandler {
         cluster.setKeepJobFlowAliveWhenNoSteps(instances.path("KeepJobFlowAliveWhenNoSteps").asBoolean(false));
         cluster.setTerminationProtected(instances.path("TerminationProtected").asBoolean(false));
         cluster.setUnhealthyNodeReplacement(instances.path("UnhealthyNodeReplacement").asBoolean(false));
+        cluster.setSessionEnabled(request.path("SessionEnabled").asBoolean(false));
         cluster.setEc2Attributes(buildEc2Attributes(instances, region));
         cluster.setInstanceGroups(parseInstanceGroups(instances.path("InstanceGroups")));
         cluster.setInstanceFleets(parseInstanceFleets(instances.path("InstanceFleets")));
@@ -276,6 +284,249 @@ public class EmrHandler {
             arr.add(node);
         }
         return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Sessions ────────────────────────────
+
+    private Response handleStartSession(JsonNode request) {
+        EmrSessions.Request start = new EmrSessions.Request(string(request, "Name"),
+                string(request, "ExecutionRoleArn"), configurationList(request.path("EngineConfigurations"),
+                "EngineConfigurations"), monitoringConfiguration(request.path("MonitoringConfiguration")),
+                longOrNull(request.path("SessionIdleTimeoutInMinutes"), "SessionIdleTimeoutInMinutes"),
+                string(request, "ClientRequestToken"), tagList(request.path("Tags"), "Tags"));
+        EmrSession session = service.startSession(string(request, "ClusterId"), start);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Id", session.getId());
+        response.put("ClusterId", session.getClusterId());
+        response.put("Arn", session.getArn());
+        response.put("AccountId", session.getAccountId());
+        response.put("State", session.getState());
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetSession(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Session", sessionNode(service.getSession(string(request, "ClusterId"),
+                string(request, "SessionId"))));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListSessions(JsonNode request) {
+        PaginatedResult<EmrSession> page = service.listSessions(string(request, "ClusterId"),
+                strings(request.path("SessionStates"), "SessionStates"), intOrNull(request.path("MaxResults")),
+                string(request, "NextToken"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode sessions = response.putArray("Sessions");
+        page.items().forEach(session -> sessions.add(sessionNode(session)));
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleTerminateSession(JsonNode request) {
+        EmrSession session = service.terminateSession(string(request, "ClusterId"), string(request, "SessionId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ClusterId", session.getClusterId());
+        response.put("SessionId", session.getId());
+        response.put("State", session.getState());
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetSessionEndpoint(JsonNode request) {
+        SparkConnectEndpoint endpoint = service.sessionEndpoint(string(request, "ClusterId"),
+                string(request, "SessionId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Endpoint", endpoint.url());
+        response.put("AuthToken", endpoint.authToken());
+        putEpoch(response, "AuthTokenExpirationTime", endpoint.authTokenExpiresAt());
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode sessionNode(EmrSession session) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", session.getId());
+        node.put("ClusterId", session.getClusterId());
+        if (session.getName() != null) {
+            node.put("Name", session.getName());
+        }
+        node.put("Arn", session.getArn());
+        node.put("State", session.getState());
+        if (session.getStateChangeReason() != null) {
+            node.put("StateChangeReason", session.getStateChangeReason());
+        }
+        node.put("ReleaseLabel", session.getReleaseLabel());
+        if (session.getExecutionRoleArn() != null) {
+            node.put("ExecutionRoleArn", session.getExecutionRoleArn());
+        }
+        node.put("AccountId", session.getAccountId());
+        putEpoch(node, "CreatedAt", session.getCreatedAt());
+        putEpoch(node, "UpdatedAt", session.getUpdatedAt());
+        putEpoch(node, "StartedAt", session.getStartedAt());
+        putEpoch(node, "EndedAt", session.getEndedAt());
+        putEpoch(node, "IdleSince", session.getIdleSince());
+        setRawJson(node, "EngineConfigurations", session.getEngineConfigurations());
+        setRawJson(node, "MonitoringConfiguration", session.getMonitoringConfiguration());
+        node.put("SessionIdleTimeoutInMinutes", session.getSessionIdleTimeoutInMinutes());
+        node.set("Tags", tagArray(session.getTags()));
+        return node;
+    }
+
+    /**
+     * A member a string where the model has one; another JSON type is refused with SerializationException, as an
+     * awsJson1_1 service refuses a member of the wrong type (Smithy's malformed-request tests), in Floci's own wording.
+     */
+    private static String string(JsonNode request, String member) {
+        JsonNode value = request.path(member);
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw malformed(member + " must be a string");
+        }
+        return value.asText();
+    }
+
+    private static Long longOrNull(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToLong()) {
+            throw malformed(member + " must be an integer");
+        }
+        return value.asLong();
+    }
+
+    /**
+     * StartSession's SessionMonitoringConfiguration, kept as its raw JSON; null when it is not there or empty. Each of
+     * its S3, CloudWatch and managed logging configurations is a structure of an {@code Enabled} boolean, strings, and
+     * {@code LogTypes}, a map of lists of strings.
+     */
+    private static String monitoringConfiguration(JsonNode value) {
+        String member = "MonitoringConfiguration";
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        requireStructure(value, member);
+        for (String logging : List.of("S3LoggingConfiguration", "CloudWatchLoggingConfiguration",
+                "ManagedLoggingConfiguration")) {
+            JsonNode configuration = value.path(logging);
+            if (configuration.isMissingNode() || configuration.isNull()) {
+                continue;
+            }
+            String path = member + "." + logging;
+            requireStructure(configuration, path);
+            configuration.properties().forEach(entry -> {
+                JsonNode field = entry.getValue();
+                if (field.isNull()) {
+                    return;
+                }
+                // Not a switch on the member names: the action tables read a string case here as an EMR action.
+                if ("Enabled".equals(entry.getKey())) {
+                    if (!field.isBoolean()) {
+                        throw malformed(path + ".Enabled must be a boolean");
+                    }
+                } else if ("LogTypes".equals(entry.getKey())) {
+                    requireStructure(field, path + ".LogTypes");
+                    field.forEach(types -> strings(types, path + ".LogTypes"));
+                } else if (!field.isTextual()) {
+                    throw malformed(path + "." + entry.getKey() + " must be a string");
+                }
+            });
+        }
+        return value.isEmpty() ? null : value.toString();
+    }
+
+    private static void requireStructure(JsonNode value, String member) {
+        if (!value.isObject()) {
+            throw malformed(member + " must be a structure");
+        }
+    }
+
+    // A list of strings; null when it is not there.
+    private static List<String> strings(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        if (!value.isArray()) {
+            throw malformed(member + " must be a list of strings");
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode element : value) {
+            if (!element.isTextual()) {
+                throw malformed(member + " must be a list of strings");
+            }
+            values.add(element.asText());
+        }
+        return values;
+    }
+
+    /**
+     * A ConfigurationList member, kept as its raw JSON; null when it is not there or empty. Each Configuration's
+     * {@code Classification} is a string, its {@code Properties} a map of strings, and its {@code Configurations}
+     * a ConfigurationList in turn.
+     */
+    private static String configurationList(JsonNode value, String member) {
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        checkConfigurations(value, member);
+        return value.isEmpty() ? null : value.toString();
+    }
+
+    private static void checkConfigurations(JsonNode value, String member) {
+        if (!value.isArray()) {
+            throw malformed(member + " must be a list of configurations");
+        }
+        for (JsonNode configuration : value) {
+            if (!configuration.isObject()) {
+                throw malformed(member + " must be a list of configurations");
+            }
+            JsonNode classification = configuration.path("Classification");
+            if (!classification.isMissingNode() && !classification.isNull() && !classification.isTextual()) {
+                throw malformed(member + "'s Classification must be a string");
+            }
+            JsonNode properties = configuration.path("Properties");
+            if (!properties.isMissingNode() && !properties.isNull()) {
+                if (!properties.isObject()) {
+                    throw malformed(member + "'s Properties must be a map of strings");
+                }
+                properties.forEach(property -> {
+                    if (!property.isTextual()) {
+                        throw malformed(member + "'s Properties must be a map of strings");
+                    }
+                });
+            }
+            JsonNode nested = configuration.path("Configurations");
+            if (!nested.isMissingNode() && !nested.isNull()) {
+                checkConfigurations(nested, member);
+            }
+        }
+    }
+
+    // A TagList member: each Tag's Key and Value strings.
+    private static Map<String, String> tagList(JsonNode value, String member) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (value.isMissingNode() || value.isNull()) {
+            return tags;
+        }
+        if (!value.isArray()) {
+            throw malformed(member + " must be a list of tags");
+        }
+        for (JsonNode tag : value) {
+            if (!tag.isObject()) {
+                throw malformed(member + " must be a list of tags");
+            }
+            String key = string(tag, "Key");
+            if (key != null) {
+                tags.put(key, string(tag, "Value"));
+            }
+        }
+        return tags;
+    }
+
+    private static AwsException malformed(String message) {
+        return new AwsException("SerializationException", message, 400);
     }
 
     // ──────────────────────────── Instance groups / fleets ────────────────────────────
@@ -759,6 +1010,7 @@ public class EmrHandler {
         node.put("EbsRootVolumeSize", c.getEbsRootVolumeSize());
         node.put("StepConcurrencyLevel", c.getStepConcurrencyLevel());
         node.put("ClusterArn", c.getClusterArn());
+        node.put("SessionEnabled", c.isSessionEnabled());
         return node;
     }
 

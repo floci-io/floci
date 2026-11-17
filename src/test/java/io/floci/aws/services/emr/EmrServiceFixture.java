@@ -345,6 +345,7 @@ final class EmrServiceFixture {
     private EmulatorConfig config(boolean reconcile) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().emr().defaultReleaseLabel()).thenReturn("emr-7.5.0");
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566/");
         when(config.services().emr().clusterStartupDelaySeconds()).thenReturn(durations[0]);
         when(config.services().emr().stepDurationSeconds()).thenReturn(durations[1]);
         when(config.services().emr().clusterTerminationDelaySeconds()).thenReturn(durations[2]);
