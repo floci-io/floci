@@ -674,15 +674,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      */
     private void reconcileEventBusTags(String arn, Collection<String> managedKeys, Map<String, String> desired,
                                        String region) {
-        List<String> dropped = managedKeys.stream()
-                .filter(key -> !desired.containsKey(key))
-                .toList();
-        if (!dropped.isEmpty()) {
-            eventBridgeService.untagResource(arn, dropped, region);
-        }
-        if (!desired.isEmpty()) {
-            eventBridgeService.tagResource(arn, desired, region);
-        }
+        CfnRollback.reconcileTags(managedKeys, desired,
+                dropped -> eventBridgeService.untagResource(arn, dropped, region),
+                tags -> eventBridgeService.tagResource(arn, tags, region));
     }
 
     private Set<String> eventBusManagedTagKeys(StackResource resource) {

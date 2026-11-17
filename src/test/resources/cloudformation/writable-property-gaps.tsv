@@ -308,7 +308,6 @@ AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	ResourcesVpcConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
 AWS::EKS::Cluster	StorageConfig	accepted and ignored
-AWS::EKS::Cluster	Tags	accepted and ignored
 AWS::EKS::Cluster	UpgradePolicy	accepted and ignored
 AWS::EKS::Cluster	ZonalShiftConfig	accepted and ignored
 AWS::EKS::Nodegroup	AmiType	accepted and ignored
