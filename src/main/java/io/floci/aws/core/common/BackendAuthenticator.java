@@ -176,6 +176,10 @@ public final class BackendAuthenticator {
         if (nonce == null || salt == null || iterations <= 0) {
             throw new IOException("malformed SCRAM message from the backend");
         }
+        if (salt.length == 0) {
+            // PBKDF2 refuses an empty salt with an unchecked exception; PostgreSQL never sends one.
+            throw new IOException("backend SCRAM salt is empty");
+        }
         if (iterations > MAX_ITERATIONS) {
             throw new IOException("backend asks for " + iterations + " SCRAM iterations, more than "
                     + MAX_ITERATIONS);

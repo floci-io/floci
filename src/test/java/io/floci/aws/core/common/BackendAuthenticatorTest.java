@@ -125,6 +125,16 @@ class BackendAuthenticatorTest {
     }
 
     @Test
+    void anEmptySaltIsRefused() throws Exception {
+        BackendAuthenticator authenticator = new BackendAuthenticator("user", "pencil", NONCE, "user");
+        authenticator.answer(auth(10, saslMechanisms("SCRAM-SHA-256")));
+
+        IOException refused = assertThrows(IOException.class,
+                () -> authenticator.answer(auth(11, text("r=" + NONCE + "x,s=,i=4096"))));
+        assertEquals("backend SCRAM salt is empty", refused.getMessage());
+    }
+
+    @Test
     void unsupportedMechanismFails() {
         BackendAuthenticator authenticator = new BackendAuthenticator("u", "p");
 
