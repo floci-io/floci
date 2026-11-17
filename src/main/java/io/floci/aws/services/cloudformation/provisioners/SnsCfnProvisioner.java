@@ -29,6 +29,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final String SUBSCRIPTION = "AWS::SNS::Subscription";
     private static final String TOPIC_POLICY = "AWS::SNS::TopicPolicy";
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
+    private static final int DISPLAY_NAME_MAX_LENGTH = 100;
     private static final String FIFO_SUFFIX = ".fifo";
     private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
     private static final String PRIOR_INLINE_ATTR = CfnRollback.SNS_PRIOR_INLINE_SUBSCRIPTIONS_ATTR;
@@ -164,6 +165,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
             attributes.put("MaximumMessageSize", maximumMessageSize);
         }
         if (displayName != null) {
+            if (displayName.length() > DISPLAY_NAME_MAX_LENGTH) {
+                throw new AwsException("ValidationError",
+                        "DisplayName must be at most " + DISPLAY_NAME_MAX_LENGTH + " characters.", 400);
+            }
             attributes.put("DisplayName", displayName);
         }
 
@@ -202,8 +207,9 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                 desired.put("MaximumMessageSize",
                         String.valueOf(SnsService.DEFAULT_MAX_MESSAGE_SIZE));
             }
-            // A dropped DisplayName goes back to the empty default GetTopicAttributes reports.
-            if (!desired.containsKey("DisplayName") && topic.getAttributes().containsKey("DisplayName")) {
+            // A DisplayName the template dropped goes back to the empty default GetTopicAttributes
+            // reports; one the template never declared may be managed outside the stack.
+            if (ctx.changes(TOPIC, props).dropped().contains("DisplayName")) {
                 desired.put("DisplayName", "");
             }
         }

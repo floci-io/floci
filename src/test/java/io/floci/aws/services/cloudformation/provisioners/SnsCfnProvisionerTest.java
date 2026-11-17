@@ -529,12 +529,12 @@ class SnsCfnProvisionerTest {
     }
 
     @Test
-    void anUpdateThatDropsDisplayNameClearsItOnlyWhenSet() {
-        Topic named = topic(TOPIC_ARN);
-        named.getAttributes().put("DisplayName", "Expected Name");
-        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(named);
+    void anUpdateThatDropsDisplayNameClearsItButContinuedOmissionDoesNot() {
+        when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
 
         provisionUpdate("""
+                {"TopicName": "events", "DisplayName": "Expected Name"}
+                """, """
                 {"TopicName": "events"}
                 """);
         verify(sns).setTopicAttributes(TOPIC_ARN, "DisplayName", "", REGION);
@@ -543,8 +543,22 @@ class SnsCfnProvisionerTest {
         when(sns.createTopic(eq("events"), anyMap(), anyMap(), eq(REGION))).thenReturn(topic(TOPIC_ARN));
         provisionUpdate("""
                 {"TopicName": "events"}
+                """, """
+                {"TopicName": "events"}
                 """);
         verify(sns, never()).setTopicAttributes(anyString(), eq("DisplayName"), anyString(), anyString());
+    }
+
+    @Test
+    void displayNameOverOneHundredCharactersIsRejectedBeforeAnythingIsCreated() {
+        String atLimit = "x".repeat(100);
+        when(sns.createTopic(anyString(), anyMap(), anyMap(), anyString())).thenReturn(topic(TOPIC_ARN));
+        provision("AWS::SNS::Topic", "{\"TopicName\": \"events\", \"DisplayName\": \"" + atLimit + "\"}");
+
+        setUp();
+        assertThrows(AwsException.class, () -> provision("AWS::SNS::Topic",
+                "{\"TopicName\": \"events\", \"DisplayName\": \"" + atLimit + "x\"}"));
+        verify(sns, never()).createTopic(anyString(), anyMap(), anyMap(), anyString());
     }
 
     /** Real SNS rejects both attributes on a standard topic, so an update must not invent them. */
@@ -561,6 +575,10 @@ class SnsCfnProvisionerTest {
 
     /** Provisions an existing topic again, the way UpdateStack re-invokes the provisioner. */
     private void provisionUpdate(String json) {
+        provisionUpdate(null, json);
+    }
+
+    private void provisionUpdate(String priorJson, String json) {
         StackResource r = new StackResource();
         r.setLogicalId("Topic");
         r.setResourceType("AWS::SNS::Topic");
@@ -568,8 +586,9 @@ class SnsCfnProvisionerTest {
         String priorName = resolved.path("TopicName").asText(null);
         r.setAttributes(new HashMap<>(Map.of("TopicName", priorName)));
         r.setPhysicalId(TOPIC_ARN);
+        JsonNode prior = priorJson == null ? null : props(priorJson);
         provisioner.provision(r, resolved,
-                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", TOPIC_ARN));
+                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", TOPIC_ARN, null, prior));
     }
 
     @Test
