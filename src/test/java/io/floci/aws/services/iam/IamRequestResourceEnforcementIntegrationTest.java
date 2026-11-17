@@ -804,6 +804,32 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(describeDeliveryStream(user, name + "-other"), "firehose:DescribeDeliveryStream");
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Firehose holds on the delivery stream a request names, as a
+     * tag call leaves them, so an allow on one team's tag lets the caller describe that team's stream and not
+     * another's.
+     */
+    @Test
+    void aFirehoseResourceTagConditionReadsTheTagsOfTheDeliveryStream() {
+        String tagged = deliveryStream("res-tag-stream-" + suffix(), "web");
+        String other = deliveryStream("res-tag-stream-" + suffix(), "web");
+        adminJson("firehose", "Firehose_20150804.TagDeliveryStream").body("{\"DeliveryStreamName\":\"" + tagged
+                + "\",\"Tags\":" + teamTag("data") + "}").post("/").then().statusCode(200);
+
+        User user = user("res-stream-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"firehose:DescribeDeliveryStream\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeDeliveryStream(user, tagged).statusCode(200);
+        refusedJson(describeDeliveryStream(user, other), "firehose:DescribeDeliveryStream");
+    }
+
+    /** A Firehose delivery stream of the name, tagged with the team, deleted afterwards. */
+    private String deliveryStream(String name, String team) {
+        return created("firehose", "Firehose_20150804.CreateDeliveryStream", "{\"DeliveryStreamName\":\"" + name
+                + "\",\"Tags\":" + teamTag(team) + "}", "Firehose_20150804.DeleteDeliveryStream",
+                "{\"DeliveryStreamName\":\"" + name + "\"}", name);
+    }
+
     /** An identity pool is checked on the ARN its id gives, the one Cognito tags it under. */
     @Test
     void anIdentityPoolIsCheckedOnTheArnItsIdGives() {
