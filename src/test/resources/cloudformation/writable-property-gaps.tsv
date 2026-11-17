@@ -290,7 +290,6 @@ AWS::ECS::TaskDefinition	Tags	accepted and ignored
 AWS::ECS::TaskDefinition	TrustedExecutionConfiguration	accepted and ignored
 AWS::EFS::FileSystem	BypassPolicyLockoutSafetyCheck	Floci's EFS service applies a file system policy without a lockout check, so there is nothing to bypass
 AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS replication, so the destination file system is not created
-AWS::EKS::Cluster	AccessConfig	accepted and ignored
 AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
 AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
 AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
@@ -301,10 +300,8 @@ AWS::EKS::Cluster	Force	accepted and ignored
 AWS::EKS::Cluster	KubeApiServerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeControllerManagerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
-AWS::EKS::Cluster	Logging	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
-AWS::EKS::Cluster	ResourcesVpcConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
 AWS::EKS::Cluster	StorageConfig	accepted and ignored
 AWS::EKS::Cluster	UpgradePolicy	accepted and ignored
