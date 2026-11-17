@@ -4,7 +4,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamGroup;
 import io.floci.aws.services.iam.model.IamPolicy;
+import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.iam.model.PolicyVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -20,13 +23,13 @@ import java.util.stream.Collectors;
 
 /**
  * CloudFormation provisioning for {@code AWS::IAM::ManagedPolicy}, a standalone customer-managed
- * policy with an ARN that must be detached from its roles before deletion. {@code Ref} and
+ * policy with an ARN that must be detached from its principals before deletion. {@code Ref} and
  * {@code Fn::GetAtt PolicyArn} return the policy ARN. A managed policy name is account-global, so
  * the physical name is honoured verbatim from {@code ManagedPolicyName} when set.
  *
  * <p>On {@code UpdateStack} with an unchanged name the policy this stack provisioned already
  * exists, so {@code PolicyDocument} is applied as a new default version in place (pruning the
- * oldest versions to stay under IAM's five-version cap) and roles no longer listed are detached,
+ * oldest versions to stay under IAM's five-version cap) and principals no longer listed are detached,
  * matching CloudFormation. A failure mid-update restores the version and attachment state this pass
  * changed rather than leaving the policy half-migrated.
  */
@@ -55,14 +58,25 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         }
         String document = ctx.resolvePolicyDocument(props);
         List<String> roleNames = ctx.resolveStringList(props, "Roles");
+        List<String> userNames = ctx.resolveStringList(props, "Users");
+        List<String> groupNames = ctx.resolveStringList(props, "Groups");
         String existingArn = r.getPhysicalId();
 
+        // Check every declared target before creating a policy or publishing a new version.
+        roleNames.forEach(iamService::getRole);
+        userNames.forEach(iamService::getUser);
+        groupNames.forEach(iamService::getGroup);
+
         IamPolicy policy;
+        IamService.PolicyEntities priorEntities = null;
         boolean createdPolicy = false;
         String previousDefaultVersionId = null;
         PolicyVersion createdVersionForRollback = null;
         List<PolicyVersion> prunedVersionsForRollback = new ArrayList<>();
-        List<String> detachedObsoleteRoles = new ArrayList<>();
+        AttachmentChanges changes = new AttachmentChanges();
+        String previousRoleTargets = r.getAttributes().get("ManagedPolicyRoleTargets");
+        String previousUserTargets = r.getAttributes().get("ManagedPolicyUserTargets");
+        String previousGroupTargets = r.getAttributes().get("ManagedPolicyGroupTargets");
         try {
             policy = iamService.createPolicy(policyName, "/", null, document, Map.of());
             createdPolicy = true;
@@ -87,6 +101,7 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
             if (policyId == null || !policyId.equals(policy.getPolicyId())) {
                 throw e;
             }
+            priorEntities = iamService.listEntitiesForPolicy(existingArn);
             previousDefaultVersionId = policy.getDefaultVersionId();
             // IAM caps a managed policy at 5 versions; prune the oldest non-default ones the way
             // CloudFormation does, so repeated stack updates never die on LimitExceeded.
@@ -103,15 +118,14 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                 iamService.deletePolicyVersion(existingArn, pruned.getVersionId());
             }
             createdVersionForRollback = iamService.createPolicyVersion(existingArn, document, true);
-            // Roles this stack attached on the previous pass but no longer listed in the template
-            // are detached, matching CloudFormation's update semantics.
-            String previousTargets = r.getAttributes().get("ManagedPolicyRoleTargets");
-            if (previousTargets != null && !previousTargets.isBlank()) {
-                for (String previousRole : previousTargets.split("\n")) {
+            // Targets this stack attached on the previous pass but no longer listed in the
+            // template are detached, matching CloudFormation's update semantics.
+            if (previousRoleTargets != null && !previousRoleTargets.isBlank()) {
+                for (String previousRole : previousRoleTargets.split("\n")) {
                     if (!roleNames.contains(previousRole)) {
                         try {
                             iamService.detachRolePolicy(previousRole, existingArn);
-                            detachedObsoleteRoles.add(previousRole);
+                            changes.detachedRoles.add(previousRole);
                         } catch (AwsException detachFailure) {
                             // Update is idempotent like the delete path: the attachment can already
                             // be gone on a retry, but other failures must surface and still restore
@@ -120,7 +134,46 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                             // never sees this failure).
                             if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
                                 restoreOnUpdateFailure(detachFailure, r, existingArn,
-                                        false, Set.of(), detachedObsoleteRoles,
+                                        false, changes,
+                                        previousRoleTargets, previousUserTargets, previousGroupTargets,
+                                        previousDefaultVersionId, createdVersionForRollback,
+                                        prunedVersionsForRollback);
+                                throw detachFailure;
+                            }
+                        }
+                    }
+                }
+            }
+            if (previousUserTargets != null && !previousUserTargets.isBlank()) {
+                for (String previousUser : previousUserTargets.split("\n")) {
+                    if (!userNames.contains(previousUser)) {
+                        try {
+                            iamService.detachUserPolicy(previousUser, existingArn);
+                            changes.detachedUsers.add(previousUser);
+                        } catch (AwsException detachFailure) {
+                            if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
+                                restoreOnUpdateFailure(detachFailure, r, existingArn,
+                                        false, changes,
+                                        previousRoleTargets, previousUserTargets, previousGroupTargets,
+                                        previousDefaultVersionId, createdVersionForRollback,
+                                        prunedVersionsForRollback);
+                                throw detachFailure;
+                            }
+                        }
+                    }
+                }
+            }
+            if (previousGroupTargets != null && !previousGroupTargets.isBlank()) {
+                for (String previousGroup : previousGroupTargets.split("\n")) {
+                    if (!groupNames.contains(previousGroup)) {
+                        try {
+                            iamService.detachGroupPolicy(previousGroup, existingArn);
+                            changes.detachedGroups.add(previousGroup);
+                        } catch (AwsException detachFailure) {
+                            if (!"NoSuchEntity".equals(detachFailure.getErrorCode())) {
+                                restoreOnUpdateFailure(detachFailure, r, existingArn,
+                                        false, changes,
+                                        previousRoleTargets, previousUserTargets, previousGroupTargets,
                                         previousDefaultVersionId, createdVersionForRollback,
                                         prunedVersionsForRollback);
                                 throw detachFailure;
@@ -142,25 +195,46 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("PolicyArn", policy.getArn());
         r.getAttributes().put("DefaultVersionId", policy.getDefaultVersionId());
         r.getAttributes().put("ManagedPolicyRoleTargets", String.join("\n", roleNames));
+        r.getAttributes().put("ManagedPolicyUserTargets", String.join("\n", userNames));
+        r.getAttributes().put("ManagedPolicyGroupTargets", String.join("\n", groupNames));
 
         String policyArn = policy.getArn();
         // On adopt, attachments from the previous pass are not this attempt's to undo.
-        Set<String> previouslyAttached = createdPolicy
-                ? Set.of()
-                : iamService.listEntitiesForPolicy(policyArn).roles().stream()
-                        .map(role -> role.getRoleName())
+        Set<String> previouslyAttachedRoles = priorEntities == null
+                ? Set.of() : priorEntities.roles().stream()
+                        .map(IamRole::getRoleName)
                         .collect(Collectors.toSet());
-        LinkedHashSet<String> attachedRoleNames = new LinkedHashSet<>();
+        Set<String> previouslyAttachedUsers = priorEntities == null
+                ? Set.of() : priorEntities.users().stream()
+                        .map(IamUser::getUserName)
+                        .collect(Collectors.toSet());
+        Set<String> previouslyAttachedGroups = priorEntities == null
+                ? Set.of() : priorEntities.groups().stream()
+                        .map(IamGroup::getGroupName)
+                        .collect(Collectors.toSet());
         try {
             for (String roleName : roleNames) {
                 iamService.attachRolePolicy(roleName, policyArn);
-                if (!previouslyAttached.contains(roleName)) {
-                    attachedRoleNames.add(roleName);
+                if (!previouslyAttachedRoles.contains(roleName)) {
+                    changes.attachedRoles.add(roleName);
+                }
+            }
+            for (String userName : userNames) {
+                iamService.attachUserPolicy(userName, policyArn);
+                if (!previouslyAttachedUsers.contains(userName)) {
+                    changes.attachedUsers.add(userName);
+                }
+            }
+            for (String groupName : groupNames) {
+                iamService.attachGroupPolicy(groupName, policyArn);
+                if (!previouslyAttachedGroups.contains(groupName)) {
+                    changes.attachedGroups.add(groupName);
                 }
             }
         } catch (RuntimeException failure) {
-            restoreOnUpdateFailure(failure, r, policyArn, createdPolicy, attachedRoleNames,
-                    detachedObsoleteRoles, previousDefaultVersionId, createdVersionForRollback,
+            restoreOnUpdateFailure(failure, r, policyArn, createdPolicy, changes,
+                    previousRoleTargets, previousUserTargets, previousGroupTargets,
+                    previousDefaultVersionId, createdVersionForRollback,
                     prunedVersionsForRollback);
             throw failure;
         }
@@ -168,18 +242,37 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Undoes whatever this update attempt already did to the managed policy before it failed:
-     * shared by the attach loop and the obsolete-role detach loop, since a detach failure can
+     * shared by the attach loop and the obsolete-target detach loops, since a detach failure can
      * escape before the attach loop even runs and must still restore the version and attachment
      * state already changed in this pass.
      */
     private void restoreOnUpdateFailure(RuntimeException failure, StackResource r, String policyArn,
-                                        boolean createdPolicy, Set<String> attachedRoleNames,
-                                        List<String> detachedObsoleteRoles, String previousDefaultVersionId,
+                                        boolean createdPolicy, AttachmentChanges changes,
+                                        String previousRoleTargets, String previousUserTargets,
+                                        String previousGroupTargets, String previousDefaultVersionId,
                                         PolicyVersion createdVersionForRollback,
                                         List<PolicyVersion> prunedVersionsForRollback) {
-        List<String> rollbackRoles = new ArrayList<>(attachedRoleNames);
-        Collections.reverse(rollbackRoles);
         boolean cleanupSucceeded = true;
+        List<String> rollbackGroups = new ArrayList<>(changes.attachedGroups);
+        Collections.reverse(rollbackGroups);
+        for (String groupName : rollbackGroups) {
+            String cleanupDescription = "detach policy " + policyArn + " from group " + groupName;
+            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                    () -> iamService.detachGroupPolicy(groupName, policyArn))) {
+                cleanupSucceeded = false;
+            }
+        }
+        List<String> rollbackUsers = new ArrayList<>(changes.attachedUsers);
+        Collections.reverse(rollbackUsers);
+        for (String userName : rollbackUsers) {
+            String cleanupDescription = "detach policy " + policyArn + " from user " + userName;
+            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                    () -> iamService.detachUserPolicy(userName, policyArn))) {
+                cleanupSucceeded = false;
+            }
+        }
+        List<String> rollbackRoles = new ArrayList<>(changes.attachedRoles);
+        Collections.reverse(rollbackRoles);
         for (String roleName : rollbackRoles) {
             String cleanupDescription = "detach policy " + policyArn + " from role " + roleName;
             if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
@@ -192,10 +285,26 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                         () -> iamService.deletePolicy(policyArn))) {
             cleanupSucceeded = false;
         }
-        // An adopted update that fails here already replaced the default version and/or detached
-        // now-obsolete roles before this attach loop ran; undo both so the failed update does not
-        // leave the policy half-migrated under UPDATE_ROLLBACK_COMPLETE.
-        List<String> reattachRoles = new ArrayList<>(detachedObsoleteRoles);
+        // An adopted update may already have detached targets and replaced the default version.
+        List<String> reattachGroups = new ArrayList<>(changes.detachedGroups);
+        Collections.reverse(reattachGroups);
+        for (String groupName : reattachGroups) {
+            String cleanupDescription = "reattach policy " + policyArn + " to group " + groupName;
+            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                    () -> iamService.attachGroupPolicy(groupName, policyArn))) {
+                cleanupSucceeded = false;
+            }
+        }
+        List<String> reattachUsers = new ArrayList<>(changes.detachedUsers);
+        Collections.reverse(reattachUsers);
+        for (String userName : reattachUsers) {
+            String cleanupDescription = "reattach policy " + policyArn + " to user " + userName;
+            if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                    () -> iamService.attachUserPolicy(userName, policyArn))) {
+                cleanupSucceeded = false;
+            }
+        }
+        List<String> reattachRoles = new ArrayList<>(changes.detachedRoles);
         Collections.reverse(reattachRoles);
         for (String roleName : reattachRoles) {
             String cleanupDescription = "reattach policy " + policyArn + " to role " + roleName;
@@ -235,6 +344,13 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         }
         if (cleanupSucceeded && createdPolicy) {
             r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+        } else if (cleanupSucceeded) {
+            restoreTargetAttribute(r, "ManagedPolicyRoleTargets", previousRoleTargets);
+            restoreTargetAttribute(r, "ManagedPolicyUserTargets", previousUserTargets);
+            restoreTargetAttribute(r, "ManagedPolicyGroupTargets", previousGroupTargets);
+            if (previousDefaultVersionId != null) {
+                r.getAttributes().put("DefaultVersionId", previousDefaultVersionId);
+            }
         }
         if (!cleanupSucceeded) {
             // A compensating call above failed (added as a suppressed exception on failure): the
@@ -247,8 +363,25 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    private static void restoreTargetAttribute(StackResource resource, String key, String previousValue) {
+        if (previousValue == null) {
+            resource.getAttributes().remove(key);
+        } else {
+            resource.getAttributes().put(key, previousValue);
+        }
+    }
+
+    private static final class AttachmentChanges {
+        private final Set<String> attachedRoles = new LinkedHashSet<>();
+        private final Set<String> attachedUsers = new LinkedHashSet<>();
+        private final Set<String> attachedGroups = new LinkedHashSet<>();
+        private final List<String> detachedRoles = new ArrayList<>();
+        private final List<String> detachedUsers = new ArrayList<>();
+        private final List<String> detachedGroups = new ArrayList<>();
+    }
+
     @Override
     public void delete(StackResource resource, String region) {
-        IamManagedPolicyDeletes.detachRolesAndDeletePolicy(iamService, resource);
+        IamManagedPolicyDeletes.detachAndDeletePolicy(iamService, resource);
     }
 }

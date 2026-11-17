@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -65,6 +66,67 @@ class IamManagedPolicyCfnProvisionerTest {
     }
 
     @Test
+    void missingGroupFailsBeforeCreatingThePolicy() throws Exception {
+        when(iam.getGroup("missing-group"))
+                .thenThrow(new AwsException("NoSuchEntity", "missing group", 404));
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(), props("""
+                {"ManagedPolicyName": "app-policy",
+                 "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                 "Users": ["app-user"], "Groups": ["missing-group"]}
+                """), ctx(null)));
+
+        assertEquals("NoSuchEntity", failure.getErrorCode());
+        verify(iam, never()).createPolicy(eq("app-policy"), eq("/"), eq(null), any(), eq(Map.of()));
+    }
+
+    @Test
+    void failedAttachmentSnapshotDoesNotMutateAnExistingPolicy() throws Exception {
+        IamPolicy policy = mock(IamPolicy.class);
+        when(policy.getPolicyId()).thenReturn("AID1");
+        when(iam.createPolicy(eq("app-policy"), eq("/"), eq(null), any(), eq(Map.of())))
+                .thenThrow(new AwsException("EntityAlreadyExists", "already exists", 409));
+        when(iam.getPolicy(ARN)).thenReturn(policy);
+        when(iam.listEntitiesForPolicy(ARN))
+                .thenThrow(new AwsException("ServiceFailure", "snapshot failed", 500));
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        r.getAttributes().put("PolicyId", "AID1");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"ManagedPolicyName": "app-policy",
+                 "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                 "Users": ["app-user"]}
+                """), ctx(ARN)));
+
+        verify(iam, never()).createPolicyVersion(eq(ARN), any(), eq(true));
+        verify(iam, never()).detachUserPolicy("app-user", ARN);
+    }
+
+    @Test
+    void failedGroupAttachUndoesNewRoleAndUserAttachments() throws Exception {
+        IamPolicy policy = mock(IamPolicy.class);
+        when(policy.getArn()).thenReturn(ARN);
+        when(iam.createPolicy(eq("app-policy"), eq("/"), eq(null), any(), eq(Map.of()))).thenReturn(policy);
+        doThrow(new AwsException("ServiceFailure", "group attach failed", 500))
+                .when(iam).attachGroupPolicy("app-group", ARN);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(), props("""
+                {"ManagedPolicyName": "app-policy",
+                 "PolicyDocument": {"Version": "2012-10-17", "Statement": []},
+                 "Roles": ["app-role"], "Users": ["app-user"], "Groups": ["app-group"]}
+                """), ctx(null)));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).attachRolePolicy("app-role", ARN);
+        order.verify(iam).attachUserPolicy("app-user", ARN);
+        order.verify(iam).attachGroupPolicy("app-group", ARN);
+        order.verify(iam).detachUserPolicy("app-user", ARN);
+        order.verify(iam).detachRolePolicy("app-role", ARN);
+        order.verify(iam).deletePolicy(ARN);
+    }
+
+    @Test
     void deleteDetachesRolesThenRemovesThePolicy() {
         StackResource r = resource();
         r.setPhysicalId(ARN);
@@ -74,6 +136,23 @@ class IamManagedPolicyCfnProvisionerTest {
 
         InOrder order = inOrder(iam);
         order.verify(iam).detachRolePolicy("web-role", ARN);
+        order.verify(iam).deletePolicy(ARN);
+    }
+
+    @Test
+    void deleteDetachesEveryStoredPrincipalBeforeRemovingThePolicy() {
+        StackResource r = resource();
+        r.setPhysicalId(ARN);
+        r.getAttributes().put("ManagedPolicyRoleTargets", "app-role");
+        r.getAttributes().put("ManagedPolicyUserTargets", "app-user");
+        r.getAttributes().put("ManagedPolicyGroupTargets", "app-group");
+
+        provisioner.delete(r, "us-east-1");
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).detachRolePolicy("app-role", ARN);
+        order.verify(iam).detachUserPolicy("app-user", ARN);
+        order.verify(iam).detachGroupPolicy("app-group", ARN);
         order.verify(iam).deletePolicy(ARN);
     }
 
