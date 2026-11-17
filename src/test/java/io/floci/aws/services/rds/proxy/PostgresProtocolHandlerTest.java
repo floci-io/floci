@@ -42,6 +42,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 
@@ -822,6 +823,81 @@ class PostgresProtocolHandlerTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void iamReplicationSessionHandsPhysicalReplicationCommandsToPostgresAsAPermissionError(boolean replication)
+            throws Exception {
+        List<String> relayed = new CopyOnWriteArrayList<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
+                            "approle", true, (in, out) -> {
+                                answerRoleAdmission(in, out, "approle", true, true);
+                                if (replication) {
+                                    readSimpleQuery(in);
+                                    writeDataRow(out, "100", "t");
+                                    writeCommandComplete(out, "SELECT 1");
+                                    writeReadyForQuery(out);
+                                }
+                                for (int i = 0; i < 2; i++) {
+                                    relayed.add(readSimpleQuery(in));
+                                    writeCommandComplete(out, "OK");
+                                    writeReadyForQuery(out);
+                                }
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                Socket proxyClient = acceptTestSocket(clientServer);
+                Socket backend = connectTestSocket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                Map<String, String> clientStartup = new LinkedHashMap<>();
+                clientStartup.put("user", "approle");
+                clientStartup.put("database", "postgres");
+                if (replication) {
+                    clientStartup.put("replication", "database");
+                }
+                writeStartup(clientOut, clientStartup);
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+                readAuthenticationOk(clientIn);
+                readParametersUntilReadyForQuery(clientIn);
+
+                writeSimpleQuery(clientOut, "BASE_BACKUP");
+                writeSimpleQuery(clientOut, "IDENTIFY_SYSTEM");
+                for (int i = 0; i < 2; i++) {
+                    assertEquals('C', clientIn.readByte());
+                    clientIn.readNBytes(clientIn.readInt() - 4);
+                    readReadyForQuery(clientIn);
+                }
+
+                ourClient.close();
+                proxyClient.close();
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertFalse(authThread.isAlive(), "authThread did not terminate");
+                assertFalse(backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+
+        assertEquals(List.of(replication ? PostgresProtocolHandler.PHYSICAL_REPLICATION_REFUSAL : "BASE_BACKUP",
+                "IDENTIFY_SYSTEM"), relayed);
+    }
+
     @Test
     void iamSessionIsRefusedWhenPostgresRefusesAStartupParameterForTheTokenRole() throws Exception {
         try (ServerSocket backendServer = new ServerSocket(0);
@@ -1209,6 +1285,53 @@ class PostgresProtocolHandlerTest {
             "false,false", "off,false", "0,false", "DATABASE,false", "o,false", "maybe,false"})
     void requestsReplicationReadsTheValuesPostgresStartsAWalSenderFor(String value, boolean expected) {
         assertEquals(expected, PostgresProtocolHandler.requestsReplication(Map.of("replication", value)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "BASE_BACKUP",
+            "BASE_BACKUP (LABEL 'x', CHECKPOINT 'fast')",
+            " \t\r\n\fBASE_BACKUP LABEL 'x'",
+            "base_backup",
+            "START_REPLICATION 0/0",
+            "START_REPLICATION PHYSICAL 0/0 TIMELINE 1",
+            "START_REPLICATION SLOT s 0/0",
+            "START_REPLICATION SLOT s PHYSICAL 0/0",
+            "START_REPLICATION SLOT \"LOGICAL\" 0/0",
+            "START_REPLICATION SLOT s /* LOGICAL */ 0/0",
+            "START_REPLICATION SLOT LOGICAL 0/0",
+            "CREATE_REPLICATION_SLOT s PHYSICAL",
+            "CREATE_REPLICATION_SLOT s TEMPORARY PHYSICAL RESERVE_WAL",
+            "CREATE_REPLICATION_SLOT \"LOGICAL\" PHYSICAL",
+            "CREATE_REPLICATION_SLOT s TEMPORARY \"LOGICAL\" x",
+            "CREATE_REPLICATION_SLOT s (LOGICAL) PHYSICAL",
+            "CREATE_REPLICATION_SLOT",
+            "READ_REPLICATION_SLOT s",
+            "TIMELINE_HISTORY 1",
+            "UPLOAD_MANIFEST"})
+    void physicalReplicationCommandsAreNotPermittedOnLogicalReplication(String command) {
+        assertFalse(PostgresProtocolHandler.permittedOnLogicalReplication(command));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "IDENTIFY_SYSTEM",
+            "IDENTIFY_SYSTEM;",
+            "SHOW wal_level",
+            "CREATE_REPLICATION_SLOT s LOGICAL pgoutput",
+            "CREATE_REPLICATION_SLOT \"s\" TEMPORARY LOGICAL pgoutput (SNAPSHOT 'nothing')",
+            "\n  CREATE_REPLICATION_SLOT logical LOGICAL test_decoding EXPORT_SNAPSHOT",
+            "DROP_REPLICATION_SLOT s WAIT",
+            "ALTER_REPLICATION_SLOT s (FAILOVER true)",
+            "START_REPLICATION SLOT s LOGICAL 0/0",
+            "START_REPLICATION SLOT \"s\" LOGICAL 16/B374D848 (\"proto_version\" '1', \"publication_names\" 'pub')",
+            "SELECT 1",
+            "BEGIN; SELECT pg_catalog.pg_current_wal_lsn()",
+            "",
+            "/* c */ BASE_BACKUP",
+            "SELECT 1; BASE_BACKUP"})
+    void logicalReplicationCommandsAndSqlArePermittedOnLogicalReplication(String command) {
+        assertTrue(PostgresProtocolHandler.permittedOnLogicalReplication(command));
     }
 
     @Test

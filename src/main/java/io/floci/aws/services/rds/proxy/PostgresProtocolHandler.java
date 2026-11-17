@@ -1673,6 +1673,11 @@ public class PostgresProtocolHandler {
      * token never granted. Watching the server's own {@code session_authorization} report catches
      * that whatever SQL produced it; the session is then terminated, since a handover that already
      * happened cannot be taken back.
+     *
+     * <p>An IAM replication session also gets its client→backend direction read message by
+     * message. Its WAL sender started as the master, which may stream every database, so the
+     * proxy hands PostgreSQL any physical replication command as SQL that fails with PostgreSQL's
+     * own permission error, which keeps the session and its transaction state as PostgreSQL has them.
      */
     public static void bridge(AuthenticatedSession session) {
         Socket client = session.client();
@@ -1696,7 +1701,10 @@ public class PostgresProtocolHandler {
                 closeQuietly(backend);
             }
         };
-        Thread t1 = RelayThreads.start("rds-pg-c2b", () -> relay(clientIn, backendOut, closeBoth));
+        boolean logicalReplication = session.iamRole() != null && requestsReplication(session.startupParameters());
+        Thread t1 = RelayThreads.start("rds-pg-c2b", logicalReplication
+                ? () -> relayRefusingPhysicalReplication(clientIn, backendOut, session.iamRole(), closeBoth)
+                : () -> relay(clientIn, backendOut, closeBoth));
         Thread t2 = RelayThreads.start("rds-pg-b2c",
                 () -> relayToClient(backendIn, clientOut, session.iamRole(), closeBoth));
         try {
@@ -1803,6 +1811,144 @@ public class PostgresProtocolHandler {
         } finally {
             onDone.run();
         }
+    }
+
+    static final String PHYSICAL_REPLICATION_REFUSAL = "DO $$BEGIN RAISE EXCEPTION "
+            + "'permission denied to use physical replication' USING ERRCODE = 'insufficient_privilege'; END$$";
+
+    private static final Set<String> REPLICATION_COMMANDS = Set.of("IDENTIFY_SYSTEM", "BASE_BACKUP",
+            "START_REPLICATION", "CREATE_REPLICATION_SLOT", "DROP_REPLICATION_SLOT", "ALTER_REPLICATION_SLOT",
+            "READ_REPLICATION_SLOT", "TIMELINE_HISTORY", "UPLOAD_MANIFEST", "SHOW");
+
+    /**
+     * Copies framed client messages, replacing each Query that carries a physical replication
+     * command with {@link #PHYSICAL_REPLICATION_REFUSAL}. Only a Query can carry one: a WAL sender
+     * refuses the extended query protocol.
+     */
+    private static void relayRefusingPhysicalReplication(InputStream clientIn, OutputStream backendOut,
+                                                         String iamRole, Runnable onDone) {
+        RelayInputStream from = new RelayInputStream(clientIn);
+        BufferedOutputStream to = new BufferedOutputStream(backendOut, 8192);
+        byte[] buf = new byte[8192];
+        try {
+            while (true) {
+                int type = from.read();
+                if (type < 0) {
+                    return;
+                }
+                byte[] header = new byte[4];
+                PostgresWire.readFully(from, header);
+                int length = PostgresWire.int32(header, 0);
+                if (length < 4) {
+                    return;
+                }
+                int remaining = length - 4;
+                if (type == 'Q') {
+                    byte[] payload = new byte[remaining];
+                    PostgresWire.readFully(from, payload);
+                    if (!permittedOnLogicalReplication(PostgresWire.cString(payload, 0).value())) {
+                        LOG.infov("RDS IAM replication session for role {0} sent a physical replication command; refused",
+                                SigV4RequestValidator.sanitizeForLog(iamRole));
+                        payload = PostgresWire.cStringBytes(PHYSICAL_REPLICATION_REFUSAL);
+                        header = PostgresWire.int32(payload.length + 4);
+                    }
+                    to.write(type);
+                    to.write(header);
+                    to.write(payload);
+                } else {
+                    to.write(type);
+                    to.write(header);
+                    while (remaining > 0) {
+                        int n = from.read(buf, 0, Math.min(buf.length, remaining));
+                        if (n < 0) {
+                            return;
+                        }
+                        to.write(buf, 0, n);
+                        remaining -= n;
+                    }
+                }
+                if (from.isDrained()) {
+                    to.flush();
+                }
+            }
+        } catch (IOException e) {
+            LOG.debugv("RDS IAM replication relay for role {0} ended: {1}", iamRole, e.getMessage());
+        } finally {
+            try {
+                to.flush();
+            } catch (IOException e) {
+                LOG.debugv("Backend for RDS IAM role {0} gone before the last flush: {1}", iamRole, e.getMessage());
+            }
+            onDone.run();
+        }
+    }
+
+    /**
+     * Whether a WAL sender would run {@code query} as SQL or as a logical replication command,
+     * read the way {@code repl_scanner.l} reads it: whitespace, then words. Keywords are matched
+     * ignoring ASCII case, which PostgreSQL does not, so a lowercase command PostgreSQL would run
+     * as SQL and refuse as a syntax error is refused here instead.
+     */
+    static boolean permittedOnLogicalReplication(String query) {
+        List<String> words = leadingReplicationWords(query, 4);
+        if (words.isEmpty() || !REPLICATION_COMMANDS.contains(words.getFirst())) {
+            return true;
+        }
+        return switch (words.getFirst()) {
+            case "IDENTIFY_SYSTEM", "SHOW", "DROP_REPLICATION_SLOT", "ALTER_REPLICATION_SLOT" -> true;
+            case "CREATE_REPLICATION_SLOT" -> words.size() > 2 && (words.get(2).equals("LOGICAL")
+                    || (words.get(2).equals("TEMPORARY") && words.size() > 3 && words.get(3).equals("LOGICAL")));
+            case "START_REPLICATION" -> words.size() > 3 && words.get(1).equals("SLOT")
+                    && words.get(3).equals("LOGICAL");
+            default -> false;
+        };
+    }
+
+    /**
+     * Up to {@code limit} leading words of {@code query}, ASCII letters upper-cased, stopping at
+     * the first token that is not a word. A double-quoted identifier is kept with its quotes, so
+     * it never reads as a keyword.
+     */
+    private static List<String> leadingReplicationWords(String query, int limit) {
+        List<String> words = new ArrayList<>();
+        int i = 0;
+        int n = query.length();
+        while (words.size() < limit) {
+            while (i < n && " \t\n\r\f\u000b".indexOf(query.charAt(i)) >= 0) {
+                i++;
+            }
+            if (i == n) {
+                break;
+            }
+            StringBuilder word = new StringBuilder();
+            if (query.charAt(i) == '"') {
+                word.append(query.charAt(i++));
+                while (i < n) {
+                    char c = query.charAt(i++);
+                    word.append(c);
+                    if (c == '"' && (i == n || query.charAt(i) != '"')) {
+                        break;
+                    }
+                    if (c == '"') {
+                        word.append(query.charAt(i++));
+                    }
+                }
+            } else if (isIdentifierStart(query.charAt(i))) {
+                while (i < n && (isIdentifierStart(query.charAt(i))
+                        || (query.charAt(i) >= '0' && query.charAt(i) <= '9') || query.charAt(i) == '$')) {
+                    char c = query.charAt(i++);
+                    word.append(c >= 'a' && c <= 'z' ? (char) (c - 'a' + 'A') : c);
+                }
+            } else {
+                break;
+            }
+            words.add(word.toString());
+        }
+        return words;
+    }
+
+    private static boolean isIdentifierStart(char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c >= 0x80;
     }
 
     // ── Error response ────────────────────────────────────────────────────────
