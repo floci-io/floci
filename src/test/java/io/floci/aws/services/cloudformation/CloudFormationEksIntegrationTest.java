@@ -163,6 +163,40 @@ class CloudFormationEksIntegrationTest {
         }
     }
 
+    @Test
+    void aDroppedTagIsGoneFromTheOriginalNodegroupAfterAReplacementRolledBack() {
+        String stack = "cfn-eksng-rb-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, rollbackStack("a", "env", "dev", false), "CREATE_COMPLETE");
+            String base = "/clusters/" + physicalId(client, stack, "Cluster") + "/node-groups";
+            List<String> names = given().get(base).jsonPath().getList("nodegroups");
+
+            CfnStackWaits.updateStack(client, stack, rollbackStack("b", "team", "a", true),
+                    "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(names, given().get(base).jsonPath().getList("nodegroups"));
+
+            CfnStackWaits.updateStack(client, stack, rollbackStack("a", null, null, false), "UPDATE_COMPLETE");
+            assertEquals(names, given().get(base).jsonPath().getList("nodegroups"));
+            assertNull(given().get(base + "/" + names.getFirst()).jsonPath().getString("nodegroup.tags.env"));
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static String rollbackStack(String roleSuffix, String tagKey, String tagValue, boolean laterFails) {
+        String tags = tagKey == null ? "" : ", \"Tags\": [{\"Key\": \"" + tagKey
+                + "\", \"Value\": \"" + tagValue + "\"}]";
+        String cluster = "\"Cluster\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {\"RoleArn\":"
+                + " \"arn:aws:iam::000000000000:role/eks-cluster-role\"" + tags + "}}";
+        String template = subjectStack(cluster, "", "AWS::EKS::Nodegroup", "\"ClusterName\": {\"Ref\": \"Cluster\"},"
+                + " \"NodeRole\": \"arn:aws:iam::000000000000:role/eks-node-role-" + roleSuffix + "\","
+                + " \"Subnets\": [\"subnet-aaaa1111\"]" + tags);
+        return laterFails
+                ? template.substring(0, template.length() - 2) + CfnStackWaits.failingResourceAfter("Subject") + "}}"
+                : template;
+    }
+
     private static String nodegroup(String team, String extraTag) {
         String cluster = "\"Cluster\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {\"RoleArn\":"
                 + " \"arn:aws:iam::000000000000:role/eks-cluster-role\"}}";
