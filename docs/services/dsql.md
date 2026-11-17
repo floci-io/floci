@@ -247,18 +247,27 @@ name can exist in each.
 Floci signs in to the server for each client itself: role passwords are stored as SCRAM verifiers
 derived from a per-cluster secret that Floci keeps with the cluster and clients never see.
 
-What differs from the Docker backend:
+What differs from the Docker backend, each because many clusters share one server, where a
+Docker cluster has a server of its own. Databases and roles are named server-wide in PostgreSQL,
+so each cluster's must carry its identifier to be kept apart from the others':
 
 - `current_user`, `session_user`, `pg_roles` and PostgreSQL's own error messages show the backend
   names (`d<cluster-id>_app`); `sys.roles` and `sys.iam_pg_role_mappings` show the DSQL names.
+  Floci translates the names in the statements a client sends, but not in the values PostgreSQL
+  computes and returns.
 - `current_database()`, the `*_catalog` columns of `information_schema` (`table_catalog` and the
   like) and `pg_database` show the cluster's database as `dsql_<cluster-id>`, while clients still
-  connect to `postgres`, as on DSQL. A tool that compares the catalog with the database it was
-  configured with should read `current_database()`.
-- `admin` cannot create databases (no `CREATEDB`).
+  connect to `postgres`, as on DSQL. Each cluster needs a database of its own on the shared server,
+  and only one there can be called `postgres`. A tool that compares the catalog with the database
+  it was configured with should read `current_database()`.
+- `admin` cannot create databases (no `CREATEDB`): a database it created would sit outside the
+  cluster's own, where neither the cluster's isolation nor its deletion reaches. A DSQL cluster
+  has the one database `postgres` in any case.
 - A role name is at most 35 bytes in UTF-8, so that with the 28-byte prefix it fits PostgreSQL's
-  63-byte identifier; a longer one is refused with `42602`. A name of multi-byte characters
-  reaches the limit with fewer than 35 characters.
+  63-byte identifier; a longer one is refused with `42602`. PostgreSQL would cut a longer name
+  short, and two names cut short could become the same role, so it is refused instead. A name of
+  multi-byte characters reaches the limit with fewer than 35 characters. The Docker backend needs
+  no prefix and keeps PostgreSQL's own limit.
 - Floci translates role names where the SQL syntax names a role (`CREATE ROLE`, `GRANT ... TO`,
   `OWNER TO`, `SET ROLE app` or `SET ROLE 'app'`, `AWS IAM GRANT` and so on), not in `LANGUAGE sql`
   function bodies or in other string literals: `has_table_privilege('app', ...)`, `pg_has_role`,
@@ -266,7 +275,9 @@ What differs from the Docker backend:
 - Floci's own role procedures (`sys.run_role_ddl`, `sys.drop_roles`, `sys.aws_iam_grant`,
   `sys.aws_iam_revoke`) and every `sys._*` routine cannot be called by a client: a statement that
   names one with `sys.`, spelled plainly or with `U&` escapes, fails with `42883`, as for a routine
-  that does not exist. A call through a `search_path` that names `sys`, or from a function body,
+  that does not exist. Floci sends a client's role DDL through these routines once it has
+  translated the names and checked that they are the cluster's; a client calling one itself would
+  skip both. A call through a `search_path` that names `sys`, or from a function body,
   is not caught; the role DDL it runs is not translated, but a role it makes outside the cluster's
   prefix is not counted as the cluster's, and it cannot take over another cluster's roles.
 - A cluster counts as its own only the roles its `admin`, or a role it created, created or granted
