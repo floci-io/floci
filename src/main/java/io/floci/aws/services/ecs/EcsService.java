@@ -2905,7 +2905,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * @param defaultPageSize the page size when the request names none, which is not the same for
-     *                        every listing: ListServices answers with ten, the rest with a hundred.
+     *                        every listing: ListServices and ListServicesByNamespace answer with ten,
+     *                        the rest with a hundred.
      */
     private static ListPage paginate(List<String> arns, Integer maxResults, String nextToken,
                                       int defaultPageSize) {
