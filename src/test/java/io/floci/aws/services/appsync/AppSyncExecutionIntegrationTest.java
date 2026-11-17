@@ -3,6 +3,7 @@ package io.floci.aws.services.appsync;
 import io.floci.aws.services.appsync.graphql.AppSyncErrorFormatter;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
 import io.floci.aws.services.appsync.graphql.SchemaRegistry;
+import io.floci.aws.testing.AppSyncRequests;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -12,13 +13,11 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -47,7 +46,7 @@ class AppSyncExecutionIntegrationTest {
         apiId = createApi("exec-" + UUID.randomUUID().toString().substring(0, 8));
         apiKey = createApiKey(apiId);
         startSchema(apiId, "type Query { hello: String }");
-        awaitSchemaSuccess(apiId);
+        AppSyncRequests.awaitSchemaSuccess(apiId, AUTH);
     }
 
     @Test
@@ -246,7 +245,7 @@ class AppSyncExecutionIntegrationTest {
         String multiApi = createApi("multi-" + UUID.randomUUID().toString().substring(0, 8));
         String multiKey = createApiKey(multiApi);
         startSchema(multiApi, "type Query { hello(id: String): String }");
-        awaitSchemaSuccess(multiApi);
+        AppSyncRequests.awaitSchemaSuccess(multiApi, AUTH);
 
         given()
             .header("x-api-key", multiKey)
@@ -273,7 +272,7 @@ class AppSyncExecutionIntegrationTest {
                 type Query { hello: String }
                 type Subscription { onHello: String }
                 """);
-        awaitSchemaSuccess(subApi);
+        AppSyncRequests.awaitSchemaSuccess(subApi, AUTH);
 
         given()
             .header("x-api-key", subKey)
@@ -295,7 +294,7 @@ class AppSyncExecutionIntegrationTest {
         String scalarApi = createApi("scalar-lit-" + UUID.randomUUID().toString().substring(0, 8));
         String scalarKey = createApiKey(scalarApi);
         startSchema(scalarApi, "type Query { echo(t: AWSDateTime): AWSDateTime }");
-        awaitSchemaSuccess(scalarApi);
+        AppSyncRequests.awaitSchemaSuccess(scalarApi, AUTH);
 
         given()
             .header("x-api-key", scalarKey)
@@ -326,7 +325,7 @@ class AppSyncExecutionIntegrationTest {
         String scalarApi = createApi("scalar-" + UUID.randomUUID().toString().substring(0, 8));
         String scalarKey = createApiKey(scalarApi);
         startSchema(scalarApi, "type Query { echo(t: AWSDateTime): AWSDateTime }");
-        awaitSchemaSuccess(scalarApi);
+        AppSyncRequests.awaitSchemaSuccess(scalarApi, AUTH);
 
         given()
             .header("x-api-key", scalarKey)
@@ -367,7 +366,7 @@ class AppSyncExecutionIntegrationTest {
         String protectedApi = createApi("protected-" + UUID.randomUUID().toString().substring(0, 8));
         String protectedKey = createApiKey(protectedApi);
         startSchema(protectedApi, "type Query { hello: String secret: String @aws_iam }");
-        awaitSchemaSuccess(protectedApi);
+        AppSyncRequests.awaitSchemaSuccess(protectedApi, AUTH);
 
         given()
             .header("x-api-key", protectedKey)
@@ -397,7 +396,7 @@ class AppSyncExecutionIntegrationTest {
         String hydrateApi = createApi("hydrate-" + UUID.randomUUID().toString().substring(0, 8));
         String hydrateKey = createApiKey(hydrateApi);
         startSchema(hydrateApi, "type Query { hello: String }");
-        awaitSchemaSuccess(hydrateApi);
+        AppSyncRequests.awaitSchemaSuccess(hydrateApi, AUTH);
 
         schemaRegistry.remove(hydrateApi);
         assertTrue(schemaRegistry.getSdl(hydrateApi).isEmpty());
@@ -469,20 +468,5 @@ class AppSyncExecutionIntegrationTest {
         .then()
             .statusCode(200)
             .body("status", equalTo("PROCESSING"));
-    }
-
-    private static void awaitSchemaSuccess(String apiId) {
-        await().atMost(Duration.ofSeconds(10))
-                .pollInterval(Duration.ofMillis(25))
-                .until(() -> {
-                    String status = given()
-                        .header("Authorization", AUTH)
-                    .when()
-                        .get("/v1/apis/" + apiId + "/schemacreation")
-                    .then()
-                        .statusCode(200)
-                        .extract().path("status");
-                    return "SUCCESS".equals(status);
-                });
     }
 }

@@ -1,6 +1,7 @@
 package io.floci.aws.services.appsync;
 
 import io.floci.aws.testing.AppSyncRequests;
+import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
@@ -11,10 +12,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.time.Duration;
-
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -49,8 +47,7 @@ class AppSyncRegionDataPlaneIntegrationTest {
                 .extract().path("apiKey.id");
         in().body("{\"definition\":\"type Query { hello: String }\"}").post("/v1/apis/" + apiId + "/schemacreation")
                 .then().statusCode(200);
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(25)).until(() -> "SUCCESS".equals(
-                in().get("/v1/apis/" + apiId + "/schemacreation").then().statusCode(200).extract().path("status")));
+        AppSyncRequests.awaitSchemaSuccess(apiId, EnforcementFixtures.auth(ACCOUNT, REGION, "appsync"));
         in().body("{\"name\":\"local\",\"type\":\"NONE\"}").post("/v1/apis/" + apiId + "/datasources")
                 .then().statusCode(200);
         in().body("{\"fieldName\":\"hello\",\"dataSourceName\":\"local\",\"requestMappingTemplate\":"
