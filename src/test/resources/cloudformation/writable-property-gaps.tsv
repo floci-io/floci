@@ -369,10 +369,8 @@ AWS::Events::EventBus	DeadLetterConfig	rejected with a ValidationError, not supp
 AWS::Events::EventBus	KmsKeyIdentifier	rejected with a ValidationError, not supported by Floci
 AWS::Events::EventBus	LogConfig	rejected with a ValidationError, not supported by Floci
 AWS::IAM::ManagedPolicy	Description	accepted and ignored
-AWS::IAM::ManagedPolicy	Groups	accepted and ignored
 AWS::IAM::ManagedPolicy	Path	accepted and ignored
 AWS::IAM::ManagedPolicy	PolicyDocument	accepted and ignored
-AWS::IAM::ManagedPolicy	Users	accepted and ignored
 AWS::IAM::Policy	PolicyDocument	accepted and ignored
 AWS::IAM::Role	Tags	accepted and ignored
 AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
