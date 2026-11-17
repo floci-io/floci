@@ -15,6 +15,9 @@ import io.floci.aws.services.elasticache.model.CacheSubnetGroup;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
+import io.floci.aws.services.elasticache.model.ReplicationGroup;
+import io.floci.aws.services.elasticache.model.ReplicationGroupStatus;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -64,6 +67,13 @@ class ElastiCacheCfnProvisionerTest {
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
+    /** An update context that carries the previous template's properties, as the stack engine's does. */
+    private ProvisionContext ctx(String priorPhysicalId, String priorProperties) throws Exception {
+        ProvisionContext base = ctx(priorPhysicalId);
+        return new ProvisionContext(base.engine(), "us-east-1", "000000000000", "my-stack", priorPhysicalId,
+                event -> { }, mapper.readTree(priorProperties));
+    }
+
     private StackResource resource(String type, String logicalId) {
         StackResource r = new StackResource();
         r.setLogicalId(logicalId);
@@ -96,6 +106,148 @@ class ElastiCacheCfnProvisionerTest {
         assertEquals("cache.t3.micro", request.getValue().cacheNodeType());
         assertEquals(1, request.getValue().numCacheNodes());
         verify(memcached, never()).createCacheCluster(any());
+    }
+
+    private ReplicationGroup replicationGroup(String id, int numCacheClusters) {
+        ReplicationGroup group = new ReplicationGroup(id, "d", ReplicationGroupStatus.AVAILABLE, AuthMode.NO_AUTH,
+                new Endpoint("localhost", 6420), Instant.now(), 6420);
+        group.setNumCacheClusters(numCacheClusters);
+        return group;
+    }
+
+    @Test
+    void replicationGroupTakesLooseScalarsAndExposesItsEndpoints() throws Exception {
+        ReplicationGroup created = replicationGroup("app-redis", 2);
+        when(cache.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
+                .thenReturn(created);
+        when(cache.memberCacheClusters(created)).thenReturn(List.of(
+                new ElastiCacheService.MemberCacheCluster(created, "app-redis-001", 6420, true),
+                new ElastiCacheService.MemberCacheCluster(created, "app-redis-002", 6420, false)));
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+
+        // EngineVersion as a number, NumCacheClusters and AutomaticFailoverEnabled as strings
+        provisioner.provision(r, props("""
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","Engine":"redis",
+                 "EngineVersion":7.1,"Port":6379,"CacheNodeType":"cache.t3.micro","NumCacheClusters":"2",
+                 "AutomaticFailoverEnabled":"false","SecurityGroupIds":["sg-1"],"CacheSubnetGroupName":"sng",
+                 "UserGroupIds":["users"],"TransitEncryptionEnabled":true}
+                """), ctx(null));
+
+        ArgumentCaptor<ElastiCacheService.CreateReplicationGroupRequest> request =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateReplicationGroupRequest.class);
+        verify(cache).createReplicationGroup(request.capture());
+        ElastiCacheService.CreateReplicationGroupRequest sent = request.getValue();
+        assertEquals("app-redis", sent.replicationGroupId());
+        assertEquals("7.1", sent.engineVersion());
+        assertEquals(2, sent.numCacheClusters());
+        assertEquals(false, sent.automaticFailoverEnabled());
+        assertEquals(6379, sent.port());
+        assertEquals(true, sent.settings().transitEncryptionEnabled());
+        assertEquals(List.of("users"), sent.userGroupIds());
+        assertEquals(List.of("sg-1"), sent.securityGroupIds());
+        assertEquals("sng", sent.cacheSubnetGroupName());
+        assertEquals(AuthMode.NO_AUTH, sent.authMode());
+
+        assertEquals("app-redis", r.getPhysicalId());
+        assertEquals("localhost", r.getAttributes().get("PrimaryEndPoint.Address"));
+        assertEquals("6420", r.getAttributes().get("PrimaryEndPoint.Port"));
+        assertEquals("localhost", r.getAttributes().get("ReaderEndPoint.Address"));
+        assertEquals("6420", r.getAttributes().get("ReaderEndPoint.Port"));
+        assertEquals("localhost,localhost", r.getAttributes().get("ReadEndPoint.Addresses"));
+        assertEquals("6420,6420", r.getAttributes().get("ReadEndPoint.Ports"));
+        assertEquals(mapper.readTree("[\"6420\",\"6420\"]"), provisioner.attributeValue(
+                "AWS::ElastiCache::ReplicationGroup", "ReadEndPoint.Ports.List",
+                r.getAttributes().get("ReadEndPoint.Ports.List")));
+        assertNull(r.getAttributes().get("ConfigurationEndPoint.Address"));
+    }
+
+    @Test
+    void clusterModeReplicationGroupExposesOnlyTheConfigurationEndpoint() throws Exception {
+        ReplicationGroup created = replicationGroup("sharded", 1);
+        created.setClusterEnabled(true);
+        when(cache.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
+                .thenReturn(created);
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+
+        provisioner.provision(r, props("""
+                {"ReplicationGroupId":"sharded","ReplicationGroupDescription":"d","ClusterMode":"enabled",
+                 "NumNodeGroups":2}
+                """), ctx(null));
+
+        assertEquals("6420", r.getAttributes().get("ConfigurationEndPoint.Port"));
+        assertNull(r.getAttributes().get("PrimaryEndPoint.Address"));
+    }
+
+    @Test
+    void malformedReplicationGroupBooleanIsRejected() throws Exception {
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"ReplicationGroupDescription":"d","AutomaticFailoverEnabled":"yes"}
+                """), ctx(null)));
+        verify(cache, never()).createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class));
+    }
+
+    private List<String> ignoredChangeWarnings(StackResource r, String props, String priorProps) {
+        return LogCapture.capture(ElastiCacheCfnProvisioner.class, () -> {
+            try {
+                provisioner.provision(r, props(props), ctx("app-redis", priorProps));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }).stream()
+                .map(LogCapture::formatted)
+                .filter(message -> message.contains("in-place modification is not supported"))
+                .toList();
+    }
+
+    @Test
+    void replicationGroupUpdateWithSameIdNamesTheChangesItIgnores() throws Exception {
+        ReplicationGroup existing = replicationGroup("app-redis", 1);
+        existing.setCacheNodeType("cache.t3.micro");
+        when(cache.getReplicationGroup("app-redis")).thenReturn(existing);
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+
+        List<String> warnings = ignoredChangeWarnings(r, """
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"changed","CacheNodeType":"cache.t3.small",
+                 "NumCacheClusters":"1"}
+                """, """
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","CacheNodeType":"cache.t3.micro",
+                 "NumCacheClusters":"1"}
+                """);
+
+        verify(cache, never()).createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class));
+        assertEquals("app-redis", r.getPhysicalId());
+        assertEquals("6420", r.getAttributes().get("PrimaryEndPoint.Port"));
+        assertEquals(List.of("ElastiCache replication group app-redis: in-place modification is not supported, "
+                + "changes to ReplicationGroupDescription, CacheNodeType are ignored"), warnings);
+    }
+
+    @Test
+    void replicationGroupUpdateWithoutChangesWarnsNothing() throws Exception {
+        ReplicationGroup existing = replicationGroup("app-redis", 1);
+        existing.setCacheNodeType("cache.t3.micro");
+        existing.setEngineVersion("7.1");
+        existing.getUserGroupIds().add("users");
+        when(cache.getReplicationGroup("app-redis")).thenReturn(existing);
+        String template = """
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","CacheNodeType":"cache.t3.micro",
+                 "EngineVersion":7.1,"NumCacheClusters":"1","UserGroupIds":["Users"],"Tags":[{"Key":"a","Value":"b"}]}
+                """;
+
+        List<String> warnings = ignoredChangeWarnings(resource("AWS::ElastiCache::ReplicationGroup", "Redis"),
+                template, template);
+
+        assertEquals(List.of(), warnings);
+    }
+
+    @Test
+    void replicationGroupDeleteToleratesAGroupAlreadyGone() {
+        doThrow(new AwsException("ReplicationGroupNotFoundFault", "gone", 404))
+                .when(cache).deleteReplicationGroup("app-redis");
+
+        provisioner.delete("AWS::ElastiCache::ReplicationGroup", "app-redis", "us-east-1");
+
+        verify(cache).deleteReplicationGroup("app-redis");
     }
 
     @Test
@@ -196,7 +348,8 @@ class ElastiCacheCfnProvisionerTest {
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
         assertThrows(AwsException.class, () -> provisioner.provision(r,
-                props("{\"ClusterName\":\"app-cache\",\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("app-cache")));
+                props("{\"ClusterName\":\"app-cache\",\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
+                ctx("app-cache", "{\"ClusterName\":\"app-cache\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}")));
     }
 
     @Test
@@ -211,10 +364,72 @@ class ElastiCacheCfnProvisionerTest {
         });
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("old-id"));
+        provisioner.provision(r, props("{\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
+                ctx("old-id", "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"));
 
         assertNotEquals("old-id", r.getPhysicalId());
         assertEquals("6401", r.getAttributes().get("RedisEndpoint.Port"));
+    }
+
+    private static final String REDIS_CLUSTER = "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\","
+            + "\"NumCacheNodes\":1%s}";
+
+    private void existingRedisCluster(String id) {
+        CacheCluster existing = new CacheCluster(id, CacheClusterStatus.AVAILABLE, "redis", "7.1",
+                new Endpoint("localhost", 6400), Instant.now());
+        when(cache.findCacheClusters(id)).thenReturn(List.of(existing));
+        when(cache.createCacheCluster(any())).thenAnswer(inv -> {
+            ElastiCacheService.CreateCacheClusterRequest req = inv.getArgument(0);
+            return new CacheCluster(req.cacheClusterId(), CacheClusterStatus.AVAILABLE, "redis", "7.1",
+                    new Endpoint("localhost", 6401), Instant.now());
+        });
+    }
+
+    @Test
+    void unnamedClusterWithChangedPortIsReplacedAndTheOldOneDeletedWhenTheUpdateCompletes() throws Exception {
+        existingRedisCluster("old-id");
+        StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+
+        provisioner.provision(r, props(REDIS_CLUSTER.formatted(",\"Port\":6380")),
+                ctx("old-id", REDIS_CLUSTER.formatted(",\"Port\":6379")));
+
+        assertNotEquals("old-id", r.getPhysicalId());
+        verify(cache).createCacheCluster(any());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("old-id", provisioner.updateCleanupPhysicalId(r));
+        verify(cache, never()).deleteCacheCluster("old-id");
+        provisioner.completeUpdate(r);
+        verify(cache).deleteCacheCluster("old-id");
+    }
+
+    @Test
+    void clusterWithChangedSnapshotNameIsReplaced() throws Exception {
+        existingRedisCluster("old-id");
+        StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+
+        provisioner.provision(r, props(REDIS_CLUSTER.formatted(",\"SnapshotName\":\"snap-2\"")),
+                ctx("old-id", REDIS_CLUSTER.formatted(",\"SnapshotName\":\"snap-1\"")));
+
+        assertNotEquals("old-id", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+
+        StackResource arns = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+        provisioner.provision(arns, props(REDIS_CLUSTER.formatted(",\"SnapshotArns\":[\"arn:aws:s3:::b/2.rdb\"]")),
+                ctx("old-id", REDIS_CLUSTER.formatted(",\"SnapshotArns\":[\"arn:aws:s3:::b/1.rdb\"]")));
+
+        assertNotEquals("old-id", arns.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(arns));
+    }
+
+    @Test
+    void explicitClusterNameWithChangedPortIsRejectedOnUpdate() throws Exception {
+        existingRedisCluster("app-cache");
+        StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r,
+                props(REDIS_CLUSTER.formatted(",\"ClusterName\":\"app-cache\",\"Port\":6380")),
+                ctx("app-cache", REDIS_CLUSTER.formatted(",\"ClusterName\":\"app-cache\",\"Port\":6379"))));
+        verify(cache, never()).createCacheCluster(any());
     }
 
     @Test
@@ -233,7 +448,7 @@ class ElastiCacheCfnProvisionerTest {
 
         provisioner.provision(r, props("""
                 {"Engine":"memcached","CacheNodeType":"cache.t3.micro","NumCacheNodes":1}
-                """), ctx("cluster-1"));
+                """), ctx("cluster-1", "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"));
 
         assertEquals("6410", r.getAttributes().get("ConfigurationEndpoint.Port"));
         assertEquals("localhost", r.getAttributes().get("ConfigurationEndpoint.Address"));
@@ -513,7 +728,9 @@ class ElastiCacheCfnProvisionerTest {
         });
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("old-id"));
+        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
+                ctx("old-id", "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1,"
+                        + "\"NetworkType\":\"dual_stack\"}"));
 
         assertNotEquals("old-id", r.getPhysicalId());
         verify(cache).createCacheCluster(any());

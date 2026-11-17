@@ -14,7 +14,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
+import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -94,5 +96,32 @@ class RedshiftServerlessResourcePolicyExpirationTest {
         store.putForAccount(account, key, replacement);
         service.deleteExpiredSnapshotPolicy(entry);
         assertTrue(store.getForAccount(account, key).isPresent());
+    }
+
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void policyOfSnapshotIsReadFromTheOwnersAccountForTheSameSnapshotGeneration() {
+        String owner = "999999999999";
+        String region = "us-east-1";
+        String arn = "arn:aws:redshift-serverless:us-east-1:" + owner + ":snapshot/shared-snap";
+        Instant created = Instant.parse("2030-01-01T00:00:00Z");
+        AccountAwareStorageBackend<ResourcePolicy> store = AccountAwareStorageBackend.inMemory("123456789012");
+        StorageFactory factory = mock(StorageFactory.class);
+        when(factory.create(eq("redshiftserverless"), eq("redshiftserverless-resourcepolicies.json"),
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) store);
+        RedshiftServerlessResourcePolicyService service = new RedshiftServerlessResourcePolicyService(
+                factory, mock(RedshiftServerlessService.class), new ObjectMapper());
+        RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot();
+        snapshot.setSnapshotArn(arn);
+        snapshot.setSnapshotCreateTime(created);
+        ResourcePolicy policy = new ResourcePolicy(arn, "{\"Version\":\"2012-10-17\"}");
+        policy.setSnapshotCreateTime(created);
+        store.putForAccount(owner, region + "::" + arn, policy);
+
+        assertEquals(Optional.of("{\"Version\":\"2012-10-17\"}"), service.policyOfSnapshot(owner, snapshot, region));
+        assertTrue(service.policyOfSnapshot("123456789012", snapshot, region).isEmpty());
+
+        snapshot.setSnapshotCreateTime(created.plusSeconds(1));
+        assertTrue(service.policyOfSnapshot(owner, snapshot, region).isEmpty());
     }
 }

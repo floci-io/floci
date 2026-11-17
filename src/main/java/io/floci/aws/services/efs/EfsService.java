@@ -25,6 +25,7 @@ import io.floci.aws.services.efs.model.DescribeMountTargetsResponse;
 import io.floci.aws.services.efs.model.FileSystem;
 import io.floci.aws.services.efs.model.FileSystemProtectionDescription;
 import io.floci.aws.services.efs.model.FileSystemSize;
+import io.floci.aws.services.efs.model.IpAddressType;
 import io.floci.aws.services.efs.model.LifeCycleState;
 import io.floci.aws.services.efs.model.LifecyclePolicy;
 import io.floci.aws.services.efs.model.ListTagsForResourceResponse;
@@ -53,6 +54,8 @@ import java.util.stream.Collectors;
 public class EfsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(EfsService.class);
+    private static final String DEFAULT_IPV4_ADDRESS = "10.0.0.10";
+    private static final String DEFAULT_IPV6_ADDRESS = "2001:db8::10";
 
     private final StorageBackend<String, FileSystem> fileSystemStore;
     private final StorageBackend<String, MountTarget> mountTargetStore;
@@ -394,6 +397,17 @@ public class EfsService implements Resettable {
     // --- Mount Targets ---
 
     public MountTarget createMountTarget(CreateMountTargetRequest request, String region) {
+        if (request.getSubnetId() == null || request.getSubnetId().isBlank()) {
+            throw EfsException.badRequest("SubnetId is required.");
+        }
+        IpAddressType addressType = request.getIpAddressType() != null
+                ? request.getIpAddressType() : IpAddressType.IPV4_ONLY;
+        if (addressType == IpAddressType.IPV6_ONLY && request.getIpAddress() != null) {
+            throw EfsException.badRequest("IpAddress cannot be specified when IpAddressType is IPV6_ONLY.");
+        }
+        if (addressType == IpAddressType.IPV4_ONLY && request.getIpv6Address() != null) {
+            throw EfsException.badRequest("Ipv6Address cannot be specified when IpAddressType is IPV4_ONLY.");
+        }
         synchronized (lockFor(regionKey(region, request.getFileSystemId()))) {
             FileSystem fs = getFileSystem(region, request.getFileSystemId());
             
@@ -411,7 +425,13 @@ public class EfsService implements Resettable {
             mt.setMountTargetId(mtId);
             mt.setFileSystemId(request.getFileSystemId());
             mt.setSubnetId(request.getSubnetId());
-            mt.setIpAddress(request.getIpAddress() != null ? request.getIpAddress() : "10.0.0.10");
+            if (addressType != IpAddressType.IPV6_ONLY) {
+                mt.setIpAddress(request.getIpAddress() != null ? request.getIpAddress() : DEFAULT_IPV4_ADDRESS);
+            }
+            if (addressType != IpAddressType.IPV4_ONLY) {
+                mt.setIpv6Address(request.getIpv6Address() != null ? request.getIpv6Address() : DEFAULT_IPV6_ADDRESS);
+            }
+            mt.setIpAddressType(request.getIpAddressType());
             mt.setLifeCycleState(LifeCycleState.available);
             mt.setVpcId("vpc-12345678");
             mt.setAvailabilityZoneName(region + "a");

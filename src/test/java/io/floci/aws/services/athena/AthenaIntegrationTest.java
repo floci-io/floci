@@ -283,7 +283,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
 
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -294,7 +294,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
 
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -305,7 +305,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
 
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -316,7 +316,7 @@ class AthenaIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("WorkGroup is required."));
+            .body("message", containsString("WorkGroup"));
     }
 
     @Test

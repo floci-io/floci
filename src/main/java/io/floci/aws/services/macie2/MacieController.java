@@ -18,7 +18,6 @@ import jakarta.ws.rs.PATCH;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -77,8 +76,8 @@ public class MacieController {
         return empty();
     }
 
-    @POST @Path("/members")
-    public Response createMember(@Context HttpHeaders headers, String body) {
+    /** CreateMember. Security Hub serves POST /members too, so SecurityAdminController routes here by signing scope. */
+    public Response createMember(String region, String body) {
         JsonNode request = readTree(body);
         JsonNode account = request.get("account");
         if (account == null || !account.isObject()) {
@@ -96,7 +95,7 @@ public class MacieController {
                     entry.getKey(), entry.getValue().isTextual() ? entry.getValue().asText() : null));
         }
         MacieMember member = macieService.createMember(
-                region(headers),
+                region,
                 regionResolver.getAccountId(),
                 account.path("accountId").asText(null),
                 account.path("email").asText(null),
@@ -106,13 +105,10 @@ public class MacieController {
         return Response.ok(response).build();
     }
 
-    @GET @Path("/members")
-    public Response listMembers(@Context HttpHeaders headers,
-                                @QueryParam("maxResults") String maxResults,
-                                @QueryParam("nextToken") String nextToken,
-                                @QueryParam("onlyAssociated") String onlyAssociated) {
+    /** ListMembers. Security Hub serves GET /members too, so SecurityAdminController routes here by signing scope. */
+    public Response listMembers(String region, String maxResults, String nextToken, String onlyAssociated) {
         MacieService.Page<MacieMember> page = macieService.listMembers(
-                region(headers), regionResolver.getAccountId(), maxResults, nextToken, onlyAssociated);
+                region, regionResolver.getAccountId(), maxResults, nextToken, onlyAssociated);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("members", objectMapper.valueToTree(page.items()));
         if (page.nextToken() != null) {

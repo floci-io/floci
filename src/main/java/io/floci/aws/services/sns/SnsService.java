@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.ContainerCaBundle;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -43,6 +44,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetAddress;
@@ -215,7 +217,8 @@ public class SnsService implements Resettable, ResourceProvider {
                 firehoseService,
                 config.effectiveBaseUrl(),
                 objectMapper,
-                messageSigner
+                messageSigner,
+                ContainerCaBundle.sslContext(config).orElse(null)
         );
     }
 
@@ -336,6 +339,22 @@ public class SnsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, FirehoseService firehoseService,
                String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore, smsStore,
+                smsAttributesStore, smsSandboxStore, regionResolver, sqsService, lambdaService,
+                firehoseService, baseUrl, objectMapper, messageSigner, null);
+    }
+
+    private SnsService(StorageBackend<String, Topic> topicStore,
+                       StorageBackend<String, Subscription> subscriptionStore,
+                       StorageBackend<String, PlatformApplication> platformAppStore,
+                       StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+                       StorageBackend<String, SentSms> smsStore,
+                       StorageBackend<String, Map<String, String>> smsAttributesStore,
+                       StorageBackend<String, SmsSandboxPhoneNumber> smsSandboxStore,
+                       RegionResolver regionResolver, SqsService sqsService,
+                       LambdaService lambdaService, FirehoseService firehoseService,
+                       String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner,
+                       SSLContext sslContext) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
@@ -349,12 +368,17 @@ public class SnsService implements Resettable, ResourceProvider {
         this.firehoseService = firehoseService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
-        // Pin to HTTP/1.1 like AWS SNS: the default HTTP_2 sends an h2c upgrade to http:// endpoints.
-        this.httpClient = HttpClient.newBuilder()
+        this.httpClient = deliveryClient(sslContext);
+        this.messageSigner = messageSigner;
+    }
+
+    // The client HTTP and HTTPS subscriptions are posted to. Pin to HTTP/1.1 like AWS SNS: the default
+    // HTTP_2 sends an h2c upgrade to http:// endpoints.
+    private static HttpClient deliveryClient(SSLContext sslContext) {
+        return ContainerCaBundle.httpClientBuilder(sslContext)
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
-        this.messageSigner = messageSigner;
     }
 
     public void clear() {
@@ -545,6 +569,13 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
+    private static void requirePublishablePhoneNumber(String phoneNumber) {
+        if (!E164_PHONE_NUMBER.matcher(phoneNumber).matches()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: PhoneNumber Reason: " + phoneNumber + " is not valid to publish to", 400);
+        }
+    }
+
     private static void requireSandboxPhoneNumber(String phoneNumber) {
         if (phoneNumber == null || phoneNumber.isEmpty()
                 || phoneNumber.length() > SANDBOX_PHONE_NUMBER_MAX_LENGTH
@@ -705,6 +736,15 @@ public class SnsService implements Resettable, ResourceProvider {
             requireLargePayloadSubscriptions(topicArn, region);
         }
         topic.getAttributes().put(attributeName, attributeValue);
+        topicStore.put(key, topic);
+    }
+
+    /** Exists for CloudFormation rollback: SetTopicAttributes cannot unset an attribute. */
+    public synchronized void removeTopicAttribute(String topicArn, String attributeName, String region) {
+        String key = topicKey(region, topicArn);
+        Topic topic = topicStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+        topic.getAttributes().remove(attributeName);
         topicStore.put(key, topic);
     }
 
@@ -1069,6 +1109,7 @@ public class SnsService implements Resettable, ResourceProvider {
 
         // Send SMS
         if (phoneNumber != null) {
+            requirePublishablePhoneNumber(phoneNumber);
             requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             return recordSms(phoneNumber, message, subject, region);
         }

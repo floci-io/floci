@@ -46,10 +46,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -339,6 +339,25 @@ class EcrServiceTest {
     }
 
     @Test
+    void storedTagsAreTheTagsOfTheRepositoryTheArnNamesAndTaggingPutsANewMapInPlaceOfTheHeldOne() {
+        String arn = service.createRepository(REPO, null, null, null, null, null, Map.of("team", "data"), REGION)
+                .getRepositoryArn();
+        Map<String, String> held = service.listTagsForResource(REPO, null, REGION);
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Map.of(), service.storedTags(arn + "-other"));
+        assertEquals(Map.of(), service.storedTags(arn.replace(ACCOUNT, "111111111111")));
+        assertEquals(Map.of(), service.storedTags(arn.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), service.storedTags(arn.replace("arn:aws:", "arn:aws-cn:")));
+
+        service.tagResource(REPO, null, Map.of("stage", "prod"), REGION);
+        service.untagResource(REPO, null, List.of("team"), REGION);
+
+        assertEquals(Map.of("stage", "prod"), service.storedTags(arn));
+        assertEquals(Map.of("team", "data"), held);
+    }
+
+    @Test
     void immutableRepositoryIsMarkedForDataPlaneTagProtection() {
         service.createRepository(REPO, null, "IMMUTABLE", null, null, null, null, REGION);
 
@@ -548,6 +567,59 @@ class EcrServiceTest {
 
             verify(registryManager).deleteRepositoryStorageByInternalName(REPO);
             verify(registryManager).pruneStorage();
+        }
+    }
+
+    @Test
+    void deleteRepository_withoutForceRefusesWhileAnUntaggedImageRemains() throws Exception {
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>();
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        when(http.listTagsStrict(anyString())).thenReturn(List.of());
+        when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        withMeta.createRepository(REPO, null, null, null, null, null, null, REGION);
+        withMeta.recordImagePush(ACCOUNT, REGION, REPO, DELETE_DIGEST, Instant.now());
+
+        AwsException ex = assertThrows(AwsException.class, () -> withMeta.deleteRepository(REPO, null, false, REGION));
+        assertEquals("RepositoryNotEmptyException", ex.getErrorCode());
+
+        when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(null);
+        assertEquals(REPO, withMeta.deleteRepository(REPO, null, false, REGION).getRepositoryName());
+
+        // A push whose record write failed, and a record kept under the bare key of the
+        // pre-account store, still count as an image while the registry holds its manifest.
+        for (boolean legacy : new boolean[] {false, true}) {
+            InMemoryStorage<String, ImageMetadata> delegate = new InMemoryStorage<>() {
+                @Override
+                public void put(String key, ImageMetadata value) {
+                    if (!legacy) {
+                        throw new IllegalStateException("store down");
+                    }
+                    super.put(key, value);
+                }
+            };
+            EcrService other = new EcrService(new InMemoryStorage<>(),
+                    new AccountAwareStorageBackend<>(delegate, null, ACCOUNT), pullThroughCacheRuleStore,
+                    registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+            when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+            other.createRepository(REPO, null, null, null, null, null, null, REGION);
+            if (legacy) {
+                delegate.put(REGION + "::" + ACCOUNT + "::" + REPO + "::" + DELETE_DIGEST,
+                        new ImageMetadata(DELETE_DIGEST, Instant.now()));
+            } else {
+                assertThrows(IllegalStateException.class,
+                        () -> other.recordImagePush(ACCOUNT, REGION, REPO, DELETE_DIGEST, Instant.now()));
+            }
+
+            ex = assertThrows(AwsException.class, () -> other.deleteRepository(REPO, null, false, REGION),
+                    "legacy=" + legacy);
+            assertEquals("RepositoryNotEmptyException", ex.getErrorCode(), "legacy=" + legacy);
+
+            when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(null);
+            assertEquals(REPO, other.deleteRepository(REPO, null, false, REGION).getRepositoryName());
+            assertTrue(delegate.keys().stream().noneMatch(k -> k.contains("::" + REPO + "::")), "legacy=" + legacy);
         }
     }
 
@@ -866,6 +938,54 @@ class EcrServiceTest {
             assertEquals(1, described.imageDetails().size());
             assertEquals(DELETE_DIGEST, described.imageDetails().get(0).getImageDigest());
             assertEquals(List.of("stable"), described.imageDetails().get(0).getImageTags());
+        }
+    }
+
+    @Test
+    void describeKeepsAcceptedPushTimeWhileMetadataWritesFail() throws Exception {
+        String repo = "batch-delete/push-recovery";
+        String internal = ACCOUNT + "/" + REGION + "/" + repo;
+        AtomicBoolean unavailable = new AtomicBoolean(true);
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, ImageMetadata metadata) {
+                if (unavailable.get()) {
+                    throw new IllegalStateException("metadata store unavailable");
+                }
+                super.put(key, metadata);
+            }
+        };
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "stable")) {
+            when(registryManager.httpClient()).thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            withMeta.createRepository(repo, null, null, null, null, null, null, REGION);
+            Instant pushedAt = Instant.parse("2026-01-01T00:00:00Z");
+            assertThrows(IllegalStateException.class,
+                    () -> withMeta.recordImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST, pushedAt));
+
+            List<ImageIdentifier> images = List.of(new ImageIdentifier("stable", null));
+            EcrService.DescribeImagesResult duringOutage = withMeta.describeImages(repo, images, null, REGION);
+            assertEquals(1, duringOutage.imageDetails().size());
+            assertEquals(pushedAt, duringOutage.imageDetails().getFirst().getImagePushedAt());
+            assertTrue(metaStore.scan(key -> true).isEmpty());
+
+            unavailable.set(false);
+            assertEquals(pushedAt, withMeta.describeImages(repo, images, null, REGION)
+                    .imageDetails().getFirst().getImagePushedAt());
+            assertEquals(pushedAt, metaStore.scan(key -> true).getFirst().getPushedAt());
+
+            withMeta.removeImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST);
+            unavailable.set(true);
+            assertThrows(IllegalStateException.class,
+                    () -> withMeta.recordImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST, pushedAt));
+            withMeta.removeImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST);
+
+            unavailable.set(false);
+            Instant repushedAt = pushedAt.plusSeconds(1);
+            assertEquals(repushedAt,
+                    withMeta.recordImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST, repushedAt).getPushedAt());
         }
     }
 
@@ -2347,25 +2467,14 @@ class EcrServiceTest {
     void creationTemplate_aSecondCreateOfThePrefixWaitsAndIsRefused() throws Exception {
         ParkingStore<RepositoryCreationTemplate> store = new ParkingStore<>();
         EcrService templates = templateService(store);
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            store.parkNextRead();
-            Future<?> first = pool.submit(() -> templates.createRepositoryCreationTemplate(
-                    template("prod", "REPLICATION"), REGION));
-            assertTrue(store.awaitParked());
-            Future<?> second = pool.submit(() -> templates.createRepositoryCreationTemplate(
-                    template("prod", "REPLICATION"), REGION));
-            assertThrows(TimeoutException.class, () -> second.get(200, TimeUnit.MILLISECONDS),
-                    "the second create must wait for the first");
-
-            store.release();
-            first.get(5, TimeUnit.SECONDS);
-            ExecutionException refused = assertThrows(ExecutionException.class, () -> second.get(5, TimeUnit.SECONDS));
-            assertEquals("TemplateAlreadyExistsException", ((AwsException) refused.getCause()).getErrorCode());
-        } finally {
-            store.release();
-            pool.shutdownNow();
-        }
+        store.parkNextRead();
+        assertOperationWaitsForParkedStore(store,
+                () -> templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION),
+                () -> {
+                    AwsException failure = assertThrows(AwsException.class,
+                            () -> templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION));
+                    assertEquals("TemplateAlreadyExistsException", failure.getErrorCode());
+                });
     }
 
     @Test
@@ -2375,22 +2484,10 @@ class EcrServiceTest {
         templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
         RepositoryCreationTemplate change = template("prod");
         change.setDescription("changed");
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            store.parkNextRead();
-            Future<?> update = pool.submit(() -> templates.updateRepositoryCreationTemplate(change, REGION));
-            assertTrue(store.awaitParked());
-            Future<?> delete = pool.submit(() -> templates.deleteRepositoryCreationTemplate("prod", REGION));
-            assertThrows(TimeoutException.class, () -> delete.get(200, TimeUnit.MILLISECONDS),
-                    "the delete must wait for the update");
-
-            store.release();
-            update.get(5, TimeUnit.SECONDS);
-            delete.get(5, TimeUnit.SECONDS);
-        } finally {
-            store.release();
-            pool.shutdownNow();
-        }
+        store.parkNextRead();
+        assertOperationWaitsForParkedStore(store,
+                () -> templates.updateRepositoryCreationTemplate(change, REGION),
+                () -> templates.deleteRepositoryCreationTemplate("prod", REGION));
 
         assertTrue(templates.describeRepositoryCreationTemplates(null, null, null, REGION).items().isEmpty());
     }

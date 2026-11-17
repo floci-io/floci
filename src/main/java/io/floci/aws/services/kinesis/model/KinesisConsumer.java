@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -13,6 +15,7 @@ public class KinesisConsumer {
     private String consumerStatus;
     private Instant consumerCreationTimestamp;
     private String streamArn;
+    private Map<String, String> tags = new HashMap<>();
 
     public KinesisConsumer() {}
 
@@ -38,4 +41,7 @@ public class KinesisConsumer {
 
     public String getStreamArn() { return streamArn; }
     public void setStreamArn(String streamArn) { this.streamArn = streamArn; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags == null ? new HashMap<>() : tags; }
 }

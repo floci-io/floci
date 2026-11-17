@@ -13,11 +13,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -73,6 +75,88 @@ class LambdaMicrovmsServicePersistenceTest {
     }
 
     @Test
+    void requestedImageConfigurationAndTagsSurviveARestart() {
+        LambdaMicrovmsService first = process();
+        LambdaMicrovmsService.RuntimeSettings settings = new LambdaMicrovmsService.RuntimeSettings(
+                List.of("connector-one"), "/aws/lambda-microvms/persisted", false,
+                Map.of("STAGE", "one"), List.of("ALL"), List.of("ARM_64"));
+        first.createImage(REGION, ACCOUNT_ID, "configured-image",
+                "arn:aws:lambda:us-east-1::microvm-image/al2023-1", "arn:aws:iam::000000000000:role/build",
+                "s3://bucket/artifact.zip", null, "9", settings, Map.of("owner", "image-fields"));
+        first.updateImage(REGION, "configured-image", "arn:aws:lambda:us-east-1::microvm-image/al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/next.zip", null, "10",
+                new LambdaMicrovmsService.RuntimeSettings(null, null, true, Map.of("STAGE", "two"),
+                        List.of(), List.of()));
+
+        LambdaMicrovmsService.MicrovmImage image = process().getImage(REGION, "configured-image");
+        assertEquals("10", image.baseImageVersion);
+        assertEquals(Map.of("owner", "image-fields"), image.tags);
+        assertEquals(settings, image.versions.get(0).runtimeSettings);
+        assertEquals(Map.of("STAGE", "two"), image.runtimeSettings.environmentVariables());
+        assertTrue(image.versions.get(1).runtimeSettings.loggingDisabled());
+        assertEquals(image.runtimeSettings, image.versions.get(1).runtimeSettings);
+    }
+
+    @Test
+    void buildInputsRemainVersionSpecificAfterReload() {
+        createAndUpdateVersionedImage();
+        LambdaMicrovmsService reloaded = process();
+
+        assertBuildInputs(versionResponse(reloaded, "1.0"), "original", "1.0");
+        assertBuildInputs(versionResponse(reloaded, "2.0"), "replacement", "2.0");
+        assertEquals("s3://artifacts/replacement.zip", reloaded.getImage(REGION, "versioned-image").codeArtifactUri);
+    }
+
+    @Test
+    void legacyVersionsUseLastKnownInputsWithoutRewritingStorage() throws IOException {
+        createAndUpdateVersionedImage();
+        Path file = storageDir.resolve("lambda-microvm-images.json");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode stored = mapper.readTree(file.toFile());
+        for (JsonNode versions : stored.findValues("versions")) {
+            for (JsonNode version : versions) {
+                ((ObjectNode) version).remove("buildSpec");
+            }
+        }
+        mapper.writeValue(file.toFile(), stored);
+        String beforeRead = Files.readString(file);
+
+        JsonNode response = versionResponse(process(), "1.0");
+        assertEquals("1.0", response.path("imageVersion").asText());
+        assertBuildInputs(response, "replacement", "2.0");
+        assertEquals(beforeRead, Files.readString(file));
+    }
+
+    private void createAndUpdateVersionedImage() {
+        LambdaMicrovmsService service = process();
+        service.createImage(REGION, ACCOUNT_ID, "versioned-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:original",
+                "arn:aws:iam::000000000000:role/original", "s3://artifacts/original.zip", null,
+                "1.0", LambdaMicrovmsService.RuntimeSettings.defaults(), Map.of());
+        service.updateImage(REGION, "versioned-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:replacement",
+                "arn:aws:iam::000000000000:role/replacement", "s3://artifacts/replacement.zip", null,
+                "2.0", LambdaMicrovmsService.RuntimeSettings.defaults());
+    }
+
+    private static JsonNode versionResponse(LambdaMicrovmsService service, String version) {
+        RegionResolver resolver = mock(RegionResolver.class);
+        when(resolver.resolveRegion(null)).thenReturn(REGION);
+        LambdaMicrovmsController controller = new LambdaMicrovmsController(service, resolver, new ObjectMapper());
+        return (JsonNode) controller.getVersion(null, "versioned-image", version).getEntity();
+    }
+
+    private static void assertBuildInputs(JsonNode response, String label, String baseVersion) {
+        assertAll(
+                () -> assertEquals("arn:aws:lambda:us-east-1:aws:microvm-image:" + label,
+                        response.path("baseImageArn").asText()),
+                () -> assertEquals(baseVersion, response.path("baseImageVersion").asText()),
+                () -> assertEquals("arn:aws:iam::000000000000:role/" + label,
+                        response.path("buildRoleArn").asText()),
+                () -> assertEquals("s3://artifacts/" + label + ".zip", response.path("codeArtifact").path("uri").asText()));
+    }
+
+    @Test
     void anInPlaceUpdateReachesTheBackend() {
         // updateImage mutates the stored image rather than replacing it, so without an explicit
         // write-back the change never reaches the backend and is lost on restart.
@@ -86,6 +170,25 @@ class LambdaMicrovmsServicePersistenceTest {
         assertEquals("updated", image.description);
         assertEquals("s3://bucket/next.zip", image.codeArtifactUri);
         assertEquals("2.0", image.latestActiveImageVersion);
+    }
+
+    @Test
+    void requestedMicrovmRunSettingsSurviveARestart() {
+        LambdaMicrovmsService first = process();
+        createImage(first, "run-image");
+        first.updateImage(REGION, "run-image", "arn:aws:lambda:us-east-1::microvm-image/al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/next.zip", null);
+        LambdaMicrovmsService.RunSettings settings = new LambdaMicrovmsService.RunSettings(
+                "1.0", "arn:aws:iam::000000000000:role/runtime", List.of("ingress"), List.of("egress"),
+                3600, false, 60, 0);
+        LambdaMicrovmsService.Microvm created = first.runMicrovm(REGION, ACCOUNT_ID, "run-image", settings);
+        assertEquals("PENDING", created.state);
+        assertEquals(settings, created.runSettings);
+
+        LambdaMicrovmsService.Microvm reloaded = process().getMicrovm(REGION, created.microvmId);
+        assertEquals("RUNNING", reloaded.state);
+        assertEquals("1.0", reloaded.imageVersion);
+        assertEquals(settings, reloaded.runSettings);
     }
 
     @Test

@@ -29,6 +29,7 @@ public class Snapshot {
     private Instant sourceSnapshotCreateTime;
     private String kmsKeyId;
     private Set<String> copiedToRegions = new LinkedHashSet<>();
+    private Set<String> accountsWithRestoreAccess = new LinkedHashSet<>();
 
     public String getSourceRegion() { return sourceRegion; }
     public void setSourceRegion(String value) { sourceRegion = value; }
@@ -76,6 +77,7 @@ public class Snapshot {
         this.sourceSnapshotCreateTime = other.sourceSnapshotCreateTime;
         this.kmsKeyId = other.kmsKeyId;
         this.copiedToRegions = new LinkedHashSet<>(other.copiedToRegions);
+        this.accountsWithRestoreAccess = new LinkedHashSet<>(other.accountsWithRestoreAccess);
         this.tags = new LinkedHashMap<>(other.tags);
     }
 
@@ -176,7 +178,12 @@ public class Snapshot {
         this.manualSnapshotRetentionPeriod = manualSnapshotRetentionPeriod;
     }
 
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
+
+    public Set<String> getAccountsWithRestoreAccess() { return accountsWithRestoreAccess; }
+    public void setAccountsWithRestoreAccess(Set<String> value) {
+        accountsWithRestoreAccess = value == null ? new LinkedHashSet<>() : new LinkedHashSet<>(value);
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

@@ -3,12 +3,10 @@ package io.floci.aws.services.cloudwatch.metrics;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.HybridStorage;
 import io.floci.aws.core.storage.InMemoryStorage;
-import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.WalStorage;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricDatum;
+import io.floci.aws.testing.StorageTestBackends;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -53,30 +51,20 @@ class CloudWatchMetricPublicationStorageFaultTest {
             statistics(metrics);
             assertEquals(3, actual.keys().size());
             actual.flush();
-        } finally { close(actual); }
+        } finally { StorageTestBackends.close(actual); }
         if (!mode.equals("memory")) {
             StorageBackend<String, MetricDatum> reloaded = backend(mode);
             try {
                 reloaded.load();
                 statistics(metrics(new AccountAwareStorageBackend<>(reloaded, null, ACCOUNT)));
                 assertEquals(3, reloaded.keys().size());
-            } finally { close(reloaded); }
+            } finally { StorageTestBackends.close(reloaded); }
         }
     }
 
     private StorageBackend<String, MetricDatum> backend(String mode) {
-        return switch (mode) {
-            case "memory" -> new InMemoryStorage<>();
-            case "persistent" -> new PersistentStorage<>(directory.resolve("metrics.json"), TYPE);
-            case "hybrid" -> new HybridStorage<>(directory.resolve("metrics.json"), TYPE, 3_600_000);
-            case "wal" -> new WalStorage<>(directory.resolve("metrics-snapshot.json"), directory.resolve("metrics.wal"), TYPE, 3_600_000);
-            default -> throw new IllegalArgumentException(mode);
-        };
-    }
-
-    private static void close(StorageBackend<String, MetricDatum> backend) {
-        if (backend instanceof HybridStorage<?, ?> hybrid) { hybrid.shutdown(); }
-        if (backend instanceof WalStorage<?, ?> wal) { wal.shutdown(); }
+        Path snapshot = directory.resolve(mode.equals("wal") ? "metrics-snapshot.json" : "metrics.json");
+        return StorageTestBackends.create(mode, snapshot, directory.resolve("metrics.wal"), TYPE, 3_600_000);
     }
 
     private static CloudWatchMetricsService metrics(AccountAwareStorageBackend<MetricDatum> store) {

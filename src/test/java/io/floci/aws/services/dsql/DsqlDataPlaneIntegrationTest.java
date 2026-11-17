@@ -548,6 +548,13 @@ class DsqlDataPlaneIntegrationTest {
         try (Connection connection = admin(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE SCHEMA dialect");
             statement.execute("CREATE TABLE dialect.t (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), n int)");
+            statement.execute("ALTER TABLE dialect.t ADD COLUMN notes varchar(255) NULL");
+
+            SQLException notNullColumn = assertThrows(SQLException.class, () ->
+                    statement.execute("ALTER TABLE dialect.t ADD COLUMN required varchar(255) NOT NULL"));
+            assertEquals("0A000", notNullColumn.getSQLState());
+            assertEquals("ALTER TABLE ADD COLUMN with constraint not supported",
+                    ((PSQLException) notNullColumn).getServerErrorMessage().getMessage());
 
             String jobId;
             try (ResultSet job = statement.executeQuery("CREATE INDEX ASYNC t_n ON dialect.t (n)")) {

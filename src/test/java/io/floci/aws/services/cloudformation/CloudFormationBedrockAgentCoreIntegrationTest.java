@@ -210,7 +210,7 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
         String runtimeArn = outputs.get("RuntimeArn");
         assertEquals(runtimeId, outputs.get("RuntimeRef"));
         assertTrue(runtimeId.startsWith("cfn_agent_runtime-"), runtimeId);
-        assertTrue(runtimeArn.matches("arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/[0-9a-f-]{36}:1"),
+        assertTrue(runtimeArn.matches("arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/[a-zA-Z][a-zA-Z0-9_]{0,47}-[a-zA-Z0-9]{10}"),
                 runtimeArn);
         assertEquals("1", outputs.get("RuntimeVersion"));
         assertEquals("READY", outputs.get("RuntimeStatus"));
@@ -219,7 +219,7 @@ class CloudFormationBedrockAgentCoreIntegrationTest {
 
         String endpointArn = outputs.get("EndpointArn");
         assertEquals(endpointArn, outputs.get("EndpointRef"));
-        assertTrue(endpointArn.startsWith("arn:aws:bedrock-agentcore:us-east-1:000000000000:agentEndpoint/"), endpointArn);
+        assertEquals(runtimeArn + "/runtime-endpoint/prod", endpointArn);
         assertEquals(runtimeArn, outputs.get("EndpointRuntimeArn"));
         assertEquals("1", outputs.get("EndpointTargetVersion"));
         assertEquals("READY", outputs.get("EndpointStatus"));

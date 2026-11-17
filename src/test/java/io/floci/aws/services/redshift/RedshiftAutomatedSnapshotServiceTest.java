@@ -121,6 +121,53 @@ class RedshiftAutomatedSnapshotServiceTest {
     }
 
     @Test
+    void modifiedManualSnapshotExpiresOnceItsRetentionHasPassed() {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", "us-east-1", null);
+        Snapshot manual = fixture.service().createSnapshot("manual-backup", "warehouse");
+        fixture.service().modifyClusterSnapshot("manual-backup", 5);
+
+        fixture.service().runSnapshotSchedules(Instant.now().plus(Duration.ofDays(4)));
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isPresent());
+        assertTrue(Files.exists(Path.of(manual.getSqlDump())));
+
+        fixture.service().runSnapshotSchedules(Instant.now().plus(Duration.ofDays(6)));
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isEmpty());
+        assertFalse(Files.exists(Path.of(manual.getSqlDump())));
+    }
+
+    @Test
+    void manualSnapshotsWithoutAFiniteRetentionAreNeverExpired() {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", null, null);
+        Snapshot manual = fixture.service().createSnapshot("manual-backup", "warehouse");
+
+        fixture.service().runSnapshotSchedules(Instant.now().plus(Duration.ofDays(4000)));
+
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isPresent());
+        assertTrue(Files.exists(Path.of(manual.getSqlDump())));
+    }
+
+    @Test
+    void modifyClusterSnapshotRejectsAnElapsedRetentionUnlessForced() {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", null, null);
+        Snapshot manual = fixture.service().createSnapshot("manual-backup", "warehouse");
+        manual.setSnapshotCreateTime(Instant.now().minus(Duration.ofDays(10)));
+        fixture.snapshots().putForAccount(ACCOUNT, "manual-backup", manual);
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> fixture.service().modifyClusterSnapshot("manual-backup", 5, false));
+        assertEquals("InvalidRetentionPeriodFault", rejected.getErrorCode());
+        assertEquals(-1, fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").orElseThrow()
+                .getManualSnapshotRetentionPeriod());
+
+        fixture.service().modifyClusterSnapshot("manual-backup", 5, true);
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isEmpty());
+        assertFalse(Files.exists(Path.of(manual.getSqlDump())));
+    }
+
+    @Test
     void missingClustersLoseAutomatedSnapshotsButKeepManualBackups() {
         Fixture fixture = fixture();
         seed(fixture, ACCOUNT, "warehouse", "us-east-1", "rate(1 hour)");
@@ -257,7 +304,7 @@ class RedshiftAutomatedSnapshotServiceTest {
         assertNotNull(changed.getUpdatedAt());
         Instant activation = ANCHOR.plusSeconds(7200);
         changed.setUpdatedAt(activation);
-        fixture.schedules().putForAccount(ACCOUNT, changed.getScheduleIdentifier(), changed);
+        fixture.schedules().putForAccount(ACCOUNT, RedshiftService.regionalKey("us-east-1", changed.getScheduleIdentifier()), changed);
 
         fixture.service().runSnapshotSchedules(activation.plusSeconds(7199));
         assertEquals(1, fixture.snapshots().scanForAccount(ACCOUNT, key -> true).size());
@@ -287,9 +334,9 @@ class RedshiftAutomatedSnapshotServiceTest {
         Instant activation = Instant.now().minusSeconds(7200);
         Cluster cluster = seed(fixture, ACCOUNT, "warehouse", "us-east-1", "rate(24 hours)");
         cluster.setAutomatedSnapshotAnchor(activation);
-        SnapshotSchedule schedule = spy(fixture.schedules().getForAccount(ACCOUNT, "schedule-warehouse").orElseThrow());
+        SnapshotSchedule schedule = spy(fixture.schedules().getForAccount(ACCOUNT, RedshiftService.regionalKey("us-east-1", "schedule-warehouse")).orElseThrow());
         schedule.setUpdatedAt(activation);
-        fixture.schedules().putForAccount(ACCOUNT, "schedule-warehouse", schedule);
+        fixture.schedules().putForAccount(ACCOUNT, RedshiftService.regionalKey("us-east-1", "schedule-warehouse"), schedule);
         CountDownLatch betweenSetters = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         doAnswer(invocation -> {
@@ -405,7 +452,7 @@ class RedshiftAutomatedSnapshotServiceTest {
         if (definition != null) {
             SnapshotSchedule schedule = new SnapshotSchedule("schedule-" + id, null, List.of(definition));
             schedule.setUpdatedAt(ANCHOR);
-            fixture.schedules().putForAccount(account, schedule.getScheduleIdentifier(), schedule);
+            fixture.schedules().putForAccount(account, RedshiftService.regionalKey(region, schedule.getScheduleIdentifier()), schedule);
             cluster.setSnapshotScheduleIdentifier(schedule.getScheduleIdentifier());
         }
         fixture.clusters().putForAccount(account, id, cluster);

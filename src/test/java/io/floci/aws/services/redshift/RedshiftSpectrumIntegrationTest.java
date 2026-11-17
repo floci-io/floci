@@ -17,12 +17,12 @@ import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.postgresql.PGStatement;
 
@@ -34,18 +34,17 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.sql.Statement;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -379,9 +378,7 @@ class RedshiftSpectrumIntegrationTest {
 
         String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?socketTimeout=20&loginTimeout=20";
-        try (Connection connection = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+        try (Connection connection = waitForConnection(url, "admin", "Secret123");
             Statement setup = connection.createStatement()) {
             setup.execute("CREATE EXTERNAL SCHEMA analytics_ext FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'");
             setup.execute("CREATE EXTERNAL TABLE analytics_ext.events (id INTEGER, name VARCHAR) "
@@ -418,9 +415,7 @@ class RedshiftSpectrumIntegrationTest {
 
         String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?socketTimeout=20&loginTimeout=20";
-        try (Connection connection = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+        try (Connection connection = waitForConnection(url, "admin", "Secret123");
              Statement setup = connection.createStatement()) {
             setup.execute("CREATE EXTERNAL SCHEMA analytics_fetch FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'");
             setup.execute("CREATE EXTERNAL TABLE analytics_fetch.events (id INTEGER, name VARCHAR) "
@@ -633,9 +628,7 @@ class RedshiftSpectrumIntegrationTest {
                 + "/dev?preferQueryMode=simple&socketTimeout=30";
         String schemaName = "pruning_lake";
 
-        try (Connection connection = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+        try (Connection connection = waitForConnection(url, "admin", "Secret123");
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '" + glueDatabase
                     + "' IAM_ROLE '" + ROLE_ARN + "'");
@@ -679,6 +672,108 @@ class RedshiftSpectrumIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "true,true"})
+    @Timeout(120)
+    void readsOnlyThePartitionsTheWhereSelectsOnTheExtendedProtocolAndInATransaction(
+            boolean bindParameters, boolean binaryTransfer) throws Exception {
+        bucket = "spectrum-pruning-ext-" + System.nanoTime();
+        s3Service.createBucket(bucket, "us-east-1");
+        s3Service.putObject(bucket, "events/day=1/part-1.csv", "1,10\n2,20\n".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+        // this partition cannot be read, so a query that reads it fails and shows which partitions were read
+        s3Service.putObject(bucket, "events/day=2/part-1.csv", "not-a-number,30\n".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+        glueDatabase = "spectrum_pruning_ext_" + System.nanoTime();
+        Database database = new Database();
+        database.setName(glueDatabase);
+        glueService.createDatabase(database);
+        clusterId = "it-pruning-ext-" + System.nanoTime();
+        Cluster cluster = createClusterWithRole(clusterId);
+        String baseUrl = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev?socketTimeout=30";
+        String schemaName = "pruning_ext_lake";
+        String selectDayOne = "SELECT SUM(amount) FROM " + schemaName + ".events WHERE day = 1";
+
+        try (Connection setup = waitForConnection(baseUrl + "&preferQueryMode=simple", "admin", "Secret123");
+             Statement statement = setup.createStatement()) {
+            statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '" + glueDatabase
+                    + "' IAM_ROLE '" + ROLE_ARN + "'");
+            statement.execute("CREATE EXTERNAL TABLE " + schemaName + ".events (id INTEGER, amount INTEGER) "
+                    + "PARTITIONED BY (day INTEGER) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' "
+                    + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/'");
+            statement.execute("ALTER TABLE " + schemaName + ".events ADD "
+                    + "PARTITION (day='1') LOCATION 's3://" + bucket + "/events/day=1/' "
+                    + "PARTITION (day='2') LOCATION 's3://" + bucket + "/events/day=2/'");
+
+            if (!bindParameters) {
+                // The literal case also covers loading the cold cache in a Simple Query transaction.
+                try (Connection simple = DriverManager.getConnection(baseUrl + "&preferQueryMode=simple",
+                        "admin", "Secret123");
+                     Statement query = simple.createStatement()) {
+                    simple.setAutoCommit(false);
+                    assertDayOneSum(query, selectDayOne);
+                    simple.commit();
+                    simple.setAutoCommit(true);
+                    assertDayOneSum(query, selectDayOne);
+                    SQLException unreadable = assertThrows(SQLException.class,
+                            () -> query.executeQuery("SELECT SUM(amount) FROM " + schemaName + ".events"));
+                    assertEquals("22P02", unreadable.getSQLState());
+                }
+            }
+            String select = bindParameters ? "SELECT SUM(amount) FROM " + schemaName + ".events WHERE day = ?" : selectDayOne;
+            String extendedUrl = baseUrl + "&preferQueryMode=extended" + (binaryTransfer ? "" : "&binaryTransfer=false");
+            try (Connection extended = DriverManager.getConnection(extendedUrl,
+                    "admin", "Secret123");
+                 PreparedStatement query = extended.prepareStatement(select)) {
+                query.unwrap(PGStatement.class).setPrepareThreshold(1);
+                // Describe forces Parse before any Bind, while the parameterized case still has a cold cache.
+                assertEquals(bindParameters ? 1 : 0, query.getParameterMetaData().getParameterCount());
+                if (bindParameters) {
+                    query.setInt(1, 1);
+                }
+                assertPreparedSum(query, 30);
+                extended.setAutoCommit(false);
+                assertPreparedSum(query, 30);
+                extended.rollback();
+                assertPreparedSum(query, 30);
+                extended.commit();
+                extended.setAutoCommit(true);
+                if (bindParameters) {
+                    query.setInt(1, 2);
+                    SQLException unreadable = assertThrows(SQLException.class, query::executeQuery);
+                    assertEquals("22P02", unreadable.getSQLState());
+                    query.setInt(1, 1);
+                    assertPreparedSum(query, 30);
+                    s3Service.putObject(bucket, "events/day=2/part-1.csv", "3,40\n".getBytes(StandardCharsets.UTF_8),
+                            "text/csv", null);
+                    query.setInt(1, 2);
+                    assertPreparedSum(query, 40);
+                    query.setInt(1, 1);
+                    assertPreparedSum(query, 30);
+                }
+            }
+            statement.execute("DROP SCHEMA IF EXISTS " + schemaName + " CASCADE");
+        } finally {
+            s3Service.deleteObject(bucket, "events/day=1/part-1.csv");
+            s3Service.deleteObject(bucket, "events/day=2/part-1.csv");
+        }
+    }
+
+    private static void assertDayOneSum(Statement statement, String sql) throws SQLException {
+        try (ResultSet rows = statement.executeQuery(sql)) {
+            assertTrue(rows.next());
+            assertEquals(30, rows.getLong(1));
+        }
+    }
+
+    private static void assertPreparedSum(PreparedStatement statement, long expected) throws SQLException {
+        try (ResultSet rows = statement.executeQuery()) {
+            assertTrue(rows.next());
+            assertEquals(expected, rows.getLong(1));
+            assertFalse(rows.next());
+        }
+    }
+
     private static void assertTotal(Statement statement, long total) throws SQLException {
         try (ResultSet rows = statement.executeQuery("SELECT COALESCE(SUM(amount),0) FROM lake.events")) {
             assertTrue(rows.next());
@@ -694,13 +789,6 @@ class RedshiftSpectrumIntegrationTest {
                 .then().statusCode(200).extract().path("Id");
         assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
                 "{\"Id\":\"" + queryId + "\"}").then().statusCode(200).extract().path("Status"));
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
-        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
-        return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, username, password), Objects::nonNull);
     }
 
     private static long concurrentTotal(Cluster cluster, CountDownLatch ready, CountDownLatch start) throws Exception {

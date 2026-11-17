@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.rdsdata.RdsDataService;
 import io.floci.aws.services.redshiftdata.RedshiftDataService;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -37,6 +36,7 @@ import java.util.stream.Stream;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.StepFunctionsTestClient.LAMBDA_TRUST;
 import static io.floci.aws.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.floci.aws.testing.StepFunctionsTestClient.policy;
 import static io.floci.aws.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -653,15 +653,6 @@ class StepFunctionsDataTaskIamIntegrationTest {
         return allow("*", "dynamodb:*", "s3:*", "rds-data:*", "redshift-data:*", "secretsmanager:*", "sts:AssumeRole");
     }
 
-    private static String policy(List<Map<String, Object>> statements) {
-        try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", statements));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
-
     private static String bucketStatement(String effect, String principal, String bucket) {
         return """
                 {"Version":"2012-10-17","Statement":[{"Effect":"%s","Principal":{"AWS":"%s"},
@@ -800,19 +791,11 @@ class StepFunctionsDataTaskIamIntegrationTest {
     }
 
     private String bucket(String account, String region) {
-        String name = "sfn-iam-" + UUID.randomUUID();
-        String authorization = auth(account, region, "s3");
-        given().port(baseUri.getPort()).header("Authorization", authorization)
-                .body(REGION.equals(region) ? "" : "<CreateBucketConfiguration><LocationConstraint>" + region
-                        + "</LocationConstraint></CreateBucketConfiguration>")
-                .put("/" + name).then().statusCode(200);
-        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), authorization, name));
-        return name;
+        return sfn().bucket(account, region, "sfn-iam-");
     }
 
     private void setBucketPolicy(String bucket, String policy) {
-        given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "s3")).body(policy)
-                .queryParam("policy", "").put("/" + bucket).then().statusCode(200);
+        sfn().setBucketPolicy(ACCOUNT, bucket, policy);
     }
 
     private Response object(String bucket, String key) {
@@ -859,17 +842,15 @@ class StepFunctionsDataTaskIamIntegrationTest {
     }
 
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-data-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-data-", trust, policy);
     }
 
     private String machine(Map<String, Object> task, String role) throws Exception {
-        return machineWithDefinition(MAPPER.writeValueAsString(
-                Map.of("StartAt", "Send", "States", Map.of("Send", task))), role);
+        return sfn().machine(ACCOUNT, "sfn-data-iam-", task, role);
     }
 
     private String machineWithDefinition(String definition, String role) {
-        return sfn().createMachine(ACCOUNT, "sfn-data-iam-", definition, "STANDARD", role);
+        return sfn().machineWithDefinition(ACCOUNT, "sfn-data-iam-", definition, role);
     }
 
     private String start(String machine, String input) {

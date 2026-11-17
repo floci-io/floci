@@ -1,6 +1,6 @@
 package io.floci.aws.services.lambda;
 
-import io.floci.aws.services.lambdaweb.LambdaWebZips;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.LambdaCodeSourcesProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -33,8 +33,8 @@ class LambdaAsyncReactiveSyncIntegrationTest {
 
     @Test
     void uploadFromANonDefaultAccountRedeploysTheFunctionInTheBackground() throws Exception {
-        byte[] v1 = LambdaWebZips.indexJs("exports.handler = async () => 'v1';");
-        byte[] v2 = LambdaWebZips.indexJs("exports.handler = async () => 'v2';");
+        byte[] v1 = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => 'v1';");
+        byte[] v2 = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => 'v2';");
         given().header("Authorization", S3_AUTH).when().put("/" + BUCKET).then().statusCode(200);
         given().header("Authorization", S3_AUTH).body(v1).when().put("/" + BUCKET + "/" + KEY).then().statusCode(200);
         given()

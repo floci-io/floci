@@ -228,7 +228,7 @@ public class IamManagedPolicyCfnProvisioner implements CfnResourceProvisioner {
                 String document = prunedVersion.getDocument();
                 String restoreContentDescription = "restore pruned policy version content on " + policyArn;
                 if (!CfnRollback.attemptIamCleanup(failure, restoreContentDescription,
-                        () -> iamService.createPolicyVersion(policyArn, document, false))) {
+                        () -> iamService.restorePolicyVersion(policyArn, document, false))) {
                     cleanupSucceeded = false;
                 }
             }

@@ -122,6 +122,7 @@ public class MemoryDbHandler {
         JsonNode authNode = request.path("AuthenticationMode");
         spec.setAuthMode(parseAuthMode(authNode));
         spec.setPasswords(parsePasswords(authNode.path("Passwords")));
+        spec.setTags(parseTags(request.path("Tags")));
         User created = service.createUser(spec, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("User", userNode(created));
@@ -148,6 +149,7 @@ public class MemoryDbHandler {
         Acl spec = new Acl();
         spec.setName(text(request, "ACLName"));
         spec.setUserNames(parseStringList(request.path("UserNames")));
+        spec.setTags(parseTags(request.path("Tags")));
         Acl created = service.createAcl(spec, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ACL", aclNode(created));

@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_cfn_property_types.py",
     "schemas": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
-    "retrieved": "2026-10-20",
+    "retrieved": "2026-11-16",
     "note": "make cfn-property-types-verify checks the file against AWS."
   },
   "operations": {
@@ -13,7 +13,8 @@
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
-    "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion"
+    "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion",
+    "AWS::SES::ConfigurationSetEventDestination": "AWS::SES::ConfigurationSetEventDestination"
   },
   "shapes": {
     "AWS::AutoScaling::LaunchConfiguration": {
@@ -91,35 +92,35 @@
     "AWS::DSQL::Cluster": {
       "type": "structure",
       "members": {
-        "DeletionProtectionEnabled": "Boolean",
-        "Tags": "AWS::DSQL::Cluster.Tags",
+        "Status": "String",
+        "PolicyVersion": "String",
+        "EncryptionDetails": "AWS::DSQL::Cluster.EncryptionDetails",
+        "KmsEncryptionKey": "String",
+        "MultiRegionProperties": "AWS::DSQL::Cluster.MultiRegionProperties",
         "ResourceArn": "String",
         "Identifier": "String",
-        "CreationTime": "String",
-        "Status": "String",
         "VpcEndpointServiceName": "String",
-        "MultiRegionProperties": "AWS::DSQL::Cluster.MultiRegionProperties",
-        "KmsEncryptionKey": "String",
-        "EncryptionDetails": "AWS::DSQL::Cluster.EncryptionDetails",
-        "Endpoint": "String",
         "VpcEndpoint": "String",
-        "PolicyVersion": "String",
-        "PolicyDocument": "String"
+        "Endpoint": "String",
+        "CreationTime": "String",
+        "PolicyDocument": "String",
+        "DeletionProtectionEnabled": "Boolean",
+        "Tags": "AWS::DSQL::Cluster.Tags"
       }
     },
     "AWS::DSQL::Cluster.EncryptionDetails": {
       "type": "structure",
       "members": {
-        "EncryptionStatus": "String",
         "EncryptionType": "String",
+        "EncryptionStatus": "String",
         "KmsKeyArn": "String"
       }
     },
     "AWS::DSQL::Cluster.MultiRegionProperties": {
       "type": "structure",
       "members": {
-        "WitnessRegion": "String",
-        "Clusters": "AWS::DSQL::Cluster.MultiRegionProperties.Clusters"
+        "Clusters": "AWS::DSQL::Cluster.MultiRegionProperties.Clusters",
+        "WitnessRegion": "String"
       }
     },
     "AWS::DSQL::Cluster.MultiRegionProperties.Clusters": {
@@ -133,8 +134,8 @@
     "AWS::DSQL::Cluster/Tag": {
       "type": "structure",
       "members": {
-        "Key": "String",
-        "Value": "String"
+        "Value": "String",
+        "Key": "String"
       },
       "required": [
         "Key",
@@ -969,6 +970,7 @@
         "TaskRoleArn": "String",
         "IpcMode": "String",
         "InferenceAccelerators": "AWS::ECS::TaskDefinition.InferenceAccelerators",
+        "TrustedExecutionConfiguration": "AWS::ECS::TaskDefinition/TrustedExecutionConfiguration",
         "Memory": "String",
         "PlacementConstraints": "AWS::ECS::TaskDefinition.PlacementConstraints",
         "Cpu": "String",
@@ -1488,6 +1490,16 @@
       "type": "list",
       "member": "String"
     },
+    "AWS::ECS::TaskDefinition/TrustedExecutionConfiguration": {
+      "type": "structure",
+      "members": {
+        "IsolationMode": "String",
+        "AttestationPolicy": "String"
+      },
+      "required": [
+        "IsolationMode"
+      ]
+    },
     "AWS::ECS::TaskDefinition/Ulimit": {
       "type": "structure",
       "members": {
@@ -1845,6 +1857,7 @@
         "SnapStart": "AWS::Lambda::Function/SnapStart",
         "FileSystemConfigs": "AWS::Lambda::Function.FileSystemConfigs",
         "FunctionName": "String",
+        "AcceleratorConfig": "AWS::Lambda::Function/AcceleratorConfig",
         "Runtime": "String",
         "KmsKeyArn": "String",
         "PublishToLatestPublished": "Boolean",
@@ -1865,6 +1878,7 @@
         "LoggingConfig": "AWS::Lambda::Function/LoggingConfig",
         "RecursiveLoop": "AWS::Lambda::Function/RecursiveLoop",
         "Environment": "AWS::Lambda::Function/Environment",
+        "RuntimeConfig": "AWS::Lambda::Function/RuntimeConfig",
         "Arn": "String",
         "EphemeralStorage": "AWS::Lambda::Function/EphemeralStorage",
         "Architectures": "AWS::Lambda::Function.Architectures"
@@ -1889,6 +1903,15 @@
     "AWS::Lambda::Function.Tags": {
       "type": "list",
       "member": "AWS::Lambda::Function/Tag"
+    },
+    "AWS::Lambda::Function/AcceleratorConfig": {
+      "type": "structure",
+      "members": {
+        "AcceleratorMemorySize": "Integer"
+      },
+      "required": [
+        "AcceleratorMemorySize"
+      ]
     },
     "AWS::Lambda::Function/CapacityProviderConfig": {
       "type": "structure",
@@ -2005,6 +2028,17 @@
     "AWS::Lambda::Function/RecursiveLoop": {
       "type": "string"
     },
+    "AWS::Lambda::Function/RuntimeConfig": {
+      "type": "structure",
+      "members": {
+        "RuntimeAlias": "String",
+        "RuntimeArn": "String"
+      },
+      "required": [
+        "RuntimeArn",
+        "RuntimeAlias"
+      ]
+    },
     "AWS::Lambda::Function/RuntimeManagementConfig": {
       "type": "structure",
       "members": {
@@ -2112,6 +2146,89 @@
       "required": [
         "S3Bucket",
         "S3Key"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination": {
+      "type": "structure",
+      "members": {
+        "Id": "String",
+        "ConfigurationSetName": "String",
+        "EventDestination": "AWS::SES::ConfigurationSetEventDestination/EventDestination"
+      },
+      "required": [
+        "ConfigurationSetName",
+        "EventDestination"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination": {
+      "type": "structure",
+      "members": {
+        "DimensionConfigurations": "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination.DimensionConfigurations"
+      }
+    },
+    "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination.DimensionConfigurations": {
+      "type": "list",
+      "member": "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration"
+    },
+    "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration": {
+      "type": "structure",
+      "members": {
+        "DimensionValueSource": "String",
+        "DefaultDimensionValue": "String",
+        "DimensionName": "String"
+      },
+      "required": [
+        "DimensionValueSource",
+        "DefaultDimensionValue",
+        "DimensionName"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination": {
+      "type": "structure",
+      "members": {
+        "EventBusArn": "String"
+      },
+      "required": [
+        "EventBusArn"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination": {
+      "type": "structure",
+      "members": {
+        "Name": "String",
+        "Enabled": "Boolean",
+        "MatchingEventTypes": "AWS::SES::ConfigurationSetEventDestination/EventDestination.MatchingEventTypes",
+        "CloudWatchDestination": "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination",
+        "KinesisFirehoseDestination": "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination",
+        "SnsDestination": "AWS::SES::ConfigurationSetEventDestination/SnsDestination",
+        "EventBridgeDestination": "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination"
+      },
+      "required": [
+        "MatchingEventTypes"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination.MatchingEventTypes": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination": {
+      "type": "structure",
+      "members": {
+        "IAMRoleARN": "String",
+        "DeliveryStreamARN": "String"
+      },
+      "required": [
+        "IAMRoleARN",
+        "DeliveryStreamARN"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/SnsDestination": {
+      "type": "structure",
+      "members": {
+        "TopicARN": "String"
+      },
+      "required": [
+        "TopicARN"
       ]
     },
     "Boolean": {

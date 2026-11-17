@@ -2,6 +2,7 @@ package io.floci.aws.services.lambda;
 
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -11,14 +12,10 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
@@ -49,7 +46,7 @@ class LambdaExecutionRoleDockerIntegrationTest {
         String functionName = "execution-role-" + suffix;
         String roleName = "LambdaDockerRole" + suffix;
         String roleArn = "arn:aws:iam::" + ACCOUNT_ID + ":role/" + roleName;
-        iamService.createRole(roleName, "/", "{}", null, 0, null);
+        iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePolicy(roleName, "RuntimePolicy", """
                 {
                   "Version": "2012-10-17",
@@ -144,13 +141,7 @@ class LambdaExecutionRoleDockerIntegrationTest {
                   };
                 };
                 """;
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(handler.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
+        return LambdaCodeFixtures.nodeJsZipBase64(handler);
     }
 
     private boolean isDockerAvailable() {

@@ -11,12 +11,11 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.math.BigInteger;
 import java.security.interfaces.RSAPublicKey;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -53,12 +52,14 @@ public class EksOidcWellKnownController {
 
     @GET
     @Path(".well-known/openid-configuration")
-    public Response openIdConfiguration(@PathParam("name") String clusterName) {
-        String issuer = requireIssuer(clusterName);
+    public Response openIdConfiguration(@PathParam("name") String clusterName,
+                                        @QueryParam("region") String region) {
+        Cluster cluster = eksService.findClusterForFlociRoute(clusterName, region);
+        String issuer = requireIssuer(cluster, clusterName);
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("issuer", issuer);
-        body.put("jwks_uri", jwksUri(clusterName));
+        body.put("jwks_uri", jwksUri(clusterName, eksService.clusterRegion(cluster)));
         body.put("authorization_endpoint", "urn:kubernetes:programmatic_authorization");
         body.put("response_types_supported", List.of("id_token"));
         body.put("subject_types_supported", List.of("public"));
@@ -69,9 +70,10 @@ public class EksOidcWellKnownController {
 
     @GET
     @Path("keys")
-    public Response keys(@PathParam("name") String clusterName) {
-        requireIssuer(clusterName);
-        ClusterOidcKey key = oidcService.findKeyByCluster(clusterName)
+    public Response keys(@PathParam("name") String clusterName, @QueryParam("region") String region) {
+        Cluster cluster = eksService.findClusterForFlociRoute(clusterName, region);
+        requireIssuer(cluster, clusterName);
+        ClusterOidcKey key = oidcService.findKeyByCluster(eksService.clusterKey(cluster))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No OIDC signing key for cluster: " + clusterName, 404));
 
@@ -81,14 +83,13 @@ public class EksOidcWellKnownController {
         jwk.put("alg", "RS256");
         jwk.put("use", "sig");
         jwk.put("kid", key.getKeyId());
-        jwk.put("n", base64UrlEncodeUnsigned(publicKey.getModulus()));
-        jwk.put("e", base64UrlEncodeUnsigned(publicKey.getPublicExponent()));
+        jwk.put("n", Base64Url.encodeUnsigned(publicKey.getModulus()));
+        jwk.put("e", Base64Url.encodeUnsigned(publicKey.getPublicExponent()));
 
         return Response.ok(Map.of("keys", List.of(jwk))).build();
     }
 
-    private String requireIssuer(String clusterName) {
-        Cluster cluster = eksService.describeCluster(clusterName);
+    private String requireIssuer(Cluster cluster, String clusterName) {
         String issuer = cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
                 ? cluster.getIdentity().getOidc().getIssuer()
                 : null;
@@ -99,19 +100,12 @@ public class EksOidcWellKnownController {
         return issuer;
     }
 
-    private String jwksUri(String clusterName) {
-        return config.effectiveBaseUrl() + "/_floci/eks/clusters/" + clusterName + "/oidc/keys";
-    }
-
     /**
-     * Encodes an RSA parameter as an unsigned big-endian base64url value, dropping the leading zero
-     * byte {@link BigInteger#toByteArray()} adds for sign — JWK requires the unsigned form.
+     * The key route of the cluster discovery resolved. It names the cluster's Region, since a verifier
+     * follows it without the discovery request's context, and cluster names are unique only within a
+     * Region of an account.
      */
-    private String base64UrlEncodeUnsigned(BigInteger value) {
-        byte[] bytes = value.toByteArray();
-        if (bytes.length > 1 && bytes[0] == 0) {
-            bytes = Arrays.copyOfRange(bytes, 1, bytes.length);
-        }
-        return Base64Url.encode(bytes);
+    private String jwksUri(String clusterName, String region) {
+        return config.effectiveBaseUrl() + "/_floci/eks/clusters/" + clusterName + "/oidc/keys?region=" + region;
     }
 }

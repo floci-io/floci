@@ -1,12 +1,19 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.services.lambda.LambdaService;
+import io.floci.aws.services.lambda.model.LambdaAlias;
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * End-to-end check that CloudFormation provisions the Lambda addressing
@@ -17,6 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @QuarkusTest
 class CloudFormationLambdaAddressingIntegrationTest {
+
+    @Inject
+    LambdaService lambdaService;
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
@@ -260,5 +270,139 @@ class CloudFormationLambdaAddressingIntegrationTest {
         // and it never drops out of DescribeStacks — so waiting for the stack to disappear
         // exercises all three delete paths.
         CfnStackWaits.awaitStackDeleted(stackName);
+    }
+
+    @Test
+    void updateStackThatDropsTheAliasDescriptionClearsItAndAReAddSetsItAgain() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-alias-desc-drop-" + suffix;
+        String fnName = "alias-desc-drop-fn-" + suffix;
+        deploy("CreateStack", stackName, aliasTemplate(fnName, ", \"Description\": \"orig\"", "0.1"),
+                "CREATE_COMPLETE");
+        assertEquals("orig", lambdaService.getAlias("us-east-1", fnName, "live").getDescription());
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName, "", "0.1"), "UPDATE_COMPLETE");
+        assertNull(lambdaService.getAlias("us-east-1", fnName, "live").getDescription());
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName, ", \"Description\": \"back\"", "0.1"),
+                "UPDATE_COMPLETE");
+        assertEquals("back", lambdaService.getAlias("us-east-1", fnName, "live").getDescription());
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+    }
+
+    @Test
+    void updateStackWhoseAliasDescriptionBecomesNoValueClearsIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-alias-desc-novalue-" + suffix;
+        String fnName = "alias-desc-novalue-fn-" + suffix;
+        deploy("CreateStack", stackName, aliasTemplate(fnName, ", \"Description\": \"orig\"", "0.1"),
+                "CREATE_COMPLETE");
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName,
+                ", \"Description\": {\"Fn::If\": [\"Off\", {\"Ref\": \"AWS::NoValue\"}, \"orig\"]}", "0.1"),
+                "UPDATE_COMPLETE");
+
+        assertNull(lambdaService.getAlias("us-east-1", fnName, "live").getDescription());
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+    }
+
+    @Test
+    void changedAliasDescriptionAppliesAndAnEmptyOneIsStoredAsGivenUntilALaterDropClearsIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-alias-desc-empty-" + suffix;
+        String fnName = "alias-desc-empty-fn-" + suffix;
+        deploy("CreateStack", stackName, aliasTemplate(fnName, ", \"Description\": \"orig\"", "0.1"),
+                "CREATE_COMPLETE");
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName, ", \"Description\": \"changed\"", "0.1"),
+                "UPDATE_COMPLETE");
+        assertEquals("changed", lambdaService.getAlias("us-east-1", fnName, "live").getDescription());
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName, ", \"Description\": \"\"", "0.1"),
+                "UPDATE_COMPLETE");
+        assertEquals("", lambdaService.getAlias("us-east-1", fnName, "live").getDescription());
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName, "", "0.1"), "UPDATE_COMPLETE");
+        assertNull(lambdaService.getAlias("us-east-1", fnName, "live").getDescription());
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+    }
+
+    @Test
+    void aliasDescriptionSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-alias-desc-outside-" + suffix;
+        String fnName = "alias-desc-outside-fn-" + suffix;
+        deploy("CreateStack", stackName, aliasTemplate(fnName, "", "0.1"), "CREATE_COMPLETE");
+        lambdaService.updateAlias("us-east-1", fnName, "live", null, "outside", null);
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName, "", "0.2"), "UPDATE_COMPLETE");
+
+        LambdaAlias stored = lambdaService.getAlias("us-east-1", fnName, "live");
+        assertEquals("outside", stored.getDescription());
+        assertEquals(Map.of("2", 0.2), stored.getRoutingConfig());
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+    }
+
+    @Test
+    void droppingTheAliasDescriptionLeavesTheVersionAndTheRoutingConfigAlone() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-alias-desc-others-" + suffix;
+        String fnName = "alias-desc-others-fn-" + suffix;
+        deploy("CreateStack", stackName, aliasTemplate(fnName, ", \"Description\": \"orig\"", "0.1"),
+                "CREATE_COMPLETE");
+        String version = lambdaService.getAlias("us-east-1", fnName, "live").getFunctionVersion();
+
+        deploy("UpdateStack", stackName, aliasTemplate(fnName, "", "0.1"), "UPDATE_COMPLETE");
+
+        LambdaAlias stored = lambdaService.getAlias("us-east-1", fnName, "live");
+        assertEquals(version, stored.getFunctionVersion());
+        assertEquals(Map.of("2", 0.1), stored.getRoutingConfig());
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+    }
+
+    private static void deploy(String action, String stackName, String template, String expectedStatus) {
+        CfnRequests.deploy(action, stackName, template, CFN_AUTH, expectedStatus, "CAPABILITY_IAM");
+    }
+
+    /** A function, a published version and the alias {@code live}; {@code aliasExtras} is appended to the alias properties. */
+    private static String aliasTemplate(String fnName, String aliasExtras, String routingWeight) {
+        return """
+                {
+                  "Conditions": {"Off": {"Fn::Equals": ["a", "a"]}},
+                  "Resources": {
+                    "Role": {
+                      "Type": "AWS::IAM::Role",
+                      "Properties": {
+                        "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [
+                          {"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]}
+                      }
+                    },
+                    "Fn": {
+                      "Type": "AWS::Lambda::Function",
+                      "Properties": {
+                        "FunctionName": "%s",
+                        "Runtime": "python3.12",
+                        "Handler": "index.handler",
+                        "Role": {"Fn::GetAtt": ["Role", "Arn"]},
+                        "Code": {"ZipFile": "def handler(e, c): return 'ok'"}
+                      }
+                    },
+                    "Ver": {
+                      "Type": "AWS::Lambda::Version",
+                      "Properties": {"FunctionName": {"Ref": "Fn"}}
+                    },
+                    "Live": {
+                      "Type": "AWS::Lambda::Alias",
+                      "Properties": {
+                        "FunctionName": {"Ref": "Fn"},
+                        "Name": "live",
+                        "FunctionVersion": {"Fn::GetAtt": ["Ver", "Version"]},
+                        "RoutingConfig": {"AdditionalVersionWeights": [
+                          {"FunctionVersion": "2", "FunctionWeight": %s}]}%s
+                      }
+                    }
+                  }
+                }
+                """.formatted(fnName, routingWeight, aliasExtras);
     }
 }

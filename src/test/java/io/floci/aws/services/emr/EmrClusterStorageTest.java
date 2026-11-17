@@ -1,9 +1,11 @@
 package io.floci.aws.services.emr;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.CopyArchiveFromContainerCmd;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.InspectNetworkCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.ListNetworksCmd;
@@ -11,10 +13,14 @@ import com.github.dockerjava.api.command.ListVolumesCmd;
 import com.github.dockerjava.api.command.ListVolumesResponse;
 import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.DockerException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerHostConfig;
+import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.ContainerNetworkSettings;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Network;
+import com.github.dockerjava.api.model.NetworkSettings;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.floci.aws.core.common.ContainerTeardown;
@@ -26,15 +32,30 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.model.SessionCreds;
+import io.floci.aws.services.lambda.launcher.BootstrapProcess;
 import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
+import io.floci.aws.services.s3.S3Service;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,11 +72,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -63,6 +89,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -79,6 +106,14 @@ class EmrClusterStorageTest {
     private static final String HOST = "ip-10-0-0-1.ec2.internal";
     private static final String READY = "test -f /tmp/floci-hdfs-ready";
     private static final BooleanSupplier NOT_STOPPED = () -> false;
+    private static final String CORE_HOST = "ip-10-1-0-1.ec2.internal";
+    private static final String TASK_HOST = "ip-10-2-0-1.ec2.internal";
+    private static final ClusterStorage.Node CORE_NODE = new ClusterStorage.Node("1-1", CORE_HOST, true);
+    private static final ClusterStorage.Node TASK_NODE = new ClusterStorage.Node("2-1", TASK_HOST, false);
+    private static final ClusterStorage.Yarn TWO_NODES = new ClusterStorage.Yarn(4096, 4)
+            .onNodes(List.of(CORE_NODE, TASK_NODE), 1, "s3://logs/j-1/containers/");
+    private static final ClusterStorage.Yarn CORE_ONLY = new ClusterStorage.Yarn(4096, 4)
+            .onNodes(List.of(CORE_NODE), 1, "s3://logs/j-1/containers/");
     // A cluster with Hive, whose EC2 instance profile's role is r, with no core-site or hive-site.
     private static final ClusterStorage.HiveMetastore METASTORE =
             new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", Map.of());
@@ -91,9 +126,12 @@ class EmrClusterStorageTest {
     private final LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
     private final LambdaExecutionRoleCredentials roleCredentials = mock(LambdaExecutionRoleCredentials.class);
     private final CurrentContainerNetworkResolver currentContainer = mock(CurrentContainerNetworkResolver.class);
+    private final S3Service s3 = mock(S3Service.class);
     private final EmrClusterStorage storage = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
-            roleCredentials, currentContainer, config);
+            roleCredentials, currentContainer, config, s3, Duration.ofSeconds(120), System::nanoTime);
     private final String hdfsName = ContainerStorageHelper.dockerName(config, "emr-j-1-hdfs");
+    private final String coreName = ContainerStorageHelper.dockerName(config, "emr-j-1-node-1-1");
+    private final String taskName = ContainerStorageHelper.dockerName(config, "emr-j-1-node-2-1");
 
     @BeforeEach
     void docker() {
@@ -105,10 +143,1021 @@ class EmrClusterStorageTest {
         when(lifecycle.resolveImageForLaunch(IMAGE, ImagePullBehavior.PREFER_CACHED, null))
                 .thenReturn(new ImageCacheService.LaunchImage(IMAGE, null));
         when(spec.build()).thenReturn(new ContainerSpec(IMAGE));
+        // The cluster's network's subnet, which lets its nodes join the steps' network too.
+        clusterSubnet("172.20.0.0/16");
         // No other cluster's HDFS runs.
         ListContainersCmd running = mock(ListContainersCmd.class, RETURNS_SELF);
         when(docker.listContainersCmd()).thenReturn(running);
         when(running.exec()).thenReturn(List.of());
+        // No node's volume is there without its container, and Docker removes the volumes it is asked to.
+        nodeVolumes();
+        when(lifecycle.removeVolume(anyString())).thenReturn(true);
+    }
+
+    @Test
+    void aClusterWithCoreAndTaskNodesRunsEachInAContainerOfItsOwn() {
+        nodesStart(coreName, taskName);
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network",
+                null, () -> TWO_NODES, NOT_STOPPED);
+
+        assertEquals(1, started.replication());
+        verify(spec).withName(coreName);
+        verify(spec).withName(taskName);
+        verify(lifecycle).ensureVolume(eq(coreName), any());
+        verify(spec).withNamedVolume(coreName, "/mnt");
+        verify(spec).withNamedVolume(taskName, "/mnt");
+        // Each under the name ListInstances gives it, on the cluster's network.
+        verify(spec).withDnsName(CORE_HOST);
+        verify(spec).withDnsName(TASK_HOST);
+        verify(spec).withDnsName(HOST);
+        // Each on the steps' network too, from before it starts, with Floci's DNS, so what runs on it reaches the
+        // containers Floci starts there by the endpoints Floci gives.
+        verify(spec, times(3)).withJoinedNetwork("floci-network");
+        verify(spec, times(3)).withEmbeddedDns();
+        verify(spec).withEnv("FLOCI_NODE_HOST", CORE_HOST);
+        verify(spec).withEnv("FLOCI_NODE_HOST", TASK_HOST);
+        // Only a core node holds a DataNode, and with one the primary node holds neither.
+        verify(spec).withEnv("FLOCI_NODE_CORE", "1");
+        verify(spec).withEnv("FLOCI_NODE_WORKERS", "1");
+        // Each node's files say which it is, before its daemons start.
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "MASTER");
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "CORE");
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "TASK");
+        verify(spec, times(3)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.NODE_INFO + "\n")));
+        // What the primary node has of YARN too, and Floci in reach.
+        verify(spec, times(3)).withEnv("FLOCI_YARN_MEMORY_MB", "4096");
+        verify(spec, times(3)).withEnv("FLOCI_YARN_VCORES", "4");
+        verify(spec, times(3)).withHostDockerInternalOnLinux();
+        verify(spec, times(3)).withJavaTrustStore();
+        verify(spec, times(2)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "n=1; if [ -n \"$FLOCI_NODE_CORE\" ]; then hdfs datanode & n=2; fi;")));
+        // It is ready once the ResourceManager knows it, not when it starts.
+        verify(spec, times(2)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "until curl -sf -m 5 \"http://$FLOCI_HDFS_HOST:8088/ws/v1/cluster/nodes?states=RUNNING\""
+                        + " | grep -q \"\\\"nodeHostName\\\":\\\"$FLOCI_NODE_HOST\\\"\"")));
+        verify(spec, times(2)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "grep -q \"$FLOCI_NODE_HOST:9866\"")));
+        verify(spec, times(3)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "<name>dfs.hosts.exclude</name><value>/tmp/floci-hdfs-conf/dfs.exclude</value>")));
+        // A node that stops is dead to the NameNode after 40s, which a core node that has gone waits for.
+        verify(spec, times(3)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "<name>dfs.namenode.heartbeat.recheck-interval</name><value>5000</value>")));
+        verify(spec, times(3)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "<name>yarn.resourcemanager.nodes.exclude-path</name><value>/tmp/floci-hdfs-conf/yarn.exclude</value>")));
+        // The primary node runs its own DataNode and NodeManager only without core nodes, but a DataNode on a volume
+        // holding one's data, so the blocks on it stay in reach.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "hdfs namenode & n=1; if [ -z \"$FLOCI_NODE_WORKERS\" ] || [ -d /mnt/datanode/current ]; then "
+                        + "hdfs datanode & n=2; fi;")));
+        // The primary node's readiness needs a DataNode of theirs, so they start before it is awaited.
+        InOrder order = inOrder(lifecycle, docker);
+        order.verify(lifecycle, times(3)).createAndStart(any());
+        order.verify(docker).execCreateCmd("c-1");
+        order.verify(docker).execCreateCmd(coreName);
+    }
+
+    @Test
+    void aCoreNodesDataNodeRegistersUnderItsNameAndACopyCountComesFromTheCluster() {
+        nodesStart(coreName, taskName);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                () -> new ClusterStorage.Yarn(4096, 4).onNodes(List.of(CORE_NODE, TASK_NODE), 2, null), NOT_STOPPED);
+
+        verify(spec, times(3)).withEnv("FLOCI_HDFS_REPLICATION", "2");
+        verify(spec, times(3)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "<name>dfs.replication</name><value>${FLOCI_HDFS_REPLICATION:-1}</value>")
+                && entrypoint.get(2).contains("datanode_name=; [ -z \"$FLOCI_NODE_HOST\" ] || datanode_name=\"<property>"
+                        + "<name>dfs.datanode.hostname</name><value>$FLOCI_NODE_HOST</value></property>\"")));
+    }
+
+    @Test
+    void everyNodeRunsItsDaemonsFromTheHadoopItsImageKeepsApart() {
+        nodesStart(coreName, taskName);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                () -> TWO_NODES.withHadoopFolder("/opt"), NOT_STOPPED);
+
+        verify(spec, times(3)).withEnv("FLOCI_HADOOP_FOLDER", "/opt");
+    }
+
+    @Test
+    void aNodeRunningInTheImageIsLeftRunning() {
+        nodesStart(coreName, taskName);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        verify(spec, never()).withName(coreName);
+        verify(spec, never()).withName(taskName);
+        verify(lifecycle, never()).removeIfExistsStrict(coreName);
+    }
+
+    @Test
+    void aNodeWithAnImageOfItsOwnRunsFromItAndStartsAgainWhereItRunsAnother() {
+        nodesStart(coreName, taskName);
+        runningNodes(node(coreName, "running", "sha256:core-node", CORE_HOST, true),
+                node(taskName, "running", IMAGE, TASK_HOST, false));
+        // Each from the image its own bootstrap left: the task node's is new, as a resize added it again.
+        ClusterStorage.Yarn ownImages = new ClusterStorage.Yarn(4096, 4).onNodes(List.of(
+                new ClusterStorage.Node("1-1", CORE_HOST, true, "sha256:core-node"),
+                new ClusterStorage.Node("2-1", TASK_HOST, false, "sha256:task-node")), 1, "s3://logs/j-1/containers/");
+        when(containerBuilder.newContainer("sha256:task-node")).thenReturn(spec);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> ownImages,
+                NOT_STOPPED);
+
+        verify(spec, never()).withName(coreName);
+        verify(spec).withName(taskName);
+        verify(containerBuilder).newContainer("sha256:task-node");
+        verify(containerBuilder, never()).newContainer("sha256:core-node");
+    }
+
+    @Test
+    void aNodeInAnotherImageOrStoppedStartsAgainOnItsData() {
+        nodesStart(coreName, taskName);
+        runningNodes(node(coreName, "running", "sha256:older", CORE_HOST, true),
+                node(taskName, "exited", IMAGE, TASK_HOST, false));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        verify(lifecycle).removeIfExistsStrict(coreName);
+        verify(spec).withName(coreName);
+        verify(spec).withName(taskName);
+        verify(lifecycle, never()).removeVolume(coreName);
+    }
+
+    @Test
+    void nodesOnTheStepsNetworkListenOnTheirClustersNetworkAlone() {
+        nodesStart(coreName, taskName);
+        clusterSubnet("172.20.0.0/16");
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        // The primary and each node: their HDFS and YARN on the cluster's network alone, out of the steps' network's
+        // reach, while what runs on them reaches that network.
+        verify(spec, times(3)).withEnv("FLOCI_HDFS_SUBNET", "172.20.0.0/16");
+    }
+
+    @Test
+    void nodesWhoseNetworksSubnetDockerDoesNotSayStayOnItAlone() {
+        nodesStart(coreName, taskName);
+        clusterSubnet(null);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        // Their daemons could not be kept to the cluster's network, so they do not join another.
+        verify(spec, never()).withJoinedNetwork(any());
+        verify(spec, never()).withEnv(eq("FLOCI_HDFS_SUBNET"), anyString());
+    }
+
+    @Test
+    void aClusterWithHivesPrimaryNodeStaysOffTheStepsNetworkAsItsMetastoreListensEverywhere() {
+        nodesStart(coreName, taskName);
+        when(awsEnv.flociEndpoint()).thenReturn("http://floci:4566");
+        when(awsEnv.flociEndpoint(false)).thenReturn("http://host.docker.internal:4566");
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", METASTORE, () -> TWO_NODES, NOT_STOPPED);
+
+        // Its core and task nodes join, the primary does not; the executors run on the core and task nodes alone, so
+        // they reach Floci as the steps do.
+        verify(spec, times(2)).withJoinedNetwork("floci-network");
+        assertEquals("http://floci:4566", started.flociEndpoint());
+    }
+
+    @Test
+    void aClusterWithHiveAndNoCoreNodeHasItsExecutorsReachFlociOnItsOwnNetwork() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
+        when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-7", hdfsName)).thenReturn("172.18.0.8");
+        ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
+        when(awsEnv.flociEndpoint(false)).thenReturn("http://host.docker.internal:4566");
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", METASTORE, () -> new ClusterStorage.Yarn(4096, 4), NOT_STOPPED);
+
+        // The executors run on the primary node, which stays off the steps' network.
+        verify(spec, never()).withJoinedNetwork(any());
+        assertEquals("http://host.docker.internal:4566", started.flociEndpoint());
+    }
+
+    @Test
+    void aNodeListensOnItsAddressInItsClustersSubnet(@TempDir Path folder) throws Exception {
+        nodesStart(coreName, taskName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        ArgumentCaptor<List<String>> entrypoints = ArgumentCaptor.captor();
+        verify(spec, times(3)).withEntrypoint(entrypoints.capture());
+        String script = entrypoints.getAllValues().getFirst().get(2);
+        int start = script.indexOf("if [ -n \"${FLOCI_HDFS_SUBNET:-}\" ]; then");
+        assertTrue(start >= 0, script);
+        String end = "> /tmp/floci-hdfs-bind || exit";
+        Path bind = folder.resolve("bind");
+        String setup = script.substring(start, script.indexOf(end, start) + end.length())
+                .replace("/tmp/floci-hdfs-bind", bind.toString());
+        // A node on the cluster's network and the steps' one, as hostname -I lists its addresses.
+        String addresses = "hostname() { echo '172.30.0.5 172.20.3.7 fd00::7'; }\n";
+
+        assertEquals(0, BootstrapProcess.run(shell(addresses + setup, "172.20.0.0/16")).exit());
+        assertEquals("172.20.3.7", Files.readString(bind).strip());
+
+        BootstrapProcess.Result outside = BootstrapProcess.run(shell(addresses + setup, "10.9.0.0/16"));
+        assertEquals(1, outside.exit());
+        assertTrue(outside.output().contains("no address of this node is in 10.9.0.0/16"), outside.output());
+
+        assertEquals(0, BootstrapProcess.run(shell(addresses + setup, null)).exit());
+        assertEquals("0.0.0.0", Files.readString(bind).strip());
+    }
+
+    // A node script's wait until condition holds, which ends the node if one of its daemons exits meanwhile.
+    private static String waitUntil(String condition) {
+        return "until " + condition + "; do [ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; ";
+    }
+
+    // bash running script with FLOCI_HDFS_BIND at 0.0.0.0, and FLOCI_HDFS_SUBNET at subnet unless it is null.
+    private static ProcessBuilder shell(String script, String subnet) {
+        ProcessBuilder shell = new ProcessBuilder("bash", "-c", script);
+        shell.environment().put("FLOCI_HDFS_BIND", "0.0.0.0");
+        if (subnet != null) {
+            shell.environment().put("FLOCI_HDFS_SUBNET", subnet);
+        } else {
+            shell.environment().remove("FLOCI_HDFS_SUBNET");
+        }
+        return shell;
+    }
+
+    // Docker says the cluster's network's subnet is subnet.
+    private void clusterSubnet(String subnet) {
+        InspectNetworkCmd inspect = mock(InspectNetworkCmd.class, RETURNS_SELF);
+        when(docker.inspectNetworkCmd()).thenReturn(inspect);
+        Network network = mock(Network.class, RETURNS_DEEP_STUBS);
+        Network.Ipam.Config config = mock(Network.Ipam.Config.class);
+        when(config.getSubnet()).thenReturn(subnet);
+        when(network.getIpam().getConfig()).thenReturn(List.of(config));
+        when(inspect.exec()).thenReturn(network);
+    }
+
+    @Test
+    void aNodeOnItsClustersNetworkAloneStartsAgainOnItsData() {
+        nodesStart(coreName, taskName);
+        // An earlier Floci's, which it started on its cluster's network alone.
+        Container alone = node(coreName, "running", IMAGE, CORE_HOST, true);
+        ContainerNetworkSettings networks = mock(ContainerNetworkSettings.class);
+        when(networks.getNetworks()).thenReturn(Map.of(hdfsName, new ContainerNetwork()));
+        when(alone.getNetworkSettings()).thenReturn(networks);
+        runningNodes(alone, node(taskName, "running", IMAGE, TASK_HOST, false));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        verify(lifecycle).removeIfExistsStrict(coreName);
+        verify(spec).withName(coreName);
+        verify(spec, never()).withName(taskName);
+        verify(lifecycle, never()).removeVolume(coreName);
+    }
+
+    @Test
+    void aNodeThatStopsBeforeItIsReadyStartsAgainOnceThenFailsTheStep() {
+        nodesStart(coreName);
+        when(lifecycle.probeContainer(coreName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+
+        IllegalStateException failed = assertThrows(IllegalStateException.class,
+                () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                        () -> CORE_ONLY, NOT_STOPPED));
+
+        assertEquals("A node of EMR cluster j-1 stopped before it was ready", failed.getMessage());
+        verify(spec, times(2)).withName(coreName);
+    }
+
+    @Test
+    void aClusterWithOnlyTaskNodesKeepsItsDataNodeAndNodeManagerOnThePrimaryNode() {
+        nodesStart(taskName);
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network",
+                null, () -> new ClusterStorage.Yarn(4096, 4).onNodes(List.of(TASK_NODE), 1, null), NOT_STOPPED);
+
+        verify(spec, never()).withEnv(eq("FLOCI_NODE_WORKERS"), any());
+        verify(spec, never()).withEnv(eq("FLOCI_NODE_CORE"), any());
+        assertEquals(0, started.replication());
+    }
+
+    @Test
+    void aPrimaryNodeThatWorksKeepsItsDataNodeAndNodeManagerBesideItsCoreNodes() {
+        nodesStart(coreName, taskName);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                () -> TWO_NODES.withPrimaryWorking(true), NOT_STOPPED);
+
+        verify(spec).withEnv("FLOCI_NODE_CORE", "1");
+        verify(spec, never()).withEnv(eq("FLOCI_NODE_WORKERS"), any());
+    }
+
+    @Test
+    void aResizeBeforeAStepHasStartedTheNodesStartsNone() {
+        storage.resize("j-1", () -> TWO_NODES);
+
+        verify(lifecycle, never()).createAndStart(any());
+    }
+
+    @Test
+    void aNewNodeStartsOnAResizeFromWhatItsClusterSaysThen() {
+        nodesStart(coreName, taskName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> CORE_ONLY,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true));
+
+        storage.resize("j-1", () -> TWO_NODES);
+
+        verify(spec).withName(taskName);
+        verify(spec, times(1)).withName(coreName);
+    }
+
+    @Test
+    void aFailedResizeIsLoggedAndLeavesTheClusterAsItIs() {
+        nodesStart(coreName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> CORE_ONLY,
+                NOT_STOPPED);
+        when(docker.listContainersCmd()).thenThrow(new IllegalStateException("Docker went away"));
+
+        assertDoesNotThrow(() -> storage.resize("j-1", () -> TWO_NODES));
+    }
+
+    @Test
+    void aTaskNodeNoLongerWantedIsDecommissionedAndGoesWithItsData() throws IOException {
+        nodesStart(coreName, taskName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        String taskLog = "application_1_0001/container_1_0001_01_000002/stdout";
+        nodeLogs(taskName, Map.of(taskLog, "from task"));
+        clearInvocations(lifecycle);
+
+        storage.resize("j-1", () -> CORE_ONLY);
+
+        // Told first: YARN lets a task node go alone, as it holds no HDFS.
+        String told = commands.get(0).get(2);
+        assertTrue(told.contains("printf '" + TASK_HOST + "\\n' > /tmp/floci-hdfs-conf/yarn.exclude.new"), told);
+        assertTrue(told.contains("printf '' > /tmp/floci-hdfs-conf/dfs.exclude.new"), told);
+        assertTrue(told.contains("yarn rmadmin -refreshNodes -g 3600 -server"), told);
+        assertTrue(told.contains("hdfs dfsadmin -refreshNodes"), told);
+        // A refresh that fails takes its list away, so the next round's differs and is read again.
+        assertTrue(told.contains("-server || { rm -f /tmp/floci-hdfs-conf/yarn.exclude; exit 1; }"), told);
+        assertTrue(told.contains("hdfs dfsadmin -refreshNodes || { rm -f /tmp/floci-hdfs-conf/dfs.exclude; exit 1; }"),
+                told);
+        String asked = commands.get(2).get(2);
+        assertTrue(asked.contains("cluster/nodes?states=DECOMMISSIONED\" | grep -q '\"nodeHostName\":\"" + TASK_HOST), asked);
+        assertFalse(asked.contains("Decommissioned"), asked);
+        verify(docker).copyArchiveFromContainerCmd(taskName, "/mnt/yarn/logs/" + taskLog);
+        verify(lifecycle).removeIfExistsStrict(taskName);
+        verify(lifecycle).removeVolume(taskName);
+        verify(lifecycle, never()).removeIfExistsStrict(coreName);
+    }
+
+    @Test
+    void aCoreNodeGoesOnlyOnceHdfsHasMovedItsBlocksAndYarnHasLetItGo() {
+        // Ten seconds on each reading, so the thread sees the NameNode's dead-node interval pass.
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofSeconds(10).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        // HDFS told; told again and asked, not yet done; told again and asked, done; YARN told and asked, done; told
+        // while the NameNode has the node live, then not.
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, hdfsName,
+                List.of(0L, 0L, 1L, 0L, 0L, 0L, 0L), "", "");
+        clearInvocations(lifecycle);
+
+        ticking.resize("j-1", () -> new ClusterStorage.Yarn(4096, 4).onNodes(List.of(TASK_NODE), 1, null));
+
+        String excluded = "printf '" + CORE_HOST + "\\n' > /tmp/floci-hdfs-conf/dfs.exclude.new";
+        String told = commands.get(0).get(2);
+        assertTrue(told.contains(excluded), told);
+        assertTrue(told.contains("printf '' > /tmp/floci-hdfs-conf/yarn.exclude.new"), told);
+        String hdfsAsked = commands.get(2).get(2);
+        assertTrue(hdfsAsked.contains("grep -Eq '" + CORE_HOST + ":9866[^}]*Decommissioned'"), hdfsAsked);
+        String yarnTold = commands.get(5).get(2);
+        assertTrue(yarnTold.contains("printf '" + CORE_HOST + "\\n' > /tmp/floci-hdfs-conf/yarn.exclude.new"),
+                yarnTold);
+        String yarnAsked = commands.get(6).get(2);
+        assertTrue(yarnAsked.contains("DECOMMISSIONED\" | grep -q '\"nodeHostName\":\"" + CORE_HOST), yarnAsked);
+        assertEquals(2, commands.stream().filter(command -> command.get(2).contains("Decommissioned'")).count());
+        assertEquals(1, commands.stream().filter(command -> command.get(2).contains("DECOMMISSIONED\"")).count());
+        String gone = commands.get(7).get(2);
+        assertTrue(gone.contains(excluded), gone);
+        String dead = commands.get(commands.size() - 1).get(2);
+        assertTrue(dead.contains("printf '' > /tmp/floci-hdfs-conf/dfs.exclude.new"), dead);
+        verify(lifecycle).removeIfExistsStrict(coreName);
+        verify(lifecycle).removeVolume(coreName);
+    }
+
+    @Test
+    void aNodeThatStoppedWhileItLeftGoesWithoutWaiting() {
+        nodesStart(coreName, taskName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        when(lifecycle.probeContainer(taskName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        clearInvocations(lifecycle);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> storage.resize("j-1", () -> CORE_ONLY));
+
+        verify(lifecycle).removeIfExistsStrict(taskName);
+    }
+
+    @Test
+    void aNodeNotDecommissionedInTimeGoesAnyway() {
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofHours(2).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        clearInvocations(lifecycle);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> ticking.resize("j-1", () -> CORE_ONLY));
+
+        verify(lifecycle).removeIfExistsStrict(taskName);
+    }
+
+    @Test
+    void aNodeALaterResizeLetsGoHasTheWholeTimeToo() {
+        // A minute on each reading, so the rounds go by.
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofMinutes(1).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        // Neither HDFS nor YARN lets a node go, so each goes when its time is up.
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        AtomicLong coreLetGo = new AtomicLong();
+        AtomicBoolean shrunk = new AtomicBoolean();
+        when(lifecycle.probeContainer(taskName)).thenAnswer(asked -> {
+            // Fifty-nine minutes into the task node's decommissioning, a resize lets the core node go too.
+            if (shrunk.compareAndSet(false, true)) {
+                clock.addAndGet(Duration.ofMinutes(59).toNanos());
+                coreLetGo.set(clock.get());
+                ticking.resize("j-1", () -> new ClusterStorage.Yarn(4096, 4).onNodes(List.of(), 1, null));
+            }
+            return ContainerLiveness.RUNNING;
+        });
+        AtomicLong coreGone = new AtomicLong();
+        doAnswer(removing -> {
+            coreGone.set(clock.get());
+            return null;
+        }).when(lifecycle).removeIfExistsStrict(coreName);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> ticking.resize("j-1", () -> CORE_ONLY));
+
+        assertTrue(coreGone.get() - coreLetGo.get() >= Duration.ofHours(1).toNanos(),
+                "gone " + Duration.ofNanos(coreGone.get() - coreLetGo.get()) + " after it was let go");
+    }
+
+    @Test
+    void aNodeDockerCannotTellTheStateOfIsAskedAgainRatherThanTakenAsGone() {
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofMinutes(30).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        when(lifecycle.probeContainer(taskName)).thenReturn(ContainerLiveness.UNKNOWN);
+        AtomicLong taskGone = new AtomicLong();
+        doAnswer(removing -> {
+            taskGone.set(clock.get());
+            return null;
+        }).when(lifecycle).removeIfExistsStrict(taskName);
+        long letGo = clock.get();
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> ticking.resize("j-1", () -> CORE_ONLY));
+
+        // Not on the first round, as a stopped node would: only once its time was up.
+        assertTrue(taskGone.get() - letGo > Duration.ofHours(1).toNanos(),
+                "gone " + Duration.ofNanos(taskGone.get() - letGo) + " after it was let go");
+    }
+
+    @Test
+    void aCoreNodeThatStopsBeforeHdfsMovedItsBlocksStartsAgainOnItsData() {
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofMinutes(30).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        // It stops before HDFS has moved its blocks, and runs once started again.
+        when(lifecycle.probeContainer(coreName)).thenReturn(ContainerLiveness.NOT_RUNNING, ContainerLiveness.RUNNING);
+        clearInvocations(spec, lifecycle);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20),
+                () -> ticking.resize("j-1", () -> new ClusterStorage.Yarn(4096, 4).onNodes(List.of(TASK_NODE), 1, null)));
+
+        verify(spec).withName(coreName);
+        verify(spec).withNamedVolume(coreName, "/mnt");
+        // Its data goes only after that, here once its time was up.
+        InOrder order = inOrder(lifecycle);
+        order.verify(lifecycle).createAndStart(any());
+        order.verify(lifecycle).removeVolume(coreName);
+    }
+
+    @Test
+    void aCoreNodeThatStopsWhileItLeavesStartsAgainFromTheImageItRan() {
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofMinutes(30).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        // It ran from the image its own bootstrap left.
+        runningNodes(node(coreName, "running", "sha256:core-node", CORE_HOST, true),
+                node(taskName, "running", IMAGE, TASK_HOST, false));
+        when(containerBuilder.newContainer("sha256:core-node")).thenReturn(spec);
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        when(lifecycle.probeContainer(coreName)).thenReturn(ContainerLiveness.NOT_RUNNING, ContainerLiveness.RUNNING);
+        clearInvocations(spec, lifecycle, containerBuilder);
+        ClusterStorage.Yarn taskOnly = new ClusterStorage.Yarn(4096, 4).onNodes(List.of(TASK_NODE), 1, null);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> ticking.resize("j-1", () -> taskOnly));
+
+        verify(containerBuilder).newContainer("sha256:core-node");
+        verify(spec).withName(coreName);
+    }
+
+    @Test
+    void aRoundThatFailsIsTriedAgainOnTheNext() {
+        nodesStart(coreName, taskName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        when(lifecycle.probeContainer(taskName)).thenThrow(new IllegalStateException("Docker went away"))
+                .thenReturn(ContainerLiveness.NOT_RUNNING);
+        clearInvocations(lifecycle);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> storage.resize("j-1", () -> CORE_ONLY));
+
+        verify(lifecycle).removeIfExistsStrict(taskName);
+        verify(lifecycle).removeVolume(taskName);
+    }
+
+    @Test
+    void aNodeWhoseDataDockerKeepsStaysToBeRemovedOnTheNextRound() {
+        nodesStart(coreName, taskName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        when(lifecycle.probeContainer(taskName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.removeVolume(taskName)).thenReturn(false, true);
+        clearInvocations(lifecycle);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> storage.resize("j-1", () -> CORE_ONLY));
+
+        verify(lifecycle, times(2)).removeVolume(taskName);
+        // Its logs are read once, while its container is there.
+        verify(docker, times(1)).copyArchiveFromContainerCmd(taskName, "/mnt/yarn/logs");
+    }
+
+    @Test
+    void aCoreNodeAShutdownCutOffWhileItLeftStartsAgainOnItsDataToBeDecommissioned() {
+        List<Runnable> queued = new ArrayList<>();
+        EmrClusterStorage queuing = queuingDecommissions(queued);
+        nodesStart(coreName, taskName);
+        // Its container went with the shutdown, and only its volume says it was a core node.
+        nodeVolumes(nodeVolume(coreName, CORE_HOST, true));
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+
+        queuing.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                () -> new ClusterStorage.Yarn(4096, 4).onNodes(List.of(TASK_NODE), 1, null), NOT_STOPPED);
+
+        verify(spec).withName(coreName);
+        verify(spec).withNamedVolume(coreName, "/mnt");
+        verify(lifecycle, never()).removeVolume(coreName);
+        String told = commands.get(0).get(2);
+        assertTrue(told.contains("printf '" + CORE_HOST + "\\n' > /tmp/floci-hdfs-conf/dfs.exclude.new"), told);
+        assertEquals(1, queued.size());
+    }
+
+    @Test
+    void aTaskNodesDataAShutdownLeftGoesAsItHoldsNoBlocks() {
+        nodesStart(coreName);
+        nodeVolumes(nodeVolume(taskName, TASK_HOST, false));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> CORE_ONLY,
+                NOT_STOPPED);
+
+        verify(lifecycle).removeVolume(taskName);
+        verify(spec, never()).withName(taskName);
+    }
+
+    @Test
+    void aNodeWhoseStartATeardownPassedGoes() {
+        nodesStart(coreName);
+        AtomicLong starts = new AtomicLong();
+        when(lifecycle.createAndStart(any())).thenAnswer(starting -> {
+            // The second is the core node's, and a shutdown sweeps while Docker creates it.
+            if (starts.incrementAndGet() == 2) {
+                storage.stopManagedContainers();
+            }
+            return new ContainerLifecycleManager.ContainerInfo("c-1", Map.of());
+        });
+
+        assertThrows(ClusterStorage.Stopped.class, () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", null, () -> CORE_ONLY, NOT_STOPPED));
+
+        // Before it was created, by the sweep, and once it was.
+        verify(lifecycle, times(3)).removeIfExistsStrict(coreName);
+    }
+
+    @Test
+    void aNodeWantedAgainWhileItLeavesCarriesOn() {
+        List<Runnable> queued = new ArrayList<>();
+        EmrClusterStorage queuing = queuingDecommissions(queued);
+        nodesStart(coreName, taskName);
+        queuing.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        queuing.resize("j-1", () -> CORE_ONLY);
+        assertEquals(1, queued.size());
+        clearInvocations(lifecycle);
+
+        queuing.resize("j-1", () -> TWO_NODES);
+        queued.get(0).run();
+
+        assertTrue(commands.get(1).get(2).contains("printf '' > /tmp/floci-hdfs-conf/yarn.exclude.new"),
+                commands.get(1).get(2));
+        verify(lifecycle, never()).removeIfExistsStrict(taskName);
+        verify(lifecycle, never()).removeVolume(taskName);
+    }
+
+    @Test
+    void oneThreadDecommissionsACluster() {
+        List<Runnable> queued = new ArrayList<>();
+        EmrClusterStorage queuing = queuingDecommissions(queued);
+        nodesStart(coreName, taskName);
+        queuing.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+
+        queuing.resize("j-1", () -> CORE_ONLY);
+        queuing.resize("j-1", () -> new ClusterStorage.Yarn(4096, 4).onNodes(List.of(), 1, null));
+
+        assertEquals(1, queued.size());
+    }
+
+    @Test
+    void aClusterThatEndsWhileANodeLeavesEndsItsDecommissioning() {
+        List<Runnable> queued = new ArrayList<>();
+        EmrClusterStorage queuing = queuingDecommissions(queued);
+        nodesStart(coreName, taskName);
+        queuing.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        queuing.resize("j-1", () -> CORE_ONLY);
+        int told = commands.size();
+
+        queuing.remove("j-1");
+        queued.get(0).run();
+
+        assertEquals(told, commands.size());
+    }
+
+    @Test
+    void aClustersEndRemovesItsNodesAndTheirDataBeforeItsNetwork() {
+        when(lifecycle.removeNetwork(any())).thenReturn(true);
+        when(lifecycle.removeVolume(any())).thenReturn(true);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+
+        assertTrue(storage.remove("j-1"));
+
+        InOrder order = inOrder(lifecycle);
+        order.verify(lifecycle).removeIfExistsStrict(coreName);
+        order.verify(lifecycle).removeVolume(coreName);
+        order.verify(lifecycle).removeIfExistsStrict(taskName);
+        order.verify(lifecycle).removeVolume(taskName);
+        order.verify(lifecycle).removeIfExistsStrict(hdfsName);
+        order.verify(lifecycle).removeNetwork(hdfsName);
+    }
+
+    @Test
+    void aNodeDockerWillNotRemoveKeepsItsClustersEndGoing() {
+        when(lifecycle.removeNetwork(any())).thenReturn(true);
+        when(lifecycle.removeVolume(any())).thenReturn(true);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true));
+        doThrow(new IllegalStateException("busy")).when(lifecycle).removeIfExistsStrict(coreName);
+
+        assertFalse(storage.remove("j-1"));
+    }
+
+    @Test
+    void aClustersEndRemovesTheDataOfANodeAShutdownLeftWithoutItsContainer() {
+        when(lifecycle.removeNetwork(any())).thenReturn(true);
+        nodeVolumes(nodeVolume(coreName, CORE_HOST, true));
+
+        assertTrue(storage.remove("j-1"));
+
+        verify(lifecycle).removeVolume(coreName);
+    }
+
+    @Test
+    void aClustersEndThatCannotFindItsNodesRemovesTheRestAndIsAskedForAgain() {
+        when(lifecycle.removeNetwork(any())).thenReturn(true);
+        when(docker.listContainersCmd()).thenThrow(new IllegalStateException("Docker went away"));
+
+        assertFalse(storage.remove("j-1"));
+
+        verify(lifecycle).removeIfExistsStrict(hdfsName);
+        verify(lifecycle).removeNetwork(hdfsName);
+        verify(lifecycle).removeVolume(hdfsName);
+    }
+
+    @Test
+    void aResetRemovesTheNodesAndLeavesTheirDataForTheNextStep() {
+        nodesStart(coreName);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> CORE_ONLY,
+                NOT_STOPPED);
+        clearInvocations(lifecycle);
+
+        storage.stopManagedContainers();
+
+        verify(lifecycle).removeIfExistsStrict(coreName);
+        verify(lifecycle, never()).removeVolume(coreName);
+    }
+
+    @Test
+    void theNodesOfAClusterThatHasEndedGoAtStartAndThoseOfOneUpStay() {
+        Map<String, Container> byCluster = new LinkedHashMap<>();
+        String otherName = ContainerStorageHelper.dockerName(config, "emr-j-2-node-1-1");
+        Container gone = nodeOf("j-1", coreName);
+        Container up = nodeOf("j-2", otherName);
+        byCluster.put(coreName, gone);
+        byCluster.put(otherName, up);
+        AtomicReference<Map<String, String>> filter = new AtomicReference<>();
+        ListContainersCmd list = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(docker.listContainersCmd()).thenReturn(list);
+        when(list.withLabelFilter(any(Map.class))).thenAnswer(asked -> {
+            filter.set(asked.getArgument(0));
+            return list;
+        });
+        when(list.exec()).thenAnswer(reading -> "emr-node".equals(filter.get().get(ContainerStorageHelper.COMPONENT_LABEL))
+                ? List.copyOf(byCluster.values()) : List.of());
+        ListNetworksCmd networks = mock(ListNetworksCmd.class, RETURNS_SELF);
+        when(docker.listNetworksCmd()).thenReturn(networks);
+        when(networks.exec()).thenReturn(List.of());
+        ListVolumesCmd volumes = mock(ListVolumesCmd.class, RETURNS_SELF);
+        when(docker.listVolumesCmd()).thenReturn(volumes);
+        when(volumes.exec()).thenReturn(mock(ListVolumesResponse.class));
+
+        storage.removeAllBut(Set.of("j-2"));
+
+        verify(lifecycle).removeIfExistsStrict(coreName);
+        verify(lifecycle, never()).removeIfExistsStrict(otherName);
+    }
+
+    @Test
+    void aClustersMetadataNetworkIsItsOwnWithItsRelayReachingFlociOnTheHost() {
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(awsEnv.flociEndpoint(false)).thenReturn("http://host.docker.internal:4566");
+
+        String network = withRelays(relays).metadataNetwork("j-1", "123456789012", "us-east-1", "sha256:image",
+                "floci-network");
+
+        assertEquals(hdfsName, network);
+        verify(lifecycle).ensureNetwork(eq(hdfsName), any());
+        verify(relays).start("j-1", "123456789012", "us-east-1", hdfsName, "sha256:image", "host.docker.internal");
+    }
+
+    @Test
+    void aClusterWhoseStepsShareANamespaceHasNoMetadataRelay() {
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(containerBuilder.resolveDockerNetwork(Optional.of("host"))).thenReturn(Optional.of("host"));
+
+        assertNull(withRelays(relays).metadataNetwork("j-1", "123456789012", "us-east-1", "sha256:image", "host"));
+
+        verify(relays, never()).start(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void eachNodeIsGivenAnAddressItsRelayAnswersAsThatNodeAndItGoesWithIt() {
+        nodesStart(coreName, taskName);
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        Map<String, Instance> instances = Map.of("0-1", nodeInstance("i-00000000000000001"),
+                "1-1", nodeInstance("i-00000000000000002"), "2-1", nodeInstance("i-00000000000000003"));
+        when(relays.give("j-1", instances.get("0-1"))).thenReturn("169.254.0.1");
+        when(relays.give("j-1", instances.get("1-1"))).thenReturn("169.254.0.2");
+        when(relays.give("j-1", instances.get("2-1"))).thenReturn("169.254.0.3");
+        when(relays.serves("j-1")).thenReturn(true);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", instances::get);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        verify(spec).withLinkLocalIp("169.254.0.1");
+        verify(spec).withLinkLocalIp("169.254.0.2");
+        verify(spec).withLinkLocalIp("169.254.0.3");
+
+        storage.remove("j-1");
+
+        // The primary's with its container; the rest with the relay, which releases every address on its network.
+        verify(relays).release("169.254.0.1");
+        verify(relays).stop("j-1");
+    }
+
+    @Test
+    void aNodeAnEarlierFlociGaveAnAddressStartsAgainSoNoAddressIsGivenTwice() {
+        nodesStart(coreName, taskName);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(relays.give(eq("j-1"), any())).thenReturn("169.254.0.9");
+        when(relays.serves("j-1")).thenReturn(true);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", node -> nodeInstance("i-" + node));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        verify(lifecycle).removeIfExistsStrict(coreName);
+        verify(lifecycle).removeIfExistsStrict(taskName);
+        verify(spec).withName(coreName);
+        verify(spec).withName(taskName);
+    }
+
+    @Test
+    void theMetadataRelaysAnEarlierFlociLeftGoAtStart() {
+        Container relay = mock(Container.class);
+        when(relay.getId()).thenReturn("relay-old");
+        when(relay.getNames()).thenReturn(new String[] {"/floci-emr-j-1-metadata"});
+        when(relay.getLabels()).thenReturn(Map.of(ContainerStorageHelper.COMPONENT_LABEL, "emr-metadata",
+                ContainerStorageHelper.RESOURCE_ID_LABEL, "j-1"));
+        AtomicReference<Map<String, String>> filter = new AtomicReference<>();
+        ListContainersCmd list = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(docker.listContainersCmd()).thenReturn(list);
+        when(list.withLabelFilter(any(Map.class))).thenAnswer(asked -> {
+            filter.set(asked.getArgument(0));
+            return list;
+        });
+        when(list.exec()).thenAnswer(reading -> "emr-metadata".equals(filter.get()
+                .get(ContainerStorageHelper.COMPONENT_LABEL)) ? List.of(relay) : List.of());
+        ListNetworksCmd networks = mock(ListNetworksCmd.class, RETURNS_SELF);
+        when(docker.listNetworksCmd()).thenReturn(networks);
+        when(networks.exec()).thenReturn(List.of());
+        ListVolumesCmd volumes = mock(ListVolumesCmd.class, RETURNS_SELF);
+        when(docker.listVolumesCmd()).thenReturn(volumes);
+        when(volumes.exec()).thenReturn(mock(ListVolumesResponse.class));
+
+        storage.removeAllBut(Set.of("j-1"));
+
+        verify(lifecycle).stopAndRemove("relay-old", null, 0);
+    }
+
+    @Test
+    void aNodeDockerKeepsKeepsItsAddressSoNoOtherContainerIsGivenIt() {
+        nodesStart(coreName, taskName);
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        Map<String, Instance> instances = Map.of("0-1", nodeInstance("i-00000000000000001"),
+                "1-1", nodeInstance("i-00000000000000002"), "2-1", nodeInstance("i-00000000000000003"));
+        when(relays.give("j-1", instances.get("0-1"))).thenReturn("169.254.0.1");
+        when(relays.give("j-1", instances.get("1-1"))).thenReturn("169.254.0.2");
+        when(relays.give("j-1", instances.get("2-1"))).thenReturn("169.254.0.3");
+        when(relays.serves("j-1")).thenReturn(true);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", instances::get);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        doThrow(new IllegalStateException("Docker kept it")).doNothing().when(lifecycle).removeIfExistsStrict(coreName);
+
+        storage.stopManagedContainers();
+
+        // Its container may still be there, at that address, which the relay would answer as another's.
+        verify(relays, never()).release("169.254.0.2");
+        verify(relays).release("169.254.0.3");
+
+        storage.stopManagedContainers();
+
+        verify(relays).release("169.254.0.2");
+    }
+
+    @Test
+    void anHdfsInTheHostsNamespaceFoundRunningServesEachStepAsNoRelayServesItsCluster() {
+        when(containerBuilder.resolveDockerNetwork(Optional.of("host"))).thenReturn(Optional.of("host"));
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        runningOn(hdfsName, "host");
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", node -> nodeInstance("i-" + node));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED);
+
+        // The other steps of its cluster use it.
+        verify(lifecycle, never()).removeIfExistsStrict(hdfsName);
+        verify(lifecycle, never()).createAndStart(any());
+        verify(relays, never()).give(anyString(), any());
+    }
+
+    @Test
+    void aRelayDockerKeepsLeavesItsClustersStorageToBeRemovedAgain() {
+        when(lifecycle.removeNetwork(any())).thenReturn(true);
+        when(lifecycle.removeVolume(any())).thenReturn(true);
+        runningNodes();
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(relays.stop("j-1")).thenReturn(false, true);
+        EmrClusterStorage storage = withRelays(relays);
+
+        assertFalse(storage.remove("j-1"));
+        assertTrue(storage.remove("j-1"));
+    }
+
+    private EmrClusterStorage withRelays(EmrMetadataRelays relays) {
+        return new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials, currentContainer, config,
+                s3, Duration.ofSeconds(120), System::nanoTime, Runnable::run, Duration.ZERO, relays);
+    }
+
+    private static Instance nodeInstance(String id) {
+        Instance instance = new Instance();
+        instance.setInstanceId(id);
+        return instance;
+    }
+
+    @Test
+    void aStoppedNodesLogsComeFromTheWholeFolderOnceAndNeverItsLaunchScript() throws IOException {
+        runningNodes(node(taskName, "exited", IMAGE, TASK_HOST, false));
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        // A decommissioned node's NodeManager exits, which ends its container, and Docker refuses a command there.
+        when(lifecycle.probeContainer(taskName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        String container = "logs/application_1_0001/container_1_0001_01_000002/";
+        byte[] logs = tar(Map.of(container + "stdout", "from task", container + "launch_container.sh", "secret"));
+        CopyArchiveFromContainerCmd copy = mock(CopyArchiveFromContainerCmd.class);
+        when(copy.exec()).thenAnswer(reading -> new ByteArrayInputStream(logs));
+        when(docker.copyArchiveFromContainerCmd(taskName, "/mnt/yarn/logs")).thenReturn(copy);
+
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+
+        verify(s3, times(1)).putObjectFromStream(eq("logs"),
+                eq("j-1/containers/application_1_0001/container_1_0001_01_000002/stdout.gz"), any(), anyString(), any());
+        verify(s3, times(1)).putObjectFromStream(anyString(), anyString(), any(), anyString(), any());
+        verify(docker, never()).execCreateCmd(taskName);
+    }
+
+    @Test
+    void aStoppedPrimaryNodeWithNoNodeManagerHasNoLogsAndNoFailure() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(docker.copyArchiveFromContainerCmd(hdfsName, "/mnt/yarn/logs")).thenThrow(new NotFoundException("none"));
+
+        assertDoesNotThrow(() -> storage.archiveContainerLogs("j-1", "123456789012", "us-east-1",
+                "s3://logs/j-1/containers/"));
+    }
+
+    @Test
+    void nodesThatCannotBeFoundLeaveTheStepAsItEnded() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(docker.copyArchiveFromContainerCmd(hdfsName, "/mnt/yarn/logs")).thenThrow(new NotFoundException("none"));
+        when(docker.listContainersCmd()).thenThrow(new IllegalStateException("Docker went away"));
+
+        assertDoesNotThrow(() -> storage.archiveContainerLogs("j-1", "123456789012", "us-east-1",
+                "s3://logs/j-1/containers/"));
+    }
+
+    @Test
+    void containerLogsComeFromEveryNode() throws IOException {
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        // The primary node runs no NodeManager, so it lists none.
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        nodeLogs(coreName, Map.of("application_1_0001/container_1_0001_01_000001/stdout", "from core"));
+        nodeLogs(taskName, Map.of("application_1_0001/container_1_0001_01_000002/stdout", "from task"));
+
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+
+        verify(s3, times(2)).putObjectFromStream(anyString(), anyString(), any(), anyString(), any());
     }
 
     @Test
@@ -121,7 +1170,7 @@ class EmrClusterStorageTest {
         List<List<String>> looks = ContainerExecStubs.completeEveryExec(docker, "c-1", List.of(1L, 0L), "", "");
 
         SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "floci-network", null, NOT_STOPPED);
+                "floci-network", null, null, NOT_STOPPED);
 
         SparkJobRunner.Storage volumes = storage.volumes("j-1");
         assertEquals(volumes.withHdfs(HOST, "172.18.0.5", hdfsName), started);
@@ -144,8 +1193,12 @@ class EmrClusterStorageTest {
         verify(spec).withLabels(argThat(labels -> "emr-hdfs".equals(labels.get(ContainerStorageHelper.COMPONENT_LABEL))
                 && "j-1".equals(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))));
         // Its host name leads to the container's own address, where the DataNode registers, unless it listens on one
-        // address only, which its name then leads to.
-        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).startsWith(String.join("\n",
+        // address only, which its name then leads to: its address on the cluster's network where it joins another (see
+        // aNodeListensOnItsAddressInItsClustersSubnet), which is found first.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).startsWith(
+                "if [ -n \"${FLOCI_HDFS_SUBNET:-}\" ]; then\n")
+                && entrypoint.get(2).contains(String.join("\n",
+                "echo \"$FLOCI_HDFS_BIND\" > /tmp/floci-hdfs-bind || exit",
                 "address=$FLOCI_HDFS_BIND; [ \"$address\" != 0.0.0.0 ] || address=$(hostname -i | awk '{print $1}')",
                 "echo \"$address $FLOCI_HDFS_HOST\" >> /etc/hosts || exit\n"))));
         // Every one of its daemons' listeners is on that address.
@@ -163,25 +1216,30 @@ class EmrClusterStorageTest {
                         + " 'log4j.appender.console=org.apache.log4j.ConsoleAppender'")));
         // The NameNode answering on its port is its own, the one its format gave the ClusterId, not another
         // cluster's sharing its namespace.
-        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
-                "cid=$(sed -n \"s/^clusterID=//p\" /mnt/namenode/current/VERSION); hdfs namenode & hdfs datanode &",
-                "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "cid=$(sed -n \"s/^clusterID=//p\" /mnt/namenode/current/VERSION);"
+                        + " hdfs namenode & n=1; if [ -z \"$FLOCI_NODE_WORKERS\" ] || [ -d /mnt/datanode/current ];"
+                        + " then hdfs datanode & n=2; fi; dirs=\"/tmp /user/hadoop\";")
+                && entrypoint.get(2).contains(String.join(" ",
+                "until curl -sf -m 5 \"http://$(cat /tmp/floci-hdfs-bind):9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
                 "| grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do",
-                "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done;"))));
+                "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;"))));
         // The image is there before the start's deadline.
         verify(lifecycle).resolveImageForLaunch(IMAGE, ImagePullBehavior.PREFER_CACHED, null);
         // Ready once the DataNode has joined and the NameNode has left safe mode, as its JMX says; a daemon that
         // exits ends it.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
-                "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState\"",
-                "| grep -q \"\\\"NumLiveDataNodes\\\" : 1,\"; do",
-                "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done;",
-                "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
+                "until curl -sf -m 5 \"http://$(cat /tmp/floci-hdfs-bind):9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState\"",
+                "| grep -q \"\\\"NumLiveDataNodes\\\" : [1-9]\"; do",
+                "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;",
+                "until curl -sf -m 5 \"http://$(cat /tmp/floci-hdfs-bind):9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
                 "| grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do",
-                "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done;",
-                "hdfs dfs -mkdir -p /tmp /user/hadoop || exit 1;"))
+                "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;",
+                "hdfs dfs -mkdir -p $dirs || exit 1;"))
                 && entrypoint.get(2).contains(String.join(" ", "fi;", "touch /tmp/floci-hdfs-ready;",
-                "wait -n; rm -f /tmp/floci-hdfs-ready; kill $(jobs -rp) 2>/dev/null; exit 1'"))));
+                // Not wait -n, which an emr-6.x image's bash, 4.2, does not have.
+                "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done;",
+                "rm -f /tmp/floci-hdfs-ready; kill $(jobs -rp) 2>/dev/null; exit 1'"))));
         // A cluster without Hive runs no metastore service, and its primary node does not talk to Floci.
         verify(spec, never()).withEnv(eq("FLOCI_HIVE_METASTORE"), anyString());
         verify(spec, never()).withJavaTrustStore();
@@ -202,7 +1260,7 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
 
         SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "host", null, NOT_STOPPED);
+                "host", null, null, NOT_STOPPED);
 
         assertEquals("127.0.0.1", started.hdfsAddress());
         // Steps share the host's network with it, so they join no other.
@@ -218,7 +1276,7 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-1")).thenReturn(ContainerLiveness.RUNNING);
         ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
 
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED);
 
         // The host's other interfaces would otherwise serve its files, without permissions, to anyone reaching them.
         verify(spec).withEnv("FLOCI_HDFS_BIND", "127.0.0.1");
@@ -234,7 +1292,7 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-2")).thenReturn(ContainerLiveness.RUNNING);
         ContainerExecStubs.completeEveryExec(docker, "c-2", 0L, "", "");
 
-        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, null, null,
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, null, null, null,
                 NOT_STOPPED);
 
         // Docker joins a container placed in another's namespace to no other network, so its steps reach it there.
@@ -243,6 +1301,289 @@ class EmrClusterStorageTest {
         verify(spec).withDockerNetwork(Optional.of("container:floci"));
         verify(spec).withEnv("FLOCI_HDFS_BIND", "127.0.0.1");
         verify(lifecycle, never()).ensureNetwork(anyString(), any());
+    }
+
+    @Test
+    void aClusterThatRunsYarnHasItsPrimaryNodeRunAResourceManagerAndANodeManagerWithItsHdfs() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
+        when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-7", hdfsName)).thenReturn("172.18.0.8");
+        ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
+        when(awsEnv.flociEndpoint()).thenReturn("http://floci:4566");
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", null, () -> new ClusterStorage.Yarn(4096, 4), NOT_STOPPED);
+
+        // The steps' Spark submits to the ResourceManager on the primary node, its executors reaching Floci there as
+        // the steps do, the node being on their network, with Floci's DNS.
+        assertEquals(HOST, started.resourceManager());
+        assertEquals("http://floci:4566", started.flociEndpoint());
+        verify(spec).withEnv("FLOCI_YARN_MEMORY_MB", "4096");
+        verify(spec).withEnv("FLOCI_YARN_VCORES", "4");
+        verify(spec, never()).withEnv(eq("FLOCI_HADOOP_FOLDER"), any());
+        verify(spec).withHostDockerInternalOnLinux();
+        verify(spec).withJavaTrustStore();
+        verify(spec).withEmbeddedDns();
+        verify(spec).withJoinedNetwork("floci-network");
+        // Its configuration names the primary node, listens where HDFS does and offers what it was given.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
+                "\"<property><name>yarn.resourcemanager.hostname</name><value>$FLOCI_HDFS_HOST</value></property>\"",
+                "\"<property><name>yarn.resourcemanager.bind-host</name><value>$FLOCI_HDFS_BIND</value></property>\"",
+                "\"<property><name>yarn.nodemanager.bind-host</name><value>$FLOCI_HDFS_BIND</value></property>\"",
+                "\"<property><name>yarn.nodemanager.resource.memory-mb</name>"
+                        + "<value>$FLOCI_YARN_MEMORY_MB</value></property>\"",
+                "\"<property><name>yarn.nodemanager.resource.cpu-vcores</name>"
+                        + "<value>$FLOCI_YARN_VCORES</value></property>\""))
+                // Each daemon through a variable Java 8, which refuses these options, ignores.
+                && Pattern.compile("JDK_JAVA_OPTIONS=\"--add-opens=java\\.base/java\\.lang=ALL-UNNAMED[^\"]*\""
+                        + " yarn resourcemanager & n=\\$\\(\\(n \\+ 1\\)\\); if \\[ -z \"\\$FLOCI_NODE_WORKERS\" \\]; then "
+                        + "JDK_JAVA_OPTIONS=\"--add-opens=java\\.base/java\\.lang=ALL-UNNAMED[^\"]*\""
+                        + " yarn nodemanager &").matcher(entrypoint.get(2)).find()));
+        // The MapReduce JobHistory server EMR's primary node runs too, a client asking it about a job whose application
+        // master has ended, on Hadoop's own ports and listening where HDFS does.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
+                "\"<property><name>mapreduce.jobhistory.address</name><value>$FLOCI_HDFS_HOST:10020</value></property>\"",
+                "\"<property><name>mapreduce.jobhistory.webapp.address</name>"
+                        + "<value>$FLOCI_HDFS_HOST:19888</value></property>\"",
+                "\"<property><name>mapreduce.jobhistory.admin.address</name>"
+                        + "<value>$FLOCI_HDFS_HOST:10033</value></property>\"",
+                "\"<property><name>mapreduce.jobhistory.bind-host</name><value>$FLOCI_HDFS_BIND</value></property>\"",
+                "'</configuration>' > /tmp/floci-hdfs-conf/mapred-site.xml || exit"))));
+        // Started with the NameNode, as none needs the HDFS to start; ready once the NodeManager has registered and the
+        // JobHistory server answers, and the node gone if any daemon exits while starting.
+        verify(spec).withEntrypoint(argThat(entrypoint -> Pattern.compile("yarn nodemanager & n=\\$\\(\\(n \\+ 1\\)\\); fi; "
+                        + "JDK_JAVA_OPTIONS=\"--add-opens=java\\.base/java\\.lang=ALL-UNNAMED[^\"]*\" mapred historyserver & "
+                        + "n=\\$\\(\\(n \\+ 1\\)\\); fi; until curl -sf -m 5 \"http://\\$\\(cat /tmp/floci-hdfs-bind\\):9870/jmx")
+                        .matcher(entrypoint.get(2)).find()
+                && entrypoint.get(2).contains("if [ -n \"$FLOCI_YARN_MEMORY_MB\" ]; then "
+                        + waitUntil("curl -sf -m 5 http://$(cat /tmp/floci-hdfs-bind):8088/ws/v1/cluster/metrics"
+                                + " | grep -q \"\\\"activeNodes\\\":[1-9]\"")
+                        + waitUntil("curl -sf -m 5 http://$(cat /tmp/floci-hdfs-bind):19888/ws/v1/history/info"
+                                + " | grep -q historyInfo")
+                        + "fi; touch /tmp/floci-hdfs-ready")));
+    }
+
+    @Test
+    void aNodeWhoseImageKeepsItsHadoopApartRunsEveryDaemonFromIt() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-9", Map.of()));
+        when(lifecycle.probeContainer("c-9")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-9", hdfsName)).thenReturn("172.18.0.9");
+        ContainerExecStubs.completeEveryExec(docker, "c-9", 0L, "", "");
+        when(awsEnv.flociEndpoint(false)).thenReturn("http://host.docker.internal:4566");
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                () -> new ClusterStorage.Yarn(4096, 4).withHadoopFolder("/opt"), NOT_STOPPED);
+
+        verify(spec).withEnv("FLOCI_HADOOP_FOLDER", "/opt");
+        // Its homes and commands, before the daemons start as the image's user, who keeps the environment.
+        verify(spec).withEntrypoint(argThat(entrypoint -> {
+            String script = entrypoint.get(2);
+            int export = script.indexOf("export HADOOP_HOME=$h/hadoop HADOOP_COMMON_HOME=$h/hadoop"
+                    + " HADOOP_LIBEXEC_DIR=$h/hadoop/libexec HADOOP_HDFS_HOME=$h/hadoop-hdfs"
+                    + " HADOOP_MAPRED_HOME=$h/hadoop-mapreduce HADOOP_YARN_HOME=$h/hadoop-yarn"
+                    + " PATH=$h/hadoop-hdfs/bin:$h/hadoop-yarn/bin:$h/hadoop-mapreduce/bin:$h/hadoop/bin:$PATH");
+            return script.contains("  h=$FLOCI_HADOOP_FOLDER") && export > 0 && export < script.indexOf("exec setpriv");
+        }));
+    }
+
+    @Test
+    void aClusterThatDoesNotRunYarnHasNoResourceManager() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-8", Map.of()));
+        when(lifecycle.probeContainer("c-8")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-8", hdfsName)).thenReturn("172.18.0.9");
+        ContainerExecStubs.completeEveryExec(docker, "c-8", 0L, "", "");
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", null, null, NOT_STOPPED);
+
+        assertNull(started.resourceManager());
+        assertNull(started.flociEndpoint());
+        verify(spec, never()).withEnv(eq("FLOCI_YARN_MEMORY_MB"), anyString());
+        verify(spec, never()).withHostDockerInternalOnLinux();
+    }
+
+    @Test
+    void aPrimaryNodeHasANetworkOfItsOwnUnlessItsStepsHaveNoneOrShareANamespace() {
+        when(containerBuilder.resolveDockerNetwork(Optional.of("host"))).thenReturn(Optional.of("host"));
+        when(containerBuilder.resolveDockerNetwork(Optional.of("container:floci")))
+                .thenReturn(Optional.of("container:floci"));
+        when(containerBuilder.resolveDockerNetwork(Optional.of("none"))).thenReturn(Optional.of("none"));
+
+        assertTrue(storage.ownNetwork("floci-network"));
+        assertFalse(storage.ownNetwork("host"));
+        assertFalse(storage.ownNetwork("container:floci"));
+        assertFalse(storage.ownNetwork("none"));
+    }
+
+    @Test
+    void aPrimaryNodeFoundRunningInAnotherImageThanItsStepsStartsAgain() {
+        // An earlier Floci's, from the Hive image, before the node ran in the steps' image.
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        runningOn(hdfsName, hdfsName);
+        when(docker.inspectContainerCmd(hdfsName).exec().getImageId()).thenReturn("sha256:hive-image");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-9", Map.of()));
+        when(lifecycle.probeContainer("c-9")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-9", hdfsName)).thenReturn("172.18.0.10");
+        ContainerExecStubs.completeEveryExec(docker, "c-9", 0L, "", "");
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null, NOT_STOPPED);
+
+        verify(lifecycle).removeIfExistsStrict(hdfsName);
+        verify(lifecycle).createAndStart(any());
+    }
+
+    @Test
+    void aPrimaryNodeFoundRunningOffItsStepsNetworkStartsAgain() {
+        // An earlier Floci's, on its cluster's network alone.
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        runningOn(hdfsName, hdfsName);
+        NetworkSettings alone = mock(NetworkSettings.class);
+        when(alone.getNetworks()).thenReturn(Map.of(hdfsName, new ContainerNetwork()));
+        when(docker.inspectContainerCmd(hdfsName).exec().getNetworkSettings()).thenReturn(alone);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-9", Map.of()));
+        when(lifecycle.probeContainer("c-9")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-9", hdfsName)).thenReturn("172.18.0.10");
+        ContainerExecStubs.completeEveryExec(docker, "c-9", 0L, "", "");
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null, NOT_STOPPED);
+
+        verify(lifecycle).removeIfExistsStrict(hdfsName);
+        verify(spec).withJoinedNetwork("floci-network");
+    }
+
+    @Test
+    void aClusterWhoseStepsHaveNoNetworkOfFlocisReachesFlociAtItsAddressOnTheClustersNetwork() {
+        when(containerBuilder.resolveDockerNetwork(Optional.empty())).thenReturn(Optional.empty());
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
+        when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-7", hdfsName)).thenReturn("172.18.0.8");
+        ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
+        // Floci on the host, reached at the host's address.
+        when(awsEnv.flociEndpoint(false)).thenReturn("http://host.docker.internal:4566");
+
+        SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, null, null,
+                () -> new ClusterStorage.Yarn(4096, 4), NOT_STOPPED);
+
+        assertEquals("http://host.docker.internal:4566", started.flociEndpoint());
+        verify(spec, never()).withJoinedNetwork(any());
+        verify(spec, never()).withEmbeddedDns();
+    }
+
+    @Test
+    void aNodesContainerLogsGoToTheirS3FolderGzippedOnceEachAndNeverALaunchScript() throws IOException {
+        String container = "application_1_0001/container_1_0001_01_000001/";
+        nodeLogs(Map.of(container + "stdout", "Pi is roughly 3.14",
+                container + "launch_container.sh", "export AWS_SECRET_ACCESS_KEY=secret"));
+        List<String> put = new ArrayList<>();
+        when(s3.putObjectFromStream(eq("logs"), anyString(), any(), eq("application/x-gzip"), any()))
+                .thenAnswer(putting -> {
+                    try (InputStream gzipped = new GZIPInputStream(putting.<InputStream>getArgument(2))) {
+                        put.add(putting.getArgument(1) + "=" + new String(gzipped.readAllBytes(), UTF_8));
+                    }
+                    return null;
+                });
+
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/emr/j-1/containers/");
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/emr/j-1/containers/");
+
+        String key = "emr/j-1/containers/application_1_0001/container_1_0001_01_000001/stdout.gz=";
+        assertEquals(List.of(key + "Pi is roughly 3.14"), put);
+        verify(docker, never()).copyArchiveFromContainerCmd(hdfsName, "/mnt/yarn/logs/" + container + "launch_container.sh");
+
+        // A log that has grown goes again.
+        nodeLogs(Map.of(container + "stdout", "Pi is roughly 3.1415"));
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/emr/j-1/containers/");
+
+        assertEquals(List.of(key + "Pi is roughly 3.14", key + "Pi is roughly 3.1415"), put);
+    }
+
+    @Test
+    void aStepsEndReadsOnlyTheLogsThatChangedAndListsThemWithTheirSizes() throws IOException {
+        String earlier = "application_1_0001/container_1_0001_01_000001/stdout";
+        String later = "application_1_0002/container_1_0002_01_000001/stdout";
+        List<List<String>> listings = nodeLogs(Map.of(earlier, "one"));
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+        // A primary node whose core nodes run the NodeManagers has no such folder, which is none to list and no failure.
+        assertEquals(List.of(List.of("bash", "-c", "[ ! -d /mnt/yarn/logs ] || exec find /mnt/yarn/logs -mindepth 3"
+                + " -maxdepth 3 -type f -printf '%s %P\\n'")), listings);
+
+        nodeLogs(Map.of(earlier, "one", later, "two"));
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+
+        verify(docker).copyArchiveFromContainerCmd(hdfsName, "/mnt/yarn/logs/" + earlier);
+        verify(docker).copyArchiveFromContainerCmd(hdfsName, "/mnt/yarn/logs/" + later);
+        verify(s3, times(2)).putObjectFromStream(anyString(), anyString(), any(), anyString(), any());
+    }
+
+    @Test
+    void twoStepsEndingAtOnceArchiveANodesLogsOneAfterTheOther() throws Exception {
+        nodeLogs(Map.of("application_1_0001/container_1_0001_01_000001/stdout", "older"));
+        CountDownLatch uploading = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        when(s3.putObjectFromStream(anyString(), anyString(), any(), anyString(), any())).thenAnswer(putting -> {
+            uploading.countDown();
+            assertTrue(finish.await(10, TimeUnit.SECONDS));
+            return null;
+        });
+        AtomicReference<Thread> second = new AtomicReference<>();
+        ExecutorService steps = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = steps.submit(() -> storage.archiveContainerLogs("j-1", "123456789012", "us-east-1",
+                    "s3://logs/j-1/containers/"));
+            assertTrue(uploading.await(10, TimeUnit.SECONDS));
+            Future<?> later = steps.submit(() -> {
+                second.set(Thread.currentThread());
+                storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+            });
+
+            awaitBlocked(second);
+            finish.countDown();
+
+            first.get(10, TimeUnit.SECONDS);
+            later.get(10, TimeUnit.SECONDS);
+        } finally {
+            finish.countDown();
+            steps.shutdownNow();
+        }
+    }
+
+    @Test
+    void aRemovedNodesContainerLogsAreForgotten() throws IOException {
+        nodeLogs(Map.of("application_1_0001/container_1_0001_01_000001/stdout", "out"));
+
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+        storage.remove("j-1");
+        storage.archiveContainerLogs("j-1", "123456789012", "us-east-1", "s3://logs/j-1/containers/");
+
+        verify(s3, times(2)).putObjectFromStream(anyString(), anyString(), any(), anyString(), any());
+    }
+
+    @Test
+    void containerLogsThatCannotBeListedLeaveTheStepAsItEnded() {
+        // What it listed before it failed is not to be trusted to be all there is, or to be there at all.
+        String log = "application_1_0001/container_1_0001_01_000001/stdout";
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "3 " + log + "\n", "find: no such folder");
+
+        assertDoesNotThrow(() -> storage.archiveContainerLogs("j-1", "123456789012", "us-east-1",
+                "s3://logs/emr/j-1/containers/"));
+
+        verify(docker, never()).copyArchiveFromContainerCmd(hdfsName, "/mnt/yarn/logs/" + log);
+    }
+
+    @Test
+    void containerLogsThatCannotBeReadLeaveTheStepAsItEnded() {
+        String log = "application_1_0001/container_1_0001_01_000001/stdout";
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "3 " + log + "\n", "");
+        when(docker.copyArchiveFromContainerCmd(hdfsName, "/mnt/yarn/logs/" + log)).thenThrow(new NotFoundException("gone"));
+
+        assertDoesNotThrow(() -> storage.archiveContainerLogs("j-1", "123456789012", "us-east-1",
+                "s3://logs/emr/j-1/containers/"));
+
+        verify(s3, never()).putObjectFromStream(anyString(), anyString(), any(), anyString(), any());
     }
 
     @Test
@@ -263,14 +1604,15 @@ class EmrClusterStorageTest {
 
         SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
                 "floci-network",
-                new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/EMR_EC2_DefaultRole", Map.of()),
+                new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/EMR_EC2_DefaultRole", Map.of()), null,
                 NOT_STOPPED);
 
         assertEquals("thrift://ip-10-0-0-1.ec2.internal:9083", started.hiveMetastore());
         verify(spec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIAMETASTORE"));
         verify(spec).withHostDockerInternalOnLinux();
         verify(spec).withJavaTrustStore();
-        // Floci's resolver would answer with an address on Floci's network, which the cluster's does not reach.
+        // Off the steps' network, as its metastore would listen there too.
+        verify(spec, never()).withJoinedNetwork(any());
         verify(spec, never()).withEmbeddedDns();
         verify(lifecycle, never()).ensureConnected(anyString(), anyString(), anyString());
         // Floci's S3 through S3A, as for the cluster's steps.
@@ -278,27 +1620,39 @@ class EmrClusterStorageTest {
                 "--hiveconf fs.s3a.endpoint=http://host.docker.internal:4566"
                         + " --hiveconf fs.s3a.endpoint.region=us-east-1 ")
                 && settings.contains(" --hiveconf fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem ")));
-        // Hive's exec jar where a Hive session would upload it, so two at once do not race to.
+        // Hive's exec jar where a Hive session would upload it, so two at once do not race to, its folder made with
+        // the others in one go.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
-                "hdfs dfs -mkdir -p /user/hive/warehouse /tmp/hadoop/.hiveJars || exit 1; "
+                "if [ -n \"$FLOCI_HIVE_METASTORE\" ]; then dirs=\"$dirs /user/hive/warehouse /tmp/hadoop/.hiveJars\";")
+                && entrypoint.get(2).contains("hdfs dfs -mkdir -p $dirs || exit 1; "
+                        + "if [ -n \"$FLOCI_HIVE_METASTORE\" ]; then "
                         + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); hdfs dfs -put -f \"$jar\" "
                         + "/tmp/hadoop/.hiveJars/$(basename \"$jar\" .jar)"
-                        + "-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar")));
-        // With the image's Hadoop configuration, as Hive steps run; in a folder Derby can write its log in; its
+                        + "-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; until (exec 3<>/dev/tcp")));
+        // Started with the NameNode, as it needs no HDFS to start, and waited for once the HDFS is ready.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).indexOf("hive --service metastore")
+                < entrypoint.get(2).indexOf("until curl -sf -m 5 \"http://$(cat /tmp/floci-hdfs-bind):9870/jmx")));
+        // With the Hive image's Hadoop configuration, as Hive steps run; in a folder Derby can write its log in; its
         // database on the primary node's own volume, its warehouse in the HDFS, ready only once it listens, and the
         // node gone if it exits while starting.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
-                "cd /tmp; LOGS_DIR=/tmp/floci-hive-logs HADOOP_CONF_DIR=/etc/hadoop/conf"
+                "cd /tmp; LOGS_DIR=/tmp/floci-hive-logs HADOOP_CONF_DIR=/etc/hadoop/conf.hive"
                         + " hive --service metastore -p 9083"
                         + " --hiveconf fs.defaultFS=hdfs://$FLOCI_HDFS_HOST:8020 $FLOCI_HIVE_METASTORE"
                         + " --hiveconf \"javax.jdo.option.ConnectionURL=jdbc:derby:;"
                         + "databaseName=/mnt/var/lib/hive/metastore_db;create=true\"")
                 && entrypoint.get(2).contains(
                         "hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
-                                + " \"${site[@]}\" &")
+                                + " \"${site[@]}\" & n=$((n + 1));")
                 && entrypoint.get(2).contains("until (exec 3<>/dev/tcp/127.0.0.1/9083) 2>/dev/null; do "
-                        + "[ \"$(jobs -rp | wc -l)\" = 3 ] || exit 1; sleep 0.2; done; "
-                        + "fi; touch /tmp/floci-hdfs-ready")));
+                        + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                        + "fi; if [ -n \"$FLOCI_YARN_MEMORY_MB\" ]; then")));
+
+        // A table's location in S3 is the metastore's to look at, with S3A, so it too leaves Hive one SDK first, as
+        // root, which owns Hive's lib folder.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.NODE_INFO + "\n"
+                        + EmrServerlessSparkRunner.HIVE_ONE_SDK + "\n")));
 
         // The session goes with the container.
         storage.remove("j-1");
@@ -319,12 +1673,12 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-8")).thenReturn(ContainerLiveness.RUNNING);
         when(lifecycle.resolveContainerNetworkIp("c-8", hdfsName)).thenReturn("172.18.0.10");
         ContainerExecStubs.completeEveryExec(docker, "c-8", 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
 
         storage.stopManagedContainers();
         verify(roleCredentials).unregister("123456789012", "ASIAONE");
         assertThrows(IllegalStateException.class, () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "floci-network", metastore, NOT_STOPPED));
+                "floci-network", metastore, null, NOT_STOPPED));
 
         verify(roleCredentials).unregister("123456789012", "ASIATWO");
     }
@@ -346,10 +1700,10 @@ class EmrClusterStorageTest {
         when(lifecycle.resolveContainerNetworkIp("c-9", hdfsName)).thenReturn("172.18.0.11");
         ContainerExecStubs.completeEveryExec(docker, "c-8", 0L, "", "");
         ContainerExecStubs.completeEveryExec(docker, "c-9", 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
 
         // Its metastore exited, which ended the container; the cluster's next step starts it again.
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
 
         verify(roleCredentials).unregister("123456789012", "ASIAONE");
         verify(roleCredentials, never()).unregister("123456789012", "ASIATWO");
@@ -367,7 +1721,7 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-8")).thenReturn(ContainerLiveness.RUNNING);
         when(lifecycle.resolveContainerNetworkIp("c-8", hdfsName)).thenReturn("172.18.0.10");
         ContainerExecStubs.completeEveryExec(docker, "c-8", 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
         doThrow(new IllegalStateException("Failed to remove container " + hdfsName)).doNothing()
                 .when(lifecycle).removeIfExistsStrict(hdfsName);
 
@@ -388,7 +1742,7 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
 
         SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host",
-                METASTORE, NOT_STOPPED);
+                METASTORE, null, NOT_STOPPED);
 
         // Hive steps keep a metastore of their own.
         assertNull(started.hiveMetastore());
@@ -408,7 +1762,7 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, "c-6", 0L, "", "");
 
         storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network",
-                METASTORE, NOT_STOPPED);
+                METASTORE, null, NOT_STOPPED);
 
         // Docker keeps the cluster's network apart from Floci's, where Floci's address is.
         InOrder start = inOrder(lifecycle);
@@ -442,7 +1796,7 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, "c-6", 0L, "", "");
 
         SparkJobRunner.Storage started = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "floci-network", METASTORE, NOT_STOPPED);
+                "floci-network", METASTORE, null, NOT_STOPPED);
 
         // The HDFS still starts, as do its steps' tables there.
         assertEquals("172.18.0.7", started.hdfsAddress());
@@ -463,10 +1817,10 @@ class EmrClusterStorageTest {
         runningOn(hdfsName, hdfsName);
         ContainerExecStubs.completeEveryExec(docker, "c-6", 0L, "", "");
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, null, NOT_STOPPED);
 
         SparkJobRunner.Storage found = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "floci-network", METASTORE, NOT_STOPPED);
+                "floci-network", METASTORE, null, NOT_STOPPED);
 
         assertEquals("thrift://ip-10-0-0-1.ec2.internal:9083", found.hiveMetastore());
         verify(lifecycle, times(1)).createAndStart(any());
@@ -489,7 +1843,7 @@ class EmrClusterStorageTest {
         when(awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), "http://host.docker.internal:4566", session,
                 "123456789012")).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIANEW"));
 
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, null, NOT_STOPPED);
 
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).removeIfExistsStrict(hdfsName);
@@ -516,9 +1870,9 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, "c-6", 0L, "", "");
         ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
         // Given Floci's address on Floci's network, which the cluster's does not reach.
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, null, NOT_STOPPED);
 
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", METASTORE, null, NOT_STOPPED);
 
         // A join cannot change the address it was given, so it starts again with Floci's on its network.
         verify(lifecycle, times(2)).createAndStart(any());
@@ -537,7 +1891,7 @@ class EmrClusterStorageTest {
         when(lifecycle.createAndStart(any())).thenThrow(new IllegalStateException("Could not start the container"));
 
         assertThrows(IllegalStateException.class, () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST,
-                IMAGE, "floci-network", METASTORE, NOT_STOPPED));
+                IMAGE, "floci-network", METASTORE, null, NOT_STOPPED));
 
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).ensureConnected("floci-container", hdfsName, "floci");
@@ -552,7 +1906,7 @@ class EmrClusterStorageTest {
         when(lifecycle.resolveContainerNetworkIp(hdfsName, hdfsName)).thenReturn("172.18.0.9");
         runningOn(hdfsName, hdfsName);
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null, NOT_STOPPED);
         when(lifecycle.disconnectFromNetwork("floci-container", hdfsName)).thenReturn(false, true);
 
         storage.stopManagedContainers();
@@ -582,7 +1936,7 @@ class EmrClusterStorageTest {
         settings.put("hive.metastore.warehouse.dir", "s3://bucket/warehouse dir");
 
         storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network",
-                new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", settings), NOT_STOPPED);
+                new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", settings), null, NOT_STOPPED);
 
         // One to a line, so a value with a space stays one argument.
         verify(spec).withEnv("FLOCI_HIVE_METASTORE_SITE", String.join("\n", "--hiveconf",
@@ -593,7 +1947,7 @@ class EmrClusterStorageTest {
                 "[ -z \"$FLOCI_HIVE_METASTORE_SITE\" ] || mapfile -t site <<< \"$FLOCI_HIVE_METASTORE_SITE\"; cd /tmp;")
                 && entrypoint.get(2).contains(
                         "hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
-                                + " \"${site[@]}\" &")));
+                                + " \"${site[@]}\" & n=$((n + 1));")));
     }
 
     @Test
@@ -608,7 +1962,7 @@ class EmrClusterStorageTest {
         when(lifecycle.resolveContainerNetworkIp("c-1", hdfsName)).thenReturn("172.18.0.5");
         ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
 
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null, NOT_STOPPED);
 
         verify(containerBuilder).newContainer(id);
         verify(containerBuilder, never()).newContainer(IMAGE);
@@ -625,7 +1979,7 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-1")).thenReturn(ContainerLiveness.RUNNING);
         ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
 
-        assertEquals("127.0.0.1", storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null,
+        assertEquals("127.0.0.1", storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null,
                 NOT_STOPPED).hdfsAddress());
 
         verify(lifecycle).removeIfExistsStrict(hdfsName);
@@ -667,11 +2021,12 @@ class EmrClusterStorageTest {
                 return null;
             }).when(lifecycle).ensureVolume(eq(hdfsName), any());
             Future<SparkJobRunner.Storage> starting = steps.submit(
-                    () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, NOT_STOPPED));
+                    () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null,
+                            NOT_STOPPED));
             assertTrue(firstLooked.await(10, TimeUnit.SECONDS));
             Future<SparkJobRunner.Storage> waiting = steps.submit(() -> {
                 second.set(Thread.currentThread());
-                return storage.hdfs("j-2", "123456789012", "us-east-1", HOST, IMAGE, "host", null, NOT_STOPPED);
+                return storage.hdfs("j-2", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED);
             });
 
             assertEquals("127.0.0.1", starting.get(10, TimeUnit.SECONDS).hdfsAddress());
@@ -701,7 +2056,7 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-1")).thenReturn(ContainerLiveness.RUNNING);
         ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
 
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED);
 
         verify(lifecycle).createAndStart(any());
     }
@@ -714,7 +2069,7 @@ class EmrClusterStorageTest {
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                        "floci-network", null, NOT_STOPPED));
+                        "floci-network", null, null, NOT_STOPPED));
 
         // Not a name clash on the create that follows.
         assertEquals("Failed to remove stale container " + hdfsName, failure.getMessage());
@@ -731,7 +2086,7 @@ class EmrClusterStorageTest {
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                        "floci-network", null, NOT_STOPPED));
+                        "floci-network", null, null, NOT_STOPPED));
 
         assertEquals("The HDFS of EMR cluster j-1 has no address on Docker network " + hdfsName,
                 failure.getMessage());
@@ -745,7 +2100,7 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
 
         assertEquals("172.18.0.6", storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "floci-network", null, NOT_STOPPED).hdfsAddress());
+                "floci-network", null, null, NOT_STOPPED).hdfsAddress());
 
         verify(lifecycle, never()).createAndStart(any());
         verify(lifecycle, never()).removeIfExists(anyString());
@@ -758,7 +2113,7 @@ class EmrClusterStorageTest {
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                        "floci-network", null, NOT_STOPPED));
+                        "floci-network", null, null, NOT_STOPPED));
 
         assertEquals("Could not tell whether the HDFS of EMR cluster j-1 runs", failure.getMessage());
         verify(lifecycle, never()).removeIfExists(anyString());
@@ -777,7 +2132,7 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
 
         assertEquals("172.18.0.8", storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "floci-network", null, NOT_STOPPED).hdfsAddress());
+                "floci-network", null, null, NOT_STOPPED).hdfsAddress());
 
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).removeIfExistsStrict(hdfsName);
@@ -794,16 +2149,18 @@ class EmrClusterStorageTest {
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                        "floci-network", null, NOT_STOPPED));
+                        "floci-network", null, null, NOT_STOPPED));
 
         assertEquals("The HDFS of EMR cluster j-1 stopped before it was ready", failure.getMessage());
         assertEquals(List.of(), looks);
+        // What it last wrote is in Floci's log, as the container goes with its cluster.
+        verify(lifecycle).lastLogLines("c-3", 40, Duration.ofSeconds(5));
     }
 
     @Test
     void aClustersHdfsThatIsNotReadyInTimeFailsToStart() {
         EmrClusterStorage impatient = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
-                roleCredentials, currentContainer, config, Duration.ZERO,
+                roleCredentials, currentContainer, config, s3, Duration.ZERO,
                 System::nanoTime);
         when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-4", Map.of()));
@@ -812,9 +2169,10 @@ class EmrClusterStorageTest {
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
                 () -> impatient.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                        "floci-network", null, NOT_STOPPED));
+                        "floci-network", null, null, NOT_STOPPED));
 
         assertEquals("The HDFS of EMR cluster j-1 did not start within 0 seconds", failure.getMessage());
+        verify(lifecycle).lastLogLines("c-4", 40, Duration.ofSeconds(5));
     }
 
     @Test
@@ -822,7 +2180,7 @@ class EmrClusterStorageTest {
         AtomicLong clock = new AtomicLong();
         long timeout = Duration.ofMinutes(2).toNanos();
         EmrClusterStorage timed = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
-                roleCredentials, currentContainer, config, Duration.ofMinutes(2),
+                roleCredentials, currentContainer, config, s3, Duration.ofMinutes(2),
                 clock::get);
         // The first step starts it; the second, which waited for it, finds it running.
         when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING, ContainerLiveness.RUNNING);
@@ -845,11 +2203,12 @@ class EmrClusterStorageTest {
         try {
             Future<SparkJobRunner.Storage> first = steps.submit(
                     () -> timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                            "floci-network", null, NOT_STOPPED));
+                            "floci-network", null, null, NOT_STOPPED));
             assertTrue(firstLooks.await(10, TimeUnit.SECONDS));
             Future<SparkJobRunner.Storage> waiting = steps.submit(() -> {
                 second.set(Thread.currentThread());
-                return timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, NOT_STOPPED);
+                return timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null,
+                        NOT_STOPPED);
             });
 
             assertThrows(ExecutionException.class, () -> first.get(10, TimeUnit.SECONDS));
@@ -868,7 +2227,7 @@ class EmrClusterStorageTest {
     void aStepWaitingForItsClustersHdfsThroughATeardownStopsAsItsDriverWouldAndStartsItNoMore() {
         AtomicLong clock = new AtomicLong();
         EmrClusterStorage timed = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
-                roleCredentials, currentContainer, config, Duration.ofMinutes(2),
+                roleCredentials, currentContainer, config, s3, Duration.ofMinutes(2),
                 clock::get);
         when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-5", Map.of()));
@@ -881,7 +2240,8 @@ class EmrClusterStorageTest {
         });
 
         assertThrows(ClusterStorage.Stopped.class,
-                () -> timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, NOT_STOPPED));
+                () -> timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null,
+                        NOT_STOPPED));
 
         verify(lifecycle, times(1)).createAndStart(any());
         // As it starts, one left from before goes, and the teardown removes it; the step does again, in case it
@@ -895,7 +2255,8 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
 
         assertThrows(ClusterStorage.Stopped.class,
-                () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> true));
+                () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null,
+                        () -> true));
 
         verify(lifecycle, never()).createAndStart(any());
         verify(lifecycle, never()).removeIfExists(anyString());
@@ -907,7 +2268,7 @@ class EmrClusterStorageTest {
     void theFirstPullOfItsImageIsNoPartOfTheHdfsStartTimeout() {
         AtomicLong clock = new AtomicLong();
         EmrClusterStorage timed = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
-                roleCredentials, currentContainer, config, Duration.ofMinutes(2),
+                roleCredentials, currentContainer, config, s3, Duration.ofMinutes(2),
                 clock::get);
         // The Hive image is not there yet, and its pull takes five minutes.
         when(lifecycle.resolveImageForLaunch(IMAGE, ImagePullBehavior.PREFER_CACHED, null)).thenAnswer(pull -> {
@@ -921,7 +2282,8 @@ class EmrClusterStorageTest {
         // Not ready the first time it is looked at, then ready.
         ContainerExecStubs.completeEveryExec(docker, "c-4", List.of(1L, 0L), "", "");
 
-        assertEquals("172.18.0.11", timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+        assertEquals("172.18.0.11", timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network",
+                null, null,
                 NOT_STOPPED).hdfsAddress());
     }
 
@@ -938,7 +2300,7 @@ class EmrClusterStorageTest {
         when(running.exec()).thenReturn(List.of(other));
 
         IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, NOT_STOPPED));
+                () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED));
 
         // Its daemons, on the ports j-2's hold, would never bind, and j-2's would answer for them.
         assertEquals("The HDFS of EMR cluster j-1 cannot start while that of EMR cluster j-2 runs in the network"
@@ -953,7 +2315,7 @@ class EmrClusterStorageTest {
         AtomicBoolean cancelled = new AtomicBoolean();
         AtomicLong clock = new AtomicLong();
         EmrClusterStorage timed = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
-                roleCredentials, currentContainer, config, Duration.ofMinutes(2),
+                roleCredentials, currentContainer, config, s3, Duration.ofMinutes(2),
                 clock::get);
         when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-8", Map.of()));
@@ -967,7 +2329,7 @@ class EmrClusterStorageTest {
 
         assertThrows(ClusterStorage.Stopped.class,
                 () -> timed.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                        "floci-network", null, cancelled::get));
+                        "floci-network", null, null, cancelled::get));
 
         // Only one left from before went, as it started; the one it started is the next step's.
         verify(lifecycle, times(1)).removeIfExistsStrict(hdfsName);
@@ -986,7 +2348,7 @@ class EmrClusterStorageTest {
         ContainerExecStubs.completeEveryExec(docker, "c-9", 0L, "", "");
 
         assertEquals("172.18.0.10", storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                "floci-network", null, NOT_STOPPED).hdfsAddress());
+                "floci-network", null, null, NOT_STOPPED).hdfsAddress());
 
         verify(lifecycle).createAndStart(any());
     }
@@ -999,7 +2361,7 @@ class EmrClusterStorageTest {
 
         assertThrows(DockerException.class,
                 () -> storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
-                        "floci-network", null, NOT_STOPPED));
+                        "floci-network", null, null, NOT_STOPPED));
 
         verify(lifecycle, never()).createAndStart(any());
         verify(lifecycle, never()).removeIfExists(anyString());
@@ -1055,7 +2417,7 @@ class EmrClusterStorageTest {
         when(lifecycle.resolveContainerNetworkIp(hdfsName, hdfsName)).thenReturn("172.18.0.9");
         runningOn(hdfsName, hdfsName);
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null, NOT_STOPPED);
 
         assertFalse(storage.remove("j-1"));
         // The next reset or shutdown removes it.
@@ -1068,7 +2430,8 @@ class EmrClusterStorageTest {
     void withNoNetworkItsStepsRunWithoutAnHdfs() {
         when(containerBuilder.resolveDockerNetwork(Optional.of("none"))).thenReturn(Optional.of("none"));
 
-        SparkJobRunner.Storage storageOnly = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "none", null,
+        SparkJobRunner.Storage storageOnly = storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "none",
+                null, null,
                 NOT_STOPPED);
 
         // Docker joins a container placed there to no network, the HDFS's included.
@@ -1089,7 +2452,7 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-1")).thenReturn(ContainerLiveness.RUNNING);
         ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
 
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "container:b", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "container:b", null, null, NOT_STOPPED);
 
         verify(lifecycle).createAndStart(any());
         verify(spec).withDockerNetwork(Optional.of("container:b"));
@@ -1106,7 +2469,8 @@ class EmrClusterStorageTest {
         containerIdOf("3333", "3333");
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
 
-        assertEquals("127.0.0.1", storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "container:floci", null,
+        assertEquals("127.0.0.1", storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "container:floci",
+                null, null,
                 NOT_STOPPED).hdfsAddress());
 
         verify(lifecycle, never()).createAndStart(any());
@@ -1128,7 +2492,7 @@ class EmrClusterStorageTest {
         when(lifecycle.probeContainer("c-1")).thenReturn(ContainerLiveness.RUNNING);
         ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
 
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "container:b", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "container:b", null, null, NOT_STOPPED);
 
         verify(lifecycle).createAndStart(any());
     }
@@ -1139,7 +2503,7 @@ class EmrClusterStorageTest {
         when(lifecycle.resolveContainerNetworkIp(hdfsName, hdfsName)).thenReturn("172.18.0.9");
         runningOn(hdfsName, hdfsName);
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null, NOT_STOPPED);
 
         storage.stopManagedContainers();
         storage.stopManagedContainers();
@@ -1155,7 +2519,7 @@ class EmrClusterStorageTest {
         when(lifecycle.resolveContainerNetworkIp(hdfsName, hdfsName)).thenReturn("172.18.0.9");
         runningOn(hdfsName, hdfsName);
         ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
-        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, null, NOT_STOPPED);
         doThrow(new IllegalStateException("Failed to remove container " + hdfsName)).doNothing()
                 .when(lifecycle).removeIfExistsStrict(hdfsName);
 
@@ -1254,13 +2618,115 @@ class EmrClusterStorageTest {
         verify(lifecycle, never()).disconnectFromNetwork("floci-container", "emr-j-up-hdfs");
     }
 
-    // The container name runs with networkMode as its network mode, as Docker inspects it.
+    // The primary node's container logs, by their path under the NodeManager's folder, as it lists and gives them. What
+    // it is asked to list.
+    private List<List<String>> nodeLogs(Map<String, String> logs) throws IOException {
+        return nodeLogs(hdfsName, logs);
+    }
+
+    private List<List<String>> nodeLogs(String node, Map<String, String> logs) throws IOException {
+        StringBuilder listing = new StringBuilder();
+        for (Map.Entry<String, String> log : logs.entrySet()) {
+            listing.append(log.getValue().length()).append(' ').append(log.getKey()).append('\n');
+            byte[] archive = tar(Map.of(log.getKey().substring(log.getKey().lastIndexOf('/') + 1), log.getValue()));
+            CopyArchiveFromContainerCmd copy = mock(CopyArchiveFromContainerCmd.class);
+            when(copy.exec()).thenAnswer(reading -> new ByteArrayInputStream(archive));
+            when(docker.copyArchiveFromContainerCmd(node, "/mnt/yarn/logs/" + log.getKey())).thenReturn(copy);
+        }
+        return ContainerExecStubs.completeEveryExec(docker, node, 0L, listing.toString(), "");
+    }
+
+    // The primary node starts and answers ready, and so does each node named.
+    private void nodesStart(String... names) {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-1", Map.of()));
+        when(lifecycle.probeContainer("c-1")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-1", hdfsName)).thenReturn("172.18.0.5");
+        ContainerExecStubs.completeEveryExec(docker, "c-1", 0L, "", "");
+        for (String name : names) {
+            when(lifecycle.probeContainer(name)).thenReturn(ContainerLiveness.RUNNING);
+            ContainerExecStubs.completeEveryExec(docker, name, 0L, "", "");
+        }
+    }
+
+    private void runningNodes(Container... nodes) {
+        ListContainersCmd list = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(docker.listContainersCmd()).thenReturn(list);
+        when(list.exec()).thenReturn(List.of(nodes));
+    }
+
+    private static Container node(String name, String state, String image, String host, boolean core) {
+        Container container = mock(Container.class);
+        when(container.getNames()).thenReturn(new String[]{"/" + name});
+        when(container.getState()).thenReturn(state);
+        when(container.getImageId()).thenReturn(image);
+        when(container.getLabels()).thenReturn(Map.of("io.floci.emr.node-host", host, "io.floci.emr.node-core",
+                String.valueOf(core)));
+        // On its cluster's network and on the one its steps run on.
+        ContainerNetworkSettings networks = mock(ContainerNetworkSettings.class);
+        when(networks.getNetworks()).thenReturn(Map.of("floci-network", new ContainerNetwork()));
+        when(container.getNetworkSettings()).thenReturn(networks);
+        return container;
+    }
+
+    // The volumes of cluster j-1's nodes Docker lists, whatever their containers.
+    private void nodeVolumes(InspectVolumeResponse... volumes) {
+        ListVolumesCmd list = mock(ListVolumesCmd.class, RETURNS_SELF);
+        when(docker.listVolumesCmd()).thenReturn(list);
+        ListVolumesResponse response = mock(ListVolumesResponse.class);
+        when(response.getVolumes()).thenReturn(List.of(volumes));
+        when(list.exec()).thenReturn(response);
+    }
+
+    private static InspectVolumeResponse nodeVolume(String name, String host, boolean core) {
+        InspectVolumeResponse volume = mock(InspectVolumeResponse.class);
+        when(volume.getName()).thenReturn(name);
+        when(volume.getLabels()).thenReturn(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, "j-1",
+                "io.floci.emr.node-host", host, "io.floci.emr.node-core", String.valueOf(core)));
+        return volume;
+    }
+
+    private static Container nodeOf(String clusterId, String name) {
+        Container container = mock(Container.class);
+        when(container.getNames()).thenReturn(new String[]{"/" + name});
+        when(container.getLabels()).thenReturn(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, clusterId));
+        return container;
+    }
+
+    private EmrClusterStorage queuingDecommissions(List<Runnable> queued) {
+        return new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials, currentContainer, config, s3,
+                Duration.ofSeconds(120), System::nanoTime, queued::add, Duration.ZERO);
+    }
+
+    // The files, by their paths in the archive, as Docker archives a folder.
+    private static byte[] tar(Map<String, String> files) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (TarArchiveOutputStream out = new TarArchiveOutputStream(bytes)) {
+            for (Map.Entry<String, String> file : files.entrySet()) {
+                byte[] content = file.getValue().getBytes(UTF_8);
+                TarArchiveEntry entry = new TarArchiveEntry(file.getKey());
+                entry.setSize(content.length);
+                out.putArchiveEntry(entry);
+                out.write(content);
+                out.closeArchiveEntry();
+            }
+        }
+        return bytes.toByteArray();
+    }
+
+    // The container name runs with networkMode as its network mode, of the image the steps run in, as Docker inspects
+    // it.
     private void runningOn(String name, String networkMode) {
         InspectContainerCmd inspect = mock(InspectContainerCmd.class);
         InspectContainerResponse response = mock(InspectContainerResponse.class);
         when(docker.inspectContainerCmd(name)).thenReturn(inspect);
         when(inspect.exec()).thenReturn(response);
         when(response.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode(networkMode));
+        when(response.getImageId()).thenReturn(IMAGE);
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(networks.getNetworks()).thenReturn(Map.of(networkMode, new ContainerNetwork(), "floci-network",
+                new ContainerNetwork()));
+        when(response.getNetworkSettings()).thenReturn(networks);
     }
 
     // Docker inspects the container nameOrId as the one of id.

@@ -31,6 +31,24 @@ public class ScalableTarget {
     private SuspendedState suspendedState = new SuspendedState();
     private Map<String, String> tags = new HashMap<>();
 
+    public ScalableTarget() {}
+
+    public ScalableTarget(ScalableTarget source) {
+        serviceNamespace = source.serviceNamespace;
+        resourceId = source.resourceId;
+        scalableDimension = source.scalableDimension;
+        minCapacity = source.minCapacity;
+        maxCapacity = source.maxCapacity;
+        roleArn = source.roleArn;
+        scalableTargetArn = source.scalableTargetArn;
+        creationTime = source.creationTime;
+        suspendedState = new SuspendedState();
+        suspendedState.setScheduledScalingSuspended(source.suspendedState.isScheduledScalingSuspended());
+        suspendedState.setDynamicScalingInSuspended(source.suspendedState.isDynamicScalingInSuspended());
+        suspendedState.setDynamicScalingOutSuspended(source.suspendedState.isDynamicScalingOutSuspended());
+        tags = new HashMap<>(source.tags);
+    }
+
     public String getServiceNamespace() { return serviceNamespace; }
     public void setServiceNamespace(String v) { this.serviceNamespace = v; }
 

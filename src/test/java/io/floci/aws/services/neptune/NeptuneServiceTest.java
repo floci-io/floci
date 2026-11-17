@@ -34,6 +34,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -90,6 +91,20 @@ class NeptuneServiceTest {
         doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());
 
         service = new NeptuneService(config, regionResolver, containerManager, proxyManager, storageFactory);
+    }
+
+    @Test
+    void failedCreateReleasesItsIdentifierForAnExplicitRetry() {
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
+                .thenThrow(new IllegalStateException("Backend startup failed"))
+                .thenReturn(new NeptuneContainerHandle("retry-container", "same", "localhost", 8182));
+
+        assertThrows(IllegalStateException.class, () -> service.createDbCluster("same", "1.3.2.1", false));
+        NeptuneCluster recovered = service.createDbCluster("same", "1.3.2.1", false);
+
+        assertEquals("retry-container", recovered.getContainerId());
+        assertEquals(18182, recovered.getProxyPort());
+        verify(containerManager, times(1)).stopByClusterId("000000000000-us-east-1-same");
     }
 
     @Test

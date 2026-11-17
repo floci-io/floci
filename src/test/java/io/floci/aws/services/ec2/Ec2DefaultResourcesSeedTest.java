@@ -10,16 +10,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -37,24 +30,10 @@ class Ec2DefaultResourcesSeedTest {
         Ec2Service service = newService(subnets);
         // Holds the first call in the middle of seeding, before any default subnet is stored.
         subnets.parkNextWrite();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> first = pool.submit(() -> service.ensureDefaultResources(REGION));
-            assertTrue(subnets.awaitParked(), "the first call must reach its first subnet write");
-            AtomicReference<Thread> secondThread = new AtomicReference<>();
-            Future<Integer> second = pool.submit(() -> {
-                secondThread.set(Thread.currentThread());
-                return service.describeSubnets(REGION, List.of(), Map.of()).size();
-            });
-            awaitBlockedOrDone(secondThread, second);
-            assertFalse(second.isDone(), "the second call read the default network while it was still being seeded");
-
-            subnets.release();
-            first.get(2, TimeUnit.SECONDS);
-            assertEquals(3, second.get(2, TimeUnit.SECONDS), "the second call sees the three default subnets");
-        } finally {
-            pool.shutdownNow();
-        }
+        assertOperationWaitsForParkedStore(subnets,
+                () -> service.ensureDefaultResources(REGION),
+                () -> assertEquals(3, service.describeSubnets(REGION, List.of(), Map.of()).size(),
+                        "the second call sees the three default subnets"));
     }
 
     private Ec2Service newService(StorageBackend<String, Subnet> subnets) {

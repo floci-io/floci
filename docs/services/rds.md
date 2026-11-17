@@ -61,7 +61,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `StopDBCluster` | Stop a cluster and its member instances |
 | `StartDBCluster` | Start a stopped cluster and its members |
 | `RebootDBCluster` | Restart a cluster's database and its members' proxies |
-| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
+| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL, MySQL or MariaDB instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
 | `PromoteReadReplica` | Detach a read replica into a standalone instance and turn automated backups on |
 | `SwitchoverReadReplica` | Refused with `InvalidDBInstanceState`: AWS supports switchover only for Oracle and SQL Server replicas, neither of which is emulated |
 | `PromoteReadReplicaDBCluster` | Refused with `InvalidDBClusterStateFault`: no cluster is created as a replica of an instance |
@@ -165,6 +165,10 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `FailoverGlobalCluster` | Promote a secondary to primary (failover with `AllowDataLoss`, or switchover) |
 | `SwitchoverGlobalCluster` | Promote a secondary to primary and demote the current primary to a secondary |
 | `FailoverDBCluster` | Move a DB cluster's writer role to a reader instance, the named one or the first |
+| `CreateBlueGreenDeployment` | Stage a green copy of a DB instance with a new engine version, parameter group, class or storage; see [Blue/Green deployments](#bluegreen-deployments) |
+| `DescribeBlueGreenDeployments` | List blue/green deployments, by identifier and the `blue-green-deployment-identifier`, `blue-green-deployment-name`, `source` and `target` filters |
+| `SwitchoverBlueGreenDeployment` | Make the green instance production: it takes the blue name, ARN, endpoint and tags, and blue becomes `<name>-old1` |
+| `DeleteBlueGreenDeployment` | Delete a deployment, with `DeleteTarget` also deleting the green instance before switchover |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
@@ -204,8 +208,10 @@ checked against the instance's other window. Modifications apply immediately —
     `DescribeDBSnapshotAttributes`/`ModifyDBSnapshotAttribute` are modeled as plain in-memory
     state (no real cross-account sharing). Available manual snapshots can be deleted, copied by
     identifier or ARN, and modified. Copies retain the source data and can copy source tags or add
-    request tags. Snapshots are region-scoped like DB instances and clusters: `DBSnapshotArn` reflects
-    the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
+    request tags. AWS doesn't document a `ModifyDBSnapshot` that names neither `EngineVersion` nor
+    `OptionGroupName`; Floci returns the snapshot unchanged, since the model requires only the
+    identifier and declares no fault for a request with nothing to change. Snapshots are
+    region-scoped like DB instances and clusters: `DBSnapshotArn` reflects the request's signed region, and a snapshot is only visible to `Describe`/`Tag` calls signed
     for that same region. Cluster snapshots follow the same lifecycle: `CreateDBClusterSnapshot`
     dumps the cluster's database, `RestoreDBClusterFromSnapshot` loads it into a new cluster, and
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
@@ -252,6 +258,27 @@ Malformed reset flags leave saved parameter overrides unchanged. Malformed event
 flags leave the subscription and its topic, source type and event categories unchanged.
 Malformed restore flags are rejected before starting an instance or cluster restore.
 
+
+## Native EventBridge lifecycle notifications
+
+Completed `StopDBInstance`, `StartDBInstance`, `StopDBCluster` and `StartDBCluster`
+operations publish `aws.rds` notifications on the resource account and Region's default
+EventBridge bus. Cluster operations also notify their member instances. Instance events
+use `RDS DB Instance Event` and IDs `RDS-EVENT-0087` (stopped) and `RDS-EVENT-0088`
+(started); cluster events use `RDS DB Cluster Event` and `RDS-EVENT-0150` / `0151`.
+The resource ARN appears in both `resources` and `detail.SourceArn`, alongside
+`SourceType` (`DB_INSTANCE` for instances, `CLUSTER` for clusters),
+`SourceIdentifier`, `Date`, `Message`, `EventID` and
+`EventCategories: ["notification"]`, following the
+[AWS event examples](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_Events.overview.html).
+The [Aurora cluster example](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/USER_Events.overview.html)
+documents the cluster-specific source type.
+
+Events are emitted after the backend and proxies finish the operation. Rejected or failed
+operations do not emit success notifications. Delivery is best effort, with no replay after
+a restart; other RDS lifecycle events are not yet emitted. Metadata-only mock mode emits
+the same notifications. EventBridge rules can route these events independently of the
+SNS subscription actions below.
 
 ## Event notification subscriptions
 
@@ -368,9 +395,11 @@ services:
 
     Proxy and target-group settings are persisted and round-trip through the RDS Query API and
     CloudFormation. Pool sizing, borrow timeout, idle timeout, TLS, init-query, and session-pinning
-    settings are currently control-plane metadata; the TCP relay does not yet implement those data-plane
-    behaviors. `DefaultAuthScheme=IAM_AUTH` is supported for control-plane workflows, but a real-mode
-    proxy using that scheme cannot register a target until backend IAM authentication is implemented.
+    settings are currently control-plane metadata; the TCP relay does not yet implement those
+    data-plane behaviors. `SessionPinningFilters` is accepted and stored on every engine family; AWS
+    documents it as effective only for the MySQL engine family. `DefaultAuthScheme=IAM_AUTH` is
+    supported for control-plane workflows, but a real-mode proxy using that scheme cannot register a
+    target until backend IAM authentication is implemented.
     Requests to `RegisterDBProxyTargets`, `DeregisterDBProxyTargets`, and
     `DescribeDBProxyTargets` use the `default` target group when `TargetGroupName` is omitted,
     matching the RDS API contract.
@@ -453,9 +482,35 @@ Not emulated: Data API requests to a paused cluster wait for the resume, as the 
 describes, and never fail with `DatabaseResumingException`; logical or binlog replication does not
 keep a cluster awake; and parameter group changes do not resume one.
 
+## VPC security groups
+
+`CreateDBInstance` and `ModifyDBInstance` check each id in `VpcSecurityGroupIds` against EC2 before
+anything is stored or a container starts, and refuse the request the way RDS does:
+
+- An id that names no security group of the account and Region fails with `InvalidParameterValue`
+  (`Invalid security group , groupId= sg-..., groupName=.`).
+- A group outside the VPC of the instance's DB subnet group fails with `InvalidParameterCombination`
+  (`The DB instance and EC2 security group are in different VPCs. ...`).
+
+A modify that also names a new `DBSubnetGroupName` checks the groups against that subnet group's VPC.
+Snapshot and point-in-time restores, read replicas, the green instance of a Blue/Green deployment and
+a CloudFormation update of `VPCSecurityGroups` are checked the same way. A request that names no groups
+is not checked.
+
+A standalone instance whose request names no groups gets the default security group of its VPC, as
+RDS documents for `CreateDBInstance` and `CreateDBInstanceReadReplica`. A same-Region read replica
+otherwise takes its source's groups, but only in the source's VPC: in another VPC it gets that VPC's
+default group. A modify that moves an instance to another VPC without naming groups puts it on the
+new VPC's default group, since the old VPC's groups cannot go with it. A cluster member's groups are
+its cluster's, which Floci does not keep, so it keeps none. `DescribeDBInstances` reports the VPC's
+default group for an instance that keeps none, such as a cluster member or an instance stored before
+these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
+before it changes anything, and a rollback leaves the groups of an instance the update moved to
+another VPC, which it does not move back.
+
 ## Modifying a DB instance
 
-`ModifyDBInstance` applies `DBInstanceClass`, `AllocatedStorage` and `EngineVersion`, and
+`ModifyDBInstance` applies `DBInstanceClass` and `AllocatedStorage`, and
 `DescribeDBInstances` reports the new values. Members the request leaves out keep their current
 value, so a partial modify does not reset anything.
 
@@ -467,7 +522,29 @@ value, so a partial modify does not reset anything.
   rather than refused, which is what AWS does. SQL Server takes the size it is given.
 - The same size is not a change and is left alone.
 
-`EngineVersion` accepts a minor upgrade on its own. A different major version needs
+Standalone container-backed instances support minor `EngineVersion` upgrades when the default
+image follows the requested version. Floci stops the proxy and database container, starts the new
+engine image on the same storage volume, and rebinds the existing endpoint. It reports `available`
+only after both the new backend and proxy have started. A failed restart reports `failed` and
+retains the storage volume.
+
+Major upgrades and downgrades fail with `InvalidParameterCombination` before any settings change.
+PostgreSQL 10 and later use the leading component as the major version; older PostgreSQL releases,
+MySQL, and MariaDB use the first two components. Existing databases need a migration for a major
+upgrade, which Floci does not perform. `AllowMajorVersionUpgrade` does not bypass this limitation.
+Custom image overrides and SQL Server do not map `EngineVersion` to a new image, so their version
+changes are also refused. Cluster members must use cluster-level engine management. Repeating the
+current version is allowed alongside other changes without restarting the database.
+
+A standalone instance created while Docker is unavailable may change its version before its first
+backend startup when its image follows the requested version. Its eventual container uses the
+updated version. Floci persists this never-started
+state, and protects the version before attempting to initialize the database, including when a later
+proxy startup fails. Existing databases remain protected against major changes after a reboot,
+storage reload, or lost container. Older records without this state are treated as existing databases.
+
+In mock mode (`FLOCI_SERVICES_RDS_MOCK=true`), `EngineVersion` updates the instance metadata.
+A minor upgrade is accepted on its own. A different major version needs
 `AllowMajorVersionUpgrade`, without which the request fails with `InvalidParameterCombination`.
 Major versions are compared on the leading version component, so a MySQL 8.0 to 8.4 upgrade reads
 as a minor one here while AWS treats it as major.
@@ -476,17 +553,11 @@ A refused member fails the whole request: a modify that carries a new `DBInstanc
 shrinking `AllocatedStorage` returns `InvalidParameterCombination` and leaves the class as it was,
 so a read-back never reports a value the request did not get.
 
-Two deviations are worth knowing:
-
-- **Changes apply immediately.** AWS defers a class, storage or engine-version change to the
-  preferred maintenance window unless `ApplyImmediately` is set, and reports it under
-  `PendingModifiedValues` until then. Floci runs no maintenance window and does not model
-  `PendingModifiedValues`, so it applies the change as soon as the request lands whatever
-  `ApplyImmediately` says. Without this a deferred change would never be applied at all, and every
-  read-back would report the same drift.
-- **The backing container is not re-imaged.** An engine-version change is recorded on the instance
-  and reported on read, but the container started at create time keeps running the image it was
-  started with. This is control-plane compatibility, like Aurora Serverless v2 scaling above.
+Accepted changes apply immediately. AWS defers a class, storage or engine-version change to the
+preferred maintenance window unless `ApplyImmediately` is set, and reports it under
+`PendingModifiedValues` until then. Floci runs no maintenance window and does not model
+`PendingModifiedValues`, so it applies accepted changes as soon as the request lands whatever
+`ApplyImmediately` says.
 
 For standalone, non-Aurora instances with instance-owned storage, `CreateDBInstance` and
 `ModifyDBInstance` retain the `StorageType` values `gp2`, `gp3`, `io1` and `io2`. A modify
@@ -599,8 +670,10 @@ one only Aurora has, is skipped with a warning in the database log. A formula va
 `require_secure_transport` and `skip_grant_tables`, which would lock out Floci's proxy (it talks
 to the server without TLS). When the server refuses a value and stops, the instance, or every
 member of the cluster, reports `incompatible-parameters` and Floci logs the server's error; correct
-the group and reboot to start it again. PostgreSQL and SQL Server databases do not take parameter
-group values yet.
+the group and reboot to start it again. A PostgreSQL or Aurora PostgreSQL database takes one value
+from its groups, layered and applied the same way: `rds.logical_replication` of `1` starts the
+server with `wal_level=logical`, as on RDS. Its other parameter group values, and those of SQL
+Server, are not applied yet.
 
 ## Option Groups
 
@@ -649,7 +722,19 @@ Known gaps, all deliberate:
 | `DescribeOptionGroupOptions` | Not implemented: the per-engine option catalog is not modeled |
 | `OptionGroupQuotaExceededFault` (AWS caps an account at 20 groups) | Not enforced — capping a local emulator would only get in a test's way |
 | `OptionSetting` metadata (`DataType`, `ApplyType`, `AllowedValues`, `DefaultValue`, `Description`) | Omitted — it would require the per-engine option catalog `DescribeOptionGroupOptions` serves |
-| `MaxRecords` / `Marker` pagination | Every group is returned in one page, as with every other RDS list action |
+| `MaxRecords` / `Marker` pagination | Every matching option group is returned in one page, with no `Marker` |
+
+## Pagination
+
+`DescribeDBInstances`, `DescribeDBClusters`, `DescribeDBSubnetGroups`,
+`DescribeDBParameterGroups`, `DescribeDBParameters`,
+`DescribeDBClusterParameters`, `DescribeOrderableDBInstanceOptions` and `DescribeOptionGroups`
+return all matching results without a `Marker`. These handlers do not yet split results by
+`MaxRecords` or resume from `Marker`. An absent marker ends pagination, including for an empty
+result; an empty marker string must not be used as a continuation token.
+
+`DescribeDBClusterParameterGroups` supports `MaxRecords` pagination and returns a
+non-empty `Marker` only when another page is available.
 
 ## Read replicas
 
@@ -666,11 +751,11 @@ and a `StatusInfos` entry of type `read replication`, the source lists it under
 it is the ARN. A `DBSubnetGroupName` with a source given by plain identifier is refused with
 `DBSubnetGroupNotAllowedFault`, as on AWS.
 
-The replica's database is initialised from a `pg_dumpall` of the source taken when the replica is
-created, the same mechanism `RestoreDBInstanceFromDBSnapshot` uses, so it holds the source's data
-as of that moment. Writes made to the source afterwards are not streamed to the replica. Because
-the copy is dump based, only PostgreSQL sources are accepted; MySQL and MariaDB sources are refused
-with `InvalidDBInstanceState`, although `CreateDBSnapshot` accepts them. A source with automated backups
+The replica's database is initialised from a dump of the source taken when the replica is
+created, the same mechanism `CreateDBSnapshot` and `RestoreDBInstanceFromDBSnapshot` use, so it
+holds the source's data as of that moment. Writes made to the source afterwards are not streamed to
+the replica. PostgreSQL, MySQL and MariaDB sources are accepted; other engines are refused with
+`InvalidDBInstanceState`. A source with automated backups
 off (`BackupRetentionPeriod` 0) is refused with the same error AWS uses.
 
 `PromoteReadReplica` clears the link on both ends, sets the requested `BackupRetentionPeriod`
@@ -679,6 +764,42 @@ connections drop while the container, endpoint and data stay. Deleting a source 
 same-region replicas; a cross-region replica keeps its link with the replication status
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
+
+## Blue/Green deployments
+
+`CreateBlueGreenDeployment` takes a PostgreSQL, MySQL or MariaDB DB instance by ARN as `Source`
+and creates its green copy, named `<source>-green-<suffix>`. The green instance inherits the
+blue one's settings and tags, with `TargetEngineVersion`, `TargetDBParameterGroupName`,
+`TargetDBInstanceClass`, `TargetAllocatedStorage` and `TargetStorageType` applied. Without
+`TargetDBParameterGroupName` it keeps the blue parameter group when the engine version stays in the
+same family, and gets the default group of the new family on a major upgrade. Both instances report
+the link in `DescribeDBInstances` as a read replica pair. The green database is initialised from a
+dump of the blue one taken at creation, the mechanism snapshots use, so it holds the blue data as
+of that moment; writes made to blue afterwards are not streamed to it.
+
+Creation finishes before the response, so the deployment is reported `AVAILABLE` straight away
+with its `SwitchoverDetails` and `Tasks`. As on AWS, a source needs automated backups on
+(`InvalidDBInstanceState` otherwise), a lower `TargetEngineVersion` is refused, and an instance can
+be in one deployment at a time. Floci refuses with `SourceDatabaseNotSupportedFault` an instance
+that belongs to a cluster, is a read replica or has read replicas, keeps its master password in
+Secrets Manager, or is a DB proxy target, and refuses a DB cluster source with
+`SourceClusterNotSupportedFault`. `TargetIops`, `TargetStorageThroughput` and
+`UpgradeTargetStorageConfig` are accepted and not applied, as `CreateDBInstance` treats IOPS.
+
+`SwitchoverBlueGreenDeployment` requires the deployment to be `AVAILABLE` and both instances
+available. Green takes the blue identifier, ARN, endpoint and tags, so clients that connect to the
+blue endpoint reach the new database without a change. Blue is renamed `<name>-old<n>`, moves to
+the endpoint green had, and keeps running. The deployment ends `SWITCHOVER_COMPLETED`, with
+`Source` naming the old instance and `Target` the new production one. The switchover completes
+before the response; `SwitchoverTimeout` is checked against the 30 to 3600 second range and has
+nothing else to bound. The old instance is not made read only.
+
+Before switchover, a deployment whose blue or green instance has been deleted, or whose green
+instance was promoted, reports `INVALID_CONFIGURATION` and can no longer be switched over.
+`DeleteBlueGreenDeployment` deletes the green instance too with `DeleteTarget`, which is refused
+after switchover; without it the green instance is kept as a standalone instance. The blue
+instance is never touched. A deployment is tagged through its
+`arn:aws:rds:<region>:<account>:deployment:<identifier>` ARN.
 
 ## Engine catalogue
 
@@ -1103,18 +1224,24 @@ The parameters a PostgreSQL client sends when it connects (`options` such as `-c
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
-with `ERROR 1524 (HY000): Plugin 'AWSAuthenticationPlugin' is not loaded`. The proxy rewrites that
+because the plugin is unavailable. The proxy rewrites that
 clause to `IDENTIFIED WITH mysql_native_password AS '*000...0'`, an authentication string no
 password hashes to. The account is therefore created, can be granted to and can be dropped, but
 holds no password of its own, which is what an IAM DB user is: an account whose credentials come
 from IAM rather than from MySQL. This is the MySQL counterpart of the empty `rds_iam` role Floci
 pre-creates for PostgreSQL.
 
-Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin rather than
-`AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`. And
-connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
-password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
-`mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
+On a connection that negotiates zstd compression, the proxy forwards command frames unchanged,
+including frames with an uncompressed payload. It does not rewrite this IAM user DDL, so the
+backend rejects the unsupported `AWSAuthenticationPlugin` on that connection.
+
+For users created through the rewrite, `SHOW CREATE USER` reports the substituted plugin rather
+than `AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`.
+MySQL IAM token login is supported over TLS: the proxy can request a `mysql_clear_password`
+auth switch to validate the token, then authenticates to the container as the master user.
+Unlike RDS, that MySQL session stays the master user: `CURRENT_USER()` reports the master,
+and the IAM user's own grants do not apply. The PostgreSQL proxy instead hands the session
+over to the role named in the token.
 
 ## Certificate authorities
 
@@ -1195,3 +1322,23 @@ PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=a
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
   --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```
+
+### IAM lifecycle resources and tags
+
+With IAM enforcement enabled, RDS request-resource mappings cover the complete
+namespace generated from AWS's Service Authorization Reference and pinned
+botocore models. Parameter groups, subnet groups, DB instances and DB clusters
+use their named ARNs. Stored proxy and endpoint identities are resolved from
+request names, and target group lookups include the owning proxy. ARN-valued
+members, including `RemoveFromGlobalCluster`'s `DbClusterIdentifier`, are checked
+as ARNs. Unfiltered describe requests continue to require a wildcard grant.
+
+For modeled taggable RDS resources (including endpoints and proxies) and
+DocumentDB clusters, instances and snapshots sharing the RDS ARN namespace,
+supported `aws:ResourceTag` and RDS resource-specific tag conditions read stored
+tags from the exact target ARN's account, Region and partition. IAM and tagging
+share resource lookup dispatch. IAM reads neither create defaults nor migrate
+legacy records; named lookups use direct account-scoped keys, and generated
+proxy identities only search their owning account. Create-time request tags
+remain separate from existing-resource tags. Resource types without modeled
+storage retain the generated wildcard fallback when no stored identity exists.

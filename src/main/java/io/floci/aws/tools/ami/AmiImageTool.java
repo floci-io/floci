@@ -3,6 +3,7 @@ package io.floci.aws.tools.ami;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import io.floci.aws.core.common.docker.DockerPlatforms;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -264,11 +265,11 @@ public final class AmiImageTool {
     }
 
     private static String platform(String architecture) {
-        return switch (architecture) {
-            case "arm64" -> "linux/arm64";
-            case "amd64", "x86_64" -> "linux/amd64";
-            default -> throw new IllegalArgumentException("Unsupported Docker platform architecture: " + architecture);
-        };
+        String platform = DockerPlatforms.forArchitecture(awsArchitecture(architecture));
+        if (platform == null) {
+            throw new IllegalArgumentException("Unsupported Docker platform architecture: " + architecture);
+        }
+        return platform;
     }
 
     private static void required(String value, String field) {

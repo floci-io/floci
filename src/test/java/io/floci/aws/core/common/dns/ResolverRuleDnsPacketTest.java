@@ -14,7 +14,6 @@ import org.junit.jupiter.api.Test;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -41,7 +40,7 @@ class ResolverRuleDnsPacketTest {
 
     @Test
     void aForwardedQueryIsAnsweredByTheRulesTarget() throws Exception {
-        byte[] request = buildQuery("db.corp.internal");
+        byte[] request = DnsTestQuery.query("db.corp.internal", 1, 0x2468);
         byte[] targetAnswer = answerFor(request, "10.4.0.11");
 
         try (java.net.DatagramSocket target = new java.net.DatagramSocket(0, InetAddress.getByName(CLIENT))) {
@@ -60,12 +59,12 @@ class ResolverRuleDnsPacketTest {
         // Port 1 on the loopback has no resolver on it, so every target of the rule fails.
         EmbeddedDnsServer dns = serverForwarding("corp.internal", 1);
 
-        byte[] failed = query(dns, buildQuery("db.corp.internal"));
+        byte[] failed = query(dns, DnsTestQuery.query("db.corp.internal", 1, 0x2468));
         assertEquals(2, ByteBuffer.wrap(failed).getShort(2) & 0x000F, "SERVFAIL for the rule's name");
         assertEquals(0, ByteBuffer.wrap(failed).getShort(2) & 0x0400,
                 "Floci is not the authority for a name a rule sends elsewhere");
 
-        byte[] request = buildQuery("api.sapphire.internal");
+        byte[] request = DnsTestQuery.query("api.sapphire.internal", 1, 0x2468);
         byte[] resolved = query(dns, request);
         assertEquals(0, ByteBuffer.wrap(resolved).getShort(2) & 0x000F);
         assertEquals(1, ByteBuffer.wrap(resolved).getShort(6));
@@ -121,29 +120,6 @@ class ResolverRuleDnsPacketTest {
         }
     }
 
-    private static byte[] buildQuery(String name) {
-        String[] labels = name.split("\\.");
-        int nameLength = 1;
-        for (String label : labels) {
-            nameLength += label.length() + 1;
-        }
-        ByteBuffer query = ByteBuffer.allocate(12 + nameLength + 4);
-        query.putShort((short) 0x2468);
-        query.putShort((short) 0x0100);
-        query.putShort((short) 1);
-        query.putShort((short) 0);
-        query.putShort((short) 0);
-        query.putShort((short) 0);
-        for (String label : labels) {
-            byte[] bytes = label.getBytes(StandardCharsets.US_ASCII);
-            query.put((byte) bytes.length);
-            query.put(bytes);
-        }
-        query.put((byte) 0);
-        query.putShort((short) 1);
-        query.putShort((short) 1);
-        return query.array();
-    }
 
     /** The query echoed back as a one-answer response, which is what a real resolver would send. */
     private static byte[] answerFor(byte[] request, String address) {

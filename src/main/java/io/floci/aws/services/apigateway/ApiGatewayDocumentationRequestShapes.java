@@ -18,7 +18,7 @@ final class ApiGatewayDocumentationRequestShapes {
                 }
 
                 @Override
-                public AwsException bounds(String path, String type, Long min, Long max, long size) {
+                public AwsException bounds(String path, String type, Long min, Long max, Number size) {
                     return bad(path + " is outside the modeled bounds.");
                 }
 

@@ -63,7 +63,7 @@ class BedrockAgentCoreControlTest {
         assertThat(runtimeId).startsWith(runtimeName + "-");
         assertThat(response.agentRuntimeVersion()).isEqualTo("1");
         assertThat(response.statusAsString()).isEqualTo("READY");
-        assertThat(response.agentRuntimeArn()).contains(":bedrock-agentcore:").contains(":agent/");
+        assertThat(response.agentRuntimeArn()).contains(":bedrock-agentcore:").contains(":runtime/" + runtimeId);
         assertThat(response.workloadIdentityDetails().workloadIdentityArn()).isNotBlank();
     }
 

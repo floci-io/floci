@@ -68,7 +68,8 @@ quarkus:
       # (bedrock/model-catalog.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
       # runtime (lambdaweb/index.mjs) into each environment, EMR writes its S3DistCp program
-      # (emr/s3-dist-cp.py) into a step's container, EC2 security group enforcement builds
+      # (emr/s3-dist-cp.py) into a step's container, DSQL renders its bootstrap
+      # (dsql/bootstrap.sql) for each cluster, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -92,9 +93,11 @@ quarkus:
         - bedrock/*.yaml
         - eks/*.json
         - aws/*.json
+        - proto/**/*.proto
         - iam/service-linked-roles.tsv
         - cloudformation/*.json
         - redshift/*.sql
+        - dsql/*.sql
         - i18n/*.properties
         - floci/version.properties
         - org/apache/velocity/runtime/defaults/*.properties
@@ -155,17 +158,19 @@ quarkus:
       - --initialize-at-run-time=io.floci.aws.services.bedrockagentcore.BedrockAgentCoreEventService
       - --initialize-at-run-time=io.floci.aws.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.floci.aws.services.emr.EmrService
+      - --initialize-at-run-time=io.floci.aws.services.emrserverless.EmrServerlessSparkRunner
       - --initialize-at-run-time=io.floci.aws.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.floci.aws.services.elb.ElbClassicService
       - --initialize-at-run-time=io.floci.aws.services.datasync.DataSyncService
       - --initialize-at-run-time=io.floci.aws.services.dms.DmsService
       - --initialize-at-run-time=io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.floci.aws.services.ecs.container.EcsTaskRoleCredentials
+      - --initialize-at-run-time=io.floci.aws.services.codeartifact.KellnrSidecarManager
       - --initialize-at-run-time=io.floci.aws.services.ssoportal.SsoPortalService
       - --initialize-at-run-time=io.floci.aws.services.redshift.proxy.RedshiftRoleAccess
       - --initialize-at-run-time=io.floci.aws.services.redshift.spectrum.SpectrumMaterializer
       - --initialize-at-run-time=io.floci.aws.services.ecs.exec.EcsExecSessionRegistry
-      - --initialize-at-run-time=io.floci.aws.services.stepfunctions.ApiGatewayTaskInvoker
+      - --initialize-at-run-time=io.floci.aws.core.common.auth.LocalAwsSigningSession
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
       # bundled JNI library from the static initializers of these two classes.
       - --initialize-at-run-time=org.xerial.snappy.Snappy
@@ -221,6 +226,8 @@ floci:
       # metric datapoints, the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
+      rekognition:
+        flush-interval-ms: 5000
       ssm:
         flush-interval-ms: 5000
       dynamodb:
@@ -239,6 +246,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
+        # Includes saved Logs Insights query definitions.
         flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
@@ -299,6 +307,8 @@ floci:
         flush-interval-ms: 5000
       emrserverless:
         flush-interval-ms: 5000
+      emrcontainers:
+        flush-interval-ms: 5000
       lakeformation:
         flush-interval-ms: 5000
 
@@ -330,6 +340,17 @@ floci:
     # Combine with tls.enabled so clients that hardcode https:// are served on port 443
     # with a certificate covering those suffixes and their regional wildcards.
     spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
+
+    # When Floci runs natively: a resolver on 127.0.0.1:<port> answering the same names as the
+    # embedded DNS server (Cloud Map <service>.<namespace>, Route 53 private zones), for the host's
+    # own resolver to point at; other names are refused. Unset starts no listener. In Docker,
+    # publish port 53/udp instead.
+    # host-port: 5354                             # FLOCI_DNS_HOST_PORT
+
+    # When Floci runs natively on a host with a docker0 bridge: also listen on that bridge's
+    # address, port 53, and give it to the containers Floci launches as their resolver. Port 53
+    # needs root or CAP_NET_BIND_SERVICE; without it Floci logs how to grant it.
+    bridge-listener-enabled: true                 # FLOCI_DNS_BRIDGE_LISTENER_ENABLED
 
   auth:
     validate-signatures: false
@@ -363,6 +384,7 @@ floci:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""                     # FLOCI_TLS_KEY_PATH (PEM private key file)
+    # extra-ca-path: ""                # FLOCI_TLS_EXTRA_CA_PATH (PEM CA certificates Floci's own HTTPS clients also trust; works with TLS on or off)
     self-signed: true                  # FLOCI_TLS_SELF_SIGNED: auto-generate a server cert signed by Floci's local CA if no cert-path provided
     aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
 
@@ -375,17 +397,18 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
-    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for every Docker call Floci makes. Each
-    # live Lambda container holds 1 connection for its whole lifetime (its exit watcher) plus one
-    # per extension; log follow uses the streaming pool below. Past the limit,
-    # create/start/stop/remove wait for a free connection and the emulator stalls. 1024 covers
-    # the 500 containers the runtime API port range allows. Keep in step with the @WithDefault on
-    # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
+    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls, plus
+    # CodeBuild phase execs, EKS audit followers and ECS Exec sessions. Past the limit,
+    # create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
+    # with the @WithDefault on EmulatorConfig.DockerConfig.maxConnections: a value set here WINS
+    # over the annotation.
     max-connections: 1024
-    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for container log-follow streams, so
-    # they never starve create/start/stop/remove. Keep in step with the @WithDefault on
+    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for streams that last a container's
+    # lifetime, so they never starve create/start/stop/remove. Each live Lambda container holds 2
+    # (log follow and exit watcher) plus one per extension; 2048 covers the 500 containers the
+    # runtime API port range allows with two extensions each. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
-    streaming-max-connections: 512
+    streaming-max-connections: 2048
     # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
     # connection before failing, for both pools. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
@@ -427,6 +450,7 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      restore-completion-delay-seconds: 0   # FLOCI_SERVICES_S3_RESTORE_COMPLETION_DELAY_SECONDS
       lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
       lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     dynamodb:
@@ -503,6 +527,11 @@ floci:
       # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
                            # without creating it first. Unset means the account has no alias,
                            # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
+      partner-permission-boundaries-path: ${FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH:}
+                           # A JSON object of partner account id to an object of boundary ARN to
+                           # policy document, standing in for the permissions boundaries AWS
+                           # registers for a delegation partner by email. Unset registers nothing:
+                           # a request reports no restriction and a delegated role is uncapped.
     msk:
       enabled: true
       mock: false
@@ -538,6 +567,7 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+      shell-less-backend: false
     memorydb:
       enabled: true
       mock: false
@@ -551,6 +581,8 @@ floci:
       snapshot-sweep-interval-seconds: 60
       snapshot-copy-enabled: true
       snapshot-copy-sweep-interval-seconds: 60
+      scheduled-actions-enabled: true
+      scheduled-action-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
@@ -562,6 +594,7 @@ floci:
       proxy-backend-connect-timeout-millis: 5000  # Max time to wait for the backend TCP connect
       proxy-max-connections: 2000                 # Max concurrent proxy connections before new ones are refused
       spectrum-max-rows: 1000000                  # FLOCI_SERVICES_REDSHIFT_SPECTRUM_MAX_ROWS; rows loaded per external table per query
+      spectrum-lake-formation-enforcement: false  # FLOCI_SERVICES_REDSHIFT_SPECTRUM_LAKE_FORMATION_ENFORCEMENT; require a Lake Formation SELECT grant on each external table
     rds:
       enabled: true
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
@@ -627,6 +660,13 @@ floci:
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
+      yarn-node-memory-mb: 4096             # memory a cluster's NodeManager offers its YARN containers
+      yarn-node-vcores: 4                   # virtual cores it offers them
+      yarn-max-worker-nodes: 4              # the most core and task nodes a cluster runs as containers of their own
+      pig:
+        enabled: false                      # true = add Apache Pig, downloaded, to a docker cluster that installs Pig
+        # urls: https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz
+        # sha256: 6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.
@@ -650,6 +690,8 @@ floci:
       rotation-tick-seconds: 60
     kinesis:
       enabled: true
+      creating-delay-millis: 0
+      updating-delay-millis: 0
       list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
@@ -784,6 +826,9 @@ floci:
       publish-awsvpc-ports-to-host: false
       dynamic-awsvpc-host-ports: false
       host-port-bind-address: "127.0.0.1"
+      # Put an awsvpc task's containers in one network namespace, so they reach each other on
+      # localhost as on Fargate, without security-group enforcement.
+      shared-task-network: false               # FLOCI_SERVICES_ECS_SHARED_TASK_NETWORK
       host-volume-roots: []
       allow-unsafe-host-volumes: false
       allow-privileged-containers: false
@@ -878,7 +923,7 @@ floci:
       enabled: true
       mock: false
       default-postgres-image: "postgres:16-alpine"
-      supported-versions: "2.10.5,2.9.3,2.8.4"
+      supported-versions: "2.11.2,2.11.0,2.10.5,2.10.3,2.10.1,2.9.3,2.9.2,2.8.4,2.8.1,2.7.2"
       default-version: "2.10.5"
       proxy-base-port: 8700
       proxy-max-port: 8799
@@ -894,6 +939,12 @@ floci:
       mock: false
       backend-keep-alive: true
       backend-keep-alive-timeout-seconds: 60
+
+      alb-zone-rule: ${FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE:aws}
+      # Per-region entries override this global setting, including an explicit aws reset.
+      # alb-zone-rule-by-region:
+      #   ap-northeast-3: allow-single-zone
+      #   us-east-1: allow-single-zone
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -926,6 +977,7 @@ floci:
       enabled: true
     applicationautoscaling:
       enabled: true
+      scheduled-action-interval-seconds: ${FLOCI_SERVICES_APPLICATIONAUTOSCALING_SCHEDULED_ACTION_INTERVAL_SECONDS:1}
     elasticbeanstalk:
       enabled: true
     backup:
@@ -1039,9 +1091,14 @@ floci:
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # for Hive job runs
-      # Remove the drivers a previous run of this deployment left on the daemon before the first
-      # job run starts. Scoped to this deployment's own containers.
+      executor-containers: 0        # a docker Spark run's executors at once, each in a container; 0 = local mode
+      honour-architectures: false   # true = run a docker job run for its application's architecture
+      # Remove the drivers and executors a previous run of this deployment left on the daemon before
+      # the first job run starts. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
+    emrcontainers:
+      enabled: true
+      job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
     ssoadmin:
       enabled: true
     ssooidc:
@@ -1078,6 +1135,8 @@ floci:
     dlm:
       enabled: true
     signer:
+      enabled: true
+    xray:
       enabled: true
     cognitoidentity:
       enabled: true
@@ -1132,6 +1191,7 @@ floci:
       npm-image: "verdaccio/verdaccio:6.10.4"
       pypi-image: "pypiserver/pypiserver:v2.4.2"
       nuget-image: "bagetter/bagetter:1.6.5"
+      cargo-image: "ghcr.io/kellnr/kellnr:5.14.1"
     quicksight:
       enabled: true
       embed-base-url: ${floci.base-url}

@@ -44,6 +44,13 @@ public class Stack {
      */
     private volatile String status = "CREATE_IN_PROGRESS";
     private String statusReason;
+    /** The stack that nests this one; null for a root stack. */
+    private String parentId;
+    /**
+     * The ClientRequestToken of this stack's current operation, null when it was given none. A nested
+     * stack never has one. Set before the operation's first record and read on its worker thread.
+     */
+    private volatile String clientRequestToken;
     private Instant creationTime = Instant.now();
     private Instant lastUpdatedTime;
     /** Set once the stack reaches DELETE_COMPLETE; null for every stack that is still there. */
@@ -72,7 +79,8 @@ public class Stack {
     private Map<String, ChangeSet> changeSets = orderedMap();
     private Map<String, String> tags = orderedMap();
     private boolean enableTerminationProtection = false;
-    private volatile String stackPolicyBody;
+    private String stackPolicyBody;
+    private volatile String delegatedRoleBoundaryArn;
     /**
      * Set when an update rollback fails, and kept until a rollback completes or the stack is
      * deleted: the state from before the failed update, and the logical ids whose rollback has not
@@ -99,6 +107,12 @@ public class Stack {
     public void setStatus(String status) { this.status = status; }
     public String getStatusReason() { return statusReason; }
     public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
+    public String getParentId() { return parentId; }
+    public void setParentId(String parentId) { this.parentId = parentId; }
+    @JsonIgnore
+    public String getClientRequestToken() { return clientRequestToken; }
+    @JsonIgnore
+    public void setClientRequestToken(String clientRequestToken) { this.clientRequestToken = clientRequestToken; }
     public Instant getCreationTime() { return creationTime; }
     public void setCreationTime(Instant creationTime) { this.creationTime = creationTime; }
     public Instant getLastUpdatedTime() { return lastUpdatedTime; }
@@ -230,6 +244,17 @@ public class Stack {
     public void setEnableTerminationProtection(boolean enableTerminationProtection) { this.enableTerminationProtection = enableTerminationProtection; }
     public String getStackPolicyBody() { return stackPolicyBody; }
     public void setStackPolicyBody(String stackPolicyBody) { this.stackPolicyBody = stackPolicyBody; }
+
+    /**
+     * The permissions boundary a delegation registered for whoever created or last updated this
+     * stack, or null for every other stack. A role this stack provisions carries it, the partner
+     * guide limiting roles "created or managed through temporary access": provisioning runs after
+     * the request that asked for it, so the cap has to travel with the stack to reach the role.
+     */
+    public String getDelegatedRoleBoundaryArn() { return delegatedRoleBoundaryArn; }
+    public void setDelegatedRoleBoundaryArn(String delegatedRoleBoundaryArn) {
+        this.delegatedRoleBoundaryArn = delegatedRoleBoundaryArn;
+    }
     public StackUpdateSnapshot getUpdateRollbackSnapshot() { return updateRollbackSnapshot; }
     public void setUpdateRollbackSnapshot(StackUpdateSnapshot updateRollbackSnapshot) { this.updateRollbackSnapshot = updateRollbackSnapshot; }
     public List<String> getUpdateRollbackResourceIds() { return updateRollbackResourceIds; }

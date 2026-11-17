@@ -68,6 +68,7 @@ import io.floci.aws.services.cloudformation.provisioners.Ec2VpcGatewayAttachment
 import io.floci.aws.services.cloudformation.provisioners.EcrCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EcsCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EfsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
@@ -113,6 +114,7 @@ import io.floci.aws.services.cloudformation.provisioners.SchedulerScheduleGroupC
 import io.floci.aws.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SesCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.SesEventDestinationCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SesReceiptRuleCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SignerCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SnsCfnProvisioner;
@@ -138,7 +140,10 @@ import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.FlowLogService;
 import io.floci.aws.services.ecr.EcrService;
+import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
+import io.floci.aws.services.ecs.container.HostVolumePolicy;
+import io.floci.aws.services.efs.EfsService;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
@@ -169,6 +174,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3vectors.S3VectorsService;
 import io.floci.aws.services.scheduler.SchedulerService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
+import io.floci.aws.services.ses.SesConfigurationSetService;
 import io.floci.aws.services.ses.SesIdentityService;
 import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.services.ses.SesService;
@@ -179,10 +185,13 @@ import io.floci.aws.services.ssm.SsmService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.transfer.TransferService;
 import io.floci.aws.services.wafv2.WafV2Service;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Builds {@link CfnResourceDispatcher} for tests without a wall of positional nulls.
@@ -203,6 +212,13 @@ final class CfnProvisionerFixture {
     private CfnProvisionerFixture() {
     }
 
+    /** The template engine a provisioner test hands to {@code provision}: fixed account and stack, no outputs. */
+    static CloudFormationTemplateEngine engine(ObjectMapper mapper, String region, Map<String, Boolean> conditions) {
+        return new CloudFormationTemplateEngine("000000000000", region, "test-stack", "stack/id",
+                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                (Function<String, String>) name -> null);
+    }
+
     static Builder builder() {
         return new Builder();
     }
@@ -214,6 +230,7 @@ final class CfnProvisionerFixture {
         private S3VectorsService s3VectorsService;
         private SnsService snsService;
         private SesService sesService;
+        private SesConfigurationSetService sesConfigurationSetService;
         private SesReceiptRuleService sesReceiptRuleService;
         private SesIdentityService sesIdentityService;
         private DynamoDbService dynamoDbService;
@@ -237,6 +254,7 @@ final class CfnProvisionerFixture {
         private CustomResourceResponseStore customResourceResponseStore;
         private ContainerReachableEndpoint reachableEndpoint;
         private EcsService ecsService;
+        private EfsService efsService;
         private ElbV2Service elbV2Service;
         private StepFunctionsService stepFunctionsService;
         private BatchService batchService;
@@ -346,6 +364,9 @@ final class CfnProvisionerFixture {
             if (sesService != null && sesIdentityService != null) {
                 discovered.add(new SesCfnProvisioner(sesService, sesIdentityService));
             }
+            if (sesConfigurationSetService != null) {
+                discovered.add(new SesEventDestinationCfnProvisioner(sesConfigurationSetService));
+            }
             if (sesReceiptRuleService != null && sesIdentityService != null) {
                 discovered.add(new SesReceiptRuleCfnProvisioner(sesReceiptRuleService, sesIdentityService));
             }
@@ -413,7 +434,11 @@ final class CfnProvisionerFixture {
             }
             if (ecsService != null) {
                 discovered.add(new EcsCapacityCfnProvisioner(ecsService));
-                discovered.add(new EcsCfnProvisioner(ecsService));
+                discovered.add(new EcsCfnProvisioner(ecsService, new EcsJsonHandler(ecsService,
+                        objectMapper, Mockito.mock(HostVolumePolicy.class))));
+            }
+            if (efsService != null) {
+                discovered.add(new EfsCfnProvisioner(efsService));
             }
             if (apiGatewayService != null) {
                 discovered.add(new ApiGatewayAccountCfnProvisioner(apiGatewayService));
@@ -586,6 +611,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder sesConfigurationSets(SesConfigurationSetService v) {
+            this.sesConfigurationSetService = v;
+            return this;
+        }
+
         public Builder sesIdentity(SesIdentityService v) {
             this.sesIdentityService = v;
             return this;
@@ -698,6 +728,11 @@ final class CfnProvisionerFixture {
 
         public Builder ecs(EcsService v) {
             this.ecsService = v;
+            return this;
+        }
+
+        public Builder efs(EfsService v) {
+            this.efsService = v;
             return this;
         }
 

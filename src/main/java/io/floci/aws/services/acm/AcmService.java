@@ -478,7 +478,7 @@ public class AcmService implements ResourceProvider {
             cert.setCertificateBody(certificatePem);
             cert.setPrivateKey(privateKeyPem);
             cert.setCertificateChain(chainPem);
-            cert.setTags(tags != null ? new HashMap<>(tags) : new HashMap<>());
+            cert.setTags(existing != null ? existing.getTags() : tags);
 
             String storageKey = regionKey(region, certId);
             if (existing != null && existing.getInUseBy() != null) {

@@ -6,8 +6,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.KeyStore;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,7 +32,33 @@ class TlsConfigSourceContainerCaBundleTest {
         System.clearProperty("floci.tls.self-signed");
         System.clearProperty("floci.tls.cert-path");
         System.clearProperty("floci.tls.key-path");
+        System.clearProperty("floci.tls.extra-ca-path");
         System.clearProperty("floci.storage.persistent-path");
+    }
+
+    /** Containers keep the bundle they had: the floci.tls.extra-ca-path CAs are for Floci's own clients only. */
+    @Test
+    void theBundleAndTrustStoreLeaveTheExtraCasOut() throws Exception {
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        Path persistent = Files.createDirectories(tempDir.resolve("data"));
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", persistent.toString());
+        System.setProperty("floci.tls.extra-ca-path", privateCa.certificatePath().toString());
+
+        new TlsConfigSource();
+
+        String bundle = Files.readString(persistent.resolve("tls/" + ContainerCaBundle.FILE_NAME));
+        assertFalse(bundle.contains(privateCa.caPem().strip()), "the extra CA stays out of the PEM bundle");
+        KeyStore trustStore = KeyStore.getInstance("PKCS12");
+        try (InputStream in = Files.newInputStream(
+                persistent.resolve("tls/" + ContainerCaBundle.JAVA_TRUST_STORE_FILE_NAME))) {
+            trustStore.load(in, null);
+        }
+        for (String alias : Collections.list(trustStore.aliases())) {
+            assertFalse(privateCa.certificate().equals(trustStore.getCertificate(alias)),
+                    "the extra CA stays out of the Java trust store");
+        }
     }
 
     @Test

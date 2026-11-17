@@ -49,6 +49,7 @@ public class EksAddonService {
 
     private final StorageBackend<String, StoredAddon> storage;
     private final StorageBackend<String, StoredUpdate> updatesStorage;
+    private final StorageBackend<String, String> deletedArns;
     private final EksAddonCatalog catalog;
     private final IamService iam;
     private final EksPodIdentityAssociationService podIdentityAssociations;
@@ -60,16 +61,20 @@ public class EksAddonService {
                 new TypeReference<Map<String, StoredAddon>>() {}),
                 storageFactory.create("eks", "eks-updates.json",
                 new TypeReference<Map<String, StoredUpdate>>() {}),
+                storageFactory.create("eks", "eks-addon-deleted-arns.json",
+                new TypeReference<Map<String, String>>() {}),
                 catalog, iam, podIdentityAssociations);
     }
 
     EksAddonService(StorageBackend<String, StoredAddon> storage,
                     StorageBackend<String, StoredUpdate> updatesStorage,
+                    StorageBackend<String, String> deletedArns,
                     EksAddonCatalog catalog,
                     IamService iam,
                     EksPodIdentityAssociationService podIdentityAssociations) {
         this.storage = storage;
         this.updatesStorage = updatesStorage;
+        this.deletedArns = deletedArns;
         this.catalog = catalog;
         this.iam = iam;
         this.podIdentityAssociations = podIdentityAssociations;
@@ -159,6 +164,7 @@ public class EksAddonService {
         );
 
         storage.put(storageKey, new StoredAddon(addon, request.clientRequestToken()));
+        deletedArns.delete(storageKey);
         LOG.infov("Created EKS addon {0} on cluster {1} with version {2}", addonName, cluster.getName(), version);
         return addon;
     }
@@ -304,6 +310,7 @@ public class EksAddonService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No addon: " + addonName + " found for cluster: " + cluster.getName(), 404));
 
+        deletedArns.put(storageKey, stored.addon().addonArn());
         storage.delete(storageKey);
         if (preserve) {
             LOG.infov("Deleted EKS addon {0} on cluster {1} (preserve=true)", addonName, cluster.getName());
@@ -335,11 +342,23 @@ public class EksAddonService {
         );
     }
 
+    /** Retain only the deleted ARN so scoped IAM policies still authorize deletion waiters. */
+    public synchronized Optional<String> authorizationArn(Cluster cluster, String addonName) {
+        requireActiveCluster(cluster);
+        if (addonName == null || addonName.isBlank()) {
+            return Optional.empty();
+        }
+        String key = prefix(cluster) + addonName.trim().toLowerCase(Locale.ROOT);
+        return storage.get(key).map(stored -> stored.addon().addonArn())
+                .or(() -> deletedArns.get(key));
+    }
+
     public synchronized void deleteClusterAddons(Cluster cluster) {
         if (cluster != null) {
             String p = prefix(cluster);
             storage.keys().stream().filter(k -> k.startsWith(p)).toList().forEach(storage::delete);
             updatesStorage.keys().stream().filter(k -> k.startsWith(p)).toList().forEach(updatesStorage::delete);
+            deletedArns.keys().stream().filter(k -> k.startsWith(p)).toList().forEach(deletedArns::delete);
             LOG.infov("Purged all addons and updates for cluster {0}", cluster.getName());
         }
     }

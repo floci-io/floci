@@ -671,7 +671,7 @@ class KinesisIntegrationTest {
         .when().post("/").then().statusCode(200);
 
         Set<String> reported = new HashSet<>();
-        // Probe enough partition keys that hash(pk) % 2 hits both shards. With 50 keys the
+        // Probe enough partition-key MD5 values to cover both shard ranges. With 50 keys the
         // odds of single-shard routing are ~1 in 2^49, so this is effectively deterministic.
         for (int i = 0; i < 50 && reported.size() < 2; i++) {
             String pk = "pk-" + i;
@@ -863,7 +863,7 @@ class KinesisIntegrationTest {
 
     @Test
     @Order(46)
-    void putRecordPreservesShardForNegativeHashCode() {
+    void putRecordUsesMd5RangeForPreviouslyNegativeJavaHashCode() {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
             .contentType(KINESIS_CONTENT_TYPE)
@@ -882,7 +882,7 @@ class KinesisIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ShardId", equalTo("shardId-000000000002"));
+            .body("ShardId", equalTo("shardId-000000000001"));
     }
 
     // --- AT_TIMESTAMP iterator coverage ---
@@ -1103,6 +1103,75 @@ class KinesisIntegrationTest {
         .when().post("/")
         .then().statusCode(200)
             .body("Records.size()", equalTo(2));
+    }
+
+    @Test
+    @Order(59)
+    void consumerResourceTagsRoundTripOverJsonProtocol() {
+        createStream("resource-tags-test", 1);
+
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\":\"resource-tags-test\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        String consumerArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.RegisterStreamConsumer")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\":\"" + streamArn + "\",\"ConsumerName\":\"tagged-consumer\","
+                    + "\"Tags\":{\"team\":\"red\"}}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("Consumer.ConsumerARN");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForResource")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ResourceARN\":\"" + consumerArn + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Tags.size()", equalTo(1))
+            .body("Tags[0].Key", equalTo("team"))
+            .body("Tags[0].Value", equalTo("red"))
+            .body("HasMoreTags", nullValue());
+
+        Response tagged = given()
+            .header("X-Amz-Target", "Kinesis_20131202.TagResource")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ResourceARN\":\"" + consumerArn + "\",\"Tags\":{\"env\":\"dev\"}}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().response();
+        assertEquals("", tagged.asString());
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForResource")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ResourceARN\":\"" + consumerArn + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Tags.Key", hasItems("team", "env"));
+
+        Response untagged = given()
+            .header("X-Amz-Target", "Kinesis_20131202.UntagResource")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ResourceARN\":\"" + consumerArn + "\",\"TagKeys\":[\"team\"]}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().response();
+        assertEquals("", untagged.asString());
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForResource")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ResourceARN\":\"" + consumerArn + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Tags.size()", equalTo(1))
+            .body("Tags[0].Key", equalTo("env"));
     }
 
     @Test

@@ -172,6 +172,16 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     }
 
     @Override
+    public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                               List<AttributeDefinition> attributeDefinitions,
+                                               List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                               List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return RequestScopes.callAs(scope.accountId(), () -> dynamoDbService.createTable(tableName, keySchema,
+                attributeDefinitions, null, null, globalSecondaryIndexes, localSecondaryIndexes,
+                List.of(), "PAY_PER_REQUEST", scope.region()));
+    }
+
+    @Override
     public TableDefinition describeTable(Scope scope, String tableName) {
         return RequestScopes.callAs(scope.accountId(), () -> dynamoDbService.describeTable(tableName, scope.region()));
     }
@@ -252,6 +262,11 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public void untagResource(Scope scope, String resourceArn, List<String> tagKeys) {
         RequestScopes.runAs(scope.accountId(),
                 () -> dynamoDbService.untagResource(resourceArn, tagKeys, scope.region()));
+    }
+
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        return dynamoDbService.storedTags(arn);
     }
 
     @Override

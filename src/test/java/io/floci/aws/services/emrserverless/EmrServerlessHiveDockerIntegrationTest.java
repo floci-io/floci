@@ -20,12 +20,8 @@ import software.amazon.awssdk.services.glue.model.Table;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.GZIPInputStream;
 
 import static io.floci.aws.testing.EmrServerlessRequests.awaitJobRun;
 import static io.floci.aws.testing.EmrServerlessRequests.createApplication;
@@ -171,10 +167,6 @@ class EmrServerlessHiveDockerIntegrationTest {
     }
 
     private String gunzipped(String key) {
-        try (GZIPInputStream in = new GZIPInputStream(s3.getObject(request -> request.bucket(bucket).key(key)))) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        return S3TestClients.gunzipped(s3, bucket, key);
     }
 }

@@ -12,6 +12,7 @@ import javax.net.ssl.X509TrustManager;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.StringReader;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -235,13 +236,29 @@ public final class ContainerCaBundle {
     }
 
     /**
-     * An SSL context that trusts what the bundle carries: the JVM's roots and Floci's own trust
-     * anchor. For Floci's own outbound HTTPS to a URL Floci serves, such as a Cognito pool's issuer,
-     * which on AWS is a public endpoint every client already trusts. Empty when there is no bundle,
-     * or when it cannot be read, and the JVM's roots alone are trusted then.
+     * An SSL context for Floci's own outbound HTTPS. It trusts what the bundle carries: the JVM's
+     * roots and Floci's own trust anchor, for a URL Floci serves, such as a Cognito pool's issuer,
+     * which on AWS is a public endpoint every client already trusts. It also trusts the CAs in the
+     * {@code floci.tls.extra-ca-path} file, for an endpoint whose certificate chains to a private or
+     * corporate CA, and then it is built with TLS off too, over the JVM's roots and those CAs. The
+     * extra CAs are added here only, never to the bundle, so containers Floci launches do not
+     * receive them.
+     *
+     * <p>Empty when there is neither a bundle nor an extra CA file, and the JVM's roots alone are
+     * trusted then. An extra CA file that cannot be read leaves the context the bundle alone gives,
+     * and a bundle that cannot be read leaves the JVM's roots in its place.
      */
     public static Optional<SSLContext> sslContext(EmulatorConfig config) {
         Optional<Path> bundle = hostPath(config);
+        Optional<Path> extraCas = extraCaFile(config);
+        if (extraCas.isPresent()) {
+            try {
+                return Optional.of(sslContext(trustStore(outboundTrustAnchors(bundle.orElse(null), extraCas.get()))));
+            } catch (IOException | GeneralSecurityException e) {
+                LOG.warnv(e, "Cannot read the extra CAs in {0}; outbound HTTPS from Floci does not trust them",
+                        extraCas.get());
+            }
+        }
         if (bundle.isEmpty()) {
             return Optional.empty();
         }
@@ -254,30 +271,103 @@ public final class ContainerCaBundle {
     }
 
     /**
+     * An {@link HttpClient} builder for Floci's own outbound HTTPS that trusts {@code sslContext}, the
+     * context {@link #sslContext(EmulatorConfig)} gives: the extra CAs in {@code floci.tls.extra-ca-path},
+     * and Floci's CA when TLS is on, added to the JVM's roots. A null {@code sslContext} keeps the JVM's
+     * default trust. Only the context is set, so hostname verification stays on.
+     */
+    public static HttpClient.Builder httpClientBuilder(SSLContext sslContext) {
+        HttpClient.Builder builder = HttpClient.newBuilder();
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        }
+        return builder;
+    }
+
+    /** The {@code floci.tls.extra-ca-path} file, when one is set; a blank value counts as unset. */
+    static Optional<Path> extraCaFile(EmulatorConfig config) {
+        return config.tls().extraCaPath().filter(path -> !path.isBlank()).map(Path::of);
+    }
+
+    /**
+     * What {@link #sslContext(EmulatorConfig)} trusts when there is an extra CA file: the certificates
+     * of {@code bundle}, or the JVM's roots when {@code bundle} is null, cannot be read or holds no
+     * certificate, followed by every certificate in {@code extraCas}. A private key in that file is
+     * skipped. A damaged bundle therefore costs Floci's own CA, never the extra CAs.
+     *
+     * @throws CertificateException when {@code extraCas} holds no certificate
+     * @throws IOException          when {@code extraCas} cannot be read
+     */
+    static List<X509Certificate> outboundTrustAnchors(Path bundle, Path extraCas)
+            throws IOException, GeneralSecurityException {
+        List<X509Certificate> extras = certificates(extraCas);
+        List<X509Certificate> anchors = new ArrayList<>();
+        if (bundle != null) {
+            try {
+                anchors.addAll(certificates(bundle));
+            } catch (IOException | GeneralSecurityException e) {
+                LOG.warnv(e, "Cannot use {0}; outbound HTTPS from Floci trusts the JVM roots and the extra CAs"
+                        + " instead", bundle);
+            }
+        }
+        if (anchors.isEmpty()) {
+            anchors.addAll(systemRoots());
+        }
+        anchors.addAll(extras);
+        LOG.debugv("TLS: outbound HTTPS from Floci trusts {0} anchor(s), {1} of them from {2}",
+                anchors.size(), extras.size(), extraCas);
+        return anchors;
+    }
+
+    /**
      * An SSL context that trusts exactly the certificates in {@code bundle}.
      *
      * @throws CertificateException when the bundle holds no certificate: a context over it would
      *                              trust nothing, public endpoints included
      */
     public static SSLContext sslContext(Path bundle) throws IOException, GeneralSecurityException {
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, trustManagers(bundle), null);
-        return context;
+        return sslContext(trustStore(bundle));
     }
 
     /** The trust managers of {@link #sslContext(Path)}, over exactly the certificates in {@code bundle}. */
     static TrustManager[] trustManagers(Path bundle) throws IOException, GeneralSecurityException {
+        return trustManagers(trustStore(bundle));
+    }
+
+    /** An SSL context that trusts exactly the entries of {@code trustStore}. */
+    private static SSLContext sslContext(KeyStore trustStore) throws GeneralSecurityException {
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, trustManagers(trustStore), null);
+        return context;
+    }
+
+    /** The trust managers over exactly the entries of {@code trustStore}. */
+    private static TrustManager[] trustManagers(KeyStore trustStore) throws GeneralSecurityException {
         TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        factory.init(trustStore(bundle));
+        factory.init(trustStore);
         return factory.getTrustManagers();
     }
 
     /** A PKCS12 key store of exactly the certificates in {@code bundle}, each a trusted entry. */
     private static KeyStore trustStore(Path bundle) throws IOException, GeneralSecurityException {
-        List<X509Certificate> certificates = parseCertificates(Files.readString(bundle));
+        return trustStore(certificates(bundle));
+    }
+
+    /**
+     * The certificates in {@code file}, in order; a private key or any other PEM object in it is skipped.
+     *
+     * @throws CertificateException when {@code file} holds no certificate
+     */
+    static List<X509Certificate> certificates(Path file) throws IOException, GeneralSecurityException {
+        List<X509Certificate> certificates = parseCertificates(Files.readString(file));
         if (certificates.isEmpty()) {
-            throw new CertificateException(bundle + " holds no certificate");
+            throw new CertificateException(file + " holds no certificate");
         }
+        return certificates;
+    }
+
+    /** A PKCS12 key store of exactly {@code certificates}, each a trusted entry. */
+    private static KeyStore trustStore(List<X509Certificate> certificates) throws IOException, GeneralSecurityException {
         KeyStore trustStore = KeyStore.getInstance("PKCS12");
         trustStore.load(null, null);
         for (int i = 0; i < certificates.size(); i++) {

@@ -25,6 +25,10 @@ Enabled-baseline operations are recorded with AWS operation names such as `ENABL
 
 `TagResource`, `UntagResource` and `ListTagsForResource` serve landing zones and enabled controls in the caller's account and Region; an ARN naming another account or Region returns `ResourceNotFoundException`. A landing zone keeps the tags passed to `CreateLandingZone`, and an enabled control those passed to `EnableControl`. Enabled baselines don't store tags yet, so a tag request for one returns `ResourceNotFoundException`, where AWS would answer.
 
+## IAM authorization
+
+With IAM enforcement enabled, Control Tower uses generated SDK routes and request-resource definitions. Landing-zone reads and mutations authorize the ARN or ID supplied by the request. Enabled-baseline and enabled-control identifiers name their full ARNs; enabling a control authorizes the new enabled-control resource with its generated ID left open. List and other resource-less actions require wildcard resource grants. Tag requests authorize the resource ARN on the shared tag route before changing tags. This does not add unsupported operations or enabled-baseline tag storage.
+
 ## Supported operations
 
 | Operation | Method and path | Behavior |

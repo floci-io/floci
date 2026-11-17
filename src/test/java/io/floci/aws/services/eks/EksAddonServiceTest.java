@@ -316,6 +316,28 @@ class EksAddonServiceTest {
     }
 
     @Test
+    void deletedAuthorizationArnIsHiddenFromReadsReplacedOnRecreationAndPurgedWithCluster() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+        CreateAddonRequest request = new CreateAddonRequest("vpc-cni", null, null, null, null, null, null, null);
+        String original = fixture.service.create(fixture.cluster, request).addonArn();
+        fixture.service.delete(fixture.cluster, "vpc-cni", false);
+        assertEquals(Optional.of(original), fixture.service.authorizationArn(fixture.cluster, "vpc-cni"));
+        assertTrue(fixture.service.list(fixture.cluster, null, null).addons().isEmpty());
+        assertThrows(AwsException.class, () -> fixture.service.describe(fixture.cluster, "vpc-cni"));
+        String replacement = fixture.service.create(fixture.cluster, request).addonArn();
+        assertNotEquals(original, replacement);
+        assertEquals(Optional.of(replacement), fixture.service.authorizationArn(fixture.cluster, "vpc-cni"));
+        fixture.service.delete(fixture.cluster, "vpc-cni", false);
+        Instant previousCreation = fixture.cluster.getCreatedAt();
+        fixture.cluster.setCreatedAt(previousCreation.plusSeconds(10));
+        assertTrue(fixture.service.authorizationArn(fixture.cluster, "vpc-cni").isEmpty());
+        fixture.cluster.setCreatedAt(previousCreation);
+        fixture.service.deleteClusterAddons(fixture.cluster);
+        assertTrue(fixture.service.authorizationArn(fixture.cluster, "vpc-cni").isEmpty());
+    }
+
+    @Test
     void inactiveClusterRejectsOperations() {
         Fixture fixture = fixture();
         fixture.cluster.setStatus(ClusterStatus.CREATING);
@@ -732,7 +754,7 @@ class EksAddonServiceTest {
         InMemoryStorage<String, EksPodIdentityAssociationService.StoredAssociation> assocStorage = new InMemoryStorage<>();
         EksPodIdentityAssociationService podIdentityAssociations = new EksPodIdentityAssociationService(
                 assocStorage, iam, new RegionResolver("us-east-1", "000000000000"));
-        EksAddonService service = new EksAddonService(storage, updatesStorage, catalog, iam, podIdentityAssociations);
+        EksAddonService service = new EksAddonService(storage, updatesStorage, new InMemoryStorage<>(), catalog, iam, podIdentityAssociations);
 
         return new Fixture(cluster, iam, role, storage, updatesStorage, catalog, podIdentityAssociations, service);
     }

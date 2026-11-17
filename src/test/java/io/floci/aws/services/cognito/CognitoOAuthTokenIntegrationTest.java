@@ -12,9 +12,9 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -34,6 +34,7 @@ import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.refreshG
 import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.signIn;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -848,6 +849,57 @@ class CognitoOAuthTokenIntegrationTest {
         refreshWithBodySecret(user.clientId(), "wrongsecret", user.refreshToken()).then().statusCode(200);
     }
 
+    @Test
+    @Order(41)
+    void clientCredentialsAcceptsAwsClientMetadata() throws Exception {
+        Response response = given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", "{\"environment\": \"dev\", \"language\": \"en-US\"}")
+        .when()
+                .post("/cognito-idp/oauth2/token");
+
+        response.then().statusCode(200);
+        JsonNode payload = decodeJwtPayload(response.jsonPath().getString("access_token"));
+        assertEquals(confidentialClientId, payload.path("client_id").asText());
+    }
+
+    @Test
+    @Order(42)
+    void clientCredentialsRejectsMalformedAwsClientMetadata() {
+        given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", "not-json")
+        .when()
+                .post("/cognito-idp/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
+    @ParameterizedTest
+    @Order(43)
+    @ValueSource(strings = {
+            "{\"environment\": null}",
+            "{\"retries\": 3}",
+            "{\"enabled\": true}",
+            "{\"nested\": {\"a\": \"b\"}}",
+            "{\"list\": [\"a\"]}",
+            "[\"environment\"]",
+            "\"environment\""})
+    void clientCredentialsRejectsAwsClientMetadataThatIsNotAnObjectOfStrings(String metadata) {
+        given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", metadata)
+        .when()
+                .post("/cognito-idp/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
     private static String confidentialRefreshToken(String confidentialId, String secret) throws Exception {
         String username = "confidential-" + System.nanoTime();
         cognitoAction("AdminCreateUser", """
@@ -856,10 +908,7 @@ class CognitoOAuthTokenIntegrationTest {
         cognitoAction("AdminSetUserPassword", """
                 {"UserPoolId": "%s", "Username": "%s", "Password": "%s", "Permanent": true}
                 """.formatted(poolId, username, PASSWORD)).then().statusCode(200);
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-        String secretHash = Base64.getEncoder().encodeToString(
-                mac.doFinal((username + confidentialId).getBytes(StandardCharsets.UTF_8)));
+        String secretHash = secretHash(confidentialId, secret, username);
         return cognitoJson("AdminInitiateAuth", """
                 {"UserPoolId": "%s", "ClientId": "%s", "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
                  "AuthParameters": {"USERNAME": "%s", "PASSWORD": "%s", "SECRET_HASH": "%s"}}

@@ -15,6 +15,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * Proper tokenizer/parser/evaluator for DynamoDB filter expressions and key condition expressions.
@@ -83,7 +84,9 @@ final class ExpressionEvaluator {
 
             if (isDigit(c)) {
                 int start = i;
-                while (i < len && isDigit(expression.charAt(i))) {
+                i++;
+                // DynamoDB reads a leading 0 as a number of its own, so a[01] fails on "1".
+                while (c != '0' && i < len && isDigit(expression.charAt(i))) {
                     i++;
                 }
                 tokens.add(new Token(TokenType.NUMBER, expression.substring(start, i), start));
@@ -216,14 +219,8 @@ final class ExpressionEvaluator {
             return advance();
         }
 
-        // DynamoDB quotes the text from the token before the failing one through the token after it.
         private IllegalArgumentException syntaxError() {
-            Token token = peek();
-            int from = pos > 0 ? tokens.get(pos - 1).pos() : 0;
-            int to = pos + 1 < tokens.size() ? tokens.get(pos + 1).end() : expression.length();
-            String text = token.type() == TokenType.EOF ? "<EOF>" : token.value();
-            return new IllegalArgumentException(
-                    "token: \"%s\", near: \"%s\"".formatted(text, expression.substring(from, to)));
+            return new IllegalArgumentException(syntaxErrorDetail(expression, tokens, pos));
         }
 
         Expr parseExpression() {
@@ -383,6 +380,15 @@ final class ExpressionEvaluator {
         }
     }
 
+    // DynamoDB quotes the text from the token before the failing one through the token after it.
+    static String syntaxErrorDetail(String expression, List<Token> tokens, int pos) {
+        Token token = tokens.get(pos);
+        int from = pos > 0 ? tokens.get(pos - 1).pos() : 0;
+        int to = pos + 1 < tokens.size() ? tokens.get(pos + 1).end() : expression.length();
+        String text = token.type() == TokenType.EOF ? "<EOF>" : token.value();
+        return "token: \"%s\", near: \"%s\"".formatted(text, expression.substring(from, to));
+    }
+
     // ── Parse helper ──
 
     static Expr parse(String expression) {
@@ -414,14 +420,12 @@ final class ExpressionEvaluator {
     static void validateExpression(String expression, String exprType,
                                    JsonNode exprAttrNames, JsonNode exprAttrValues) {
         validateSyntax(expression, exprType);
-        validateSemantics(expression, exprType, exprAttrNames, exprAttrValues);
+        validateSemantics(parse(expression), exprType, exprAttrNames, exprAttrValues, false);
     }
 
     /**
      * The tokenize/parse/redundant-parentheses half of {@link #validateExpression}, split out so
-     * callers can run an undefined-#name/:value check between this and {@link #validateSemantics}:
-     * DynamoDB reports a syntax or redundant-parentheses error before an undefined placeholder,
-     * but an undefined placeholder before a semantic error like {@code contains(x, x)}.
+     * callers can run other checks between this and {@link #validateSemantics}.
      */
     static void validateSyntax(String expression, String exprType) {
         if (expression == null || expression.isEmpty()) {
@@ -437,10 +441,26 @@ final class ExpressionEvaluator {
         }
     }
 
-    /** The semantic half of {@link #validateExpression}; see {@link #validateSyntax}. */
+    /**
+     * The semantic half of {@link #validateExpression}, which also refuses an undefined #name or
+     * :value. DynamoDB checks the conditions in written order, and the names and values of a
+     * condition before its other errors.
+     */
     static void validateSemantics(String expression, String exprType,
                                    JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        validateSemantics(parse(expression), exprType, exprAttrNames, exprAttrValues);
+        validateSemantics(parse(expression), exprType, exprAttrNames, exprAttrValues, true);
+    }
+
+    static AwsException undefinedName(String exprType, String name) {
+        return new AwsException("ValidationException", "Invalid " + exprType
+                + ": An expression attribute name used in the document path is not defined; attribute name: "
+                + name, 400);
+    }
+
+    static AwsException undefinedValue(String exprType, String value) {
+        return new AwsException("ValidationException", "Invalid " + exprType
+                + ": An expression attribute value used in expression is not defined; attribute value: "
+                + value, 400);
     }
 
     // A pair of parentheses is redundant when its entire content is itself a single
@@ -472,17 +492,80 @@ final class ExpressionEvaluator {
         return -1;
     }
 
-    private static void validateSemantics(Expr expr, String exprType,
-                                          JsonNode names, JsonNode values) {
+    private static final Map<TokenType, String> ORDERING_OPERATORS = Map.of(
+            TokenType.LT, "<", TokenType.LE, "<=", TokenType.GT, ">", TokenType.GE, ">=");
+
+    private static void validateSemantics(Expr expr, String exprType, JsonNode names, JsonNode values,
+                                          boolean requireDefined) {
         if (expr == null) return;
+        if (requireDefined) {
+            conditionOperands(expr).forEach(operand -> requireDefined(operand, exprType, names, values));
+        }
         switch (expr) {
-            case AndExpr a -> a.operands().forEach(o -> validateSemantics(o, exprType, names, values));
-            case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values));
-            case NotExpr n -> validateSemantics(n.operand(), exprType, names, values);
+            case AndExpr a -> a.operands().forEach(o -> validateSemantics(o, exprType, names, values, requireDefined));
+            case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values, requireDefined));
+            case NotExpr n -> validateSemantics(n.operand(), exprType, names, values, requireDefined);
             case FunctionCallExpr f -> validateFunction(f, exprType, names, values);
-            case BetweenExpr b -> validateBetween(b, exprType, values);
+            case CompareExpr c when ORDERING_OPERATORS.containsKey(c.op()) ->
+                    requireOrderedOperands(ORDERING_OPERATORS.get(c.op()), exprType, values, c.left(), c.right());
+            case BetweenExpr b -> {
+                requireOrderedOperands("BETWEEN", exprType, values, b.value(), b.low(), b.high());
+                validateBetween(b, exprType, values);
+            }
             default -> {}
         }
+    }
+
+    private static List<Operand> conditionOperands(Expr condition) {
+        return switch (condition) {
+            case CompareExpr c -> List.of(c.left(), c.right());
+            case BetweenExpr b -> List.of(b.value(), b.low(), b.high());
+            case InExpr in -> {
+                List<Operand> operands = new ArrayList<>();
+                operands.add(in.value());
+                operands.addAll(in.candidates());
+                yield operands;
+            }
+            case FunctionCallExpr f -> f.args();
+            default -> List.of();
+        };
+    }
+
+    private static void requireDefined(Operand operand, String exprType, JsonNode names, JsonNode values) {
+        switch (operand) {
+            case PathOperand path -> {
+                for (String segment : path.segments()) {
+                    if (segment.startsWith("#") && (names == null || !names.has(segment))) {
+                        throw undefinedName(exprType, segment);
+                    }
+                    if (DynamoDbReservedWords.isReserved(segment)) {
+                        throw DynamoDbReservedWords.reservedWord(exprType, segment);
+                    }
+                }
+            }
+            case PlaceholderOperand placeholder -> {
+                if (values == null || !values.has(placeholder.name())) {
+                    throw undefinedValue(exprType, placeholder.name());
+                }
+            }
+            case FunctionOperand function ->
+                    function.args().forEach(arg -> requireDefined(arg, exprType, names, values));
+        }
+    }
+
+    private static void requireOrderedOperands(String operator, String exprType, JsonNode values,
+                                               Operand... operands) {
+        for (Operand operand : operands) {
+            String type = operandValueType(operand, values);
+            if (type != null && !DynamoDbPartiQLParser.ORDERED_TYPES.contains(type)) {
+                throw incorrectOperandType(exprType, operator, type);
+            }
+        }
+    }
+
+    private static AwsException incorrectOperandType(String exprType, String operator, String type) {
+        return new AwsException("ValidationException", "Invalid " + exprType + ": "
+                + DynamoDbPartiQLParser.incorrectOperandType(operator, type), 400);
     }
 
     // AWS rejects a BETWEEN whose bounds are the wrong way round when it parses the
@@ -559,9 +642,7 @@ final class ExpressionEvaluator {
         if (name.equals("begins_with") && f.args().size() >= 2) {
             String type = operandValueType(f.args().get(1), values);
             if (type != null && !type.equals("S") && !type.equals("B")) {
-                throw new AwsException("ValidationException",
-                        "Invalid " + exprType + ": Incorrect operand type for operator or function; "
-                        + "operator or function: begins_with, operand type: " + type, 400);
+                throw incorrectOperandType(exprType, "begins_with", type);
             }
         }
     }
@@ -679,6 +760,7 @@ final class ExpressionEvaluator {
     // ── Evaluator ──
 
     private static final String DOT_ESCAPE = "\uFF0E";
+    private static final Pattern LIST_INDEX_SEGMENT = Pattern.compile("\\[\\d+\\]");
 
     /**
      * Evaluates a parsed expression against a DynamoDB item.
@@ -1017,7 +1099,7 @@ final class ExpressionEvaluator {
         for (int i = 0; i < segments.size(); i++) {
             if (current == null) return null;
             String segment = segments.get(i);
-            if (segment.matches("\\[\\d+\\]")) {
+            if (LIST_INDEX_SEGMENT.matcher(segment).matches()) {
                 // List index navigation
                 int idx = Integer.parseInt(segment.substring(1, segment.length() - 1));
                 JsonNode listNode = current.has("L") ? current.get("L") : (current.isArray() ? current : null);

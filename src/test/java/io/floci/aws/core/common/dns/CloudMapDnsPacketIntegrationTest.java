@@ -16,7 +16,6 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -58,7 +57,7 @@ class CloudMapDnsPacketIntegrationTest {
         cloudMapService.registerInstance(service.getId(), "task-1", null,
                 Map.of("AWS_INSTANCE_IPV4", "172.31.0.6"), REGION);
 
-        byte[] request = buildQuery("api." + namespace, (short) 1);
+        byte[] request = DnsTestQuery.query("api." + namespace, 1, 0x1234);
         byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)), request);
         ByteBuffer packet = ByteBuffer.wrap(response);
 
@@ -105,7 +104,7 @@ class CloudMapDnsPacketIntegrationTest {
         for (List<DnsRecordSource> sources : List.of(
                 List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
                 List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
-            byte[] request = buildQuery("both." + namespace, (short) 1);
+            byte[] request = DnsTestQuery.query("both." + namespace, 1, 0x1234);
             byte[] response = query(new EmbeddedDnsServer(List.of(), sources), request);
             ByteBuffer packet = ByteBuffer.wrap(response);
 
@@ -116,14 +115,14 @@ class CloudMapDnsPacketIntegrationTest {
 
             // A name only Route 53 holds (as TXT) is NODATA for A, not Cloud Map's NXDOMAIN.
             ByteBuffer txtOnly = ByteBuffer.wrap(query(new EmbeddedDnsServer(List.of(), sources),
-                    buildQuery("txtonly." + namespace, (short) 1)));
+                    DnsTestQuery.query("txtonly." + namespace, 1, 0x1234)));
             assertEquals(0, txtOnly.getShort(2) & 0x000F);
             assertEquals(0, txtOnly.getShort(6));
         }
         // A name neither source has is still NXDOMAIN.
         byte[] missing = query(new EmbeddedDnsServer(List.of(),
                 List.of(route53DnsRecordSource, cloudMapDnsRecordSource)),
-                buildQuery("nothere." + namespace, (short) 1));
+                DnsTestQuery.query("nothere." + namespace, 1, 0x1234));
         assertEquals(3, ByteBuffer.wrap(missing).getShort(2) & 0x000F);
     }
 
@@ -137,7 +136,7 @@ class CloudMapDnsPacketIntegrationTest {
                 Map.of("AWS_INSTANCE_IPV4", "172.31.0.6", "AWS_INSTANCE_PORT", "8080"), REGION);
 
         byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)),
-                buildQuery("srvonly." + namespace, (short) 1));
+                DnsTestQuery.query("srvonly." + namespace, 1, 0x1234));
         ByteBuffer packet = ByteBuffer.wrap(response);
 
         assertEquals(0, packet.getShort(2) & 0x000F);
@@ -154,7 +153,7 @@ class CloudMapDnsPacketIntegrationTest {
         cloudMapService.registerInstance(service.getId(), "task-1", null,
                 Map.of("AWS_INSTANCE_IPV4", "172.31.0.6", "AWS_INSTANCE_PORT", "8080"), REGION);
 
-        byte[] request = buildQuery("task-1.backend." + namespace, (short) 1);
+        byte[] request = DnsTestQuery.query("task-1.backend." + namespace, 1, 0x1234);
         byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)), request);
         ByteBuffer packet = ByteBuffer.wrap(response);
 
@@ -171,7 +170,7 @@ class CloudMapDnsPacketIntegrationTest {
         privateDnsNamespace(namespace);
 
         byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)),
-                buildQuery("missing." + namespace, (short) 1));
+                DnsTestQuery.query("missing." + namespace, 1, 0x1234));
 
         assertEquals(3, ByteBuffer.wrap(response).getShort(2) & 0x000F);
     }
@@ -187,7 +186,7 @@ class CloudMapDnsPacketIntegrationTest {
         Service service = typedService(namespace, "AAAA", "MULTIVALUE");
         cloudMapService.registerInstance(service.getId(), "task-1", null,
                 Map.of("AWS_INSTANCE_IPV6", "2001:db8::1"), REGION);
-        byte[] request = buildQuery("typed." + namespace, (short) 28);
+        byte[] request = DnsTestQuery.query("typed." + namespace, 28, 0x1234);
         byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)), request);
         ByteBuffer packet = ByteBuffer.wrap(response);
         assertEquals(1, packet.getShort(6));
@@ -206,7 +205,7 @@ class CloudMapDnsPacketIntegrationTest {
         cloudMapService.registerInstance(service.getId(), "task-1", null,
                 Map.of("AWS_INSTANCE_CNAME", "backend.example.com"), REGION);
         for (short type : new short[]{1, 5, 28}) {
-            byte[] request = buildQuery("typed." + namespace, type);
+            byte[] request = DnsTestQuery.query("typed." + namespace, type, 0x1234);
             byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)), request);
             ByteBuffer packet = ByteBuffer.wrap(response);
             assertEquals(1, packet.getShort(6));
@@ -223,7 +222,7 @@ class CloudMapDnsPacketIntegrationTest {
         Service service = typedService(namespace, "SRV", "MULTIVALUE");
         cloudMapService.registerInstance(service.getId(), "task-1", null,
                 Map.of("AWS_INSTANCE_IPV6", "2001:db8::2", "AWS_INSTANCE_PORT", "8080"), REGION);
-        byte[] request = buildQuery("typed." + namespace, (short) 33);
+        byte[] request = DnsTestQuery.query("typed." + namespace, 33, 0x1234);
         byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)), request);
         ByteBuffer packet = ByteBuffer.wrap(response);
         assertEquals(1, packet.getShort(6));
@@ -234,7 +233,7 @@ class CloudMapDnsPacketIntegrationTest {
         assertEquals(8080, packet.getShort());
         assertEquals("task-1.typed." + namespace, EmbeddedDnsServer.readName(packet, response));
         byte[] address = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)),
-                buildQuery("task-1.typed." + namespace, (short) 28));
+                DnsTestQuery.query("task-1.typed." + namespace, 28, 0x1234));
         assertEquals(1, ByteBuffer.wrap(address).getShort(6));
     }
 
@@ -247,7 +246,7 @@ class CloudMapDnsPacketIntegrationTest {
                     Map.of("AWS_INSTANCE_IPV4", "172.31.0." + i), REGION);
         }
         byte[] response = query(new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource)),
-                buildQuery("typed." + namespace, (short) 1));
+                DnsTestQuery.query("typed." + namespace, 1, 0x1234));
         assertEquals(1, ByteBuffer.wrap(response).getShort(6));
     }
 
@@ -266,7 +265,7 @@ class CloudMapDnsPacketIntegrationTest {
                     Map.of("AWS_INSTANCE_IPV4", "192.0.2.1", "AWS_INSTANCE_PORT", "8080"), REGION);
         }
         EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of(), List.of(cloudMapDnsRecordSource));
-        byte[] legacyQuery = buildQuery("typed." + namespace, (short) 33);
+        byte[] legacyQuery = DnsTestQuery.query("typed." + namespace, 33, 0x1234);
         byte[] legacy = query(dns, legacyQuery);
         ByteBuffer legacyPacket = ByteBuffer.wrap(legacy);
         assertTrue(legacy.length <= 512);
@@ -334,27 +333,4 @@ class CloudMapDnsPacketIntegrationTest {
         }
     }
 
-    private static byte[] buildQuery(String name, short type) {
-        String[] labels = name.split("\\.");
-        int nameLength = 1;
-        for (String label : labels) {
-            nameLength += label.length() + 1;
-        }
-        ByteBuffer query = ByteBuffer.allocate(12 + nameLength + 4);
-        query.putShort((short) 0x1234);
-        query.putShort((short) 0x0100);
-        query.putShort((short) 1);
-        query.putShort((short) 0);
-        query.putShort((short) 0);
-        query.putShort((short) 0);
-        for (String label : labels) {
-            byte[] bytes = label.getBytes(StandardCharsets.US_ASCII);
-            query.put((byte) bytes.length);
-            query.put(bytes);
-        }
-        query.put((byte) 0);
-        query.putShort(type);
-        query.putShort((short) 1);
-        return query.array();
-    }
 }

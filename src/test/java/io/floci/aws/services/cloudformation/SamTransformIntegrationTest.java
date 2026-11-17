@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
@@ -11,14 +12,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -36,6 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class SamTransformIntegrationTest {
+
+    private static final String HANDLER_SOURCE = "exports.handler=async(e)=>({statusCode:200})";
 
     private final List<String> stacksToDelete = new ArrayList<>();
 
@@ -238,15 +237,10 @@ class SamTransformIntegrationTest {
             .header("X-Amz-Executed-Version", equalTo("1"))
             .body("ok", equalTo(true));
 
-        ByteArrayOutputStream changedCode = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(changedCode)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async () => ({ ok: false });".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
+        String changedCode = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ ok: false });");
         given()
             .contentType("application/json")
-            .body("{\"ZipFile\":\"" + Base64.getEncoder().encodeToString(changedCode.toByteArray()) + "\"}")
+            .body("{\"ZipFile\":\"" + changedCode + "\"}")
         .when()
             .put("/2015-03-31/functions/sam-alias-func/code")
         .then()
@@ -483,9 +477,9 @@ class SamTransformIntegrationTest {
             .toList();
         assertThat(oldVersionStatuses, hasItem("DELETE_COMPLETE"));
         assertThat(oldVersionStatuses, not(hasItem("DELETE_SKIPPED")));
-        // floci reports the version deleted but keeps every version it publishes; AWS deletes it.
+        // VersionDeletionPolicy: Delete removes the replaced version from the native inventory.
         given().when().get("/2015-03-31/functions/" + function + "/versions")
-            .then().statusCode(200).body("Versions.Version", equalTo(List.of("$LATEST", "1", "2")));
+            .then().statusCode(200).body("Versions.Version", equalTo(List.of("$LATEST", "2")));
     }
 
     /**
@@ -910,6 +904,56 @@ class SamTransformIntegrationTest {
             .body("Configuration.MemorySize", equalTo(256))
             .body("Configuration.Environment.Variables.TABLE_NAME", equalTo("my-table"))
             .body("Configuration.Environment.Variables.STAGE", equalTo("local"));
+    }
+
+    @Test
+    void samDurableFunctionKeepsDurableAndLoggingConfig() {
+        String stackName = "sam-durable-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Globals:
+              Function:
+                LoggingConfig:
+                  LogFormat: JSON
+                  ApplicationLogLevel: DEBUG
+            Resources:
+              DurableFunc:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-durable-func
+                  Handler: app.handler
+                  Runtime: python3.13
+                  InlineCode: "def handler(event, context): return event"
+                  DurableConfig:
+                    ExecutionTimeout: 60
+                    RetentionPeriodInDays: 3
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/sam-durable-func")
+        .then()
+            .statusCode(200)
+            .body("Configuration.DurableConfig.ExecutionTimeout", equalTo(60))
+            .body("Configuration.DurableConfig.RetentionPeriodInDays", equalTo(3))
+            .body("Configuration.LoggingConfig.LogFormat", equalTo("JSON"))
+            .body("Configuration.LoggingConfig.ApplicationLogLevel", equalTo("DEBUG"));
     }
 
     @Test
@@ -1603,7 +1647,7 @@ class SamTransformIntegrationTest {
         .then()
             .statusCode(200);
 
-        byte[] zipBytes = buildHandlerZip();
+        byte[] zipBytes = LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE);
         given()
             .contentType("application/zip")
             .body(zipBytes)
@@ -2227,7 +2271,7 @@ class SamTransformIntegrationTest {
         String bucket = "sam-layer-code";
         stacksToDelete.add(stack);
         given().when().put("/" + bucket).then().statusCode(200);
-        given().contentType("application/zip").body(buildHandlerZip())
+        given().contentType("application/zip").body(LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE))
                 .when().put("/" + bucket + "/layer.zip").then().statusCode(200);
         String template = """
                 Transform: AWS::Serverless-2016-10-31
@@ -2287,11 +2331,11 @@ class SamTransformIntegrationTest {
                     .body("CompatibleRuntimes", hasItems("nodejs22.x", "python3.14"))
                     .body("CompatibleArchitectures", hasItem("arm64"))
                     .body("LicenseInfo", equalTo("MIT"))
-                    .body("Content.CodeSize", equalTo(buildHandlerZip().length));
+                    .body("Content.CodeSize", equalTo(LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE).length));
             given().when().get("/2015-03-31/functions/sam-layer-consumer")
                     .then().statusCode(200).body("Configuration.Layers[0].Arn", equalTo(arn))
                     .body("Configuration.Environment.Variables.DependsOn", equalTo("Layer"));
-            given().contentType("application/zip").body(buildHandlerZip())
+            given().contentType("application/zip").body(LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE))
                     .when().put("/" + bucket + "/updated.zip").then().statusCode(200);
             given().contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "UpdateStack").formParam("StackName", stack)
@@ -2329,20 +2373,6 @@ class SamTransformIntegrationTest {
                 .split("<OutputKey>" + outputKey + "</OutputKey>")[1]
                 .split("<OutputValue>")[1]
                 .split("</OutputValue>")[0];
-    }
-
-    private static byte[] buildHandlerZip() {
-        try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new ZipEntry("index.js"));
-                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-            return baos.toByteArray();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 
     private static void waitForStackStatus(String stackName, String status) {

@@ -16,7 +16,7 @@ import java.util.Map;
  * the resource on Get and rotated on Update, never embedded in the wire WebACL shape.
  */
 @RegisterForReflection
-public class WebAcl {
+public class WebAcl implements WafV2Resource {
 
     private String id;
     private String name;

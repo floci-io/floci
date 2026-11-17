@@ -13,6 +13,7 @@ public class S3Table {
     private String format;
     private String versionToken;
     private String metadataLocation;
+    private String warehouseLocation;
     private String createdAt;
     private String modifiedAt;
     private String ownerAccountId;
@@ -58,6 +59,8 @@ public class S3Table {
     public void setVersionToken(String versionToken) { this.versionToken = versionToken; }
     public String getMetadataLocation() { return metadataLocation; }
     public void setMetadataLocation(String metadataLocation) { this.metadataLocation = metadataLocation; }
+    public String getWarehouseLocation() { return warehouseLocation; }
+    public void setWarehouseLocation(String warehouseLocation) { this.warehouseLocation = warehouseLocation; }
     public String getCreatedAt() { return createdAt; }
     public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
     public String getModifiedAt() { return modifiedAt; }

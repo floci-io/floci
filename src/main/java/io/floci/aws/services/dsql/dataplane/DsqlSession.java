@@ -237,7 +237,7 @@ final class DsqlSession {
             if (!optionSettings.isEmpty()) {
                 backendStartup.put("options", backendOptions(optionSettings));
             }
-            backendStartup.put("database", "postgres");
+            backendStartup.put("database", target.database());
             principalArn = admission.principalArn();
             backendOut.write(PostgresWire.startupMessage(backendStartup));
             backendOut.flush();

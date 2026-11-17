@@ -7,6 +7,8 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.RedshiftAuditTarget;
 import io.floci.aws.services.redshift.TempCredential;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshiftserverless.model.ConfigParameter;
@@ -14,6 +16,7 @@ import io.floci.aws.services.redshiftserverless.model.Namespace;
 import io.floci.aws.services.redshiftserverless.model.PricePerformanceTarget;
 import io.floci.aws.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.floci.aws.services.redshiftserverless.model.Workgroup;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -23,6 +26,7 @@ import org.mockito.Mockito;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -33,6 +37,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -46,6 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
@@ -53,6 +59,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -96,6 +103,11 @@ class RedshiftServerlessServiceTest {
                 .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
                         + invocation.getArgument(1, String.class) + ":" + ACCOUNT_ID + ":"
                         + invocation.getArgument(2, String.class));
+        when(regionResolver.buildArn(eq("redshift-serverless"), any(String.class), any(String.class),
+                any(String.class)))
+                .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
+                        + invocation.getArgument(1, String.class) + ":" + invocation.getArgument(2, String.class)
+                        + ":" + invocation.getArgument(3, String.class));
         nextPort = 7100;
         endpoints = mock(RedshiftServerlessEndpoints.class);
         when(endpoints.allocate()).thenAnswer(invocation -> new Endpoint("localhost", nextPort++));
@@ -402,6 +414,37 @@ class RedshiftServerlessServiceTest {
 
         assertEquals(Map.of("env", "dev"),
                 service.listTagsForResource(created.getNamespaceArn(), REGION));
+    }
+
+    @Test
+    void storedTagsReadTheNamespaceOrTheSnapshotTheArnNamesInItsAccountAndRegion() {
+        String namespace = service.createNamespace("stored-tags-ns", "admin", null, null, null, null, null,
+                Map.of("team", "data"), REGION).getNamespaceArn();
+        String snapshot = service.createSnapshot("stored-tags-snap", "stored-tags-ns", null, Map.of("team", "backup"),
+                REGION).getSnapshotArn();
+
+        assertEquals(Map.of("team", "data"), service.storedTags(namespace));
+        assertEquals(Map.of("team", "backup"), service.storedTags(snapshot));
+        assertEquals(Map.of(), service.storedTags(namespace.replace(ACCOUNT_ID, "111111111111")));
+        assertEquals(Map.of(), service.storedTags(namespace.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), service.storedTags(namespace + "0"));
+
+        service.tagResource(namespace, Map.of("stage", "prod"), REGION);
+        service.untagResource(namespace, List.of("team"), REGION);
+
+        assertEquals(Map.of("stage", "prod"), service.storedTags(namespace));
+    }
+
+    @Test
+    void storedTagsReadAPreMultiAccountNamespaceAsTheDefaultAccountsAndAsNoOthers() {
+        Namespace legacy = new Namespace();
+        legacy.setNamespaceArn("arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT_ID + ":namespace/legacy-id");
+        legacy.setTags(Map.of("team", "legacy"));
+        doAnswer(invocation -> Stream.of(legacy).filter(invocation.<Predicate<Namespace>>getArgument(0)).toList())
+                .when(store).scanUnscopedLegacy(any());
+
+        assertEquals(Map.of("team", "legacy"), service.storedTags(legacy.getNamespaceArn()));
+        assertEquals(Map.of(), service.storedTags(legacy.getNamespaceArn().replace(ACCOUNT_ID, "111111111111")));
     }
 
     @Test
@@ -866,7 +909,7 @@ class RedshiftServerlessServiceTest {
         assertThrows(IllegalStateException.class,
                 () -> service.updateNamespace("undo-ns", null, "Changed123", null, null, null, null, REGION));
 
-        verify(runtime).restoreMasterPassword(ACCOUNT_ID, REGION, "undo-wg", "root", "dev", "Secret123");
+        verify(runtime).changeMasterPassword(ACCOUNT_ID, REGION, "undo-wg", "root", "dev", null, "Secret123");
     }
 
     @Test
@@ -875,8 +918,9 @@ class RedshiftServerlessServiceTest {
         createWorkgroup("mask-wg", "mask-ns");
         IllegalStateException storageFailure = new IllegalStateException("disk full");
         doThrow(storageFailure).when(store).put(eq(REGION + "::mask-ns"), any(Namespace.class));
+        // a restore names no previous password, which tells it from the change that came first
         doThrow(new RuntimeException("psql failed")).when(runtime)
-                .restoreMasterPassword(any(), any(), any(), any(), any(), any());
+                .changeMasterPassword(any(), any(), any(), any(), any(), isNull(), any());
 
         IllegalStateException thrown = assertThrows(IllegalStateException.class,
                 () -> service.updateNamespace("mask-ns", null, "Changed123", null, null, null, null, REGION));
@@ -1038,6 +1082,182 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void aRunningWorkgroupExportsTheLogTypesItsNamespaceSelects() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("audit-ns", "admin", null, null, null, null, List.of("connectionlog", "userlog"),
+                Map.of(), REGION);
+
+        createWorkgroup("audit-wg", "audit-ns");
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        RedshiftAuditTarget target = registered.getValue();
+        assertEquals("serverless_us-east-1_audit-wg", target.identifier());
+        assertEquals("/aws/redshift/audit-ns", target.logGroupPrefix());
+        assertEquals("serverless", target.name());
+        assertEquals("cloudwatch", target.destinationType());
+        assertEquals(List.of("connectionlog", "userlog"), target.exports());
+        assertTrue(target.enabled());
+        assertFalse(target.activityLoggingEnabled());
+
+        service.updateNamespace("audit-ns", null, null, null, null, List.of("useractivitylog"), REGION);
+        service.updateNamespace("audit-ns", null, null, null, null, List.of(), REGION);
+        service.deleteWorkgroup("audit-wg", REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> reregistered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(3)).register(eq(ACCOUNT_ID), eq(REGION), reregistered.capture());
+        assertEquals(List.of("useractivitylog"), reregistered.getAllValues().get(1).exports());
+        assertFalse(reregistered.getAllValues().get(2).enabled());
+        verify(publisher).unregister(ACCOUNT_ID, "serverless_us-east-1_audit-wg");
+    }
+
+    @Test
+    void updatingTheWorkgroupConfigParameterReregistersTheTarget() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("cfg-ns", "admin", null, null, null, null, List.of("useractivitylog"), Map.of(), REGION);
+        createWorkgroup("cfg-wg", "cfg-ns");
+
+        service.updateWorkgroup("cfg-wg", new WorkgroupSettings(null, null, null, null, null,
+                List.of(new ConfigParameter("enable_user_activity_logging", "true")), null, null, null, null, null,
+                null), REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(2)).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertFalse(registered.getAllValues().get(0).activityLoggingEnabled());
+        assertTrue(registered.getAllValues().get(1).activityLoggingEnabled());
+    }
+
+    @Test
+    void restoringANamespaceUpdateReregistersThePreviousLogExports() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("rollback-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(),
+                REGION);
+        createWorkgroup("rollback-wg", "rollback-ns");
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot =
+                service.snapshotNamespaceUpdate("rollback-ns", REGION);
+        service.updateNamespace("rollback-ns", null, null, null, null, List.of("userlog"), REGION);
+
+        service.restoreNamespaceUpdate(snapshot, REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(3)).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals(List.of("userlog"), registered.getAllValues().get(1).exports());
+        assertEquals(List.of("connectionlog"), registered.getAllValues().get(2).exports());
+    }
+
+    @Test
+    void aRestartRegistersTheTargetOfEveryRecoveredWorkgroup() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.createNamespace("boot-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(), REGION);
+        createWorkgroup("boot-wg", "boot-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals("serverless_us-east-1_boot-wg", registered.getValue().identifier());
+        assertEquals(List.of("connectionlog"), registered.getValue().exports());
+    }
+
+    @Test
+    void aWorkgroupThatFailsToStartRegistersNothing() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("fail-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(), REGION);
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenThrow(new IllegalStateException("container failed"));
+
+        assertThrows(IllegalStateException.class, () -> createWorkgroup("fail-wg", "fail-ns"));
+
+        verify(publisher, never()).register(any(), any(), any(RedshiftAuditTarget.class));
+    }
+
+    @Test
+    void theUserActivityLogNeedsItsConfigParameterOnTheWorkgroup() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("activity-ns", "admin", null, null, null, null, List.of("useractivitylog"), Map.of(),
+                REGION);
+
+        service.createWorkgroup("activity-wg", "activity-ns", new WorkgroupSettings(null, null, null, null, null,
+                List.of(new ConfigParameter("enable_user_activity_logging", "true")), null, null, null, null, null,
+                null), null, REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertTrue(registered.getValue().activityLoggingEnabled());
+    }
+
+    @Test
+    void recoveryIgnoresNullLogExportsAndKeepsWorkgroupRuntime() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        Namespace namespace = service.createNamespace("null-export-ns", "admin", null, null, null, null,
+                List.of("connectionlog"), Map.of(), REGION);
+        namespace.setLogExports(Arrays.asList("connectionlog", null));
+        store.put(REGION + "::null-export-ns", namespace);
+        createWorkgroup("null-export-wg", "null-export-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        Workgroup recovered = service.getWorkgroup("null-export-wg", REGION);
+        assertEquals("127.0.0.1", recovered.getRuntimeHost());
+        assertEquals(55432, recovered.getRuntimePort());
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals(List.of("connectionlog"), registered.getValue().exports());
+    }
+
+    @Test
+    void recoveryKeepsWorkgroupRuntimeWhenAuditRegistrationThrows() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        doThrow(new IllegalStateException("audit failure")).when(publisher)
+                .register(eq(ACCOUNT_ID), eq(REGION), any(RedshiftAuditTarget.class));
+        service.createNamespace("audit-err-ns", "admin", null, null, null, null, List.of("connectionlog"),
+                Map.of(), REGION);
+        createWorkgroup("audit-err-wg", "audit-err-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        Workgroup recovered = service.getWorkgroup("audit-err-wg", REGION);
+        assertEquals("127.0.0.1", recovered.getRuntimeHost());
+        assertEquals(55432, recovered.getRuntimePort());
+    }
+
+    @Test
+    void clearUnregistersAuditTargetEvenWhenRuntimeStopFails() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("clear-err-ns", "admin", null, null, null, null, List.of("connectionlog"),
+                Map.of(), REGION);
+        Workgroup created = createWorkgroup("clear-err-wg", "clear-err-ns");
+        doThrow(new RuntimeException("stop failed")).when(runtime).stop(ACCOUNT_ID, REGION, "clear-err-wg");
+
+        service.clear();
+
+        verify(publisher).unregister(ACCOUNT_ID, "serverless_us-east-1_clear-err-wg");
+        verify(endpoints, never()).release(created.getEndpoint());
+        assertTrue(service.listWorkgroups(REGION, null, null).items().isEmpty());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Instance<RedshiftAuditLogPublisher> instanceOf(RedshiftAuditLogPublisher publisher) {
+        Instance<RedshiftAuditLogPublisher> instance = mock(Instance.class);
+        when(instance.isUnsatisfied()).thenReturn(false);
+        when(instance.get()).thenReturn(publisher);
+        return instance;
+    }
+
+    @Test
     void restoreRequiresAnExistingNamespaceWorkgroupAndSnapshot() {
         create("restore-ns");
         service.createSnapshot("restore-snap", "restore-ns", null, null, REGION);
@@ -1055,6 +1275,145 @@ class RedshiftServerlessServiceTest {
         AwsException noSnapshot = assertThrows(AwsException.class,
                 () -> service.restoreFromSnapshot("restore-ns", "restore-wg", "missing-snap", null, REGION));
         assertEquals("ResourceNotFoundException", noSnapshot.getErrorCode());
+    }
+
+    @Test
+    void tableRestoreRefusesAWorkgroupOfAnotherNamespace() {
+        create("table-ns-a");
+        create("table-ns-b");
+        service.createSnapshot("table-snap", "table-ns-a", null, null, REGION);
+        createWorkgroup("table-wg-b", "table-ns-b");
+
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> service.tableRestoreSource("table-ns-a", "table-wg-b", "table-snap", REGION));
+
+        assertEquals("ValidationException", mismatch.getErrorCode());
+    }
+
+    @Test
+    void restoreFromSharedSnapshotReadsTheSnapshotOfAnotherAccount() throws Exception {
+        String owner = "999999999999";
+        create("shared-ns");
+        createWorkgroup("shared-wg", "shared-ns");
+        RedshiftServerlessSnapshot own = service.createSnapshot("own-snap", "shared-ns", null, null, REGION);
+        Path ownerDump = dumpDir.resolve("redshift-serverless-dumps").resolve(owner).resolve(REGION)
+                .resolve("their-snap.sql").toAbsolutePath().normalize();
+        Files.createDirectories(ownerDump.getParent());
+        Files.writeString(ownerDump, "select 1;");
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(own);
+        theirs.setSnapshotName("their-snap");
+        theirs.setOwnerAccount(owner);
+        theirs.setSqlDump(ownerDump.toString());
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
+
+        assertTrue(service.findSnapshotOfAccount(owner, "their-snap", REGION).isPresent());
+        assertTrue(service.findSnapshotOfAccount(ACCOUNT_ID, "their-snap", REGION).isEmpty());
+        assertTrue(service.findSnapshotOfAccount(owner, "own-snap", REGION).isEmpty());
+
+        RedshiftServerlessService.RestoreResult restored = service.restoreFromSharedSnapshot(
+                "shared-ns", "shared-wg", "their-snap", owner, null, null, REGION);
+
+        assertEquals("AVAILABLE", restored.namespace().getStatus());
+        assertEquals("their-snap", restored.snapshot().getSnapshotName());
+        assertEquals(owner, restored.snapshot().getOwnerAccount());
+        verify(runtime).restoreSnapshot(eq(ACCOUNT_ID), eq(REGION), eq("shared-wg"), any(), any(), eq(ownerDump),
+                any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void findNamesTheArnOfTheSnapshotOfTheAccountThatOwnsIt() {
+        String owner = "999999999999";
+        create("find-ns");
+        RedshiftServerlessSnapshot own = service.createSnapshot("own-snap", "find-ns", null, null, REGION);
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(own);
+        theirs.setSnapshotName("their-snap");
+        theirs.setSnapshotArn("arn:aws:redshift-serverless:" + REGION + ":" + owner + ":snapshot/their-snap");
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
+
+        assertEquals(Optional.of(own.getSnapshotArn()), service.find("snapshot", List.of("own-snap"), REGION));
+        assertEquals(Optional.of(theirs.getSnapshotArn()),
+                service.findInAccount("snapshot", List.of("their-snap"), owner, REGION));
+        assertEquals(Optional.empty(), service.find("snapshot", List.of("their-snap"), REGION));
+        assertEquals(Optional.empty(), service.findInAccount("snapshot", List.of("own-snap"), owner, REGION));
+        assertEquals(Optional.empty(), service.findInAccount("namespace", List.of("find-ns"), owner, REGION));
+        assertEquals(Optional.of(service.getNamespace("find-ns", REGION).getNamespaceArn()),
+                service.find("namespace", List.of("find-ns"), REGION));
+        assertEquals(Optional.empty(), service.find("workgroup", List.of("missing"), REGION));
+        assertEquals(Optional.empty(), service.find("endpointAccess", List.of("any"), REGION));
+        RedshiftServerlessEndpointAccessService endpointService = mock(RedshiftServerlessEndpointAccessService.class);
+        Instance<RedshiftServerlessEndpointAccessService> endpointInstance = mock(Instance.class);
+        when(endpointInstance.isUnsatisfied()).thenReturn(false);
+        when(endpointInstance.get()).thenReturn(endpointService);
+        when(endpointService.findEndpointArn("my-endpoint", REGION)).thenReturn(Optional.of("arn:endpoint"));
+        service.endpointAccess = endpointInstance;
+        assertEquals(Optional.of("arn:endpoint"), service.find("endpointAccess", List.of("my-endpoint"), REGION));
+        assertEquals(Optional.empty(), service.find("snapshot", List.of(), REGION));
+    }
+
+    @Test
+    void anOwnerAccountIsOtherOnlyWhenItDiffersFromTheCallers() {
+        assertTrue(service.isOtherAccount("999999999999"));
+        assertFalse(service.isOtherAccount(ACCOUNT_ID));
+        assertFalse(service.isOtherAccount(null));
+        assertFalse(service.isOtherAccount(" "));
+    }
+
+    @Test
+    void snapshotNameFromArnOfAnotherOwnerNeedsThatOwnersAccount() {
+        String owner = "999999999999";
+        String ownerArn = "arn:aws:redshift-serverless:" + REGION + ":" + owner + ":snapshot/their-snap";
+
+        assertEquals("their-snap", service.snapshotNameFromArn(ownerArn, REGION, owner, "snapshotArn"));
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.snapshotNameFromArn(ownerArn, REGION, ACCOUNT_ID, "snapshotArn")).getErrorCode());
+    }
+
+    @Test
+    void restoreFromSharedSnapshotDoesNotTrustADumpOutsideTheOwnersDirectory() throws Exception {
+        String owner = "999999999999";
+        create("shared-ns");
+        createWorkgroup("shared-wg", "shared-ns");
+        Path callerDump = dumpDir.resolve("redshift-serverless-dumps").resolve(ACCOUNT_ID).resolve(REGION)
+                .resolve("elsewhere.sql").toAbsolutePath().normalize();
+        Files.createDirectories(callerDump.getParent());
+        Files.writeString(callerDump, "select 1;");
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(
+                service.createSnapshot("own-snap", "shared-ns", null, null, REGION));
+        theirs.setSnapshotName("their-snap");
+        theirs.setOwnerAccount(owner);
+        theirs.setSqlDump(callerDump.toString());
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
+
+        AwsException untrusted = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "shared-wg", "their-snap", owner, null, null, REGION));
+
+        assertEquals("InternalServerException", untrusted.getErrorCode());
+    }
+
+    @Test
+    void restoreFromSharedSnapshotStillNeedsAnAvailableSnapshotAndAWorkgroup() {
+        String owner = "999999999999";
+        create("shared-ns");
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(
+                service.createSnapshot("own-snap", "shared-ns", null, null, REGION));
+        theirs.setSnapshotName("their-snap");
+        theirs.setOwnerAccount(owner);
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
+
+        AwsException noWorkgroup = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "missing-wg", "their-snap", owner, null, null, REGION));
+        assertEquals("ResourceNotFoundException", noWorkgroup.getErrorCode());
+
+        AwsException noSnapshot = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "missing-wg", "no-such-snap", owner, null, null, REGION));
+        assertEquals("ResourceNotFoundException", noSnapshot.getErrorCode());
+
+        theirs.setStatus("FAILED");
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
+        AwsException unavailable = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "missing-wg", "their-snap", owner, null, null, REGION));
+        assertEquals("ConflictException", unavailable.getErrorCode());
     }
 
     @Test

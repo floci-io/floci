@@ -1,6 +1,8 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.sns.SnsService;
@@ -9,6 +11,7 @@ import io.floci.aws.services.sns.model.Topic;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -16,6 +19,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Provisions {@code AWS::SNS::Topic}, {@code AWS::SNS::Subscription} and {@code AWS::SNS::TopicPolicy}. */
 @ApplicationScoped
@@ -27,6 +31,10 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
     private static final String FIFO_SUFFIX = ".fifo";
     private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
+    private static final String PRIOR_INLINE_ATTR = CfnRollback.SNS_PRIOR_INLINE_SUBSCRIPTIONS_ATTR;
+
+    private static final String ADOPTED_ATTR = CfnRollback.SNS_ADOPTED_TOPIC_UPDATE_SNAPSHOT_ATTR;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final SnsService snsService;
 
@@ -50,7 +58,65 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(PRIOR_INLINE_ATTR);
+        resource.getAttributes().remove(ADOPTED_ATTR);
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, ADOPTED_ATTR);
+        if (snapshot != null) {
+            // A topic the update adopted is not the stack's to keep changed: put its attributes back and
+            // drop the subscriptions this update made, then let the replacement cleanup point back.
+            Map<String, String> prior = new HashMap<>();
+            snapshot.path("attributes").fields().forEachRemaining(e ->
+                    prior.put(e.getKey(), CfnRollback.snapshotText(snapshot.path("attributes"), e.getKey())));
+            List<String> added = new ArrayList<>();
+            snapshot.path("subscriptions").forEach(arn -> added.add(arn.asText()));
+            restoreAdoptedTopic(CfnRollback.snapshotText(snapshot, "topicArn"),
+                    CfnRollback.snapshotText(snapshot, "region"), prior, added);
+            resource.getAttributes().remove(ADOPTED_ATTR);
+        }
+        if (!ReplacementCleanup.rollback(resource, this::delete)) {
+            return false;
+        }
+        String prior = resource.getAttributes().remove(PRIOR_INLINE_ATTR);
+        if (prior != null) {
+            resource.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX));
+            for (String arn : prior.split(",")) {
+                if (!arn.isEmpty()) {
+                    resource.getAttributes().put(INLINE_SUBSCRIPTION_PREFIX + arn, "true");
+                }
+            }
+        }
+        return true;
+    }
+
     private void provisionTopic(StackResource r, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            // Rolling this update back undoes it alone; only ContinueUpdateRollback retries the
+            // delete the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String topicName = ctx.resolveOptional(props, "TopicName");
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         String throughputScope = ctx.resolveOptional(props, "FifoThroughputScope");
@@ -60,19 +126,22 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         boolean fifo = "true".equalsIgnoreCase(ctx.resolveOptional(props, "FifoTopic"))
                 || (topicName != null && topicName.endsWith(FIFO_SUFFIX));
         String priorName = r.getAttributes().get("TopicName");
-        // FifoTopic is createOnly and carried by the name, so a flip needs a replacement. Nothing
-        // cleans up the displaced topic or its subscriptions, so refuse it, as SqsCfnProvisioner
-        // does for FifoQueue.
-        if (ctx.isUpdate() && priorName != null && !priorName.isBlank()
-                && priorName.endsWith(FIFO_SUFFIX) != fifo) {
-            throw new AwsException("ValidationError",
-                    "Updating FifoTopic requires resource replacement, which is not supported.", 400);
+        // The engine's change decides whether the update replaces the topic: TopicName and
+        // FifoTopic are create-only in the registry. A topic's mode is carried by its name, so the
+        // prior name's .fifo suffix tells the live mode; the engine reads an added FifoTopic as no
+        // change and would apply the update in place. A named topic cannot be replaced under the
+        // same name.
+        boolean replaces = ctx.isUpdate() && priorName != null && !priorName.isBlank()
+                && (ctx.changes(TOPIC, props).requiresReplacement() || priorName.endsWith(FIFO_SUFFIX) != fifo);
+        if (replaces && topicName != null && topicName.equals(priorName)) {
+            throw CfnExceptions.customNamedReplacement(topicName);
         }
         if (topicName == null || topicName.isBlank()) {
             // ctx.stablePhysicalName does not fit here: the physical id is the topic ARN, so the
             // prior name comes from the attribute recorded at create time. Reusing it keeps an
-            // unnamed topic (and its subscriptions) across updates instead of orphaning it.
-            if (priorName != null && !priorName.isBlank()) {
+            // unnamed topic (and its subscriptions) across updates instead of orphaning it. A
+            // replacing update gets a fresh generated name instead.
+            if (priorName != null && !priorName.isBlank() && !replaces) {
                 topicName = priorName;
             } else if (fifo) {
                 // Like real CloudFormation, a generated FIFO name ends in .fifo.
@@ -114,8 +183,9 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         boolean created = creation.created();
         // createTopic leaves an existing topic untouched, so an update writes the mutable
         // attributes itself. A property the template dropped is reset, not left standing.
+        Map<String, String> desired = new HashMap<>();
         if (ctx.isUpdate()) {
-            Map<String, String> desired = new HashMap<>(attributes);
+            desired.putAll(attributes);
             if (fifo) {
                 desired.putIfAbsent("ContentBasedDeduplication", "false");
                 desired.putIfAbsent("FifoThroughputScope", "Topic");
@@ -128,8 +198,13 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                 desired.put("MaximumMessageSize",
                         String.valueOf(SnsService.DEFAULT_MAX_MESSAGE_SIZE));
             }
-            desired.forEach((name, value) ->
-                    snsService.setTopicAttributes(topic.getTopicArn(), name, value, ctx.region()));
+        }
+        // A replacing update that adopted an existing topic changes something the stack did not
+        // create, so what it writes (the prior values, null for absent) is kept for the undo.
+        boolean adopted = ctx.isUpdate() && !created && !ctx.priorPhysicalId().equals(topic.getTopicArn());
+        Map<String, String> priorAttributes = new HashMap<>();
+        if (adopted) {
+            desired.keySet().forEach(name -> priorAttributes.put(name, topic.getAttributes().get(name)));
         }
         // Ref returns the topic ARN, which is why the physical id is the ARN and not the name.
         r.setPhysicalId(topic.getTopicArn());
@@ -143,9 +218,64 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         Set<String> added = new HashSet<>();
         CfnRollback.guarded(r, ctx, created,
                 () -> snsService.deleteTopic(topic.getTopicArn(), ctx.region()),
-                () -> added.forEach(arn -> snsService.unsubscribe(arn, ctx.region())),
-                () -> reconcileInlineSubscriptions(r, topic.getTopicArn(), ctx.region(),
-                        desiredSubscriptions, existing, added));
+                () -> {
+                    if (adopted) {
+                        restoreAdoptedTopic(topic.getTopicArn(), ctx.region(), priorAttributes, added);
+                    } else {
+                        added.forEach(arn -> snsService.unsubscribe(arn, ctx.region()));
+                    }
+                },
+                () -> {
+                    desired.forEach((name, value) ->
+                            snsService.setTopicAttributes(topic.getTopicArn(), name, value, ctx.region()));
+                    reconcileInlineSubscriptions(r, topic.getTopicArn(), ctx.region(),
+                            desiredSubscriptions, existing, added);
+                });
+        boolean replaced = ctx.isUpdate() && !ctx.priorPhysicalId().equals(r.getPhysicalId());
+        if (replaced) {
+            r.getAttributes().put(PRIOR_INLINE_ATTR, attributesBefore.keySet().stream()
+                    .filter(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX))
+                    .map(key -> key.substring(INLINE_SUBSCRIPTION_PREFIX.length()))
+                    .collect(Collectors.joining(",")));
+        } else {
+            r.getAttributes().remove(PRIOR_INLINE_ATTR);
+        }
+        if (adopted) {
+            ObjectNode snapshot = MAPPER.createObjectNode();
+            snapshot.put("topicArn", topic.getTopicArn());
+            snapshot.put("region", ctx.region());
+            ObjectNode attrs = snapshot.putObject("attributes");
+            priorAttributes.forEach((name, value) -> {
+                if (value == null) {
+                    attrs.putNull(name);
+                } else {
+                    attrs.put(name, value);
+                }
+            });
+            added.forEach(arn -> snapshot.withArray("subscriptions").add(arn));
+            r.getAttributes().put(ADOPTED_ATTR, snapshot.toString());
+        } else {
+            r.getAttributes().remove(ADOPTED_ATTR);
+        }
+        // A topic the update only adopted, because its name already existed, is not deleted by a rollback.
+        ReplacementCleanup.record(r, ctx, attributesBefore, replaced, created);
+    }
+
+    /** Puts an adopted topic back: the attributes this update wrote (null = absent) and its own subscriptions. */
+    private void restoreAdoptedTopic(String topicArn, String region, Map<String, String> prior,
+                                     Collection<String> addedSubscriptions) {
+        addedSubscriptions.forEach(arn -> CfnDeletes.safeDelete("subscription", arn,
+                () -> snsService.unsubscribe(arn, region), "NotFound"));
+        if (!snsService.topicExists(topicArn, region)) {
+            return;
+        }
+        prior.forEach((name, value) -> {
+            if (value == null) {
+                snsService.removeTopicAttribute(topicArn, name, region);
+            } else {
+                snsService.setTopicAttributes(topicArn, name, value, region);
+            }
+        });
     }
 
     private void reconcileInlineSubscriptions(StackResource r, String topicArn, String region,
@@ -275,7 +405,8 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
-            case TOPIC -> snsService.deleteTopic(physicalId, region);
+            case TOPIC -> CfnDeletes.safeDelete("topic", physicalId,
+                    () -> snsService.deleteTopic(physicalId, region), "NotFound");
             case SUBSCRIPTION -> snsService.unsubscribe(physicalId, region);
             // No entity to remove. The topics keep the last policy written, the same choice
             // SqsCfnProvisioner makes for AWS::SQS::QueuePolicy.

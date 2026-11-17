@@ -1,5 +1,7 @@
 package io.floci.aws.services.cognito;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
@@ -551,10 +553,15 @@ public class CognitoOAuthController {
                     "Only client_credentials, authorization_code and refresh_token are supported");
         }
         String scope = trimToNull(formParams.getFirst("scope"));
+        Optional<Map<String, String>> clientMetadata =
+                parseClientMetadata(trimToNull(formParams.getFirst("aws_client_metadata")));
+        if (clientMetadata.isEmpty()) {
+            return oauthError("invalid_request", "aws_client_metadata must be a JSON object of strings");
+        }
 
         try {
             Map<String, Object> result = cognitoService.issueClientCredentialsToken(
-                    clientId, clientSecret, scope, domainPoolId);
+                    clientId, clientSecret, scope, domainPoolId, clientMetadata.get());
             return Response.ok(objectMapper.valueToTree(result))
                     .type(MediaType.APPLICATION_JSON)
                     .header("Cache-Control", "no-store")
@@ -576,6 +583,37 @@ public class CognitoOAuthController {
             LOG.error("Failed to issue Cognito OAuth token", e);
             return oauthError("invalid_request", e.getMessage());
         }
+    }
+
+    /**
+     * The client-credentials {@code aws_client_metadata} parameter, or empty when it is not a JSON
+     * object of string values. An absent parameter is an empty map.
+     */
+    private Optional<Map<String, String>> parseClientMetadata(String raw) {
+        if (raw == null) {
+            return Optional.of(Map.of());
+        }
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(raw);
+        } catch (JsonProcessingException e) {
+            LOG.debugv(e, "Rejecting malformed aws_client_metadata");
+            return Optional.empty();
+        }
+        if (root == null || root.isNull()) {
+            return Optional.of(Map.of());
+        }
+        if (!root.isObject()) {
+            return Optional.empty();
+        }
+        Map<String, String> metadata = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> member : root.properties()) {
+            if (!member.getValue().isTextual()) {
+                return Optional.empty();
+            }
+            metadata.put(member.getKey(), member.getValue().textValue());
+        }
+        return Optional.of(metadata);
     }
 
     private Response redeemAuthorizationCode(String clientId, String clientSecret,
@@ -911,7 +949,7 @@ public class CognitoOAuthController {
         fields.add(hiddenField("username", username));
         for (String factor : factors) {
             String label = "PASSWORD".equals(factor) ? "Sign in with your password" : "Email me a sign-in code";
-            fields.add("<button type=\"submit\" name=\"challenge\" value=\"" + escapeHtml(factor) + "\">"
+            fields.add("<button type=\"submit\" name=\"challenge\" value=\"" + CognitoHtml.escape(factor) + "\">"
                     + label + "</button>");
         }
         return signInPage(requestContext, request, status, error, fields);
@@ -933,12 +971,12 @@ public class CognitoOAuthController {
     private static String usernameInput(AuthorizationRequest request, String username) {
         String value = username != null ? username : request.loginHint();
         return "<input id=\"username\" name=\"username\" type=\"text\" autocomplete=\"username\""
-                + " autocapitalize=\"none\"" + (value == null ? "" : " value=\"" + escapeHtml(value) + "\"")
+                + " autocapitalize=\"none\"" + (value == null ? "" : " value=\"" + CognitoHtml.escape(value) + "\"")
                 + " required>";
     }
 
     private static String hiddenField(String name, String value) {
-        return "<input type=\"hidden\" name=\"" + escapeHtml(name) + "\" value=\"" + escapeHtml(value) + "\">";
+        return "<input type=\"hidden\" name=\"" + CognitoHtml.escape(name) + "\" value=\"" + CognitoHtml.escape(value) + "\">";
     }
 
     /**
@@ -960,8 +998,8 @@ public class CognitoOAuthController {
             }
             Map<String, String> parameters = new LinkedHashMap<>(request.parameters());
             parameters.put("identity_provider", provider);
-            providerLinks.add("    <p><a href=\"" + escapeHtml(authorizePath + "?" + formEncode(parameters))
-                    + "\">Sign in with " + escapeHtml(provider) + "</a></p>");
+            providerLinks.add("    <p><a href=\"" + CognitoHtml.escape(authorizePath + "?" + formEncode(parameters))
+                    + "\">Sign in with " + CognitoHtml.escape(provider) + "</a></p>");
         }
         String csrfToken = stateStore.generateOpaqueKey();
         List<String> formFields = new ArrayList<>();
@@ -976,7 +1014,7 @@ public class CognitoOAuthController {
                       <input type="hidden" name="%s" value="%s">
                 %s
                     </form>
-                """.formatted(escapeHtml(loginPath(requestContext)), CSRF_FIELD, escapeHtml(csrfToken),
+                """.formatted(CognitoHtml.escape(loginPath(requestContext)), CSRF_FIELD, CognitoHtml.escape(csrfToken),
                 String.join("\n", formFields)) : "";
         String page = """
                 <!doctype html>
@@ -995,7 +1033,7 @@ public class CognitoOAuthController {
                   </main>
                 </body>
                 </html>
-                """.formatted(error == null ? "" : "    <p role=\"alert\">" + escapeHtml(error) + "</p>",
+                """.formatted(error == null ? "" : "    <p role=\"alert\">" + CognitoHtml.escape(error) + "</p>",
                 String.join("\n", providerLinks), form);
         // No form-action directive: browsers apply it to the redirect after the form is submitted,
         // which goes to the client's callback on another origin.
@@ -1044,14 +1082,6 @@ public class CognitoOAuthController {
 
     private static boolean isHttps(ContainerRequestContext requestContext) {
         return "https".equalsIgnoreCase(requestContext.getUriInfo().getRequestUri().getScheme());
-    }
-
-    private static String escapeHtml(String value) {
-        return value.replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace("\"", "&quot;")
-                .replace("'", "&#39;");
     }
 
     private boolean secretsEqual(String expected, String actual) {

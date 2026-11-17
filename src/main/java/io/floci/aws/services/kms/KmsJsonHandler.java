@@ -45,14 +45,14 @@ public class KmsJsonHandler {
             "GenerateDataKeyWithoutPlaintext", "GenerateDataKeyPair", "GenerateDataKeyPairWithoutPlaintext", "Sign", "Verify", "GenerateMac", "VerifyMac", "ScheduleKeyDeletion",
             "CancelKeyDeletion", "TagResource", "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy",
             "ListKeyPolicies", "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation",
-            "DisableKeyRotation", "EnableKey", "DisableKey", "RotateKeyOnDemand", "GetParametersForImport",
+            "DisableKeyRotation", "EnableKey", "DisableKey", "RotateKeyOnDemand", "ListKeyRotations", "GetParametersForImport",
             "ImportKeyMaterial", "DeleteImportedKeyMaterial");
 
     private static final Set<String> KEY_ONLY_OPERATIONS = Set.of(
             "ReplicateKey", "CreateGrant", "ListGrants", "RevokeGrant", "ScheduleKeyDeletion", "CancelKeyDeletion", "TagResource",
             "UntagResource", "ListResourceTags", "GetKeyPolicy", "PutKeyPolicy", "ListKeyPolicies",
             "UpdateKeyDescription", "GetKeyRotationStatus", "EnableKeyRotation", "DisableKeyRotation", "EnableKey",
-            "DisableKey", "RotateKeyOnDemand", "GetParametersForImport", "ImportKeyMaterial",
+            "DisableKey", "RotateKeyOnDemand", "ListKeyRotations", "GetParametersForImport", "ImportKeyMaterial",
             "DeleteImportedKeyMaterial");
 
     public Response handle(String action, JsonNode request, String region) {
@@ -109,6 +109,7 @@ public class KmsJsonHandler {
             case "EnableKey" -> handleEnableKey(request, region);
             case "DisableKey" -> handleDisableKey(request, region);
             case "RotateKeyOnDemand" -> handleRotateKeyOnDemand(request, region);
+            case "ListKeyRotations" -> handleListKeyRotations(request, region);
             case "GetParametersForImport" -> handleGetParametersForImport(request, region);
             case "ImportKeyMaterial" -> handleImportKeyMaterial(request, region);
             case "DeleteImportedKeyMaterial" -> handleDeleteImportedKeyMaterial(request, region);
@@ -116,6 +117,38 @@ public class KmsJsonHandler {
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
         };
+    }
+
+    private Response handleListKeyRotations(JsonNode request, String region) {
+        JsonNode include = request.path("IncludeKeyMaterial");
+        if (!include.isMissingNode() && !include.isNull() && !include.isTextual()) {
+            throw new AwsException("SerializationException", jsonToken(include) + " can not be converted to a String", 400);
+        }
+        KmsService.Page<KmsService.KeyRotation> page = service.listKeyRotations(request.path("KeyId").asText(),
+                include.asText(null), region, marker(request), limit(request));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode rotations = response.putArray("Rotations");
+        for (KmsService.KeyRotation rotation : page.items()) {
+            ObjectNode entry = rotations.addObject();
+            entry.put("KeyId", rotation.keyId());
+            entry.put("KeyMaterialId", rotation.keyMaterialId());
+            entry.put("KeyMaterialState", rotation.keyMaterialState());
+            if (rotation.rotationDate() != null) {
+                entry.put("RotationDate", rotation.rotationDate() / 1000.0);
+                entry.put("RotationType", "ON_DEMAND");
+            }
+            if (rotation.importState() != null) {
+                entry.put("ImportState", rotation.importState());
+            }
+            if (rotation.expirationModel() != null) {
+                entry.put("ExpirationModel", rotation.expirationModel());
+            }
+            if (rotation.validTo() != null) {
+                entry.put("ValidTo", rotation.validTo());
+            }
+        }
+        putTruncation(response, page);
+        return Response.ok(response).build();
     }
 
     private Response handleCreateKey(JsonNode request, String region) {

@@ -1,12 +1,22 @@
 package io.floci.aws.services.eventbridge;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridge.model.InvalidEventPatternException;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 class EventBridgeTestEventPatternIntegrationTest {
@@ -17,6 +27,71 @@ class EventBridgeTestEventPatternIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#cases")
+    void numericComparisonThroughSdk(String value, String comparisons, boolean expected) {
+        try (EventBridgeClient client = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.EU_WEST_2)) {
+            String event = """
+                    {"version":"0","id":"numeric-test","detail-type":"Example","source":"example.test",
+                     "account":"000000000000","time":"2026-11-06T00:00:00Z","region":"eu-west-2",
+                     "resources":[],"detail":{"severity":%s}}
+                    """.formatted(value);
+            String pattern = "{\"detail\":{\"severity\":[{\"numeric\":[" + comparisons + "]}]}}";
+
+            assertEquals(expected, client.testEventPattern(request -> request
+                    .eventPattern(pattern).event(event)).result());
+            String name = "valid-numeric-pattern";
+            client.putRule(request -> request.name(name).eventPattern(pattern));
+            try {
+                assertEquals(pattern, client.describeRule(request -> request.name(name)).eventPattern());
+            } finally {
+                client.deleteRule(request -> request.name(name));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
+    void invalidNumericPatternsRaiseSdkErrors(String pattern) {
+        try (EventBridgeClient client = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.EU_WEST_2)) {
+            for (String detail : List.of("{\"severity\":7}", "{\"severity\":\"7\"}", "{}")) {
+                String event = """
+                        {"version":"0","id":"numeric-test","detail-type":"Example","source":"example.test",
+                         "account":"000000000000","time":"2026-11-06T00:00:00Z","region":"eu-west-2",
+                         "resources":[],"detail":%s}
+                        """.formatted(detail);
+                InvalidEventPatternException error = assertThrows(InvalidEventPatternException.class,
+                        () -> client.testEventPattern(request -> request.eventPattern(pattern).event(event)));
+                assertEquals(400, error.statusCode());
+                assertEquals("InvalidEventPatternException", error.awsErrorDetails().errorCode());
+            }
+            InvalidEventPatternException error = assertThrows(InvalidEventPatternException.class,
+                    () -> client.putRule(request -> request.name("invalid-numeric-pattern").eventPattern(pattern)));
+            assertEquals(400, error.statusCode());
+            assertEquals("InvalidEventPatternException", error.awsErrorDetails().errorCode());
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
+    void invalidNumericUpdatePreservesExistingRuleThroughSdk(String pattern) {
+        try (EventBridgeClient client = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.EU_WEST_2)) {
+            String name = "numeric-update-preservation";
+            String original = "{\"detail\":{\"severity\":[7]}}";
+            client.putRule(request -> request.name(name).eventPattern(original).description("original"));
+            try {
+                InvalidEventPatternException error = assertThrows(InvalidEventPatternException.class,
+                        () -> client.putRule(request -> request.name(name).eventPattern(pattern).description("changed")));
+                assertEquals(400, error.statusCode());
+                assertEquals("InvalidEventPatternException", error.awsErrorDetails().errorCode());
+                assertEquals(original, client.describeRule(request -> request.name(name)).eventPattern());
+                assertEquals("original", client.describeRule(request -> request.name(name)).description());
+            } finally {
+                client.deleteRule(request -> request.name(name));
+            }
+        }
     }
 
     @Test

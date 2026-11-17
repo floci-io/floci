@@ -5,9 +5,12 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SignedMarkers;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.applicationautoscaling.model.Alarm;
@@ -15,6 +18,8 @@ import io.floci.aws.services.applicationautoscaling.model.PredefinedMetricSpecif
 import io.floci.aws.services.applicationautoscaling.model.ScalableTarget;
 import io.floci.aws.services.applicationautoscaling.model.ScalingActivity;
 import io.floci.aws.services.applicationautoscaling.model.ScalingPolicy;
+import io.floci.aws.services.applicationautoscaling.model.ScheduledAction;
+import io.floci.aws.services.applicationautoscaling.model.ScheduledAction.State;
 import io.floci.aws.services.applicationautoscaling.model.StepScalingConfiguration;
 import io.floci.aws.services.applicationautoscaling.model.SuspendedState;
 import io.floci.aws.services.applicationautoscaling.model.TargetTrackingConfiguration;
@@ -22,27 +27,27 @@ import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import io.floci.aws.services.iam.ServiceLinkedRoles;
+import io.floci.aws.services.scheduler.SchedulerExpressionParser;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Application Auto Scaling control plane.
- *
- * <p>Scalable targets and scaling policies are stored and described faithfully, but
- * policies are <strong>inert</strong>: nothing evaluates them and no capacity is ever
- * adjusted. This mirrors the existing EC2 Auto Scaling {@code PutScalingPolicy} behaviour
- * and is documented in {@code docs/services/applicationautoscaling.md}.</p>
  *
  * @see <a href="https://docs.aws.amazon.com/autoscaling/application/APIReference/Welcome.html">Application Auto Scaling API Reference</a>
  */
@@ -90,6 +95,9 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
     private final StorageBackend<String, ScalableTarget> targets;
     private final StorageBackend<String, ScalingPolicy> policies;
     private final StorageBackend<String, ScalingActivity> activities;
+    private final StorageBackend<String, ScheduledAction> scheduledActions;
+    private final EcsCapacityAdjuster ecsCapacityAdjuster;
+    private final Object[] targetLocks = new Object[256];
     private final RegionResolver regionResolver;
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final SignedMarkers pageTokens = new SignedMarkers();
@@ -97,22 +105,31 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
     @Inject
     public ApplicationAutoScalingService(StorageFactory factory,
                                          RegionResolver regionResolver,
-                                         CloudWatchMetricsService cloudWatchMetricsService) {
+                                         CloudWatchMetricsService cloudWatchMetricsService,
+                                         EcsCapacityAdjuster ecsCapacityAdjuster) {
         this(factory.create("applicationautoscaling", "application-autoscaling-targets.json",
                         new TypeReference<Map<String, ScalableTarget>>() {}),
                 factory.create("applicationautoscaling", "application-autoscaling-policies.json",
                         new TypeReference<Map<String, ScalingPolicy>>() {}),
                 factory.create("applicationautoscaling", "application-autoscaling-activities.json",
                         new TypeReference<Map<String, ScalingActivity>>() {}),
-                regionResolver,
-                cloudWatchMetricsService);
+                factory.create("applicationautoscaling", "application-autoscaling-scheduled-actions.json",
+                        new TypeReference<Map<String, ScheduledAction>>() {}),
+                regionResolver, cloudWatchMetricsService, ecsCapacityAdjuster);
     }
 
     ApplicationAutoScalingService(StorageBackend<String, ScalableTarget> targets,
                                   StorageBackend<String, ScalingPolicy> policies,
                                   StorageBackend<String, ScalingActivity> activities,
+                                  StorageBackend<String, ScheduledAction> scheduledActions,
                                   RegionResolver regionResolver,
-                                  CloudWatchMetricsService cloudWatchMetricsService) {
+                                  CloudWatchMetricsService cloudWatchMetricsService,
+                                  EcsCapacityAdjuster ecsCapacityAdjuster) {
+        this.scheduledActions = scheduledActions;
+        this.ecsCapacityAdjuster = ecsCapacityAdjuster;
+        for (int i = 0; i < targetLocks.length; i++) {
+            targetLocks[i] = new Object();
+        }
         this.targets = targets;
         this.policies = policies;
         this.activities = activities;
@@ -127,55 +144,62 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                                                  Integer maxCapacity, String roleArn,
                                                  SuspendedState suspendedState,
                                                  Map<String, String> tags, String region) {
-        validateTriple(serviceNamespace, resourceId, scalableDimension);
+        synchronized (targetLock(region, serviceNamespace, resourceId, scalableDimension)) {
+            validateTriple(serviceNamespace, resourceId, scalableDimension);
 
-        String key = targetKey(region, serviceNamespace, resourceId, scalableDimension);
-        ScalableTarget existing = targets.get(key).orElse(null);
+            String key = targetKey(region, serviceNamespace, resourceId, scalableDimension);
+            ScalableTarget existing = targets.get(key).map(ScalableTarget::new).orElse(null);
 
-        if (existing == null) {
-            if (minCapacity == null || maxCapacity == null) {
-                throw new AwsException("ValidationException",
-                        "Min and max capacity are required when registering a new scalable target.", 400);
+            if (existing == null) {
+                if (minCapacity == null || maxCapacity == null) {
+                    throw new AwsException("ValidationException",
+                            "Min and max capacity are required when registering a new scalable target.", 400);
+                }
+                ScalableTarget target = new ScalableTarget();
+                target.setServiceNamespace(serviceNamespace);
+                target.setResourceId(resourceId);
+                target.setScalableDimension(scalableDimension);
+                target.setMinCapacity(minCapacity);
+                target.setMaxCapacity(maxCapacity);
+                target.setRoleArn(roleArn != null ? roleArn : serviceLinkedRoleArn(serviceNamespace));
+                target.setScalableTargetArn(buildScalableTargetArn(region));
+                target.setCreationTime(nowEpochSeconds());
+                target.setSuspendedState(suspendedState != null ? suspendedState : new SuspendedState());
+                if (tags != null) {
+                    target.setTags(tags);
+                }
+                targets.putAllAtomically(Map.of(key, target));
+                LOG.infov("RegisterScalableTarget: {0} {1} {2} in {3}",
+                        serviceNamespace, resourceId, scalableDimension, region);
+                return target;
             }
-            ScalableTarget target = new ScalableTarget();
-            target.setServiceNamespace(serviceNamespace);
-            target.setResourceId(resourceId);
-            target.setScalableDimension(scalableDimension);
-            target.setMinCapacity(minCapacity);
-            target.setMaxCapacity(maxCapacity);
-            target.setRoleArn(roleArn != null ? roleArn : serviceLinkedRoleArn(serviceNamespace));
-            target.setScalableTargetArn(buildScalableTargetArn(region));
-            target.setCreationTime(nowEpochSeconds());
-            target.setSuspendedState(suspendedState != null ? suspendedState : new SuspendedState());
-            if (tags != null) {
-                target.setTags(tags);
+
+            if (suspendedState != null && suspendedState.isScheduledScalingSuspended()
+                    != existing.getSuspendedState().isScheduledScalingSuspended()) {
+                runTargetScheduledActions(serviceNamespace, resourceId, scalableDimension, region, Instant.now());
+                existing = new ScalableTarget(targets.get(key).orElseThrow());
             }
-            targets.put(key, target);
-            LOG.infov("RegisterScalableTarget: {0} {1} {2} in {3}",
+            // Update semantics: only supplied parameters change.
+            if (minCapacity != null) {
+                existing.setMinCapacity(minCapacity);
+            }
+            if (maxCapacity != null) {
+                existing.setMaxCapacity(maxCapacity);
+            }
+            if (roleArn != null) {
+                existing.setRoleArn(roleArn);
+            }
+            if (suspendedState != null) {
+                existing.setSuspendedState(suspendedState);
+            }
+            if (tags != null && !tags.isEmpty()) {
+                existing.putTags(tags);
+            }
+            targets.putAllAtomically(Map.of(key, existing));
+            LOG.infov("RegisterScalableTarget (update): {0} {1} {2} in {3}",
                     serviceNamespace, resourceId, scalableDimension, region);
-            return target;
+            return existing;
         }
-
-        // Update semantics: only supplied parameters change.
-        if (minCapacity != null) {
-            existing.setMinCapacity(minCapacity);
-        }
-        if (maxCapacity != null) {
-            existing.setMaxCapacity(maxCapacity);
-        }
-        if (roleArn != null) {
-            existing.setRoleArn(roleArn);
-        }
-        if (suspendedState != null) {
-            existing.setSuspendedState(suspendedState);
-        }
-        if (tags != null && !tags.isEmpty()) {
-            existing.putTags(tags);
-        }
-        targets.put(key, existing);
-        LOG.infov("RegisterScalableTarget (update): {0} {1} {2} in {3}",
-                serviceNamespace, resourceId, scalableDimension, region);
-        return existing;
     }
 
     public List<ScalableTarget> describeScalableTargets(String serviceNamespace, List<String> resourceIds,
@@ -212,21 +236,273 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
      */
     public void deregisterScalableTarget(String serviceNamespace, String resourceId,
                                          String scalableDimension, String region) {
-        validateTriple(serviceNamespace, resourceId, scalableDimension);
-        String key = targetKey(region, serviceNamespace, resourceId, scalableDimension);
-        if (targets.get(key).isEmpty()) {
-            throw new AwsException("ObjectNotFoundException",
-                    "No scalable target found for service namespace: " + serviceNamespace
-                            + ", resource ID: " + resourceId
-                            + ", scalable dimension: " + scalableDimension, 400);
+        synchronized (targetLock(region, serviceNamespace, resourceId, scalableDimension)) {
+            validateTriple(serviceNamespace, resourceId, scalableDimension);
+            String key = targetKey(region, serviceNamespace, resourceId, scalableDimension);
+            if (targets.get(key).isEmpty()) {
+                throw new AwsException("ObjectNotFoundException",
+                        "No scalable target found for service namespace: " + serviceNamespace
+                                + ", resource ID: " + resourceId
+                                + ", scalable dimension: " + scalableDimension, 400);
+            }
+            for (ScalingPolicy policy : findPolicies(region, serviceNamespace, resourceId, scalableDimension)) {
+                deleteAlarms(policy, region);
+                policies.delete(policyKey(region, serviceNamespace, resourceId, scalableDimension, policy.getPolicyName()));
+            }
+            Set<String> actionKeys = scheduledActions.keys().stream()
+                    .filter(actionKey -> actionKey.startsWith(key + "::")).collect(Collectors.toSet());
+            scheduledActions.deleteAllAtomically(actionKeys);
+            targets.deleteAllAtomically(Set.of(key));
+            LOG.infov("DeregisterScalableTarget: {0} {1} {2} in {3}",
+                    serviceNamespace, resourceId, scalableDimension, region);
         }
-        for (ScalingPolicy policy : findPolicies(region, serviceNamespace, resourceId, scalableDimension)) {
-            deleteAlarms(policy, region);
-            policies.delete(policyKey(region, serviceNamespace, resourceId, scalableDimension, policy.getPolicyName()));
+    }
+
+    public ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
+                                               String schedule, boolean actionSupplied, Integer min, Integer max,
+                                               String timezone, String region) {
+        return putScheduledAction(namespace, resourceId, dimension, name, schedule, actionSupplied, min, max,
+                timezone, region, Instant.now());
+    }
+
+    ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
+                                       String schedule, boolean actionSupplied, Integer min, Integer max,
+                                       String timezone, String region, Instant now) {
+        validateTriple(namespace, resourceId, dimension);
+        validateActionName(name);
+        if (!"ecs".equals(namespace) || !"ecs:service:DesiredCount".equals(dimension)) {
+            throw new AwsException("ValidationException", "Scheduled actions support ECS desired count only.", 400);
         }
-        targets.delete(key);
-        LOG.infov("DeregisterScalableTarget: {0} {1} {2} in {3}",
-                serviceNamespace, resourceId, scalableDimension, region);
+        if (timezone != null && !"UTC".equals(timezone)) {
+            throw new AwsException("ValidationException", "Only UTC is supported for Timezone.", 400);
+        }
+        Instant deadline = schedule == null ? null : parseSchedule(schedule);
+        if (actionSupplied && (min == null && max == null || min != null && min < 0 || max != null && max < 0
+                || min != null && max != null && min > max)) {
+            throw new AwsException("ValidationException", "Supply nonnegative capacity bounds with MinCapacity <= MaxCapacity.", 400);
+        }
+        synchronized (targetLock(region, namespace, resourceId, dimension)) {
+            requireTarget(region, namespace, resourceId, dimension);
+            String key = policyKey(region, namespace, resourceId, dimension, name);
+            ScheduledAction existing = scheduledActions.get(key).orElse(null);
+            if (existing == null && (schedule == null || !actionSupplied)) {
+                throw new AwsException("ValidationException", "Schedule and ScalableTargetAction are required.", 400);
+            }
+            ScheduledAction action = existing == null ? new ScheduledAction() : new ScheduledAction(existing);
+            if (existing == null) {
+                action.setServiceNamespace(namespace);
+                action.setResourceId(resourceId);
+                action.setScalableDimension(dimension);
+                action.setScheduledActionName(name);
+                action.setCreationTime(now.getEpochSecond() + now.getNano() / 1_000_000_000.0);
+                action.setScheduledActionArn(regionResolver.buildArn("autoscaling", region,
+                        "scheduledAction:" + UUID.randomUUID() + ":resource/" + namespace + "/" + resourceId
+                                + ":scheduledActionName/" + name));
+            }
+            if (schedule != null) {
+                action.setSchedule(schedule);
+                action.setDeadline(deadline);
+                action.setState(deadline.isBefore(now.truncatedTo(ChronoUnit.SECONDS)) ? State.SKIPPED : State.PENDING);
+            }
+            if (timezone != null) {
+                action.setTimezone(timezone);
+            }
+            if (actionSupplied) {
+                action.setMinCapacity(min);
+                action.setMaxCapacity(max);
+            }
+            scheduledActions.putAllAtomically(Map.of(key, action));
+            return new ScheduledAction(action);
+        }
+    }
+
+    public void deleteScheduledAction(String namespace, String resourceId, String dimension, String name, String region) {
+        validateTriple(namespace, resourceId, dimension);
+        validateActionName(name);
+        synchronized (targetLock(region, namespace, resourceId, dimension)) {
+            String key = policyKey(region, namespace, resourceId, dimension, name);
+            if (scheduledActions.get(key).isEmpty()) {
+                throw new AwsException("ObjectNotFoundException", "Scheduled action not found: " + name, 400);
+            }
+            scheduledActions.deleteAllAtomically(Set.of(key));
+        }
+    }
+
+    PaginatedResult<ScheduledAction> describeScheduledActions(String namespace, String resourceId, String dimension,
+                                                              List<String> names, Integer maxResults,
+                                                              String nextToken, String region) {
+        requireNamespace(namespace);
+        if (dimension != null && (resourceId == null || resourceId.isBlank())) {
+            throw new AwsException("ValidationException", "A resource ID is required with ScalableDimension.", 400);
+        }
+        if (dimension != null) {
+            validateTriple(namespace, resourceId, dimension);
+        }
+        if (names != null && names.size() > 50) {
+            throw new AwsException("ValidationException", "At most 50 scheduled action names are allowed.", 400);
+        }
+        String prefix = region + "::" + namespace + "::";
+        List<ScheduledAction> matching = scheduledActions.scan(key -> key.startsWith(prefix)).stream()
+                .filter(a -> resourceId == null || resourceId.equals(a.getResourceId()))
+                .filter(a -> dimension == null || dimension.equals(a.getScalableDimension()))
+                .filter(a -> names == null || names.isEmpty() || names.contains(a.getScheduledActionName()))
+                .map(ScheduledAction::new).sorted(Comparator.comparing(ApplicationAutoScalingService::scheduledActionCursor))
+                .toList();
+        return signedPage(Pagination.paginate(matching, ApplicationAutoScalingService::scheduledActionCursor,
+                pageSize(maxResults, 50), decodeNextToken(nextToken, "DescribeScheduledActions"),
+                pageNamespace(names, "DescribeScheduledActions", regionResolver.getAccountId(), region, namespace,
+                        resourceId, dimension), token -> invalidNextToken("DescribeScheduledActions")));
+    }
+
+    private static String scheduledActionCursor(ScheduledAction action) {
+        return action.getScheduledActionName() + "\u0000" + action.getResourceId() + "\u0000" + action.getScalableDimension();
+    }
+
+    private static void validateActionName(String name) {
+        if (name == null || name.isBlank() || name.length() > 256
+                || name.chars().anyMatch(c -> c == ':' || c == '/' || c == '|' || Character.isISOControl(c))) {
+            throw new AwsException("ValidationException", "Invalid ScheduledActionName.", 400);
+        }
+    }
+
+    private static Instant parseSchedule(String schedule) {
+        if (!schedule.matches("at\\(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\)")) {
+            throw new AwsException("ValidationException", "Only UTC at(yyyy-MM-ddTHH:mm:ss) schedules are supported.", 400);
+        }
+        try {
+            return SchedulerExpressionParser.parseAt(schedule, "UTC");
+        } catch (DateTimeParseException e) {
+            throw new AwsException("ValidationException", "Invalid scheduled date.", 400);
+        }
+    }
+
+    private ScalableTarget requireTarget(String region, String namespace, String resourceId, String dimension) {
+        return targets.get(targetKey(region, namespace, resourceId, dimension))
+                .orElseThrow(() -> new AwsException("ObjectNotFoundException", "Scalable target not found.", 400));
+    }
+
+    Object targetLock(String region, String namespace, String resourceId, String dimension) {
+        int hash = (regionResolver.getAccountId() + "::" + targetKey(region, namespace, resourceId, dimension)).hashCode();
+        return targetLocks[Math.floorMod(hash, targetLocks.length)];
+    }
+
+    private List<AccountEntry<ScheduledAction>> allScheduledActions() {
+        if (scheduledActions instanceof AccountAwareStorageBackend<ScheduledAction> accountAware) {
+            return accountAware.scanAllAccountEntries(key -> true);
+        }
+        return scheduledActions.keys().stream().map(key -> new AccountEntry<>(regionResolver.getAccountId(), key,
+                scheduledActions.get(key).orElseThrow())).toList();
+    }
+
+    /** Restored overdue occurrences are skipped. Claimed occurrences are never replayed. */
+    void recoverScheduledActions(Instant now) {
+        for (AccountEntry<ScheduledAction> entry : allScheduledActions()) {
+            String region = entry.key().substring(0, entry.key().indexOf("::"));
+            RequestScopes.runAs(entry.accountId(), region, () -> {
+                ScheduledAction action = entry.value();
+                if (action.getState() == State.PENDING && action.getDeadline().isBefore(now)
+                        || action.getState() == State.CLAIMED) {
+                    ScheduledAction recovered = new ScheduledAction(action);
+                    recovered.setState(State.SKIPPED);
+                    scheduledActions.putAllAtomically(Map.of(entry.key(), recovered));
+                }
+            });
+        }
+    }
+
+    public void runScheduledActions(Instant now) {
+        List<AccountEntry<ScheduledAction>> entries = allScheduledActions().stream()
+                .filter(e -> e.value().getState() == State.PENDING && !e.value().getDeadline().isAfter(now))
+                .sorted(Comparator.comparing((AccountEntry<ScheduledAction> e) -> e.value().getDeadline())
+                        .thenComparing(e -> e.value().getScheduledActionName())).toList();
+        Set<String> processedTargets = new HashSet<>();
+        for (AccountEntry<ScheduledAction> entry : entries) {
+            String region = entry.key().substring(0, entry.key().indexOf("::"));
+            ScheduledAction candidate = entry.value();
+            String targetKey = targetKey(region, candidate.getServiceNamespace(), candidate.getResourceId(),
+                    candidate.getScalableDimension());
+            if (!processedTargets.add(entry.accountId() + "::" + targetKey)) {
+                continue;
+            }
+            try {
+                RequestScopes.runAs(entry.accountId(), region, () -> {
+                    ScheduledAction action = entry.value();
+                    synchronized (targetLock(region, action.getServiceNamespace(), action.getResourceId(),
+                            action.getScalableDimension())) {
+                        runTargetScheduledActions(action.getServiceNamespace(), action.getResourceId(),
+                                action.getScalableDimension(), region, now);
+                    }
+                });
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Scheduled action {0} failed", entry.key());
+            }
+        }
+    }
+
+    private void runTargetScheduledActions(String namespace, String resourceId, String dimension,
+                                           String region, Instant now) {
+        String prefix = targetKey(region, namespace, resourceId, dimension) + "::";
+        List<ScheduledAction> due = scheduledActions.scan(key -> key.startsWith(prefix)).stream()
+                .filter(a -> a.getState() == State.PENDING && !a.getDeadline().isAfter(now))
+                .sorted(Comparator.comparing(ScheduledAction::getDeadline)
+                        .thenComparing(ScheduledAction::getScheduledActionName)).toList();
+        for (ScheduledAction action : due) {
+            try {
+                executeScheduledAction(prefix + action.getScheduledActionName(), now, region);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Scheduled action {0} failed", action.getScheduledActionName());
+            }
+        }
+    }
+
+    private void executeScheduledAction(String key, Instant now, String region) {
+        ScheduledAction stored = scheduledActions.get(key).orElse(null);
+        if (stored == null || stored.getState() != State.PENDING || stored.getDeadline().isAfter(now)) {
+            return;
+        }
+        ScheduledAction action = new ScheduledAction(stored);
+        ScalableTarget existing = targets.get(targetKey(region, action.getServiceNamespace(), action.getResourceId(),
+                action.getScalableDimension())).orElse(null);
+        if (existing == null || existing.getSuspendedState().isScheduledScalingSuspended()) {
+            action.setState(State.SKIPPED);
+            scheduledActions.putAllAtomically(Map.of(key, action));
+            return;
+        }
+        action.setState(State.CLAIMED);
+        scheduledActions.putAllAtomically(Map.of(key, new ScheduledAction(action)));
+        String description = "Applying scheduled action " + action.getScheduledActionName();
+        String failure = null;
+        try {
+            ScalableTarget target = new ScalableTarget(existing);
+            int min = action.getMinCapacity() == null ? target.getMinCapacity() : action.getMinCapacity();
+            int max = action.getMaxCapacity() == null ? target.getMaxCapacity() : action.getMaxCapacity();
+            if (min > max) {
+                throw new AwsException("ValidationException", "Scheduled bounds conflict with the target's current bounds.", 400);
+            }
+            target.setMinCapacity(min);
+            target.setMaxCapacity(max);
+            targets.putAllAtomically(Map.of(targetKey(region, target.getServiceNamespace(), target.getResourceId(),
+                    target.getScalableDimension()), target));
+            int current = ecsCapacityAdjuster.getCurrentCapacity(target.getResourceId(), region);
+            int desired = Math.max(min, Math.min(max, current));
+            if (desired != current) {
+                ecsCapacityAdjuster.setCapacity(target.getResourceId(), desired, region);
+            }
+            description = "Setting capacity bounds to " + min + " and " + max;
+            action.setState(State.SUCCEEDED);
+        } catch (RuntimeException e) {
+            action.setState(State.FAILED);
+            failure = e.getMessage();
+            LOG.warnv(e, "Scheduled action {0} could not complete", action.getScheduledActionName());
+        }
+        try {
+            recordScalingActivity(action.getServiceNamespace(), action.getResourceId(), action.getScalableDimension(),
+                    description, "scheduled action " + action.getScheduledActionName(), region,
+                    action.getState() == State.SUCCEEDED ? "Successful" : "Failed", failure);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not record activity for scheduled action {0}", action.getScheduledActionName());
+        }
+        scheduledActions.putAllAtomically(Map.of(key, action));
     }
 
     // ---------------------------------------------------------------- scaling policies
@@ -340,20 +616,26 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
         if (tags == null || tags.isEmpty()) {
             throw new AwsException("ValidationException", "Tags are required.", 400);
         }
-        ScalableTarget target = findTargetByArn(resourceArn, region);
-        target.putTags(tags);
-        targets.put(targetKey(region, target.getServiceNamespace(), target.getResourceId(),
-                target.getScalableDimension()), target);
+        ScalableTarget found = findTargetByArn(resourceArn, region);
+        synchronized (targetLock(region, found.getServiceNamespace(), found.getResourceId(), found.getScalableDimension())) {
+            ScalableTarget target = new ScalableTarget(findTargetByArn(resourceArn, region));
+            target.putTags(tags);
+            targets.putAllAtomically(Map.of(targetKey(region, target.getServiceNamespace(), target.getResourceId(),
+                    target.getScalableDimension()), target));
+        }
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
         if (tagKeys == null || tagKeys.isEmpty()) {
             throw new AwsException("ValidationException", "TagKeys are required.", 400);
         }
-        ScalableTarget target = findTargetByArn(resourceArn, region);
-        target.removeTags(tagKeys);
-        targets.put(targetKey(region, target.getServiceNamespace(), target.getResourceId(),
-                target.getScalableDimension()), target);
+        ScalableTarget found = findTargetByArn(resourceArn, region);
+        synchronized (targetLock(region, found.getServiceNamespace(), found.getResourceId(), found.getScalableDimension())) {
+            ScalableTarget target = new ScalableTarget(findTargetByArn(resourceArn, region));
+            target.removeTags(tagKeys);
+            targets.putAllAtomically(Map.of(targetKey(region, target.getServiceNamespace(), target.getResourceId(),
+                    target.getScalableDimension()), target));
+        }
     }
 
     // ---------------------------------------------------------------- internals
@@ -743,21 +1025,29 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
     /** Records that the control loop changed capacity, mirroring what AWS reports through
      * DescribeScalingActivities. */
     void recordScalingActivity(ScalingPolicy policy, String description, String cause, String region) {
+        recordScalingActivity(policy.getServiceNamespace(), policy.getResourceId(), policy.getScalableDimension(),
+                description, cause, region, "Successful", null);
+    }
+
+    private void recordScalingActivity(String serviceNamespace, String resourceId, String dimension,
+                                       String description, String cause, String region,
+                                       String status, String statusMessage) {
         ScalingActivity activity = new ScalingActivity();
         activity.setActivityId(UUID.randomUUID().toString());
-        activity.setServiceNamespace(policy.getServiceNamespace());
-        activity.setResourceId(policy.getResourceId());
-        activity.setScalableDimension(policy.getScalableDimension());
+        activity.setServiceNamespace(serviceNamespace);
+        activity.setResourceId(resourceId);
+        activity.setScalableDimension(dimension);
         activity.setDescription(description);
         activity.setCause(cause);
         double now = nowEpochSeconds();
         activity.setStartTime(now);
         activity.setEndTime(now);
-        activity.setStatusCode("Successful");
-        String key = region + "::" + policy.getServiceNamespace() + "::" + policy.getScalableDimension()
-                + "::" + policy.getResourceId() + "::" + activity.getActivityId();
-        activities.put(key, activity);
-        LOG.infov("Scaling activity for policy {0}: {1}", policy.getPolicyName(), description);
+        activity.setStatusCode(status);
+        activity.setStatusMessage(statusMessage);
+        String key = region + "::" + serviceNamespace + "::" + dimension
+                + "::" + resourceId + "::" + activity.getActivityId();
+        activities.putAllAtomically(Map.of(key, activity));
+        LOG.infov("Scaling activity for {0}: {1}", resourceId, description);
     }
 
     public List<ScalingActivity> describeScalingActivities(String serviceNamespace, String resourceId,

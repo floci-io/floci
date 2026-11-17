@@ -411,6 +411,15 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         return table(call(scope, "CreateTable", body).path("TableDescription"));
     }
 
+    @Override
+    public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                               List<AttributeDefinition> attributeDefinitions,
+                                               List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                               List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return createTable(scope, tableName, keySchema, attributeDefinitions, null, null, globalSecondaryIndexes,
+                localSecondaryIndexes);
+    }
+
     private ObjectNode index(ArrayNode indexes, String indexName, List<KeySchemaElement> keySchema,
                              String projectionType, List<String> nonKeyAttributes) {
         ObjectNode index = indexes.addObject().put("IndexName", indexName);
@@ -532,6 +541,36 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
             tagKeys.forEach(current::remove);
             tags.putForAccount(scope.accountId(), key, current);
         }
+    }
+
+    /**
+     * The tags Floci records for the table {@code arn} names in the account and Region it names, matched on the whole
+     * ARN, or for the table whose index it names, when DynamoDB Local describes that table, and for an index as
+     * holding it, as ListTagsOfResource asks it; none for a table DynamoDB Local no longer has.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "dynamodb")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        boolean index = parts.length == 4 && "index".equals(parts[2]);
+        if (!"table".equals(parts[0]) || parts.length != 2 && !index) {
+            return Map.of();
+        }
+        String tableArn = AwsArnUtils.Arn.of("dynamodb", parsed.region(), parsed.accountId(), "table/" + parts[1])
+                .toString();
+        if (!arn.equals(index ? tableArn + "/index/" + parts[3] : tableArn)) {
+            return Map.of();
+        }
+        Map<String, String> held = AccountAwareStorageBackend.readInAccount(tags, parsed.accountId(),
+                key(parsed.region(), parts[1])).orElse(Map.of());
+        if (held.isEmpty() || !findTable(new Scope(parsed.accountId(), parsed.region()), parts[1])
+                .map(table -> !index || table.holdsIndex(parts[3])).orElse(false)) {
+            return Map.of();
+        }
+        return held;
     }
 
     private String existingTableKey(Scope scope, String resourceArn) {

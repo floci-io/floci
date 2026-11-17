@@ -7,6 +7,7 @@ import io.floci.aws.services.redshift.container.RedshiftContainerHandle;
 import io.floci.aws.services.redshift.container.RedshiftContainerManager;
 import io.floci.aws.services.redshift.model.ClusterParameterGroup;
 import io.floci.aws.services.redshift.model.Parameter;
+import io.floci.aws.testing.QueryRequests;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
@@ -452,7 +453,23 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"));
 
-        // 3b. CopyClusterSnapshot rejects manual snapshot
+        // 3b. ModifyClusterSnapshot updates retention period
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterSnapshot")
+            .formParam("SnapshotIdentifier", "snap-test-1")
+            .formParam("ManualSnapshotRetentionPeriod", "45")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<ModifyClusterSnapshotResponse>"))
+            .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"))
+            .body(containsString("<ManualSnapshotRetentionPeriod>45</ManualSnapshotRetentionPeriod>"));
+
+        // 3c. CopyClusterSnapshot rejects manual snapshot
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", AUTH_HEADER)
@@ -466,7 +483,7 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<Code>InvalidClusterSnapshotState</Code>"));
 
-        // 3c. CopyClusterSnapshot succeeds when source is automated
+        // 3d. CopyClusterSnapshot succeeds when source is automated
         service.getSnapshot("snap-test-1").ifPresent(s -> s.setSnapshotType("automated"));
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1021,6 +1038,39 @@ public class RedshiftOperationsTest {
             .statusCode(200);
     }
 
+    @Test
+    @Order(3)
+    void parameterGroupAndSnapshotKeepTheirCreateTags() {
+        when(containerManager.start(any(), eq("cluster-create-tags"), any(), any(), any(), any()))
+                .thenReturn(new RedshiftContainerHandle("c4", "cluster-create-tags", "localhost", 5442));
+        assertEquals(200, redshift("CreateCluster", "ClusterIdentifier", "cluster-create-tags", "NodeType", "dc2.large",
+                "MasterUsername", "admin", "MasterUserPassword", "password123").statusCode());
+        String tag = "<Tag><Key>team</Key><Value>red</Value></Tag>";
+
+        redshift("CreateClusterParameterGroup", "ParameterGroupName", "pg-create-tags",
+                "ParameterGroupFamily", "redshift-1.0", "Description", "d",
+                "Tags.Tag.1.Key", "team", "Tags.Tag.1.Value", "red")
+            .then().statusCode(200).body(containsString("<Tags>" + tag + "</Tags>"));
+        redshift("DescribeClusterParameterGroups", "ParameterGroupName", "pg-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+        redshift("DescribeTags", "ResourceName", "arn:aws:redshift:us-east-1:000000000000:parametergroup:pg-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+
+        redshift("CreateClusterSnapshot", "SnapshotIdentifier", "snap-create-tags",
+                "ClusterIdentifier", "cluster-create-tags", "Tags.Tag.1.Key", "team", "Tags.Tag.1.Value", "red")
+            .then().statusCode(200).body(containsString("<Tags>" + tag + "</Tags>"));
+        redshift("DescribeClusterSnapshots", "SnapshotIdentifier", "snap-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+        redshift("DescribeTags", "ResourceName",
+                "arn:aws:redshift:us-east-1:000000000000:snapshot:cluster-create-tags/snap-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+
+        assertEquals(200, redshift("DeleteClusterSnapshot", "SnapshotIdentifier", "snap-create-tags").statusCode());
+        assertEquals(200, redshift("DeleteClusterParameterGroup", "ParameterGroupName", "pg-create-tags").statusCode());
+        assertEquals(200, redshift("DeleteCluster", "ClusterIdentifier", "cluster-create-tags",
+                "SkipFinalClusterSnapshot", "true").statusCode());
+    }
+
     /**
      * CreateSnapshotCopyGrant checks the name is free and then writes. Both steps run under the
      * service lock, so of two concurrent creates of one name exactly one wins and the other sees
@@ -1095,15 +1145,14 @@ public class RedshiftOperationsTest {
     }
 
 
+    /** {@link #redshift} signed for {@code region}. */
+    private static Response redshiftIn(String region, String action, String... keyValues) {
+        return QueryRequests.request("test", region, "redshift", action, keyValues)
+                .contentType("application/x-www-form-urlencoded").when().post("/");
+    }
+
     private static Response redshift(String action, String... keyValues) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH_HEADER)
-            .formParam("Action", action);
-        for (int i = 0; i < keyValues.length; i += 2) {
-            request.formParam(keyValues[i], keyValues[i + 1]);
-        }
-        return request.when().post("/");
+        return redshiftIn("us-east-1", action, keyValues);
     }
 
     private static void assertFault(Response response, int status, String code) {
@@ -1184,8 +1233,10 @@ public class RedshiftOperationsTest {
         assertFalse(redshift("DescribeClusters", "ClusterIdentifier", "cluster-copy").asString()
                 .contains("ClusterSnapshotCopyStatus"));
 
-        // A grant named on enable is reported back.
-        assertEquals(200, redshift("CreateSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
+        // A grant named on enable is reported back. It is made in the destination Region, as on AWS: the source
+        // Region has no grant of that name.
+        assertEquals(200, redshiftIn("us-west-2", "CreateSnapshotCopyGrant",
+                "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
         assertEquals(200, redshift("EnableSnapshotCopy", "ClusterIdentifier", "cluster-copy",
                 "DestinationRegion", "us-west-2", "RetentionPeriod", "3",
                 "ManualSnapshotRetentionPeriod", "5", "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
@@ -1195,13 +1246,16 @@ public class RedshiftOperationsTest {
         assertEquals(5, copy.getInt("ClusterSnapshotCopyStatus.ManualSnapshotRetentionPeriod"));
 
         // A grant a cluster's enabled copy still names cannot be deleted (InvalidSnapshotCopyGrantStateFault).
-        assertFault(redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant"),
+        assertFault(redshiftIn("us-west-2", "DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant"),
                 400, "InvalidSnapshotCopyGrantStateFault");
+        assertFault(redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant"),
+                400, "SnapshotCopyGrantNotFoundFault");
         assertEquals(200, redshift("DisableSnapshotCopy", "ClusterIdentifier", "cluster-copy").statusCode());
 
         assertEquals(200, redshift("DeleteCluster", "ClusterIdentifier", "cluster-copy",
                 "SkipFinalClusterSnapshot", "true").statusCode());
-        assertEquals(200, redshift("DeleteSnapshotCopyGrant", "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
+        assertEquals(200, redshiftIn("us-west-2", "DeleteSnapshotCopyGrant",
+                "SnapshotCopyGrantName", "copy-lifecycle-grant").statusCode());
     }
 
     /**
@@ -1355,10 +1409,12 @@ public class RedshiftOperationsTest {
 
         AccountAwareStorageBackend<ClusterParameterGroup> backend = storageFactory.create(
                 "redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
-        assertTrue(backend.get(name).isEmpty());
+        // Parameter groups are Regional: stored under their Region, us-east-1 here.
+        String key = RedshiftService.regionalKey("us-east-1", name);
+        assertTrue(backend.get(key).isEmpty());
         ClusterParameterGroup legacy = new ClusterParameterGroup(name, "redshift-1.0", "legacy custom group");
         legacy.setParameters(List.of(new Parameter("max_cursor_result_set_size", "1000")));
-        backend.put(name, legacy);
+        backend.put(key, legacy);
         backend.flush();
         try {
             redshift("DescribeClusterParameterGroups", "ParameterGroupName", name).then().statusCode(200)
@@ -1377,7 +1433,7 @@ public class RedshiftOperationsTest {
                     .body(containsString("<Source>engine-default</Source>"));
             redshift("DeleteClusterParameterGroup", "ParameterGroupName", name).then().statusCode(200);
         } finally {
-            backend.delete(name);
+            backend.delete(key);
             backend.flush();
         }
         redshift("DescribeClusterParameterGroups", "ParameterGroupName", name).then().statusCode(200)

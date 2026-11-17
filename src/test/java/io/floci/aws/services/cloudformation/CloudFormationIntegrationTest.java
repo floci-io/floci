@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.cloudformation.model.Stack;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.MutableClock;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -17,10 +18,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -28,8 +26,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -49,6 +45,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class CloudFormationIntegrationTest {
+
+    private static final String HANDLER_SOURCE = "exports.handler=async(e)=>({statusCode:200})";
 
     private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
@@ -71,20 +69,6 @@ class CloudFormationIntegrationTest {
     @BeforeEach
     void resetClock() {
         clock.reset();
-    }
-
-    private static byte[] buildHandlerZip() {
-        try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new ZipEntry("index.js"));
-                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-            return baos.toByteArray();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 
     /**
@@ -719,7 +703,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_lambdaWithS3Code() {
-        byte[] zipBytes = buildHandlerZip();
+        byte[] zipBytes = LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE);
 
         // Create S3 bucket
         given()
@@ -1881,7 +1865,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_lambdaWithZipFile() {
-        String base64Zip = Base64.getEncoder().encodeToString(buildHandlerZip());
+        String base64Zip = LambdaCodeFixtures.nodeJsZipBase64(HANDLER_SOURCE);
 
         String template = """
             {

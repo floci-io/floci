@@ -332,6 +332,37 @@ class IotMqttEnabledIntegrationTest {
         }
     }
 
+    /**
+     * AWS IoT forwards an MQTT 5 publish's user properties to an MQTT 5 subscriber unchanged, a repeated name
+     * included, in the order they were sent; an MQTT 3.1.1 subscriber gets the message without them.
+     */
+    @Test
+    void mqtt5UserPropertiesReachTheSubscriberUnchangedAndInOrder() throws Exception {
+        String topic = "phase6/mqtt5-user-properties/" + System.nanoTime();
+        byte[] payload = "segment".getBytes(StandardCharsets.UTF_8);
+        List<UserProperty> sent = List.of(
+                new UserProperty("seg", "1"),
+                new UserProperty("total", "3"),
+                new UserProperty("cid", "c-" + System.nanoTime()),
+                new UserProperty("seg", "2"));
+        MqttProperties properties = new MqttProperties();
+        properties.setUserProperties(sent);
+
+        try (Mqtt5TestClient subscriber = connectMqtt5("mqtt5-user-properties-sub");
+             MqttTestClient mqtt3Subscriber = connectMqtt("mqtt5-user-properties-sub-v3")) {
+            subscriber.subscribe(topic);
+            mqtt3Subscriber.subscribe(topic);
+            try (Mqtt5TestClient publisher = connectMqtt5("mqtt5-user-properties-pub")) {
+                publisher.publish(topic, payload, 1, properties);
+            }
+
+            MqttPublish received = subscriber.takePublish();
+            assertArrayEquals(payload, received.payload());
+            assertEquals(sent, received.userProperties());
+            assertArrayEquals(payload, mqtt3Subscriber.takePublish().payload());
+        }
+    }
+
     /** 8 KB correlation data plus user properties of the given key and value size, as AWS counts them. */
     private static MqttProperties awsMaximumProperties(int userPropertiesSize) {
         MqttProperties properties = new MqttProperties();
@@ -960,7 +991,7 @@ class IotMqttEnabledIntegrationTest {
         out.writeBytes(bytes);
     }
 
-    private record MqttPublish(String topic, byte[] payload, int qos, boolean retained) {
+    private record MqttPublish(String topic, byte[] payload, int qos, boolean retained, List<UserProperty> userProperties) {
     }
 
     private static final class MqttTestClient implements AutoCloseable {
@@ -982,7 +1013,7 @@ class IotMqttEnabledIntegrationTest {
 
                 @Override
                 public void messageArrived(String topic, MqttMessage message) {
-                    testClient.publishes.add(new MqttPublish(topic, message.getPayload(), message.getQos(), message.isRetained()));
+                    testClient.publishes.add(new MqttPublish(topic, message.getPayload(), message.getQos(), message.isRetained(), List.of()));
                 }
 
                 @Override
@@ -1076,7 +1107,8 @@ class IotMqttEnabledIntegrationTest {
 
                 @Override
                 public void messageArrived(String topic, org.eclipse.paho.mqttv5.common.MqttMessage message) {
-                    testClient.publishes.add(new MqttPublish(topic, message.getPayload(), message.getQos(), message.isRetained()));
+                    testClient.publishes.add(new MqttPublish(topic, message.getPayload(), message.getQos(), message.isRetained(),
+                            message.getProperties().getUserProperties()));
                 }
 
                 @Override

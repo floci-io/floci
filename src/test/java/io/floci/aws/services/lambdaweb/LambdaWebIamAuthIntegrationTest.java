@@ -6,6 +6,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.EnforcementFixtures.UserCredentials;
 import io.floci.aws.testing.IamEnforcementProfile;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -18,13 +19,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -67,11 +63,12 @@ class LambdaWebIamAuthIntegrationTest {
     private String domain;
 
     @BeforeEach
-    void createFunction() throws IOException {
+    void createFunction() {
         functionName = "iam-auth-" + Long.toString(System.nanoTime(), 36);
         LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/web");
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, functionName + ".zip", zip(), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, functionName + ".zip", LambdaCodeFixtures.nodeJsZip(APP),
+                "application/zip", Map.of());
         int port = baseUri.getPort();
         String name = functionName;
         cleanup.register(() -> {
@@ -144,16 +141,6 @@ class LambdaWebIamAuthIntegrationTest {
                 .credentials(credentials.accessKeyId(), credentials.secretAccessKey(), null)
                 .sign("GET", domain, "/");
         return given().header("Host", domain).headers(signed.headers()).when().get("/").then();
-    }
-
-    private static byte[] zip() throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(APP.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
     }
 
     private boolean isDockerAvailable() {

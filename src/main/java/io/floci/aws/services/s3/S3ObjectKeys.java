@@ -41,6 +41,37 @@ public final class S3ObjectKeys {
         }
     }
 
+    /**
+     * The decoded key an S3 request on {@code bucket} names, or null for a bucket-level request.
+     * {@code sentPath} is the path as the client sent it, where a key's own slashes survive, and
+     * {@code normalizedPath} the path JAX-RS matched, which stands in when the sent path carries no
+     * bucket, as for a request no Vert.x request backs. {@link S3Controller}, the IAM condition
+     * resolver and the resource ARN a request is checked against all read the key here, so the
+     * object stored, the object the conditions describe and the object the policy is matched
+     * against are the same one.
+     */
+    public static String objectKey(String sentPath, String requestUriPath, String normalizedPath,
+                                   String bucket) {
+        String key = sentPath == null ? null : fromRawPath(sentPath, requestUriPath, bucket);
+        if (key == null) {
+            key = fromNormalizedPath(normalizedPath);
+        }
+        return key == null || key.isEmpty() ? null : key;
+    }
+
+    /** The object key of a path-style (or filter-rewritten) S3 path, null for a bucket-level one. */
+    static String fromNormalizedPath(String path) {
+        if (path == null) {
+            return null;
+        }
+        String stripped = path.startsWith("/") ? path.substring(1) : path;
+        int slash = stripped.indexOf('/');
+        if (slash < 0 || slash == stripped.length() - 1) {
+            return null;
+        }
+        return stripped.substring(slash + 1);
+    }
+
     /** Decodes a URL path, skipping the decoder when it holds no escape and no plus. */
     static String decodePath(String raw) {
         return raw.indexOf('%') < 0 && raw.indexOf('+') < 0

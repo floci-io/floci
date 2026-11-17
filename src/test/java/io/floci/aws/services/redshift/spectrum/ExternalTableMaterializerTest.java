@@ -11,6 +11,7 @@ import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.lakeformation.LakeFormationAuthorizer;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +54,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.notNull;
 import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -75,14 +78,22 @@ class ExternalTableMaterializerTest {
     private IamService iam;
     private RecordingBackend backend;
     private ExternalTableMaterializer materializer;
+    private EmulatorConfig config;
+    private LakeFormationAuthorizer lakeFormation;
 
     private static final class RecordingBackend implements BackendSql {
         private final List<String> statements = new ArrayList<>();
         private boolean publicationAllowed = true;
+        private Object connection;
 
         @Override
         public boolean permitsCachePublication() {
             return publicationAllowed;
+        }
+
+        @Override
+        public Object connectionKey() {
+            return connection;
         }
 
         @Override
@@ -107,20 +118,23 @@ class ExternalTableMaterializerTest {
         when(role.getArn()).thenReturn("arn:aws:iam::000000000000:role/R");
         when(role.getAssumeRolePolicyDocument()).thenReturn(TRUST_POLICY);
         when(iam.findRole(ACCOUNT, "R")).thenReturn(Optional.of(role));
-        EmulatorConfig config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
+        lakeFormation = mock(LakeFormationAuthorizer.class);
         when(config.services().redshift().spectrumMaxRows()).thenReturn(1000L);
         when(config.defaultRegion()).thenReturn("us-east-1");
         when(duck.query(anyString(), any(), anyString())).thenReturn(List.of());
         backend = new RecordingBackend();
-        materializer = new ExternalTableMaterializer(duck, glue, s3, iam, config);
+        materializer = new ExternalTableMaterializer(duck, glue, s3, iam, config, lakeFormation);
         when(s3.openObjectStream(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString(), isNull()))
                 .thenReturn(new ByteArrayInputStream("id,name\n1,Alice\n2,Bob\n".getBytes(StandardCharsets.UTF_8)));
         S3Object icebergMetadata = new S3Object("bucket", "events/metadata/v1.json",
                 "{\"current-snapshot-id\":\"1\",\"snapshots\":[{\"snapshot-id\":\"1\","
                         .concat("\"manifest-list\":\"s3://bucket/events/metadata/snap*.avro\"}]}")
-                        .getBytes(StandardCharsets.UTF_8), "application/json");
+                        .getBytes(StandardCharsets.UTF_8), "application/json", "metadata-etag");
         when(s3.getObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
                 .thenReturn(icebergMetadata);
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"));
         when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(
                         List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1")),
@@ -129,6 +143,45 @@ class ExternalTableMaterializerTest {
         when(s3.listObjectsWithPrefixes(eq(ExternalTableMaterializer.SCRATCH_BUCKET), eq("spectrum-"), eq(""),
                 eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+    }
+
+    @Test
+    void lakeFormationIsNotConsultedWhenEnforcementIsOff() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        verify(lakeFormation, never()).canSelect(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void lakeFormationGrantAllowsTheQuery() {
+        when(config.services().redshift().spectrumLakeFormationEnforcement()).thenReturn(true);
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(lakeFormation.canSelect(ACCOUNT, BINDING.iamRoleArn(), "lake", "events")).thenReturn(true);
+        assertEquals(ExternalTableMaterializer.Outcome.LOADED,
+                materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+    }
+
+    @Test
+    void lakeFormationRefusalDeniesWithInsufficientPrivilege() {
+        when(config.services().redshift().spectrumLakeFormationEnforcement()).thenReturn(true);
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        SpectrumSqlException denied = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+        assertEquals("42501", denied.sqlState());
+        assertThat(denied.getMessage(), containsString("Lake Formation"));
+    }
+
+    @Test
+    void revokeDeniesATableAlreadyLoadedIntoTheBackend() {
+        when(config.services().redshift().spectrumLakeFormationEnforcement()).thenReturn(true);
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(lakeFormation.canSelect(ACCOUNT, BINDING.iamRoleArn(), "lake", "events")).thenReturn(true);
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+        assertEquals(ExternalTableMaterializer.Outcome.CURRENT,
+                materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+        when(lakeFormation.canSelect(ACCOUNT, BINDING.iamRoleArn(), "lake", "events")).thenReturn(false);
+        assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
     }
 
     @Test
@@ -225,7 +278,8 @@ class ExternalTableMaterializerTest {
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
         assertThat(exception.sqlState(), equalTo("42501"));
-        verify(duck).query(argThat(sql -> sql.contains("iceberg_metadata('s3://bucket/events/metadata/v[[]1].json')")),
+        verify(duck).query(argThat(sql -> sql.contains(
+                "iceberg_metadata('s3://bucket/events/metadata/v[[]1].json', snapshot_from_id = 1)")),
                 any(), startsWith("ASIA"), anyString(), anyString());
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
     }
@@ -628,8 +682,66 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        verify(duck).execute(argThat(sql -> sql.contains("iceberg_scan('s3://bucket/events/metadata/v[[]1].json')")),
+        verify(duck).execute(argThat(sql -> sql.contains(
+                        "iceberg_scan('s3://bucket/events/metadata/v[[]1].json', snapshot_from_id = 1)")),
                 any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesBeforeTheScan() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"), metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesDuringTheScan() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"), metadataHead("metadata-etag"),
+                        metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(duck).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesAfterTheDataFilesWereListed() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(s3, times(1)).headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/")));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataIsDeletedDuringTheQuery() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+    }
+
+    private static S3Object metadataHead(String eTag) {
+        return new S3Object("bucket", "events/metadata/v1.json", new byte[0], "application/json", eTag);
     }
 
     @Test
@@ -1257,7 +1369,7 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
-    void loadsEveryPartitionInATransactionAndOnAnExtendedQueryBackend() {
+    void loadsEveryPartitionWhenTheBackendDoesNotReportTheEndOfTheTransaction() {
         Table table = dayPartitionedTable();
         Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
         Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
@@ -1269,6 +1381,284 @@ class ExternalTableMaterializerTest {
 
         verify(duck, times(2)).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
                 && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsOnlyTheSelectedPartitionOnAnExtendedQueryBackend() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && !sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    private static final String DAY_PARAMETER_SQL = "SELECT * FROM analytics.events WHERE day = $1";
+
+    @Test
+    void loadsNoPartitionWhileAParameterizedStatementIsOnlyBeingParsed() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL, null);
+
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+        assertThat(extended.statements.stream().anyMatch(sql -> sql.contains("CREATE TABLE \"analytics\".\"events\"")),
+                equalTo(true));
+    }
+
+    @Test
+    void loadsOnlyThePartitionTheBoundValueSelectsAfterTheStatementWasParsed() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL, null);
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL,
+                List.of("2026-01-02"));
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/two/part-1.csv")
+                && !sql.contains("s3://bucket/one/")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsEveryPartitionWhenTheBoundValueIsUnusable() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL,
+                Collections.singletonList(null));
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void parsingAParameterizedStatementDoesNotEmptyATableOfOverlappingPartitions() {
+        Table table = dayPartitionedTable();
+        table.setPartitionKeys(List.of(new Column("n", "int")));
+        Partition one = dayPartition(table, "1", "one/", "e1");
+        Partition paddedOne = dayPartition(table, "01", "padded/", "e2");
+        Partition two = dayPartition(table, "2", "two/", "e3");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne, two));
+        RecordingBackend extended = extendedBackend("connection-1");
+        materializer.ensureCurrent(extended, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE n = 1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne));
+        int loaded = extended.statements.size();
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE n = $1", null);
+
+        assertThat(extended.statements.size(), equalTo(loaded));
+    }
+
+    @Test
+    void aBindAfterAParseThatSawAGluePartitionRemovedStillReadsTheRetainedOverlappingPartitions() {
+        Table table = dayPartitionedTable();
+        table.setPartitionKeys(List.of(new Column("n", "int")));
+        Partition one = dayPartition(table, "1", "one/", "e1");
+        Partition paddedOne = dayPartition(table, "01", "padded/", "e2");
+        Partition zeroPaddedOne = dayPartition(table, "001", "zero-padded/", "e3");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne, zeroPaddedOne));
+        RecordingBackend extended = extendedBackend("connection-1");
+        materializer.ensureCurrent(extended, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE n = 1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne));
+        String sql = "SELECT * FROM analytics.events WHERE n = $1";
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", sql, null);
+        clearInvocations(duck);
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", sql, List.of("1"));
+
+        verify(duck).execute(argThat(load -> load.contains("s3://bucket/one/part-1.csv")
+                && load.contains("s3://bucket/padded/part-1.csv")
+                && !load.contains("s3://bucket/zero-padded/")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void aStatementWithoutParametersLoadsItsPartitionsEvenWhileBeingParsed() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_ONE_SQL, null);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && !sql.contains("s3://bucket/two/")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsEveryPartitionOnABackendThatDoesNotReportTheEndOfTheTransactionEvenWhileBeingParsed() {
+        twoDayPartitions();
+        RecordingBackend unreported = new RecordingBackend();
+        unreported.publicationAllowed = false;
+
+        materializer.ensureCurrent(unreported, session(false), BINDING, "events", DAY_PARAMETER_SQL, null);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsOnlyTheSelectedPartitionInsideATransaction() {
+        twoDayPartitions();
+        RecordingBackend inTransaction = extendedBackend("connection-1");
+        inTransaction.publicationAllowed = true;
+
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && !sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void aTransactionKeepsThePartitionsItLoadedForItsNextQuery() {
+        twoDayPartitions();
+        RecordingBackend inTransaction = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL);
+        assertThat(materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+        int loaded = inTransaction.statements.size();
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_TWO_SQL);
+
+        verify(duck, times(2)).execute(anyString(), any(), anyString(), eq(ACCOUNT));
+        assertThat(inTransaction.statements.subList(loaded, inTransaction.statements.size()).stream()
+                .noneMatch(sql -> sql.contains("TRUNCATE")), equalTo(true));
+    }
+
+    @Test
+    void aCommitPublishesThePartitionsALaterConnectionReuses() {
+        twoDayPartitions();
+        RecordingBackend first = extendedBackend("connection-1");
+        materializer.ensureCurrent(first, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(first, true);
+
+        RecordingBackend second = extendedBackend("connection-2");
+        assertThat(materializer.ensureCurrent(second, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+    }
+
+    @Test
+    void aRollbackDropsThePartitionsItStagedSoTheNextQueryReloadsThem() {
+        twoDayPartitions();
+        RecordingBackend first = extendedBackend("connection-1");
+        materializer.ensureCurrent(first, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(first);
+
+        RecordingBackend second = extendedBackend("connection-2");
+        assertThat(materializer.ensureCurrent(second, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aRollbackOfLaterPartitionsKeepsOnlyTheCommittedBaselineUsable() {
+        twoDayPartitions();
+        RecordingBackend connection = extendedBackend("connection-1");
+        materializer.ensureCurrent(connection, session(false), BINDING, "events", DAY_ONE_SQL);
+        materializer.finishCycle(connection, true);
+        materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_TWO_SQL);
+
+        materializer.finishCycle(connection);
+
+        // the rolled back load of day two is not trusted, and neither is the baseline it was added to
+        assertThat(materializer.ensureCurrent(connection, session(false), BINDING, "events", DAY_TWO_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aRollbackToASavepointMakesTheNextQueryInTheTransactionReload() {
+        twoDayPartitions();
+        RecordingBackend connection = extendedBackend("connection-1");
+        materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(connection);
+
+        assertThat(materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aCommitWithNothingStagedChangesNothing() {
+        twoDayPartitions();
+        RecordingBackend connection = extendedBackend("connection-1");
+
+        materializer.finishCycle(connection, true);
+
+        assertThat(materializer.ensureCurrent(connection, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void dropsTheRowsOfAPartitionGlueNoLongerHasInsideATransaction() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+        RecordingBackend connection = extendedBackend("connection-1");
+        connection.publicationAllowed = true;
+        materializer.ensureCurrent(connection, session(true), BINDING, "events", null);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
+        int loaded = connection.statements.size();
+
+        assertThat(materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        assertThat(connection.statements.subList(loaded, connection.statements.size()).stream().anyMatch(sql -> sql.contains(
+                "DELETE FROM \"analytics\".\"events\" WHERE (\"day\" = CAST('2026-01-02' AS text))")), equalTo(true));
+    }
+
+    @Test
+    void aStagedLoadOfOneConnectionDoesNotAffectAnotherTablesOrConnectionsStagedState() {
+        twoDayPartitions();
+        RecordingBackend first = extendedBackend("connection-1");
+        RecordingBackend second = extendedBackend("connection-2");
+        materializer.ensureCurrent(first, session(true), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(second, true);
+
+        assertThat(materializer.ensureCurrent(first, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+    }
+
+    @Test
+    void aCommitDoesNotPublishPartitionsThatAnotherLoadHasSupersededSince() {
+        twoDayPartitions();
+        RecordingBackend staged = extendedBackend("connection-1");
+        materializer.ensureCurrent(staged, session(false), BINDING, "events", DAY_ONE_SQL);
+        materializer.invalidateTable(BINDING.clusterKey(), "dev", "analytics", "events");
+
+        materializer.finishCycle(staged, true);
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aTransactionDoesNotTrustPartitionsItLoadedOnceAnotherLoadChangedTheTable() {
+        twoDayPartitions();
+        RecordingBackend inTransaction = extendedBackend("connection-1");
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL);
+        materializer.invalidateTable(BINDING.clusterKey(), "dev", "analytics", "events");
+
+        assertThat(materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    private void twoDayPartitions() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+    }
+
+    private static RecordingBackend extendedBackend(Object connection) {
+        RecordingBackend extended = new RecordingBackend();
+        extended.publicationAllowed = false;
+        extended.connection = connection;
+        return extended;
     }
 
     @Test

@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -39,8 +40,12 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1547,6 +1552,35 @@ class SqsServiceTest {
     }
 
     @Test
+    void messageAttributeSize_countsUtf8BytesOfNameTypeAndStringValue() {
+        assertEquals(6 + 6 + 6, SqsService.messageAttributeSize("na\u00efve", "String", "\u20acuro", null));
+    }
+
+    @Test
+    void messageAttributeSize_countsDecodedBinaryLength() {
+        assertEquals(3 + 6 + 6, SqsService.messageAttributeSize("bin", "Binary", null, "AAECAwQF"));
+    }
+
+    @Test
+    void messageAttributeSize_countsInvalidBase64AsItsUtf8Length() {
+        assertEquals(3 + 6 + 11, SqsService.messageAttributeSize("bin", "Binary", null, "not base64!"));
+    }
+
+    @Test
+    void messageAttributeSize_countsAnAttributeWithNoDataType() {
+        assertEquals(3 + 5, SqsService.messageAttributeSize("big", null, "value", null));
+    }
+
+    @Test
+    void computeMessageSize_countsEachAttributeLikeItsWireFields() {
+        Map<String, MessageAttributeValue> attrs = Map.of(
+                "na\u00efve", new MessageAttributeValue("\u20acuro", "String"),
+                "bin", new MessageAttributeValue(new byte[] {0, 1, 2, 3, 4, 5}, "Binary"));
+
+        assertEquals(4 + 18 + 15, SqsService.computeMessageSize("body", attrs));
+    }
+
+    @Test
     void addPermission_appendsLabelledStatementToPolicy() {
         Queue queue = sqsService.createQueue("perm-queue", null, "us-east-1");
         sqsService.addPermission(queue.getQueueUrl(), "share",
@@ -2091,6 +2125,26 @@ class SqsServiceTest {
 
     @Test
     void cancelMessageMoveTask_acceptedCancelIsNotOverwrittenByTheWorkersTerminalWrite() throws Exception {
+        sqsService = spy(sqsService);
+        CountDownLatch terminalWriteReady = new CountDownLatch(1);
+        CountDownLatch releaseTerminalWrite = new CountDownLatch(1);
+        CompletableFuture<Void> terminalWriteFinished = new CompletableFuture<>();
+        AtomicReference<Boolean> cancellationObserved = new AtomicReference<>();
+        doAnswer(invocation -> {
+            cancellationObserved.set(invocation.getArgument(2));
+            terminalWriteReady.countDown();
+            try {
+                assertTrue(releaseTerminalWrite.await(5, TimeUnit.SECONDS));
+                invocation.callRealMethod();
+                terminalWriteFinished.complete(null);
+                return null;
+            } catch (Throwable failure) {
+                terminalWriteFinished.completeExceptionally(failure);
+                throw failure;
+            }
+        }).when(sqsService).finishMoveTask(any(), anyLong(),
+                anyBoolean());
+
         Queue dlq = sqsService.createQueue("cancel-terminal-dlq", null, "us-east-1");
         String dlqArn = queueArn("cancel-terminal-dlq");
         sqsService.createQueue("cancel-terminal-source",
@@ -2099,21 +2153,21 @@ class SqsServiceTest {
                 "us-east-1");
         sqsService.createQueue("cancel-terminal-destination", null, "us-east-1");
         String destinationArn = queueArn("cancel-terminal-destination");
-        for (int i = 0; i < 50; i++) {
-            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null, "us-east-1");
+        sqsService.sendMessage(dlq.getQueueUrl(), "msg", 0, null, null, "us-east-1");
+
+        try {
+            String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, "us-east-1");
+            assertTrue(terminalWriteReady.await(5, TimeUnit.SECONDS));
+            assertEquals(Boolean.FALSE, cancellationObserved.get());
+            sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+            assertEquals("CANCELLING", moveTaskStatus(dlqArn, taskHandle));
+            releaseTerminalWrite.countDown();
+            terminalWriteFinished.get(5, TimeUnit.SECONDS);
+            assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
+        } finally {
+            releaseTerminalWrite.countDown();
+            sqsService.stop();
         }
-
-        // The interleaving: the worker reads its own signal and concludes COMPLETED, the cancel is
-        // accepted (the task reads CANCELLING), and only then does the worker's terminal write
-        // land. Replaying that write with the stale decision must not turn CANCELLING back into
-        // COMPLETED.
-        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destinationArn, 1, "us-east-1");
-        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
-        sqsService.finishMoveTask(taskHandle, 1, false);
-
-        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
-        awaitMoveTaskStatus(dlqArn, taskHandle, "CANCELLED");
-        assertEquals("CANCELLED", moveTaskStatus(dlqArn, taskHandle));
     }
 
     private String moveTaskStatus(String sourceArn, String taskHandle) {

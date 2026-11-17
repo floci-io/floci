@@ -11,9 +11,7 @@ import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.Credentials;
@@ -62,7 +60,8 @@ class StsAccountTokenDurationIntegrationTest {
         SignedIamUsers.User user = SignedIamUsers.createUser(endpoint(), "token-duration-", "federation",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Action\":\"sts:GetFederationToken\",\"Resource\":\"*\"}]}");
-        try (user; StsClient sts = client(user.accessKeyId(), user.secretAccessKey())) {
+        try (user; StsClient sts = AwsTestClients.create(StsClient.builder(),
+                user.accessKeyId(), user.secretAccessKey(), Region.US_EAST_1, endpoint())) {
             assertTrue(sts.getCallerIdentity().arn().endsWith("user/" + user.name()));
             checkLifetime(sts, action, duration, expected);
         } finally {
@@ -84,20 +83,15 @@ class StsAccountTokenDurationIntegrationTest {
                     && !issued.expiration().isAfter(after.plusSeconds(expected)), "Unexpected issued expiration");
             assertFalse(iam.isExpiredSession(issued.accessKeyId(), issued.expiration().minusSeconds(1)));
             assertTrue(iam.isExpiredSession(issued.accessKeyId(), issued.expiration().plusSeconds(1)));
-            try (StsClient session = StsClient.builder().endpointOverride(endpoint()).region(Region.US_EAST_1)
-                    .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
-                            issued.accessKeyId(), issued.secretAccessKey(), issued.sessionToken()))).build()) {
+            try (StsClient session = AwsTestClients.create(StsClient.builder(), AwsSessionCredentials.create(
+                    issued.accessKeyId(), issued.secretAccessKey(), issued.sessionToken()),
+                    Region.US_EAST_1, endpoint())) {
                 assertEquals(ACCOUNT, session.getCallerIdentity().account());
             }
         } finally {
             iam.unregisterSession(ACCOUNT, issued.accessKeyId());
             assertFalse(iam.isKnownAccessKey(issued.accessKeyId()));
         }
-    }
-
-    private static StsClient client(String key, String secret) {
-        return StsClient.builder().endpointOverride(endpoint()).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(key, secret))).build();
     }
 
     private static URI endpoint() {

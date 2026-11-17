@@ -18,9 +18,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class CodeDeployJsonHandler {
+
+    private static final Set<String> TAG_FILTER_TYPES = Set.of("KEY_ONLY", "VALUE_ONLY", "KEY_AND_VALUE");
 
     private final CodeDeployService service;
     private final ObjectMapper mapper;
@@ -75,7 +78,7 @@ public class CodeDeployJsonHandler {
     private Response createApplication(JsonNode req, String region) {
         String name = req.path("applicationName").asText(null);
         String computePlatform = req.has("computePlatform") ? req.path("computePlatform").asText() : null;
-        List<Map<String, String>> tags = parseTags(req, "tags");
+        List<Map<String, String>> tags = parseOptionalTags(req, "tags");
         Application app = service.createApplication(region, name, computePlatform, tags);
         return Response.ok(Map.of("applicationId", app.getApplicationId())).build();
     }
@@ -123,8 +126,9 @@ public class CodeDeployJsonHandler {
         String deploymentConfigName = req.has("deploymentConfigName") ? req.path("deploymentConfigName").asText() : null;
         String serviceRoleArn = req.has("serviceRoleArn") ? req.path("serviceRoleArn").asText() : null;
         Map<String, Object> fields = extractGroupFields(req);
+        List<Map<String, String>> tags = parseOptionalTags(req, "tags");
         DeploymentGroup group = service.createDeploymentGroup(region, appName, groupName,
-                deploymentConfigName, serviceRoleArn, fields);
+                deploymentConfigName, serviceRoleArn, fields, tags);
         return Response.ok(Map.of("deploymentGroupId", group.getDeploymentGroupId())).build();
     }
 
@@ -313,13 +317,13 @@ public class CodeDeployJsonHandler {
 
     private Response listOnPremisesInstances(JsonNode req, String region) {
         String registrationStatus = req.has("registrationStatus") ? req.path("registrationStatus").asText() : null;
-        List<Map<String, String>> tagFilters = parseTags(req, "tagFilters");
+        List<Map<String, String>> tagFilters = parseTagFilters(req);
         List<String> names = service.listOnPremisesInstances(region, registrationStatus, tagFilters);
         return Response.ok(Map.of("instanceNames", names)).build();
     }
 
     private Response addTagsToOnPremisesInstances(JsonNode req, String region) {
-        List<Map<String, String>> tags = parseTags(req, "tags");
+        List<Map<String, String>> tags = parseTags(req, "tags", "InvalidTagException");
         List<String> names = new ArrayList<>();
         req.path("instanceNames").forEach(n -> names.add(n.asText()));
         service.addTagsToOnPremisesInstances(region, names, tags);
@@ -327,7 +331,7 @@ public class CodeDeployJsonHandler {
     }
 
     private Response removeTagsFromOnPremisesInstances(JsonNode req, String region) {
-        List<Map<String, String>> tags = parseTags(req, "tags");
+        List<Map<String, String>> tags = parseTags(req, "tags", "InvalidTagException");
         List<String> names = new ArrayList<>();
         req.path("instanceNames").forEach(n -> names.add(n.asText()));
         service.removeTagsFromOnPremisesInstances(region, names, tags);
@@ -348,22 +352,58 @@ public class CodeDeployJsonHandler {
         return fields;
     }
 
-    private List<Map<String, String>> parseTags(JsonNode req, String fieldName) {
-        if (!req.has(fieldName) || req.get(fieldName).isNull()) {
+    private List<Map<String, String>> parseTagFilters(JsonNode req) {
+        if (!req.has("tagFilters") || req.get("tagFilters").isNull()) {
             return List.of();
         }
+        JsonNode filterList = req.get("tagFilters");
+        if (!filterList.isArray()) {
+            throw new AwsException("InvalidTagFilterException", "The specified tag filters are not valid.", 400);
+        }
         List<Map<String, String>> result = new ArrayList<>();
-        for (JsonNode tag : req.get(fieldName)) {
-            Map<String, String> t = new HashMap<>();
-            // Support both capitalizations (Tags uses Key/Value, tags uses key/value)
-            if (tag.has("Key")) {
-                t.put("Key", tag.path("Key").asText());
-                t.put("Value", tag.path("Value").asText());
-            } else {
-                t.put("Key", tag.path("key").asText());
-                t.put("Value", tag.path("value").asText());
+        for (JsonNode filter : filterList) {
+            if (!filter.isObject()) {
+                throw new AwsException("InvalidTagFilterException", "The specified tag filters are not valid.", 400);
             }
-            result.add(t);
+            Map<String, String> values = new HashMap<>();
+            for (String member : List.of("Key", "Value", "Type")) {
+                if (filter.hasNonNull(member)) {
+                    JsonNode value = filter.get(member);
+                    if (!value.isTextual()
+                            || (member.equals("Type") && !TAG_FILTER_TYPES.contains(value.asText()))) {
+                        throw new AwsException("InvalidTagFilterException", "The specified tag filters are not valid.", 400);
+                    }
+                    values.put(member, value.asText());
+                }
+            }
+            result.add(values);
+        }
+        return result;
+    }
+
+    private List<Map<String, String>> parseTags(JsonNode req, String fieldName) {
+        return parseTags(req, fieldName, "InvalidTagsToAddException");
+    }
+
+    private List<Map<String, String>> parseOptionalTags(JsonNode req, String fieldName) {
+        return req.path(fieldName).isNull() ? List.of() : parseTags(req, fieldName);
+    }
+
+    private List<Map<String, String>> parseTags(JsonNode req, String fieldName, String invalidType) {
+        if (!req.has(fieldName)) {
+            return List.of();
+        }
+        JsonNode tagList = req.get(fieldName);
+        if (!tagList.isArray()) {
+            throw new AwsException(invalidType, "The specified tags are not valid.", 400);
+        }
+        List<Map<String, String>> result = new ArrayList<>();
+        for (JsonNode tag : tagList) {
+            if (!tag.isObject() || !tag.path("Key").isTextual()
+                    || tag.has("Value") && !tag.get("Value").isTextual()) {
+                throw new AwsException(invalidType, "The specified tags are not valid.", 400);
+            }
+            result.add(Map.of("Key", tag.get("Key").asText(), "Value", tag.path("Value").asText("")));
         }
         return result;
     }

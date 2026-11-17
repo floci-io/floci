@@ -11,6 +11,7 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretResponse;
 import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
+import java.time.Duration;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -170,7 +171,11 @@ class MskTest {
 
     @Test
     @Order(6)
-    void batchAssociateScramSecret() {
+    void batchAssociateScramSecret() throws InterruptedException {
+        TestFixtures.await(() -> kafka.describeCluster(request -> request.clusterArn(clusterArn))
+                        .clusterInfo().state() == ClusterState.ACTIVE,
+                "MSK cluster", "ACTIVE", Duration.ofMinutes(2).toNanos(), 250);
+
         try (SecretsManagerClient secrets = TestFixtures.secretsManagerClient();
              KmsClient kms = TestFixtures.kmsClient()) {
             scramKeyId = kms.createKey(CreateKeyRequest.builder().build()).keyMetadata().keyId();

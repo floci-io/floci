@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -615,7 +616,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     void refusesAWriteThatLeavesTheItemTooDeep() {
         putItem("deep-path", "\"m\":{\"M\":{}}");
         String update = "UPDATE " + QUOTED_TABLE + " SET m.deep = ? WHERE pk='deep-path' AND sk='1'";
-        String parameters = "[" + "{\"M\":{\"a\":".repeat(31) + "{\"S\":\"x\"}" + "}}".repeat(31) + "]";
+        String parameters = "[" + nestedMap(31, "a", "{\"S\":\"x\"}") + "]";
         String tooDeep = "Nesting Levels have exceeded supported limits";
 
         statement(update, parameters)
@@ -855,6 +856,39 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
                 """.formatted(TABLE, pk))
             .statusCode(200);
+    }
+
+    @Test
+    @Order(34)
+    void refusesAKeyReadWhoseFilterNamesAKey() {
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
+        String refused = "Filter Expression can only contain non-primary key attributes: Primary key attribute: ";
+
+        for (String where : List.of("pk='ranges' AND (NOT sk='1' OR flag='one')",
+                "pk='ranges' AND NOT (sk='1' AND flag='one')",
+                "pk='ranges' AND NOT NOT sk='1'",
+                "pk='ranges' AND NOT size(sk) = 1",
+                "pk='ranges' AND (size(sk) = 1 OR flag='one')",
+                "pk IN ['ranges','ranges-other'] AND (NOT sk='1' OR flag='one')",
+                "pk='ranges' AND (NOT pk='ranges-other' OR NOT sk='1')",
+                "pk='ranges' AND ((sk='1' AND NOT size(sk) = 1) OR (sk='2' AND NOT size(sk) = 1))",
+                "(pk='ranges' AND NOT size(pk) = 1) OR (pk='ranges-other' AND NOT size(sk) = 1)")) {
+            statement(select + where).statusCode(400).body("message", equalTo(refused + "sk"));
+        }
+        for (String where : List.of("pk='ranges' AND (NOT pk='ranges-other' OR flag='one')",
+                "pk='ranges' AND ((sk='1' AND NOT size(sk) = 1) OR (sk='2' AND NOT size(pk) = 1))",
+                "pk='ranges' AND ((sk='2' AND NOT size(pk) = 1) OR (sk='1' AND NOT size(sk) = 1))")) {
+            statement(select + where).statusCode(400).body("message", equalTo(refused + "pk"));
+        }
+        for (String where : List.of("pk='ranges' AND NOT sk='1'",
+                "pk='ranges' AND size(sk) = 1",
+                "pk='ranges' AND (sk<>'1' OR flag='one')",
+                "(pk='ranges' AND (NOT sk='1' OR flag='one')) OR (pk='ranges-other' AND flag='two')",
+                "pk='ranges' AND ((sk='1' AND NOT size(sk) = 1) OR sk='2')",
+                "pk='ranges' AND ((sk='1' AND flag='one') OR (sk='2' AND NOT size(sk) = 1))",
+                "NOT sk='1' OR flag='one'")) {
+            statement(select + where).statusCode(200);
+        }
     }
 
     private static void putItem(String pk, String attributes) {

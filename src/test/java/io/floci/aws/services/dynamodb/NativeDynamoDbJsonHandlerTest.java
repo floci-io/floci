@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
@@ -28,6 +30,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -81,7 +90,7 @@ class NativeDynamoDbJsonHandlerTest {
         return node;
     }
 
-    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression, 
+    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression,
     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValues){
         ObjectNode node = mapper.createObjectNode();
         node.put("TableName", tableName);
@@ -109,12 +118,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "UPDATED_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -136,7 +145,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesUpdatedNewOnNewItem() throws Exception {
         createUsersTable("us-east-1");
@@ -186,12 +195,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "UPDATED_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -213,7 +222,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesAllOld()  throws Exception {
         createUsersTable("us-east-1");
@@ -226,12 +235,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "ALL_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -255,7 +264,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesAllNew()  throws Exception {
         createUsersTable("us-east-1");
@@ -268,12 +277,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "ALL_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -297,7 +306,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesNone()  throws Exception {
         createUsersTable("us-east-1");
@@ -310,12 +319,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "NONE");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -471,6 +480,84 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void putResourcePolicyAttachesTheFirstPolicyWhenNoPolicyIsExpected() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", tableArn);
+        putRequest.put("Policy", "{}");
+        putRequest.put("ExpectedRevisionId", "NO_POLICY");
+
+        Response putResponse = handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+        assertEquals(200, putResponse.getStatus());
+        JsonNode putBody = mapper.convertValue(putResponse.getEntity(), JsonNode.class);
+        String revisionId = putBody.get("RevisionId").asText();
+        assertFalse(revisionId.isBlank());
+
+        ObjectNode getRequest = mapper.createObjectNode();
+        getRequest.put("ResourceArn", tableArn);
+        JsonNode getBody = mapper.convertValue(
+                handler.handle("GetResourcePolicy", getRequest, "eu-west-1").getEntity(), JsonNode.class);
+        assertEquals(revisionId, getBody.get("RevisionId").asText());
+    }
+
+    @Test
+    void putResourcePolicyRejectsNoPolicyWhenAPolicyIsAttached() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", tableArn);
+        putRequest.put("Policy", "{}");
+        handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+
+        putRequest.put("ExpectedRevisionId", "NO_POLICY");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutResourcePolicy", putRequest, "eu-west-1"));
+        assertEquals("PolicyNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void putResourcePolicyLetsOneConcurrentNoPolicyAttachSucceed() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+        int callers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(callers);
+        try {
+            List<Future<Boolean>> attempts = new ArrayList<>();
+            for (int i = 0; i < callers; i++) {
+                attempts.add(executor.submit(() -> {
+                    ObjectNode putRequest = mapper.createObjectNode();
+                    putRequest.put("ResourceArn", tableArn);
+                    putRequest.put("Policy", "{}");
+                    putRequest.put("ExpectedRevisionId", "NO_POLICY");
+                    start.await();
+                    try {
+                        handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+                        return true;
+                    } catch (AwsException expected) {
+                        // The losing callers find the winner's policy already attached.
+                        assertEquals("PolicyNotFoundException", expected.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int attached = 0;
+            for (Future<Boolean> attempt : attempts) {
+                if (attempt.get()) {
+                    attached++;
+                }
+            }
+            assertEquals(1, attached);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void putResourcePolicyRejectsInvalidResourceArn() {
         ObjectNode putRequest = mapper.createObjectNode();
         putRequest.put("ResourceArn", "not-an-arn");
@@ -605,6 +692,121 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void describeTableReportsProvisionedTableCapacityAsWarmThroughput() throws Exception {
+        service.createTable("table-warm-provisioned",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-provisioned"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void describeTableReportsOnDemandTableWarmThroughput() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-on-demand",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-on-demand"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(12000, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void updateTableWalksWarmThroughputThroughCutRaiseAndOnDemandSwitch() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 10, "WriteCapacityUnits": 20}
+                }
+                """), "eu-west-1");
+
+        // cut: warm stays at the previous peak (10/20)
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 8}
+                }
+                """), "eu-west-1");
+        JsonNode warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(10, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(20, warm.get("WriteUnitsPerSecond").asLong());
+
+        // raise: warm follows the new capacity
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 15, "WriteCapacityUnits": 25}
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(15, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(25, warm.get("WriteUnitsPerSecond").asLong());
+
+        // on-demand switch: warm only rises to the baseline, never drops the peak
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(12000, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warm.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void describeTableFallsBackForLegacyZeroWarmThroughput() throws Exception {
+        service.createTable("table-warm-legacy",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        // Simulate a persisted table from before warm throughput was tracked.
+        TableDefinition table = service.describeTable("table-warm-legacy", "eu-west-1");
+        table.setWarmReadUnitsPerSecond(0);
+        table.setWarmWriteUnitsPerSecond(0);
+        service.persistTable("table-warm-legacy", table, "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-legacy"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void createTableOmitsTableWarmThroughput() throws Exception {
+        Response response = handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-create",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 4}
+                }
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.get("TableDescription").has("WarmThroughput"),
+                "CreateTable must omit table-level WarmThroughput");
+    }
+
+    @Test
     void describeTableReportsOnDemandGsiWarmThroughput() throws Exception {
         handler.handle("CreateTable", json("""
                 {
@@ -667,6 +869,14 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ACTIVE", describedWarmThroughput.get("Status").asText());
     }
 
+    private JsonNode describedTable(String tableName) throws Exception {
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        return body.get("Table");
+    }
+
     private JsonNode describedGsi(String tableName, String indexName) throws Exception {
         Response response = handler.handle("DescribeTable",
                 mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
@@ -714,6 +924,203 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> assertEquals(1, describedIndexes.size()));
     }
 
+    private static final String SEE_GUIDE =
+            " Refer to the Amazon DynamoDB Developer Guide for current limits and how to request higher limits.";
+
+    private JsonNode quotaTableRequest(String tableName, long read, long write, long gsiRead, long gsiWrite) {
+        return json("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d},
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}
+                    }]
+                }
+                """.formatted(tableName, read, write, gsiRead, gsiWrite));
+    }
+
+    private JsonNode throughputUpdate(String tableName, long read, long write) {
+        return json("""
+                {"TableName": "%s", "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}}
+                """.formatted(tableName, read, write));
+    }
+
+    private AwsException expectLimitExceeded(String action, JsonNode request) {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(action, request, "eu-west-2"));
+        assertEquals("LimitExceededException", ex.getErrorCode());
+        return ex;
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            40001 | 1     | 1     | 1     | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 40001 | 1     | 1     | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 1     | 40001 | 1     | The requested ReadCapacityUnits for index gsi1, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 1     | 1     | 40001 | The requested WriteCapacityUnits for index gsi1, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 40001 | 40001 | 1     | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            79984 | 1     | 1     | 1     | The requested ReadCapacityUnits, 79984, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            79985 | 1     | 1     | 1     | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 79986.
+            1     | 1     | 79985 | 1     | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 79986.
+            40001 | 80001 | 1     | 1     | This request would have caused the WriteCapacityUnits limit to be exceeded for the account in eu-west-2. Current WriteCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 80002.
+            """)
+    void createTableRefusesCapacityAboveTheQuotas(long read, long write, long gsiRead, long gsiWrite, String message) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("elsewhere", 30000, 30000, 30000, 30000), "us-east-1");
+
+        AwsException ex = expectLimitExceeded("CreateTable", quotaTableRequest("quota", read, write, gsiRead, gsiWrite));
+
+        assertEquals(message + SEE_GUIDE, ex.getMessage());
+        assertEquals(List.of("held"), service.listTables("eu-west-2"));
+    }
+
+    @Test
+    void createTableChecksTheQuotasAfterTheOtherErrors() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        ObjectNode unusedAttribute = (ObjectNode) quotaTableRequest("quota", 40001, 1, 1, 1);
+        ((ArrayNode) unusedAttribute.get("AttributeDefinitions")).addObject()
+                .put("AttributeName", "unused").put("AttributeType", "S");
+
+        AwsException taken = assertThrows(AwsException.class, () -> handler.handle("CreateTable",
+                quotaTableRequest("held", 40001, 1, 1, 1), "eu-west-2"));
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> handler.handle("CreateTable", unusedAttribute, "eu-west-2"));
+
+        assertEquals("ResourceInUseException", taken.getErrorCode());
+        assertEquals("ValidationException", invalid.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":10}} | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":10,"WriteCapacityUnits":40001}} | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":5}}}],"ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":10}} | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":6,"WriteCapacityUnits":5}}},{"Update":{"IndexName":"nope","ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":40001}}}]} | The requested WriteCapacityUnits for index nope, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":1}}}]} | The requested ReadCapacityUnits for index gsi2, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":79971,"WriteCapacityUnits":1}}}]} | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 30. Limit: 80000. Current ReadCapacityUnits provisioned for the table and indexes: 15. Requested: 79986.
+            """)
+    void updateTableRefusesCapacityAboveTheQuotas(String request, String message) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+
+        AwsException ex = expectLimitExceeded("UpdateTable", json(request));
+
+        assertEquals(message + SEE_GUIDE, ex.getMessage());
+        TableDefinition table = service.describeTable("quota", "eu-west-2");
+        assertEquals(10, table.getProvisionedThroughput().getReadCapacityUnits());
+        assertEquals(1, table.getGlobalSecondaryIndexes().size());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":39996,"WriteCapacityUnits":10}} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":10,"WriteCapacityUnits":39996}} | WriteCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":39991,"WriteCapacityUnits":5}}}]} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":39986,"WriteCapacityUnits":1}}}]} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"onDemand","BillingMode":"PROVISIONED","ProvisionedThroughput":{"ReadCapacityUnits":39986,"WriteCapacityUnits":1}} | ReadCapacityUnits | 40015 | 0 | 39986
+            """)
+    void updateTableRefusesATotalAboveTheAccountQuota(String request, String unit, long reserved, long current,
+                                                      long requested) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 39990, 39990, 10, 10), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "onDemand",
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}]
+                }
+                """), "eu-west-2");
+
+        AwsException ex = expectLimitExceeded("UpdateTable", json(request));
+
+        assertEquals("This request would have caused the " + unit + " limit to be exceeded for the account in "
+                + "eu-west-2. Current " + unit + " reserved by the account: " + reserved + ". Limit: 80000. Current "
+                + unit + " provisioned for the table and indexes: " + current + ". Requested: " + requested + "."
+                + SEE_GUIDE, ex.getMessage());
+    }
+
+    @Test
+    void updateTableAcceptsATotalAtTheAccountQuotaAndAnyDecrease() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 39990, 39990, 10, 10), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+
+        handler.handle("UpdateTable", throughputUpdate("quota", 39995, 10), "eu-west-2");
+        handler.handle("UpdateTable", throughputUpdate("quota", 39994, 9), "eu-west-2");
+
+        assertEquals(39994, service.describeTable("quota", "eu-west-2").getProvisionedThroughput().getReadCapacityUnits());
+    }
+
+    @Test
+    void updateTableChecksTheQuotasAfterTheLookups() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+        JsonNode existingIndexCreate = json("""
+                {
+                    "TableName": "quota",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": 80001, "WriteCapacityUnits": 1}
+                    }}]
+                }
+                """);
+
+        AwsException missingTable = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateTable", throughputUpdate("missing", 40001, 10), "eu-west-2"));
+        AwsException existingIndex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateTable", existingIndexCreate, "eu-west-2"));
+
+        assertEquals("ResourceNotFoundException", missingTable.getErrorCode());
+        assertEquals("ValidationException", existingIndex.getErrorCode());
+    }
+
+    @Test
+    void concurrentRequestsCannotPassTheAccountQuotaTogether() throws Exception {
+        try (ExecutorService pool = Executors.newFixedThreadPool(16)) {
+            for (String region : AwsRegions.advertised(AwsRegions.DEFAULT_PARTITION)) {
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Response>> results = new ArrayList<>();
+                for (int i = 0; i < 8; i++) {
+                    handler.handle("CreateTable", quotaTableRequest("old" + i, 1, 1, 1, 1), region);
+                    JsonNode create = quotaTableRequest("new" + i, 10000, 1, 1, 1);
+                    JsonNode update = throughputUpdate("old" + i, 10000, 1);
+                    results.add(pool.submit(() -> {
+                        start.await();
+                        return handler.handle("CreateTable", create, region);
+                    }));
+                    results.add(pool.submit(() -> {
+                        start.await();
+                        return handler.handle("UpdateTable", update, region);
+                    }));
+                }
+                start.countDown();
+                for (Future<Response> result : results) {
+                    try {
+                        result.get();
+                    } catch (ExecutionException e) {
+                        AwsException refused = assertInstanceOf(AwsException.class, e.getCause());
+                        assertEquals("LimitExceededException", refused.getErrorCode());
+                    }
+                }
+
+                long reserved = 0;
+                for (String name : service.listTables(region)) {
+                    reserved += DynamoDbCapacityQuotas.Capacity.of(service.describeTable(name, region)).read();
+                }
+                assertTrue(reserved <= DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS, region + " " + reserved);
+            }
+        }
+    }
+
     // Request validation for AWS parity: real DynamoDB rejects each of these with a
     // ValidationException (paritysuite dynamodb-conformance tier1).
 
@@ -729,6 +1136,68 @@ class NativeDynamoDbJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class, () -> handler.handle(action, request, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         return ex;
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"LocalSecondaryIndexes":[{"IndexName":"l1","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"Projection":{}}],"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{}}]} | 2 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'l1' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"BillingMode":"BOGUS","AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"X"}],"KeySchema":[{"AttributeName":"pk","KeyType":"BOGUS"}],"LocalSecondaryIndexes":[{"IndexName":"l1","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"Projection":{}}],"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0},"StreamSpecification":{"StreamViewType":"BOGUS"},"SSESpecification":{"SSEType":"BOGUS"},"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{}}]} | 10 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value 'BOGUS' at 'sSESpecification.sSEType' failed to satisfy constraint: Member must satisfy enum value set: [AES256, KMS]; Value 'BOGUS' at 'keySchema.1.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]; Value '0' at 'provisionedThroughput.writeCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1; Value '0' at 'provisionedThroughput.readCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1; Value 'BOGUS' at 'streamSpecification.streamViewType' failed to satisfy constraint: Member must satisfy enum value set: [OLD_IMAGE, KEYS_ONLY, NEW_AND_OLD_IMAGES, NEW_IMAGE]; Value null at 'streamSpecification.streamEnabled' failed to satisfy constraint: Member must not be null; Value 'X' at 'attributeDefinitions.1.member.attributeType' failed to satisfy constraint: Member must satisfy enum value set: [B, N, S]; Value 'l1' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"GlobalSecondaryIndexes":[{"IndexName":"a!","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{}}]} | 2 validation errors detected: Value 'a!' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'a!' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"BOGUS"}],"Projection":{"ProjectionType":"BOGUS","NonKeyAttributes":[]},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0}}]} | 6 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'BOGUS' at 'globalSecondaryIndexes.1.member.keySchema.1.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]; Value '[]' at 'globalSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'BOGUS' at 'globalSecondaryIndexes.1.member.projection.projectionType' failed to satisfy constraint: Member must satisfy enum value set: [ALL, INCLUDE, KEYS_ONLY]; Value '0' at 'globalSecondaryIndexes.1.member.provisionedThroughput.writeCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1; Value '0' at 'globalSecondaryIndexes.1.member.provisionedThroughput.readCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1
+            {"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"INCLUDE","NonKeyAttributes":["","n0","n1","n2","n3","n4","n5","n6","n7","n8","n9","n10","n11","n12","n13","n14","n15","n16","n17","n18","n19"]}}]} | 3 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '[, n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15, n16, n17, n18, n19]' at 'globalSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must have length less than or equal to 20; Value '[, n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15, n16, n17, n18, n19]' at 'globalSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must satisfy constraint: [Member must have length less than or equal to 255, Member must have length greater than or equal to 1]
+            {"GlobalSecondaryIndexes":[{}]} | 3 validation errors detected: Value null at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must not be null; Value null at 'globalSecondaryIndexes.1.member.keySchema' failed to satisfy constraint: Member must not be null; Value null at 'globalSecondaryIndexes.1.member.projection' failed to satisfy constraint: Member must not be null
+            {"KeySchema":[null],"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"NonKeyAttributes":[null]}}]} | 1 validation error detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"KeySchema":[null,{"AttributeName":"","KeyType":"BOGUS"}],"GlobalSecondaryIndexes":[null,{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"NonKeyAttributes":[null,""]}}]} | 4 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.2.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '[null, ]' at 'globalSecondaryIndexes.2.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must satisfy constraint: [Member must have length less than or equal to 255, Member must have length greater than or equal to 1]; Value '' at 'keySchema.2.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'BOGUS' at 'keySchema.2.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]
+            {"KeySchema":[],"AttributeDefinitions":[null,{"AttributeName":"","AttributeType":"X"}]} | 3 validation errors detected: Value '[]' at 'keySchema' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'X' at 'attributeDefinitions.2.member.attributeType' failed to satisfy constraint: Member must satisfy enum value set: [B, N, S]; Value '' at 'attributeDefinitions.2.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            {"KeySchema":[{"AttributeName":"","KeyType":"BOGUS"}]} | 2 validation errors detected: Value '' at 'keySchema.1.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'BOGUS' at 'keySchema.1.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]
+            {"AttributeDefinitions":[{"AttributeName":"","AttributeType":"X"}]} | 2 validation errors detected: Value 'X' at 'attributeDefinitions.1.member.attributeType' failed to satisfy constraint: Member must satisfy enum value set: [B, N, S]; Value '' at 'attributeDefinitions.1.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            {"LocalSecondaryIndexes":[{"IndexName":"l1","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"Projection":{},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0}}]} | 1 validation error detected: Value 'l1' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            """)
+    void createTableListsItsConstraintErrorsInOrder(String members, String message) {
+        ObjectNode request = (ObjectNode) json("""
+                {"TableName":"Tbl","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}
+                """);
+        request.setAll((ObjectNode) json(members));
+
+        assertEquals(message, expectValidationException("CreateTable", request).getMessage());
+    }
+
+    @Test
+    void createTableReportsTheFirstTenConstraintErrors() {
+        ObjectNode request = (ObjectNode) json("""
+                {"TableName":"Tbl","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}]}
+                """);
+        ArrayNode indexes = request.putArray("GlobalSecondaryIndexes");
+        List<String> violations = new ArrayList<>();
+        for (int i = 1; i <= 11; i++) {
+            String name = "g" + (char) ('a' + i);
+            indexes.add(json("{\"IndexName\":\"" + name + "\",\"KeySchema\":[{\"AttributeName\":\"g\",\"KeyType\":\"HASH\"}],"
+                    + "\"Projection\":{}}"));
+            violations.add(SmithyValidationErrors.lengthTooShort(
+                    "globalSecondaryIndexes." + i + ".member.indexName", name, 3));
+        }
+
+        assertEquals(SmithyValidationErrors.message(violations.subList(0, 10)),
+                expectValidationException("CreateTable", request).getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            k            | 0    | 2 validation errors detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value '%s' at 'sSESpecification.kMSMasterKeyId' failed to satisfy constraint: Member must have length greater than or equal to 1
+            k            | 2048 | 1 validation error detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]
+            k            | 2049 | 2 validation errors detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value '%s' at 'sSESpecification.kMSMasterKeyId' failed to satisfy constraint: Member must have length less than or equal to 2048
+            😀 | 1025 | 1 validation error detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]
+            """)
+    void createTableChecksTheKmsMasterKeyIdLength(String character, int count, String message) {
+        String key = character.repeat(count);
+        ObjectNode request = (ObjectNode) json("""
+                {"TableName":"Tbl","BillingMode":"BOGUS","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}
+                """);
+        request.putObject("SSESpecification").put("Enabled", true).put("SSEType", "KMS").put("KMSMasterKeyId", key);
+
+        assertEquals(message.formatted(key), expectValidationException("CreateTable", request).getMessage());
     }
 
     @Test
@@ -1318,6 +1787,41 @@ class NativeDynamoDbJsonHandlerTest {
                 + "Expression parameters: {ProjectionExpression, FilterExpression}", ex.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Select":"BOGUS"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":null,"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"abc"}]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Query | {"TableName":"Missing","QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":""} | Value '' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Limit":0} | 1 validation error detected: Value at 'Limit' failed to satisfy constraint: Member must have value greater than or equal to 1
+            Scan  | {"TableName":"Missing","ScanFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{},"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Scan  | {"TableName":"Missing","ConditionalOperator":"XOR"} | ConditionalOperator cannot be used without Filter or Expected
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND","Select":"BOGUS"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND","Segment":1} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Segment":1} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","ReturnConsumedCapacity":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            Scan  | {"TableName":"a!","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND"} | 1 validation error detected: Value 'a!' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            """)
+    void queryAndScanCheckTheConditionalOperatorBeforeTheFilterValues(String operation, String request,
+            String message) throws Exception {
+        JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(40))));
+
+        assertEquals(message, expectValidationException(operation, body).getMessage());
+    }
+
+    @Test
+    void aNullConditionalOperatorIsTreatedAsAbsent() {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("Scan", json("""
+                {"TableName": "Missing", "ScanFilter": {"b": {"ComparisonOperator": "NULL"}},
+                 "ConditionalOperator": null}
+                """), "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
     @Test
     void scanReportsTheLimitBeforeMixedParameters() {
         AwsException ex = expectValidationException("Scan", json("""
@@ -1648,6 +2152,24 @@ class NativeDynamoDbJsonHandlerTest {
         return (ObjectNode) mapper.createObjectNode().set(placeholder, attributeValue("S", "x"));
     }
 
+    // Defines each placeholder the expression uses: :v and :s a string, :n a number, :l a list,
+    // :ss a string set and :m a map.
+    private ObjectNode valuesFor(String expression) {
+        ObjectNode values = mapper.createObjectNode();
+        Matcher placeholder = Pattern.compile(":[a-z]+").matcher(expression);
+        while (placeholder.find()) {
+            switch (placeholder.group()) {
+                case ":v", ":s" -> values.set(placeholder.group(), attributeValue("S", "x"));
+                case ":n" -> values.set(":n", attributeValue("N", "1"));
+                case ":l" -> values.putObject(":l").putArray("L");
+                case ":ss" -> values.putObject(":ss").putArray("SS").add("x");
+                case ":m" -> values.putObject(":m").putObject("M");
+                default -> { }
+            }
+        }
+        return values;
+    }
+
     @Test
     void updateItemRejectsAnUpdateExpressionOver4096BytesBeforeTheTableLookup() {
         ObjectNode request = updateUserRequest();
@@ -1684,6 +2206,422 @@ class NativeDynamoDbJsonHandlerTest {
             assertEquals("1 validation error detected: Invalid UpdateExpression: Syntax error; "
                     + "token: \"<EOF>\", near: \"" + near + "\"", ex.getMessage());
         });
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a, b = :v                            | a, b
+            SET a ,  b = :v                          | a ,  b
+            SET a,b = :v                             | a,b
+            set a, b = :v                            | a, b
+            SET a = :v, b, c = :v                    | b, c
+            SET a.b[1], c = :v                       | ], c
+            SET #n, b = :v                           | #n, b
+            SET , b = :v                             | SET , b
+            SET ,                                    | SET ,
+            SET a,                                   | a,
+            SET a = :v, , b = :v                     | , , b
+            SET a, b = (:v                           | a, b
+            SET a = if_not_exists(b, :v), c, d = :v  | c, d
+            REMOVE b SET a, c = :v                   | a, c
+            SET a, b = :v $                          | a, b
+            """)
+    void updateItemRejectsACommaInASetTargetBeforeTheTableLookup(String expression, String near) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: Syntax error; "
+                + "token: \",\", near: \"" + near + "\"", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = :v REMOVE b, c", "SET a = if_not_exists(b, :v), c = :v", "SET a = b + :n, c = :n"})
+    void updateItemReadsACommaOutsideASetTargetAsASeparator(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SET                               | <EOF>         | SET
+            `   `                             | <EOF>         | `   `
+            SET a = :v,                       | <EOF>         | ,
+            SET a = :v b = :v                 | b             | :v b =
+            REMOVE a = :v                     | =             | a = :v
+            ADD a b                           | b             | a b
+            ADD a :v + :v                     | +             | :v + :v
+            ADD a if_not_exists(b, :v)        | if_not_exists | a if_not_exists(
+            ADD a :v ADD b                    | <EOF>         | b
+            ADD ADD :v                        | ADD           | ADD ADD :v
+            ADD a :v, ADD b :v                | ADD           | , ADD b
+            SET a = :v,REMOVE b               | REMOVE        | ,REMOVE b
+            SET set = :v                      | set           | SET set =
+            SET and = :v                      | and           | SET and =
+            SET :v = a                        | :v            | SET :v =
+            SET a[] = :v                      | ]             | [] =
+            SET a[01] = :v                    | 1             | 01]
+            SET a.[1] = :v                    | [             | .[1
+            SET a[1]b = :v                    | b             | ]b =
+            SET a = :v + :v + :v              | +             | :v + :v
+            SET a = -:v                       | -             | = -:v
+            SET a = (:v + :v) + :v            | +             | ) + :v
+            SET a = :v - (:v + :v)            | +             | :v + :v
+            SET a = if_not_exists(b, :v + :v) | +             | :v + :v
+            SET a = if_not_exists()           | )             | ()
+            SET a = if_not_exists(b, :v).c    | .             | ).c
+            SET a = #f(:v)                    | (             | #f(:v
+            SET a = :v[1]                     | [             | :v[1
+            SET a = 1                         | 1             | = 1
+            SET a = (:v = :v)                 | =             | :v = :v
+            SET a = $ ((:v))                  | $             | = $ (
+            FOO a = :v                        | FOO           | FOO a
+            """)
+    void updateItemRejectsAMalformedUpdateExpressionBeforeTheTableLookup(String expression, String token,
+                                                                          String near) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: Syntax error; "
+                + "token: \"" + token + "\", near: \"" + near + "\"", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            ADD a :v ADD b | <EOF> | b
+            `   `          | <EOF> | `   `
+            SET a = -:v    | -     | = -:v
+            """)
+    void updateItemCallersThatSkipTheHandlerGetTheSameSyntaxError(String expression, String token, String near) {
+        createUsersTable("eu-west-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", item("userId", "u1"),
+                null, expression, null, singleValue(":v"), "NONE", "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = ((:v)) $", "SET a = ((:v)) REMOVE", "SET a = :v + ((:v))",
+            "SET a = list_append(((:v)), :v)", "SET a = (((:v) + :v))", "SET a = ((:v + :v))"})
+    void updateItemRefusesRedundantParenthesesAsSoonAsItClosesThem(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: "
+                + "The expression has redundant parentheses;", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = (:n) + (:n)", "SET a = ((:n) + :n)", "SET a = (:n + :n)", "SET a = (b)",
+            "SET a = list_append((:l), :l)", "SET a = list_append(if_not_exists(b, :l), :l)",
+            "SET a = (if_not_exists(b, :n) + :n)", "SET a[ 1 ] = :v", "SET a[0].b[10] = :v",
+            "REMOVE a[0], b.c", "set a = :v remove b", "SET\ta = :v\nREMOVE b"})
+    void updateItemAcceptsTheUpdateExpressionGrammar(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        if (expression.contains(":")) {
+            request.set("ExpressionAttributeValues", valuesFor(expression));
+        }
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a =        | a = = b  | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            SET a =        | a = :zz  | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :zz
+            SET a = :zz    | a = :yy  | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :yy
+            SET a = ((:v)) | a = :zz  | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :zz
+            """)
+    void updateItemChecksTheConditionInFullBeforeItParsesTheUpdate(String expression, String condition,
+                                                                    String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.put("ConditionExpression", condition);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a =   | attribute_exists(a) | Invalid UpdateExpression: Syntax error; token: "<EOF>", near: "="
+            ADD a :v, |                     | Invalid UpdateExpression: Syntax error; token: "<EOF>", near: ","
+            SET a =   | a = = b             | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            SET a =   | a = :zz             | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :zz
+            """)
+    void transactWriteItemsParsesTheUpdateAfterTheConditionAndBeforeTheTableLookup(String expression,
+                                                                                    String condition,
+                                                                                    String message) {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", expression);
+        if (condition != null) {
+            update.put("ConditionExpression", condition);
+        }
+        ObjectNode request = transactWrite("Update", update);
+        update.put("TableName", "Missing");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:n)                                  | Invalid function name; function: foo
+            SET a = IF_NOT_EXISTS(b, :n)                     | Invalid function name; function: IF_NOT_EXISTS
+            SET a = size(b)                                  | The function is not allowed in an update expression; function: size
+            SET a = begins_with(b, :s)                       | The function is not allowed in an update expression; function: begins_with
+            SET a = size(b, c)                               | The function is not allowed in an update expression; function: size
+            SET a = if_not_exists(b)                         | Incorrect number of operands for operator or function; operator or function: if_not_exists, number of operands: 1
+            SET a = if_not_exists(b, :n, :n)                 | Incorrect number of operands for operator or function; operator or function: if_not_exists, number of operands: 3
+            SET a = list_append(:l)                          | Incorrect number of operands for operator or function; operator or function: list_append, number of operands: 1
+            SET a = if_not_exists(:n, b)                     | Operator or function requires a document path; operator or function: if_not_exists
+            SET a = if_not_exists(if_not_exists(b, :n), :n)  | Operator or function requires a document path; operator or function: if_not_exists
+            SET a = list_append(:l, :l) + :n                 | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = (list_append(:l, :l)) + :n               | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(:n, :l) + :n                 | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = if_not_exists(b, list_append(:l, :l))    | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(list_append(:l, :l), :l)     | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(:n, :l)                      | Incorrect operand type for operator or function; operator or function: list_append, operand type: N
+            SET a = list_append(b, :s)                       | Incorrect operand type for operator or function; operator or function: list_append, operand type: S
+            SET a = :s + :n                                  | Incorrect operand type for operator or function; operator or function: +, operand type: S
+            SET a = :n - :l                                  | Incorrect operand type for operator or function; operator or function: -, operand type: L
+            SET a = b + (:ss)                                | Incorrect operand type for operator or function; operator or function: +, operand type: SS
+            ADD a :l                                         | Incorrect operand type for operator or function; operator: ADD, operand type: LIST, typeSet: ALLOWED_FOR_ADD_OPERAND
+            DELETE a :n                                      | Incorrect operand type for operator or function; operator: DELETE, operand type: NUMBER, typeSet: ALLOWED_FOR_DELETE_OPERAND
+            """)
+    void updateItemChecksTheFunctionsAndOperandTypesBeforeTheTableLookup(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:u)                  | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = foo(#u)                  | An expression attribute name used in the document path is not defined; attribute name: #u
+            SET a = foo(:n), b = :u          | Invalid function name; function: foo
+            SET a = :u, b = foo(:n)          | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = if_not_exists(:n, :u)    | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = list_append(:l, :l) + :u | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = :s + :u                  | An expression attribute value used in expression is not defined; attribute value: :u
+            SET out = foo(:n)                | Attribute name is a reserved keyword; reserved keyword: out
+            SET a = foo(:n), out = :n        | Invalid function name; function: foo
+            SET out = :u                     | Attribute name is a reserved keyword; reserved keyword: out
+            ADD c :u SET a = foo(:n)         | An expression attribute value used in expression is not defined; attribute value: :u
+            ADD b :s SET a = foo(:n)         | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            SET a = foo(:n) ADD b :s         | Invalid function name; function: foo
+            SET a = foo(:n) SET b = :n       | Invalid function name; function: foo
+            SET a = true                     | Attribute name is a reserved keyword; reserved keyword: true
+            ADD true :s                      | Attribute name is a reserved keyword; reserved keyword: true
+            REMOVE false                     | Attribute name is a reserved keyword; reserved keyword: false
+            """)
+    void updateItemChecksNamesValuesAndCallsInWrittenOrder(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = if_not_exists(b, :n) + :n", "SET a = :n - if_not_exists(b, :s)",
+            "SET a = (list_append(:l, :l))", "SET a = list_append(:l, if_not_exists(b, :n))",
+            "SET a = if_not_exists(b, if_not_exists(c, :n))", "SET a = if_not_exists((b), :n)",
+            "SET a = list_append(b, c)", "SET size = :n", "SET a = size", "ADD a :n, b :ss", "DELETE a :ss"})
+    void updateItemAcceptsTheUpdateFunctionsAndOperandTypes(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:n)           | Invalid function name; function: foo
+            SET out = :n              | Attribute name is a reserved keyword; reserved keyword: out
+            SET a = foo(:n), out = :n | Invalid function name; function: foo
+            DELETE a :n               | Incorrect operand type for operator or function; operator: DELETE, operand type: NUMBER, typeSet: ALLOWED_FOR_DELETE_OPERAND
+            """)
+    void transactWriteItemsChecksTheFunctionsAndReservedWordsBeforeTheTableLookup(String expression,
+                                                                                    String message) {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", expression);
+        update.set("ExpressionAttributeValues", valuesFor(expression));
+        ObjectNode request = transactWrite("Update", update);
+        update.put("TableName", "Missing");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            Scan               | {"TableName":"Missing","FilterExpression":"name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | Invalid FilterExpression
+            Scan               | {"TableName":"Missing","ProjectionExpression":"name"} | Invalid ProjectionExpression
+            Query              | {"TableName":"Missing","KeyConditionExpression":"userId = :w AND name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | Invalid KeyConditionExpression
+            Query              | {"TableName":"Missing","KeyConditionExpression":"userId = :w","FilterExpression":"name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | Invalid FilterExpression
+            GetItem            | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ProjectionExpression":"a.name"} | Invalid ProjectionExpression
+            TransactGetItems   | {"TransactItems":[{"Get":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ProjectionExpression":"a"}},{"Get":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ProjectionExpression":"name"}}]} | Invalid ProjectionExpression
+            PutItem            | {"TableName":"Missing","Item":{"userId":{"S":"u1"}},"ConditionExpression":"attribute_exists(name)"} | 1 validation error detected: Invalid ConditionExpression
+            DeleteItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ConditionExpression":"a[0].name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | 1 validation error detected: Invalid ConditionExpression
+            UpdateItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET status = :w","ConditionExpression":"name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | 1 validation error detected: Invalid ConditionExpression
+            UpdateItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | 1 validation error detected: Invalid UpdateExpression
+            TransactWriteItems | {"TransactItems":[{"ConditionCheck":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ConditionExpression":"NOT name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}}}]} | Invalid ConditionExpression
+            """)
+    void everyExpressionRefusesAReservedWordBeforeTheTableLookup(String operation, String request, String prefix)
+            throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(prefix + ": Attribute name is a reserved keyword; reserved keyword: name", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            name = :missing             | Attribute name is a reserved keyword; reserved keyword: name
+            :missing = name             | An expression attribute value used in expression is not defined; attribute value: :missing
+            name.#u = :w                | Attribute name is a reserved keyword; reserved keyword: name
+            '#u.name = :w'              | An expression attribute name used in the document path is not defined; attribute name: #u
+            name < :b                   | Attribute name is a reserved keyword; reserved keyword: name
+            a < :b AND name = :w        | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            name = :w AND a < :b        | Attribute name is a reserved keyword; reserved keyword: name
+            contains(name, name)        | Attribute name is a reserved keyword; reserved keyword: name
+            status = :w AND name = :w   | Attribute name is a reserved keyword; reserved keyword: status
+            NaMe = :w                   | Attribute name is a reserved keyword; reserved keyword: NaMe
+            true = :w                   | Attribute name is a reserved keyword; reserved keyword: true
+            attribute_exists(false)     | Attribute name is a reserved keyword; reserved keyword: false
+            """)
+    void conditionExpressionChecksReservedWordsInWrittenOrder(String expression, String message) throws Exception {
+        ObjectNode request = (ObjectNode) mapper.readTree("""
+                {"TableName":"Missing","Item":{"userId":{"S":"u1"}},
+                 "ExpressionAttributeValues":{":w":{"S":"w"},":b":{"BOOL":true},":z":{"S":"z"}}}
+                """);
+        request.put("ConditionExpression", expression);
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid ConditionExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            userId = :w AND name = :w           | status | Invalid KeyConditionExpression: Attribute name is a reserved keyword; reserved keyword: name
+            userId = :w AND sk > :w AND sk < :w | a, a   | Invalid KeyConditionExpression: KeyConditionExpressions must only contain one condition per key
+            userId = :w                         | status | Invalid ProjectionExpression: Attribute name is a reserved keyword; reserved keyword: status
+            """)
+    void queryChecksTheKeyConditionBeforeTheProjection(String keyCondition, String projection, String message)
+            throws Exception {
+        ObjectNode request = (ObjectNode) mapper.readTree("""
+                {"TableName":"Missing","ExpressionAttributeValues":{":w":{"S":"w"}}}
+                """);
+        request.put("KeyConditionExpression", keyCondition);
+        request.put("ProjectionExpression", projection);
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = :v SET b = :v                                   | SET
+            REMOVE a REMOVE b                                       | REMOVE
+            ADD a :s ADD b :s                                       | ADD
+            DELETE a :s DELETE b :s                                 | DELETE
+            add a :s\tADD b :s                                      | ADD
+            REMOVE a REMOVE b REMOVE c                              | REMOVE
+            ADD a :s REMOVE b REMOVE c ADD d :s                     | REMOVE
+            SET a = :v DELETE b :s ADD c :s DELETE d :s SET e = :v  | DELETE
+            """)
+    void updateItemRejectsARepeatedSectionBeforeTheTableLookup(String expression, String section) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: The \"" + section
+                + "\" section can only be used once in an update expression;", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            ADD a :v ADD b :v     | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            ADD a :s ADD b :w     | An expression attribute value used in expression is not defined; attribute value: :w
+            """)
+    void updateItemChecksARepeatedSectionAfterTheOtherUpdateExpressionErrors(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @Test
+    void updateItemRefusesARepeatedSectionForACallerThatSkipsTheHandler() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = item("userId", "u1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", key, null,
+                "ADD a :s ADD b :s", null, valueAndSet(), "NONE", "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"ADD\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", key, "eu-west-1"));
+    }
+
+    private ObjectNode valueAndSet() {
+        ObjectNode values = singleValue(":v");
+        values.putObject(":s").putArray("SS").add("x");
+        return values;
     }
 
     @Test
@@ -1814,14 +2752,14 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void updateItemRejectsAnExpressionAttributeValueWithALeafAtLevel33() {
+    void updateItemRejectsAnExpressionAttributeValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode request = updateUserRequest();
         request.put("UpdateExpression", "SET touched = :t");
         request.put("ConditionExpression", "#d = :deep");
         request.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
         ObjectNode values = singleValue(":t");
-        values.set(":deep", nestedMaps(32));
+        values.set(":deep", nestedMaps(33));
         request.set("ExpressionAttributeValues", values);
 
         AwsException ex = assertThrows(AwsException.class,
@@ -1918,6 +2856,51 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void transactWriteItemsRejectsACommaInASetTarget() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET a, b = :v");
+        update.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: Syntax error; token: \",\", near: \"a, b\"", ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSection() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSectionBeforeUnusedValuesAndTheTableLookup() {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+        update.put("ConditionExpression", "attribute_exists(c)");
+        update.set("ExpressionAttributeValues", singleValue(":u"));
+        update.putObject("ExpressionAttributeNames").put("#u", "u");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
+    }
+
+    @Test
     void transactWriteItemsRejectsAPutItemWithALeafAtLevel33() {
         createUsersTable("eu-west-1");
         ObjectNode put = mapper.createObjectNode();
@@ -1948,12 +2931,12 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void transactWriteItemsRejectsAnUpdateValueWithALeafAtLevel33() {
+    void transactWriteItemsRejectsAnUpdateValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode update = mapper.createObjectNode();
         update.set("Key", item("userId", "u1"));
         update.put("UpdateExpression", "SET deep = :deep");
-        update.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        update.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
@@ -1963,13 +2946,63 @@ class NativeDynamoDbJsonHandlerTest {
         assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            UpdateItem | {"TableName":"Users","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET t = :t","ConditionExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":t":{"S":"y"},":deep":"DEEP"}}
+            PutItem    | {"TableName":"Users","Item":{"userId":{"S":"u1"}},"ConditionExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":deep":"DEEP"}}
+            DeleteItem | {"TableName":"Users","Key":{"userId":{"S":"u1"}},"ConditionExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":deep":"DEEP"}}
+            PutItem    | {"TableName":"Users","Item":{"userId":{"S":"u1"}},"Expected":{"d":{"Value":"DEEP"}}}
+            """)
+    void aConditionValueWithALeafAtLevel33IsEvaluated(String operation, String request) throws Exception {
+        createUsersTable("eu-west-1");
+        service.putItem("Users", item("userId", "u1"), "eu-west-1");
+        JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(32))));
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals("ConditionalCheckFailedException", ex.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            Scan  | {"TableName":"Users","FilterExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":deep":"DEEP"}}
+            Scan  | {"TableName":"Users","ScanFilter":{"d":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}}}
+            Query | {"TableName":"Users","KeyConditionExpression":"userId = :u","FilterExpression":"#d = :deep","ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":u":{"S":"u1"},":deep":"DEEP"}}
+            """)
+    void aReadFiltersOnAValueWithALeafAtLevel33AndRefusesOneAtLevel34Bare(String operation, String request)
+            throws Exception {
+        createUsersTable("eu-west-1");
+        JsonNode accepted = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(32))));
+        JsonNode refused = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(33))));
+
+        assertEquals(200, handler.handle(operation, accepted, "eu-west-1").getStatus());
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, refused, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits: "
+                + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
+    }
+
     @Test
-    void transactWriteItemsRejectsAConditionCheckValueWithALeafAtLevel33BeforeTheTableLookup() {
+    void anUpdateThatWritesAValueWithALeafAtLevel33FailsOnTheFinishedItem() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode request = updateUserRequest();
+        request.put("UpdateExpression", "SET deep = :deep");
+        request.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        ObjectNode update = request.deepCopy();
+        update.remove("TableName");
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("Nesting Levels have exceeded supported limits", ex.getMessage());
+        assertEquals("Nesting Levels have exceeded supported limits",
+                onlyValidationErrorMessage(handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1")));
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsAConditionCheckValueWithALeafAtLevel34BeforeTheTableLookup() {
         ObjectNode check = mapper.createObjectNode();
         check.set("Key", item("userId", "u1"));
         check.put("ConditionExpression", "#d = :deep");
         check.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
-        check.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        check.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", transactWrite("ConditionCheck", check), "eu-west-1"));
@@ -1979,11 +3012,11 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void transactWriteItemsRejectsAnUnusedValueWithALeafAtLevel33() {
+    void transactWriteItemsRejectsAnUnusedValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode delete = mapper.createObjectNode();
         delete.set("Key", item("userId", "u1"));
-        delete.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        delete.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", transactWrite("Delete", delete), "eu-west-1"));
@@ -1998,7 +3031,7 @@ class NativeDynamoDbJsonHandlerTest {
         ObjectNode deepCheck = (ObjectNode) deep.get("ConditionCheck");
         deepCheck.put("ConditionExpression", "#d = :deep");
         deepCheck.set("ExpressionAttributeNames", mapper.createObjectNode().put("#d", "data"));
-        deepCheck.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(32)));
+        deepCheck.set("ExpressionAttributeValues", mapper.createObjectNode().set(":deep", nestedMaps(33)));
         ObjectNode broken = transactMember("ConditionCheck", "Users", "Key", item("userId", "u2"));
         ((ObjectNode) broken.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(");
 
@@ -2380,6 +3413,31 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"ExclusiveStartTableName":"ab"}             | 1 validation error detected: Value 'ab' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"ExclusiveStartTableName":"😀😀"}           | 2 validation errors detected: Value '😀😀' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '😀😀' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":""}               | 2 validation errors detected: Value '' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":"arn:aws:dynamodb:eu-west-2:123456789012:table/abc"} | 1 validation error detected: Value 'arn:aws:dynamodb:eu-west-2:123456789012:table/abc' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"ExclusiveStartTableName":"ab","Limit":0}   | 2 validation errors detected: Value '0' at 'limit' failed to satisfy constraint: Member must have value greater than or equal to 1; Value 'ab' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"ExclusiveStartTableName":"a!","Limit":101} | 3 validation errors detected: Value '101' at 'limit' failed to satisfy constraint: Member must have value less than or equal to 100; Value 'a!' at 'exclusiveStartTableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'a!' at 'exclusiveStartTableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            """)
+    void listTablesChecksItsStartNameBesideItsLimit(String request, String message) throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ListTables", mapper.readTree(request), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"ExclusiveStartTableName\":\"Aaa\"}", "{\"ExclusiveStartTableName\":null}"})
+    void listTablesAcceptsAStartNameNoTableHasAndANullOne(String request) throws Exception {
+        createUsersTable("eu-west-1");
+
+        Response response = handler.handle("ListTables", mapper.readTree(request), "eu-west-1");
+        assertTrue(response.getEntity().toString().contains("Users"), response.getEntity().toString());
+    }
+
+    @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             PutItem    | {"TableName":"Missing","Item":{},"ReturnValues":"ALL_NEW"} | 1 validation error detected: ReturnValues can only be ALL_OLD or NONE
             DeleteItem | {"TableName":"Missing","Key":{},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
@@ -2407,6 +3465,7 @@ class NativeDynamoDbJsonHandlerTest {
             PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"","ExpressionAttributeValues":{":v":{"S":"x"}}} | 1 validation error detected: Invalid ConditionExpression: The expression can not be empty;
             DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ConditionExpression":"a = :v"} | 1 validation error detected: Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :v
             PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"a BETWEEN :b AND :a","ExpressionAttributeValues":{":a":{"N":"1"},":b":{"N":"5"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:5}, upper bound operand: AttributeValue: {N:1}
+            DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ConditionExpression":"a < :v","ExpressionAttributeValues":{":v":{"BOOL":true}}} | 1 validation error detected: Invalid ConditionExpression: Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
             """)
     void aPutOrDeleteChecksItsConditionMembersInOrderInsideTheEnvelope(String operation, String request,
             String message) throws Exception {
@@ -2449,6 +3508,9 @@ class NativeDynamoDbJsonHandlerTest {
             UpdateItem | 33 | {"TableName":"Missing","Key":{"pk":{"S":"a","Foo":"y"}},"AttributeUpdates":{"m":{"Action":"PUT","Value":"DEEP"},"a":{"Action":"PUT","Value":{"N":"x"}}}} | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
             UpdateItem | 33 | {"TableName":"Missing","Key":{"pk":{"S":"a","Foo":"y"}},"UpdateExpression":"SET a = :q + :b + :x + :e + :k + :c","ExpressionAttributeValues":{":q":{"N":"x"},":b":{"S":"x"},":x":{"S":"x"},":e":{"S":"x"},":k":"DEEP",":c":{"S":"x"}}} | ExpressionAttributeValues contains invalid value: Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit for key :k
             UpdateItem | 62 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"x"}}},"Expected":{"e":{"Value":"DEEP"}}} | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            PutItem    | 63 | {"Item":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}}} | 1 validation error detected: Value null at 'tableName' failed to satisfy constraint: Member must not be null
+            PutItem    | 63 | {"Item":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}},"ReturnValues":"BOGUS"} | 2 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value null at 'tableName' failed to satisfy constraint: Member must not be null
+            DeleteItem | 0  | {"TableName":null,"ConditionalOperator":"XOR"} | 3 validation errors detected: Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [OR, AND]; Value null at 'key' failed to satisfy constraint: Member must not be null; Value null at 'tableName' failed to satisfy constraint: Member must not be null
             UpdateItem | 0  | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"AttributeUpdates":{"a":{"Action":"PUT","Value":{"S":"x","Foo":"y"}}},"ReturnValues":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]
             """)
     void theOlderValidatorChecksAnItemWriteTheNewerOneGivesUpOn(String operation, int levels,
@@ -2458,6 +3520,24 @@ class NativeDynamoDbJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            DescribeTable | {}                                                                 | pattern
+            UpdateTable   | {"BillingMode":"PAY_PER_REQUEST"}                                  | pattern
+            PutItem       | {"Item":{"userId":{"S":"u1"}},"Expected":{"d":{"Value":"DEEP"}}} | pattern
+            GetItem       | {"Key":{"userId":{"S":"u1"}}}                                      | short
+            Query         | {"KeyConditionExpression":"userId = :v","ExpressionAttributeValues":{":v":{"S":"u1"}}} | short
+            UpdateItem    | {"Key":{"userId":{"S":"u1"}}}                                      | pattern, short
+            """)
+    void eachCallMeasuresATableNameItsOwnWay(String operation, String request, String problems) throws Exception {
+        ObjectNode body = (ObjectNode) mapper.readTree(
+                request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(63))));
+        body.put("TableName", "😀😀");
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals(DynamoDbTableNamesTest.nameErrors("😀😀", problems), ex.getMessage());
     }
 
     @ParameterizedTest
@@ -2570,11 +3650,11 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void putItemRejectsAnExpectedValueWithALeafAtLevel33() {
+    void putItemRejectsAnExpectedValueWithALeafAtLevel34() {
         createUsersTable("eu-west-1");
         ObjectNode request = putRequest(attributeValue("S", "x"));
         request.set("Expected", mapper.createObjectNode().set("data",
-                mapper.createObjectNode().set("Value", nestedMaps(32))));
+                mapper.createObjectNode().set("Value", nestedMaps(33))));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutItem", request, "eu-west-1"));
@@ -2582,7 +3662,7 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
-    void queryRejectsAQueryFilterValueWithALeafAtLevel33WithoutTheEnvelope() {
+    void queryRejectsAQueryFilterValueWithALeafAtLevel34WithoutTheEnvelope() {
         createUsersTable("eu-west-1");
         ObjectNode request = mapper.createObjectNode();
         request.put("TableName", "Users");
@@ -2592,7 +3672,7 @@ class NativeDynamoDbJsonHandlerTest {
         request.set("KeyConditions", mapper.createObjectNode().set("userId", keyCondition));
         ObjectNode filter = mapper.createObjectNode();
         filter.put("ComparisonOperator", "EQ");
-        filter.set("AttributeValueList", mapper.createArrayNode().add(nestedMaps(32)));
+        filter.set("AttributeValueList", mapper.createArrayNode().add(nestedMaps(33)));
         request.set("QueryFilter", mapper.createObjectNode().set("data", filter));
 
         AwsException ex = assertThrows(AwsException.class,
@@ -3120,5 +4200,18 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("One or more parameter values were invalid: Type mismatch for Index Key title "
                 + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
         assertEquals("Old", service.getItem("Movies", item("id", "m1"), "eu-west-1").get("title").get("S").asText());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"t","SearchVector":[{"N":"1"}],"TopK":1} | ValidationException | missing field `IndexName` at line 1 column 53
+            {"TableName":"t","IndexName":"vix","SearchVector":[{"N":"1"}]} | ValidationException | missing field `TopK` at line 1 column 62
+            {"TableName":"t","IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":null} | SerializationException | invalid type: null, expected i32 at line 1 column 73
+            """)
+    void searchVectorsWithoutAJsonBodyStillRefusesANullOrOmittedRequiredMember(String body, String type,
+                                                                                 String message) {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("SearchVectors", json(body), "eu-west-1"));
+        assertEquals(type, ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
     }
 }

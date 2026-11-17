@@ -1,27 +1,43 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
+import io.floci.aws.testing.OrganizationsRequests;
 import io.floci.aws.testing.PartitionCleanup;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.eks.EksClient;
+import software.amazon.awssdk.services.eks.model.EksException;
+import software.amazon.awssdk.services.eks.model.ResourceNotFoundException;
 
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * REST requests whose route no rule mapped to an IAM action were let through under enforcement
@@ -33,6 +49,10 @@ class IamRestRouteEnforcementIntegrationTest {
 
     private static final String ADMIN = "test";
     private static final String ACCOUNT = "000000000000";
+    /** The management account of an organization of this class's own, which no other test uses. */
+    private static final String MANAGEMENT = "731000000154";
+    /** Another account, owning the sinks and shares this class's own account reaches across accounts. */
+    private static final String PEER = "731000000162";
 
     @TestHTTPResource("/")
     static URI baseUri;
@@ -42,6 +62,11 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /** Each user's access key ID, by user name. */
     private final Map<String, String> keys = new HashMap<>();
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     void apiGatewayManagementRoutesBeyondRestApisAreCheckedByMethod() {
@@ -72,6 +97,51 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void cloudFrontKeyValueStoreDataPlaneRoutesAreCheckedByOperation() {
+        String user = user("route-kvs");
+        String arn = "arn:aws:cloudfront::" + ACCOUNT + ":key-value-store/" + UUID.randomUUID();
+        String path = "/key-value-stores/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
+
+        policy(user, allow("cloudfront-keyvaluestore:ListKeys", "*"));
+        refused(as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).get(path).then(),
+                "cloudfront-keyvaluestore:DescribeKeyValueStore");
+        refused(as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).header("If-Match", "etag")
+                .body("{\"Value\":\"v\"}").put(path + "/keys/k").then(), "cloudfront-keyvaluestore:PutKey");
+
+        policy(user, allow("cloudfront-keyvaluestore:DescribeKeyValueStore", arn));
+        // Allowed on that store, the request reaches the data plane, which has no such store.
+        as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).get(path).then().statusCode(404);
+    }
+    @Test
+    void cloudFrontKeyValueStoreControlPlaneIsCheckedAgainstTheStoresReturnedArn() {
+        String user = user("route-kvs-control");
+        String name = "kvs-" + suffix();
+        String namespace = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
+        Response created = given().header("Authorization", auth(ADMIN, "cloudfront"))
+                .contentType("application/xml")
+                .body("<CreateKeyValueStoreRequest xmlns=\"" + namespace + "\"><Name>" + name
+                        + "</Name></CreateKeyValueStoreRequest>")
+                .post("/2020-05-31/key-value-store");
+        created.then().statusCode(201);
+        String arn = XmlParser.extractFirst(created.asString(), "ARN", null);
+        String etag = created.header("ETag");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "cloudfront")).header("If-Match", etag)
+                .delete("/2020-05-31/key-value-store/" + name).then().statusCode(204));
+
+        policy(user, allow("cloudfront:*", "*") + "," +
+                "{\"Effect\":\"Deny\",\"Action\":\"cloudfront:DeleteKeyValueStore\",\"Resource\":\"" + arn + "\"}");
+        refused(as(user, "cloudfront").header("If-Match", etag).delete("/2020-05-31/key-value-store/" + name).then(),
+                "cloudfront:DeleteKeyValueStore");
+        as(user, "cloudfront").get("/2020-05-31/key-value-store/" + name).then().statusCode(200);
+
+        policy(user, allow("cloudfront:DescribeKeyValueStore", "arn:aws:cloudfront::" + ACCOUNT
+                + ":key-value-store/not-this-one"));
+        refused(as(user, "cloudfront").get("/2020-05-31/key-value-store/" + name).then(),
+                "cloudfront:DescribeKeyValueStore");
+        policy(user, allow("cloudfront:DescribeKeyValueStore", arn));
+        as(user, "cloudfront").get("/2020-05-31/key-value-store/" + name).then().statusCode(200);
+    }
+    @Test
     void aScheduleRequestSignedForAnotherServiceIsStillCheckedAsScheduler() {
         // Checked by the route it reached, not by the credential scope it was signed with: an S3
         // grant does not let the request through as an S3 request.
@@ -81,28 +151,59 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void schedulerTaggingIsCheckedOnTheBareTagsRouteToo() {
-        // The shared tagging routes also take the ARN in the body of POST /tags.
+    void schedulerTaggingIsCheckedOnTheGroupItsModeledRouteNamesAndServedOnNoOtherRoute() {
+        // Scheduler tags the group whose ARN its modeled /tags/{ResourceArn} carries, which the generated request
+        // resources read, so a Deny on that group holds against an Allow on every resource. The shared controller's
+        // bare POST /tags is no route of Scheduler's model, as AWS gives it none: let through, it is refused as an
+        // ARN that path does not serve, and tags nothing.
         String user = user("route-scheduler-tags");
         String group = scheduleGroup("route-group-" + suffix());
+        String tagsPath = "/tags/" + encoded(group);
+        String tags = "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
 
         policy(user, allow("scheduler:ListTagsForResource", "*"));
-        refused(as(user, "scheduler").body(tagBody(group)).post("/tags").then(), "scheduler:TagResource");
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
         policy(user, allow("scheduler:TagResource", group));
         // Allowed on that group, the request reaches Scheduler, which has no such group.
-        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(not(403));
+        as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then().statusCode(not(403));
+        policy(user, allow("scheduler:TagResource", "*") + "," + deny("scheduler:TagResource", group));
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
+        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(400)
+                .body(containsString("Invalid resource ARN"));
+    }
+
+    /** A resource-tag condition reads the tags Scheduler holds on the schedule group a request names. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheScheduleGroup() {
+        String tagged = "route-tagged-" + suffix();
+        String untagged = "route-untagged-" + suffix();
+        for (String[] group : new String[][] {{tagged, "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}"},
+                {untagged, "{}"}}) {
+            given().header("Authorization", auth(ADMIN, "scheduler")).contentType("application/json").body(group[1])
+                    .post("/schedule-groups/" + group[0]).then().statusCode(200);
+            cleanup.register(() -> given().header("Authorization", auth(ADMIN, "scheduler"))
+                    .delete("/schedule-groups/" + group[0]).then().statusCode(200));
+        }
+        String user = user("route-scheduler-tag-condition");
+
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":\"scheduler:GetScheduleGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        as(user, "scheduler").get("/schedule-groups/" + tagged).then().statusCode(200);
+        refused(as(user, "scheduler").get("/schedule-groups/" + untagged).then(), "scheduler:GetScheduleGroup");
     }
 
     @Test
     void postTagsIsCheckedAgainstTheArnItsBodyNames() {
         // POST /tags tags the ARN its body names: one named in the query does not move the check.
         String user = user("route-tags-body");
-        String allowed = scheduleGroup("route-allowed-" + suffix());
-        String other = scheduleGroup("route-other-" + suffix());
+        String allowed = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-allowed-" + suffix();
+        String other = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-other-" + suffix();
 
-        policy(user, allow("scheduler:TagResource", allowed));
-        refused(as(user, "scheduler").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
-                "scheduler:TagResource");
+        policy(user, allow("pipes:TagResource", allowed));
+        refused(as(user, "pipes").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
+                "pipes:TagResource");
     }
 
     @Test
@@ -148,6 +249,60 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void deletedEksAddonRemainsAuthorizedForItsScopedDescribeWaiter() {
+        String name = "addon-waiter-" + suffix();
+        eksCluster(name);
+        String base = "/clusters/" + name + "/addons";
+        String arn = eks().body("{\"addonName\":\"vpc-cni\"}").post(base).then().statusCode(200)
+                .extract().path("addon.addonArn");
+        String user = "addon-waiter-user-" + suffix();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
+        policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn));
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
+            assertEquals(arn, client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")).addon().addonArn());
+            client.deleteAddon(r -> r.clusterName(name).addonName("vpc-cni"));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")));
+            policy(user, allow("eks:DescribeAddon", arn + "-foreign"));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni"))).statusCode());
+            policy(user, allow("eks:DescribeAddon", "*") + "," + deny("eks:DescribeAddon", arn));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni"))).statusCode());
+        }
+    }
+
+    @Test
+    void deletedEksFargateProfileRemainsAuthorizedForItsScopedDescribeWaiter() {
+        String name = "fargate-waiter-" + suffix();
+        eksCluster(name);
+        String path = "/clusters/" + name + "/fargate-profiles";
+        String arn = eks().body("{\"fargateProfileName\":\"fp\",\"podExecutionRoleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/route-fargate\"}").post(path).then().statusCode(200)
+                .extract().path("fargateProfile.fargateProfileArn");
+        String user = "fargate-waiter-user-" + suffix();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
+        policy(user, allow("eks:DescribeFargateProfile", arn) + "," + allow("eks:DeleteFargateProfile", arn));
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
+            assertEquals(arn, client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))
+                    .fargateProfile().fargateProfileArn());
+            client.deleteFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"));
+            assertThrows(ResourceNotFoundException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp")));
+            policy(user, allow("eks:DescribeFargateProfile", arn + "-foreign"));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))).statusCode());
+            policy(user, allow("eks:DescribeFargateProfile", "*") + "," + deny("eks:DescribeFargateProfile", arn));
+            assertEquals(403, assertThrows(EksException.class,
+                    () -> client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))).statusCode());
+        }
+    }
+
+    @Test
     void eachResourceAnEksClusterHoldsIsCheckedAgainstTheArnEksHoldsItUnder() {
         // Each is looked up as EKS looks it up, so a Deny on its own ARN applies where the action is allowed
         // on every resource, and a grant on that ARN alone covers it.
@@ -190,20 +345,22 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void anEksClusterRouteIsCheckedAgainstTheClusterEksActsOn() {
-        // EKS finds a cluster by its name alone, whatever Region a request is signed for, so a request signed
-        // for another Region is checked against the cluster it acts on.
+        // EKS clusters are Regional: a request signed for the cluster's Region is checked against the cluster it
+        // acts on, and one signed for another Region acts on that Region's cluster of the name, which is not there.
         String user = user("route-eks-region");
         String name = "route-west-" + suffix();
         String cluster = given().header("Authorization", auth(ADMIN, "us-west-2", "eks"))
                 .contentType("application/json")
                 .body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/route-cluster\"}")
                 .post("/clusters").then().statusCode(200).extract().path("cluster.arn");
-        cleanup.register(() -> eks().delete("/clusters/" + name));
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "us-west-2", "eks"))
+                .delete("/clusters/" + name));
 
         policy(user, allow("eks:DescribeCluster", "*") + "," + deny("eks:DescribeCluster", cluster));
-        refused(as(user, "eks").get("/clusters/" + name).then(), "eks:DescribeCluster");
+        refused(as(user, "us-west-2", "eks").get("/clusters/" + name).then(), "eks:DescribeCluster");
+        as(user, "eks").get("/clusters/" + name).then().statusCode(404);
         policy(user, allow("eks:DescribeCluster", cluster));
-        as(user, "eks").get("/clusters/" + name).then().statusCode(200);
+        as(user, "us-west-2", "eks").get("/clusters/" + name).then().statusCode(200);
     }
 
     @Test
@@ -339,9 +496,10 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void lambdaTaggingIsCheckedAgainstTheCallersOwnResourceWhateverAccountTheArnNames() {
-        // Lambda tags the caller's own function or MicroVM image of the ARN's name, so a grant on another
-        // account's ARN of that name does not cover it, and a grant on the caller's own does.
+    void lambdaTaggingByAnotherAccountsArnIsCheckedOnThatArnAndTheCallersOwnResourceOfItsName() {
+        // The ARN names another account's function or MicroVM image, which is checked, and Lambda tags the caller's
+        // own of that name, which is checked too, so a grant on either alone does not cover it; one on the caller's
+        // own covers a request naming its own ARN.
         String user = user("route-lambda-tags-account");
         String name = "route-tagged-" + suffix();
         String body = "{\"Tags\":{\"team\":\"a\"}}";
@@ -352,7 +510,8 @@ class IamRestRouteEnforcementIntegrationTest {
             policy(user, allow("lambda:TagResource", foreign));
             refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
             policy(user, allow("lambda:TagResource", own));
-            as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then().statusCode(not(403));
+            refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
+            as(user, "lambda").body(body).post("/2017-03-31/tags/" + own).then().statusCode(not(403));
         }
     }
 
@@ -512,6 +671,78 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * A route of Lake Formation, Macie or Inspector that AWS authorizes on no resource type is checked as its vendored
+     * route's operation, with no hand rule, Macie's on the paths it shares with other services among them: refused
+     * without its action, past the check with it.
+     */
+    @Test
+    void lakeFormationMacieAndInspectorAreCheckedByTheirRoutes() {
+        String user = user("route-no-type");
+
+        policy(user, allow("lakeformation:ListLFTags", "*"));
+        refused(as(user, "lakeformation").body("{}").post("/GetDataLakeSettings").then(),
+                "lakeformation:GetDataLakeSettings");
+        refused(as(user, "macie2").get("/admin/configuration").then(), "macie2:DescribeOrganizationConfiguration");
+        refused(as(user, "macie2").get("/members").then(), "macie2:ListMembers");
+        refused(as(user, "macie2").get("/admin").then(), "macie2:ListOrganizationAdminAccounts");
+        refused(as(user, "inspector2").body("{}").post("/status/batch/get").then(),
+                "inspector2:BatchGetAccountStatus");
+        refused(as(user, "inspector2").body("{}").post("/disable").then(), "inspector2:Disable");
+
+        policy(user, allow("lakeformation:GetDataLakeSettings", "*") + ","
+                + allow("macie2:DescribeOrganizationConfiguration", "*") + ","
+                + allow("inspector2:BatchGetAccountStatus", "*"));
+        as(user, "lakeformation").body("{}").post("/GetDataLakeSettings").then().statusCode(200);
+        // Past the check, Macie answers that this account has no session.
+        as(user, "macie2").get("/admin/configuration").then().statusCode(404);
+        as(user, "inspector2").body("{}").post("/status/batch/get").then().statusCode(200);
+    }
+
+    /**
+     * Macie's {@code CreateMember} is checked on the account's members, {@code member/*}: nothing botocore or the
+     * Service Reference says names the member it makes by its {@code account.accountId}, so a grant scoped to one
+     * member does not reach it, a grant on the members lets the request reach Macie, which answers that this account
+     * has no session, and a deny on them holds under an allow on everything.
+     */
+    @Test
+    void macieCreateMemberIsCheckedOnTheAccountsMembers() {
+        String user = user("route-macie-member");
+        String members = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/*";
+
+        policy(user, allow("macie2:CreateMember", "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333"));
+        refused(createMember(user, "111122223333", null), "macie2:CreateMember");
+
+        policy(user, allow("macie2:CreateMember", members));
+        createMember(user, "111122223333", null).statusCode(404);
+        createMember(user, "444455556666", null).statusCode(404);
+
+        policy(user, allow("macie2:CreateMember", "*") + "," + deny("macie2:CreateMember", members));
+        refused(createMember(user, "111122223333", null), "macie2:CreateMember");
+    }
+
+    /**
+     * A Macie {@code CreateMember} that carries tags also needs {@code macie2:TagResource} on the member it makes, and
+     * a condition on {@code aws:RequestTag/<key>} sees those tags. One that carries none needs only its own action.
+     */
+    @Test
+    void macieCreateMemberIsCheckedWithTheTagsItCarries() {
+        String user = user("route-macie-tags");
+        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/*";
+
+        policy(user, allow("macie2:CreateMember", member));
+        createMember(user, "111122223333", null).statusCode(404);
+        refused(createMember(user, "111122223333", "blue"), "macie2:TagResource");
+
+        policy(user, allow("macie2:CreateMember", member) + "," + allow("macie2:TagResource", member));
+        createMember(user, "111122223333", "blue").statusCode(404);
+
+        policy(user, allow("macie2:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"macie2:CreateMember\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
+        refused(createMember(user, "111122223333", "red"), "macie2:CreateMember");
+        createMember(user, "111122223333", "blue").statusCode(404);
+    }
+
+    /**
      * An OpenSearch request naming its domain in its path, or its ARN in its query, is checked on that domain, in
      * both API versions: a grant scoped to the domain lets the request reach OpenSearch, which has no such domain, a
      * request naming another domain is refused, and a deny on the domain holds under an allow on everything. A domain
@@ -577,6 +808,110 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * A Security Hub request is checked on the caller's hub in the Region it is signed for, {@code hub/default}, the
+     * ARN Security Hub gives it, or on the hub its {@code HubArn} names: a caller with no grant is refused, a grant
+     * scoped to the hub lets {@code DescribeStandards} through and {@code DescribeHub} reach Security Hub, which is
+     * not enabled there, with or without the hub's ARN, a request naming or signed for another Region's hub is
+     * refused, and a deny on the hub holds under an allow on everything.
+     */
+    @Test
+    void aSecurityHubRequestIsCheckedOnTheHub() {
+        String user = user("route-hub");
+        String region = "eu-west-3";
+        String hub = "arn:aws:securityhub:" + region + ":" + ACCOUNT + ":hub/default";
+        String otherHub = "arn:aws:securityhub:us-west-2:" + ACCOUNT + ":hub/default";
+        refused(as(user, region, "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+        refused(as(user, region, "securityhub").body("{}").post("/accounts").then(), "securityhub:EnableSecurityHub");
+
+        policy(user, allow("securityhub:DescribeStandards", hub) + "," + allow("securityhub:DescribeHub", hub));
+        as(user, region, "securityhub").get("/standards").then().statusCode(200);
+        as(user, region, "securityhub").get("/accounts").then().statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        as(user, region, "securityhub").queryParam("HubArn", hub).get("/accounts").then().statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        refused(as(user, region, "securityhub").queryParam("HubArn", otherHub).get("/accounts").then(),
+                "securityhub:DescribeHub");
+        refused(as(user, "us-west-2", "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+
+        policy(user, allow("securityhub:*", "*") + "," + deny("securityhub:DescribeStandards", hub));
+        refused(as(user, region, "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+        as(user, "us-west-2", "securityhub").get("/standards").then().statusCode(200);
+    }
+
+    /**
+     * A GuardDuty request naming its detector in its path is checked on that detector, the ARN GuardDuty gives it,
+     * and one naming none as its action on {@code *}: a caller with no grant is refused, a grant scoped to the
+     * detector lets {@code GetDetector} read it, a request naming another detector is refused, and a deny on the
+     * detector holds under an allow on everything.
+     */
+    @Test
+    void aGuardDutyRequestIsCheckedOnTheDetectorItsPathNames() {
+        String user = user("route-detector");
+        String region = "eu-west-3";
+        refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
+        String detector = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json").body("{\"enable\":true}").post("/detector")
+                .then().statusCode(200).extract().path("detectorId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/detector/" + detector));
+        String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":detector/" + detector;
+        refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
+
+        policy(user, allow("guardduty:GetDetector", arn));
+        as(user, region, "guardduty").get("/detector/" + detector).then().statusCode(200)
+                .body("status", equalTo("ENABLED"));
+        refused(as(user, region, "guardduty").get("/detector/other" + detector).then(), "guardduty:GetDetector");
+        refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
+
+        policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:GetDetector", arn));
+        refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
+        as(user, region, "guardduty").get("/detector").then().statusCode(200);
+    }
+
+    /**
+     * A GuardDuty malware protection plan request, which GuardDutyRouteFilter moves onto {@code /_guardduty}, is
+     * checked as the model's route for it, on the plan its path names, and so is one sent to {@code /_guardduty}
+     * itself: a caller with no grant is refused before a plan is created, a grant scoped to the plan lets
+     * {@code GetMalwareProtectionPlan} read it and refuses another, and a deny on the plan keeps it from being
+     * deleted under an allow on everything.
+     */
+    @Test
+    void aGuardDutyMalwareProtectionPlanRequestIsCheckedOnThePlanItsPathNames() {
+        String user = user("route-plan");
+        String region = "eu-west-3";
+        String plan = "{\"role\":\"arn:aws:iam::" + ACCOUNT + ":role/malware-scan\","
+                + "\"protectedResource\":{\"s3Bucket\":{\"bucketName\":\"route-plan-" + suffix() + "\"}}}";
+        refused(as(user, region, "guardduty").body(plan).post("/malware-protection-plan").then(),
+                "guardduty:CreateMalwareProtectionPlan");
+        refused(as(user, region, "guardduty").get("/malware-protection-plan").then(),
+                "guardduty:ListMalwareProtectionPlans");
+        // GuardDuty refuses a second plan for one bucket, so this create also shows the refused one made none.
+        String id = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json").body(plan).post("/malware-protection-plan")
+                .then().statusCode(200).extract().path("malwareProtectionPlanId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/malware-protection-plan/" + id));
+        String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":malware-protection-plan/" + id;
+        refused(as(user, region, "guardduty").get("/malware-protection-plan/" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+        refused(as(user, region, "guardduty").get("/_guardduty/malware-protection-plan/" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+
+        policy(user, allow("guardduty:GetMalwareProtectionPlan", arn));
+        as(user, region, "guardduty").get("/malware-protection-plan/" + id).then().statusCode(200)
+                .body("arn", equalTo(arn));
+        as(user, region, "guardduty").get("/_guardduty/malware-protection-plan/" + id).then().statusCode(200)
+                .body("arn", equalTo(arn));
+        refused(as(user, region, "guardduty").get("/malware-protection-plan/other" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+
+        policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:DeleteMalwareProtectionPlan", arn));
+        refused(as(user, region, "guardduty").delete("/malware-protection-plan/" + id).then(),
+                "guardduty:DeleteMalwareProtectionPlan");
+        as(user, region, "guardduty").get("/malware-protection-plan/" + id).then().statusCode(200);
+    }
+
+    /**
      * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
      * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
      * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.
@@ -600,6 +935,446 @@ class IamRestRouteEnforcementIntegrationTest {
         }
     }
 
+    @Test
+    void fisRamOamResourceExplorerAccountAndControlCatalogAreCheckedByTheirRoutes() {
+        String user = user("route-governance");
+
+        checkedAs(user, "account", "POST", "/getAlternateContact", "{\"AlternateContactType\":\"BILLING\"}",
+                "account:GetAlternateContact");
+        checkedAs(user, "account", "POST", "/getContactInformation", "{}", "account:GetContactInformation");
+        checkedAs(user, "account", "POST", "/putContactInformation", "{}", "account:PutContactInformation");
+        checkedAs(user, "controlcatalog", "POST", "/list-controls", "{}", "controlcatalog:ListControls");
+        checkedAs(user, "fis", "GET", "/experimentTemplates", null, "fis:ListExperimentTemplates");
+        checkedAs(user, "oam", "POST", "/ListSinks", "{}", "oam:ListSinks");
+        checkedAs(user, "ram", "POST", "/getresourceshares", "{\"resourceOwner\":\"SELF\"}", "ram:GetResourceShares");
+        checkedAs(user, "resource-explorer-2", "POST", "/ListViews", "{}", "resource-explorer-2:ListViews");
+    }
+
+    @Test
+    void resourceExplorerRoutesItsFilterMovesOffSharedPathsAreChecked() {
+        String user = user("route-re2-moved");
+
+        checkedAs(user, "resource-explorer-2", "POST", "/ListIndexes", "{}", "resource-explorer-2:ListIndexes");
+        // AWS authorizes ListResources as Search.
+        checkedAs(user, "resource-explorer-2", "POST", "/ListResources", "{}", "resource-explorer-2:Search");
+    }
+
+    @Test
+    void sharedTagRoutesAreCheckedForFisAndResourceExplorerOnBothPaths() {
+        String user = user("route-shared-tags");
+        String template = encoded("arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/EXTabsent");
+        String view = encoded("arn:aws:resource-explorer-2:us-east-1:" + ACCOUNT + ":view/absent/1");
+
+        checkedAs(user, "fis", "GET", "/tags/" + template, null, "fis:ListTagsForResource");
+        policy(user, allow("sts:GetCallerIdentity", "*"));
+        checkedAs(user, "fis", "GET", "/tags?resourceArn=" + template, null, "fis:ListTagsForResource");
+        checkedAs(user, "resource-explorer-2", "GET", "/tags/" + view, null, "resource-explorer-2:ListTagsForResource");
+        policy(user, allow("sts:GetCallerIdentity", "*"));
+        checkedAs(user, "resource-explorer-2", "GET", "/tags?resourceArn=" + view, null,
+                "resource-explorer-2:ListTagsForResource");
+    }
+
+    @Test
+    void accountIsCheckedOnTheAccountARequestActsOn() {
+        String user = user("route-account");
+        String own = "{\"AlternateContactType\":\"BILLING\"}";
+        String member = "{\"AccountId\":\"111122223333\",\"AlternateContactType\":\"BILLING\"}";
+        String action = "account:GetAlternateContact";
+
+        policy(user, allow(action, "arn:aws:account::" + ACCOUNT + ":account"));
+        request(user, "account", "POST", "/getAlternateContact", own).statusCode(404);
+        refused(request(user, "account", "POST", "/getAlternateContact", member), action);
+
+        policy(user, allow(action, "arn:aws:account::*:account/o-*/111122223333"));
+        // Past the check: the caller is in no organization, which Account Management refuses itself.
+        request(user, "account", "POST", "/getAlternateContact", member)
+                .statusCode(403).body(containsString("The specified account"));
+        refused(request(user, "account", "POST", "/getAlternateContact", own), action);
+    }
+
+    @Test
+    void accountIsCheckedOnTheMemberAccountOfTheCallersOrganization() {
+        OrganizationsRequests.request(MANAGEMENT, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .when().post("/").then().statusCode(200);
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "DeleteOrganization", "{}")
+                .when().post("/").then().statusCode(200));
+        String organization = OrganizationsRequests.request(MANAGEMENT, "DescribeOrganization", "{}")
+                .when().post("/").then().statusCode(200).extract().path("Organization.Id");
+        String member = OrganizationsRequests.request(MANAGEMENT, "CreateAccount",
+                        "{\"Email\":\"route-contact@example.com\",\"AccountName\":\"RouteContact\"}")
+                .when().post("/").then().statusCode(200).extract().path("CreateAccountStatus.AccountId");
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "RemoveAccountFromOrganization",
+                "{\"AccountId\":\"" + member + "\"}").when().post("/").then().statusCode(200));
+        OrganizationsRequests.request(MANAGEMENT, "EnableAWSServiceAccess",
+                        "{\"ServicePrincipal\":\"account.amazonaws.com\"}")
+                .when().post("/").then().statusCode(200);
+        String userName = "route-account-member-" + suffix();
+        String accessKeyId = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(MANAGEMENT, "iam"),
+                userName).accessKeyId();
+        String action = "account:GetAlternateContact";
+        String memberArn = "arn:aws:account::" + MANAGEMENT + ":account/" + organization + "/" + member;
+        String body = "{\"AccountId\":\"" + member + "\",\"AlternateContactType\":\"BILLING\"}";
+        Consumer<String> policy = statements -> EnforcementFixtures.putUserPolicy(baseUri.getPort(),
+                auth(MANAGEMENT, "iam"), userName, "p",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}");
+
+        // The member account's own ARN, its organization and management account the ones the caller's organization has.
+        policy.accept(allow(action, memberArn));
+        given().header("Authorization", auth(accessKeyId, "account")).contentType("application/json").body(body)
+                .post("/getAlternateContact").then().statusCode(404);
+        policy.accept(allow(action, "arn:aws:account::" + MANAGEMENT + ":account/o-other00000/" + member));
+        refused(given().header("Authorization", auth(accessKeyId, "account")).contentType("application/json")
+                .body(body).post("/getAlternateContact").then(), action);
+        policy.accept(allow(action, "*") + "," + deny(action, memberArn));
+        refused(given().header("Authorization", auth(accessKeyId, "account")).contentType("application/json")
+                .body(body).post("/getAlternateContact").then(), action);
+    }
+
+    @Test
+    void controlCatalogIsCheckedOnTheControlItNames() {
+        String user = user("route-control");
+        String control = "arn:aws:controlcatalog:::control/" + "a".repeat(34);
+        String other = "arn:aws:controlcatalog:::control/" + "b".repeat(34);
+
+        policy(user, allow("controlcatalog:GetControl", control));
+        request(user, "controlcatalog", "POST", "/get-control", "{\"ControlArn\":\"" + control + "\"}").statusCode(404);
+        refused(request(user, "controlcatalog", "POST", "/get-control", "{\"ControlArn\":\"" + other + "\"}"),
+                "controlcatalog:GetControl");
+    }
+
+    @Test
+    void fisIsCheckedOnTheTemplateItsPathNames() {
+        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
+                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}}";
+        String id = adminOf("fis").body(template).post("/experimentTemplates")
+                .then().statusCode(200).extract().path("experimentTemplate.id");
+        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
+        String arn = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/" + id;
+        String user = user("route-fis");
+
+        policy(user, allow("fis:GetExperimentTemplate", arn));
+        request(user, "fis", "GET", "/experimentTemplates/" + id, null)
+                .statusCode(200).body("experimentTemplate.arn", equalTo(arn));
+        refused(request(user, "fis", "GET", "/experimentTemplates/EXTother", null), "fis:GetExperimentTemplate");
+    }
+
+    @Test
+    void fisSafetyLeverUpdateIsCheckedOnTheLever() {
+        String user = user("route-lever");
+        String action = "fis:UpdateSafetyLeverState";
+        String body = "{\"state\":{\"status\":\"disengaged\",\"reason\":\"route test\"}}";
+
+        policy(user, allow(action, "arn:aws:fis:us-east-1:" + ACCOUNT + ":safety-lever/default"));
+        request(user, "fis", "PATCH", "/safetyLevers/default/state", body).statusCode(200);
+        policy(user, allow(action, "arn:aws:fis:us-east-1:" + ACCOUNT + ":safety-lever/other"));
+        refused(request(user, "fis", "PATCH", "/safetyLevers/default/state", body), action);
+    }
+
+    @Test
+    void oamIsCheckedOnTheArnItsIdentifiersHold() {
+        String sink = adminOf("oam").body("{\"Name\":\"route-sink-" + suffix() + "\"}").post("/CreateSink")
+                .then().statusCode(200).extract().path("Arn");
+        cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + sink + "\"}").post("/DeleteSink"));
+        String link = "arn:aws:oam:us-east-1:" + ACCOUNT + ":link/absent";
+        String other = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/other";
+        String user = user("route-oam");
+
+        policy(user, allow("oam:GetSink", sink));
+        request(user, "oam", "POST", "/GetSink", "{\"Identifier\":\"" + sink + "\"}")
+                .statusCode(200).body("Arn", equalTo(sink));
+        refused(request(user, "oam", "POST", "/GetSink", "{\"Identifier\":\"" + other + "\"}"), "oam:GetSink");
+
+        policy(user, allow("oam:GetSinkPolicy", sink));
+        request(user, "oam", "POST", "/GetSinkPolicy", "{\"SinkIdentifier\":\"" + sink + "\"}").statusCode(not(403));
+        refused(request(user, "oam", "POST", "/GetSinkPolicy", "{\"SinkIdentifier\":\"" + other + "\"}"),
+                "oam:GetSinkPolicy");
+
+        policy(user, allow("oam:GetLink", link));
+        request(user, "oam", "POST", "/GetLink", "{\"Identifier\":\"" + link + "\"}").statusCode(404);
+        refused(request(user, "oam", "POST", "/GetLink", "{\"Identifier\":\"" + link + "x\"}"), "oam:GetLink");
+    }
+
+    @Test
+    void oamTagRoutesAreCheckedOnTheArnWhetherItsSlashIsEncodedOrNot() {
+        String sink = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/allowed";
+        String other = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/other";
+        String user = user("route-oam-tags");
+        String tags = "{\"Tags\":{\"team\":\"red\"}}";
+
+        // The tag routes take the ARN as the rest of the path, so a sink's slash may come unencoded too.
+        policy(user, allow("oam:TagResource", sink) + "," + allow("oam:ListTagsForResource", sink) + ","
+                + allow("oam:UntagResource", sink));
+        for (String arn : List.of(sink, encoded(sink))) {
+            request(user, "oam", "PUT", "/tags/" + arn, tags).statusCode(not(403));
+            request(user, "oam", "GET", "/tags/" + arn, null).statusCode(not(403));
+            request(user, "oam", "DELETE", "/tags/" + arn + "?tagKeys=team", null).statusCode(not(403));
+        }
+        for (String arn : List.of(other, encoded(other))) {
+            refused(request(user, "oam", "PUT", "/tags/" + arn, tags), "oam:TagResource");
+            refused(request(user, "oam", "GET", "/tags/" + arn, null), "oam:ListTagsForResource");
+            refused(request(user, "oam", "DELETE", "/tags/" + arn + "?tagKeys=team", null), "oam:UntagResource");
+        }
+    }
+
+    @Test
+    void ramIsCheckedOnTheResourceShareItNamesInItsBodyAndQuery() {
+        String share = madeShare(adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}")
+                .post("/createresourceshare").then());
+        String other = "arn:aws:ram:us-east-1:" + ACCOUNT + ":resource-share/other";
+        String user = user("route-ram");
+
+        policy(user, allow("ram:UpdateResourceShare", share));
+        request(user, "ram", "POST", "/updateresourceshare",
+                "{\"resourceShareArn\":\"" + share + "\",\"name\":\"route-renamed-" + suffix() + "\"}").statusCode(200);
+        refused(request(user, "ram", "POST", "/updateresourceshare", "{\"resourceShareArn\":\"" + other + "\"}"),
+                "ram:UpdateResourceShare");
+
+        policy(user, allow("ram:DeleteResourceShare", share));
+        refused(request(user, "ram", "DELETE", "/deleteresourceshare?resourceShareArn=" + encoded(other), null),
+                "ram:DeleteResourceShare");
+        request(user, "ram", "DELETE", "/deleteresourceshare?resourceShareArn=" + encoded(share), null).statusCode(200);
+    }
+
+    @Test
+    void ramCreateIsCheckedOnTheShareItMakesAndThePermissionsItNames() {
+        String user = user("route-ram-create");
+        String action = "ram:CreateResourceShare";
+        String shares = "arn:aws:ram:us-east-1:" + ACCOUNT + ":resource-share/*";
+        String permission = "arn:aws:ram::aws:permission/AWSRAMDefaultPermissionSubnet";
+        String named = "{\"permissionArns\":[\"" + permission + "\"]}";
+
+        policy(user, allow(action, shares));
+        madeShare(request(user, "ram", "POST", "/createresourceshare", "{}"));
+        refused(request(user, "ram", "POST", "/createresourceshare", named), action);
+
+        policy(user, allow(action, shares) + "," + allow(action, permission));
+        madeShare(request(user, "ram", "POST", "/createresourceshare", named));
+
+        policy(user, allow(action, permission));
+        refused(request(user, "ram", "POST", "/createresourceshare", named), action);
+
+        // Its tags go on the share it makes.
+        policy(user, allow(action, shares) + "," + allow("ram:TagResource", shares));
+        madeShare(request(user, "ram", "POST", "/createresourceshare",
+                "{\"tags\":[{\"key\":\"team\",\"value\":\"red\"}]}"));
+    }
+
+    @Test
+    void resourceExplorerIsCheckedOnTheViewItsMembersName() {
+        String service = "resource-explorer-2";
+        String view = adminOf(service).body("{\"ViewName\":\"route-view-" + suffix() + "\"}").post("/CreateView")
+                .then().statusCode(200).extract().path("View.ViewArn");
+        cleanup.register(() -> adminOf(service).body("{\"ViewArn\":\"" + view + "\"}").post("/DeleteView"));
+        String other = "arn:aws:resource-explorer-2:us-east-1:" + ACCOUNT + ":view/other/1";
+        String user = user("route-re2-view");
+
+        policy(user, allow("resource-explorer-2:GetView", view));
+        request(user, service, "POST", "/GetView", "{\"ViewArn\":\"" + view + "\"}")
+                .statusCode(200).body("View.ViewArn", equalTo(view));
+        refused(request(user, service, "POST", "/GetView", "{\"ViewArn\":\"" + other + "\"}"),
+                "resource-explorer-2:GetView");
+    }
+
+    @Test
+    void createsActingOnNoResourceTypeAreCheckedForTheirTagsOnWhatTheyMake() {
+        String service = "resource-explorer-2";
+        String user = user("route-made-tags");
+        String views = "arn:aws:resource-explorer-2:us-east-1:" + ACCOUNT + ":view/*";
+        String indexes = "arn:aws:resource-explorer-2:eu-west-2:" + ACCOUNT + ":index/*";
+        String sinks = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/*";
+        String tags = "\"Tags\":{\"team\":\"red\"}";
+        String creates = allow("resource-explorer-2:CreateView", "*") + "," + allow("resource-explorer-2:CreateIndex", "*")
+                + "," + allow("oam:CreateSink", "*");
+
+        // A tagging grant scoped to the type a create makes lets its tags through.
+        policy(user, creates + "," + allow("resource-explorer-2:TagResource", views) + ","
+                + allow("resource-explorer-2:TagResource", indexes) + "," + allow("oam:TagResource", sinks));
+        String view = request(user, service, "POST", "/CreateView",
+                "{\"ViewName\":\"route-made-" + suffix() + "\"," + tags + "}").statusCode(200).extract().path("View.ViewArn");
+        cleanup.register(() -> adminOf(service).body("{\"ViewArn\":\"" + view + "\"}").post("/DeleteView"));
+        String sink = request(user, "oam", "POST", "/CreateSink", "{\"Name\":\"route-made-" + suffix() + "\"," + tags + "}")
+                .statusCode(200).extract().path("Arn");
+        cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + sink + "\"}").post("/DeleteSink"));
+        Response index = as(user, "eu-west-2", service).body("{" + tags + "}").post("/CreateIndex");
+        index.then().statusCode(not(403));
+        if (index.statusCode() == 200) {
+            String arn = index.path("Arn");
+            cleanup.register(() -> given().header("Authorization", auth(ADMIN, "eu-west-2", service))
+                    .contentType("application/json").body("{\"Arn\":\"" + arn + "\"}").post("/DeleteIndex"));
+        }
+
+        // A grant on another type, or a deny on the type made, refuses them.
+        policy(user, creates + "," + allow("resource-explorer-2:TagResource", indexes.replace("eu-west-2", "us-east-1"))
+                + "," + allow("oam:TagResource", "*") + "," + deny("oam:TagResource", sinks));
+        refused(request(user, service, "POST", "/CreateView", "{\"ViewName\":\"route-made-" + suffix() + "\"," + tags + "}"),
+                "resource-explorer-2:TagResource");
+        refused(as(user, "eu-west-2", service).body("{" + tags + "}").post("/CreateIndex").then(),
+                "resource-explorer-2:TagResource");
+        refused(request(user, "oam", "POST", "/CreateSink", "{\"Name\":\"route-made-" + suffix() + "\"," + tags + "}"),
+                "oam:TagResource");
+    }
+
+    @Test
+    void oamCreateLinkIsCheckedOnTheSinkOfTheAccountItsArnNamesAlone() {
+        String sink = given().header("Authorization", auth(PEER, "oam")).contentType("application/json")
+                .body("{\"Name\":\"route-peer-" + suffix() + "\"}").post("/CreateSink")
+                .then().statusCode(200).extract().path("Arn");
+        cleanup.register(() -> given().header("Authorization", auth(PEER, "oam")).contentType("application/json")
+                .body("{\"Identifier\":\"" + sink + "\"}").post("/DeleteSink"));
+        String sinkPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":[\""
+                + ACCOUNT + "\"]},\"Action\":[\"oam:CreateLink\"],\"Resource\":\"*\"}]}";
+        given().header("Authorization", auth(PEER, "oam")).contentType("application/json")
+                .body("{\"SinkIdentifier\":\"" + sink + "\",\"Policy\":\"" + sinkPolicy.replace("\"", "\\\"") + "\"}")
+                .post("/PutSinkPolicy").then().statusCode(200);
+        String user = user("route-oam-link");
+        String action = "oam:CreateLink";
+        String body = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\","
+                + "\"ResourceTypes\":[\"AWS::CloudWatch::Metric\"]}";
+
+        // The sink is the other account's, which the link is made to: a grant on a sink of that name of the caller's
+        // own is no grant on it.
+        policy(user, allow(action, sink.replace(PEER, ACCOUNT)));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, "*") + "," + deny(action, sink));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, sink));
+        String link = request(user, "oam", "POST", "/CreateLink", body).statusCode(200).extract().path("Arn");
+        cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + link + "\"}").post("/DeleteLink"));
+    }
+
+    @Test
+    void ramInvitationIsCheckedOnTheInvitationOfTheAccountThatSentIt() {
+        String share = given().header("Authorization", auth(PEER, "ram")).contentType("application/json")
+                .body("{\"name\":\"route-invite-" + suffix() + "\",\"principals\":[\"" + ACCOUNT + "\"]}")
+                .post("/createresourceshare").then().statusCode(200).extract().path("resourceShare.resourceShareArn");
+        cleanup.register(() -> given().header("Authorization", auth(PEER, "ram")).queryParam("resourceShareArn", share)
+                .delete("/deleteresourceshare"));
+        String invitation = adminOf("ram").body("{\"resourceShareArns\":[\"" + share + "\"]}")
+                .post("/getresourceshareinvitations").then().statusCode(200)
+                .extract().path("resourceShareInvitations[0].resourceShareInvitationArn");
+        String user = user("route-ram-invite");
+        String action = "ram:AcceptResourceShareInvitation";
+        String body = "{\"resourceShareInvitationArn\":\"" + invitation + "\"}";
+
+        policy(user, allow(action, invitation.replace(PEER, ACCOUNT)));
+        refused(request(user, "ram", "POST", "/acceptresourceshareinvitation", body), action);
+        policy(user, allow(action, invitation));
+        request(user, "ram", "POST", "/acceptresourceshareinvitation", body).statusCode(200)
+                .body("resourceShareInvitation.status", equalTo("ACCEPTED"));
+        // The share it accepted is the other account's, whose permissions it reads there.
+        policy(user, allow("ram:ListResourceSharePermissions", share));
+        request(user, "ram", "POST", "/listresourcesharepermissions", "{\"resourceShareArn\":\"" + share + "\"}")
+                .statusCode(200);
+    }
+
+    @Test
+    void fisTemplatesAreCheckedOnTheActionsTheyName() {
+        String user = user("route-fis-actions");
+        String create = "fis:CreateExperimentTemplate";
+        String update = "fis:UpdateExperimentTemplate";
+        String wait = "arn:aws:fis:us-east-1:" + ACCOUNT + ":action/aws:fis:wait";
+        String templates = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/*";
+        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
+                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}}";
+        String actions = "{\"actions\":{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT2M\"}}}}";
+        String passRole = allow("iam:PassRole", "*");
+
+        policy(user, allow(create, "*") + "," + deny(create, wait) + "," + passRole);
+        refused(request(user, "fis", "POST", "/experimentTemplates", template), create);
+        policy(user, allow(create, templates) + "," + passRole);
+        refused(request(user, "fis", "POST", "/experimentTemplates", template), create);
+        policy(user, allow(create, templates) + "," + allow(create, wait) + "," + passRole);
+        String id = request(user, "fis", "POST", "/experimentTemplates", template)
+                .statusCode(200).extract().path("experimentTemplate.id");
+        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
+
+        policy(user, allow(update, "*") + "," + deny(update, wait));
+        refused(request(user, "fis", "PATCH", "/experimentTemplates/" + id, actions), update);
+        policy(user, allow(update, templates) + "," + allow(update, wait));
+        request(user, "fis", "PATCH", "/experimentTemplates/" + id, actions).statusCode(200);
+    }
+
+    @Test
+    void resourceExplorerSearchesNamingNoViewAreCheckedOnTheDefaultView() {
+        String service = "resource-explorer-2";
+        String view = adminOf(service).body("{}").post("/GetDefaultView").then().statusCode(200).extract().path("ViewArn");
+        String other = "arn:aws:resource-explorer-2:us-east-1:" + ACCOUNT + ":view/other/1";
+        String user = user("route-re2-default");
+        String action = "resource-explorer-2:Search";
+        String search = "{\"QueryString\":\"\"}";
+
+        policy(user, allow(action, view));
+        request(user, service, "POST", "/Search", search).statusCode(200);
+        request(user, service, "POST", "/ListResources", "{}").statusCode(200);
+        policy(user, allow(action, other));
+        refused(request(user, service, "POST", "/Search", search), action);
+        refused(request(user, service, "POST", "/ListResources", "{}"), action);
+        policy(user, allow(action, "*") + "," + deny(action, view));
+        refused(request(user, service, "POST", "/Search", search), action);
+        refused(request(user, service, "POST", "/ListResources", "{}"), action);
+    }
+
+    @Test
+    void createsAreCheckedWithTheTagsTheyCarry() {
+        // These three name too little to be created, so past the check the service refuses them; RAM makes the share.
+        Consumer<ValidatableResponse> refusedByTheService = response -> response.statusCode(400);
+        createIsCheckedWithItsTags("fis", "/experimentTemplates", "fis:CreateExperimentTemplate", "fis:TagResource",
+                team -> "{\"tags\":{\"team\":\"" + team + "\"}}", refusedByTheService);
+        createIsCheckedWithItsTags("oam", "/CreateSink", "oam:CreateSink", "oam:TagResource",
+                team -> "{\"Tags\":{\"team\":\"" + team + "\"}}", refusedByTheService);
+        createIsCheckedWithItsTags("resource-explorer-2", "/CreateView", "resource-explorer-2:CreateView",
+                "resource-explorer-2:TagResource", team -> "{\"Tags\":{\"team\":\"" + team + "\"}}",
+                refusedByTheService);
+        createIsCheckedWithItsTags("ram", "/createresourceshare", "ram:CreateResourceShare", "ram:TagResource",
+                team -> "{\"tags\":[{\"key\":\"team\",\"value\":\"" + team + "\"}]}", this::madeShare);
+    }
+
+    /**
+     * An untagged request needs only the create, one with tags the tagging action too, and a deny on a tag refuses
+     * that tag and no other. {@code passed} takes a response that got past the check.
+     */
+    private void createIsCheckedWithItsTags(String service, String path, String action, String tagging,
+                                            UnaryOperator<String> body, Consumer<ValidatableResponse> passed) {
+        String user = user("route-tags-" + service);
+
+        policy(user, allow(action, "*"));
+        passed.accept(request(user, service, "POST", path, "{}"));
+        refused(request(user, service, "POST", path, body.apply("red")), tagging);
+
+        policy(user, allow(action, "*") + "," + allow(tagging, "*") + ",{\"Effect\":\"Deny\",\"Action\":\"" + action
+                + "\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
+        passed.accept(request(user, service, "POST", path, body.apply("blue")));
+        refused(request(user, service, "POST", path, body.apply("red")), action);
+    }
+
+    /** A create that got past the check and made a resource share, removed afterwards; returns the share's ARN. */
+    private String madeShare(ValidatableResponse response) {
+        String share = response.statusCode(200).extract().path("resourceShare.resourceShareArn");
+        cleanup.register(() -> adminOf("ram").queryParam("resourceShareArn", share).delete("/deleteresourceshare"));
+        return share;
+    }
+
+    /** Refuses a request until the caller holds the action, then lets it past the check. */
+    private void checkedAs(String user, String service, String method, String path, String body, String action) {
+        refused(request(user, service, method, path, body), action);
+        policy(user, allow(action, "*"));
+        request(user, service, method, path, body).statusCode(not(403));
+    }
+
+    private ValidatableResponse request(String user, String service, String method, String path, String body) {
+        RequestSpecification request = as(user, service).urlEncodingEnabled(false);
+        if (body != null) {
+            request.body(body);
+        }
+        return request.request(method, path).then();
+    }
+
+    private static RequestSpecification adminOf(String service) {
+        return given().header("Authorization", auth(ADMIN, service)).contentType("application/json");
+    }
+
     /** Creates a MicroVM image as the account's admin, removed afterwards, and returns its ARN. */
     private String microvmImage(String name) {
         admin().body("""
@@ -621,7 +1396,15 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     private static RequestSpecification admin() {
-        return given().header("Authorization", auth(ADMIN, "lambda")).contentType("application/json");
+        return adminOf("lambda");
+    }
+
+    /** Macie's {@code CreateMember} for {@code accountId}, with a {@code team} tag unless {@code team} is null. */
+    private ValidatableResponse createMember(String user, String accountId, String team) {
+        String tags = team == null ? "" : ",\"tags\":{\"team\":\"" + team + "\"}";
+        return as(user, "macie2")
+                .body("{\"account\":{\"accountId\":\"" + accountId + "\",\"email\":\"m@example.com\"}" + tags + "}")
+                .post("/members").then();
     }
 
     private static String deny(String action, String resource) {
@@ -651,7 +1434,11 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     private RequestSpecification as(String user, String service) {
-        return given().header("Authorization", auth(keys.get(user), service)).contentType("application/json");
+        return as(user, "us-east-1", service);
+    }
+
+    private RequestSpecification as(String user, String region, String service) {
+        return given().header("Authorization", auth(keys.get(user), region, service)).contentType("application/json");
     }
 
     /** A Lambda request as {@code user}, with an empty JSON body on a write. */

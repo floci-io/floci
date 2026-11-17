@@ -1,0 +1,208 @@
+name: Standalone Binaries
+
+# Builds and smoke-tests the macOS and Windows floci-aws binaries. The Linux release binaries are
+# the native artifacts release.yml builds for the images.
+#
+# release.yml calls this for every version tag, and publish-binaries there uploads what it built.
+# Run it by hand (Actions > Standalone Binaries > Run workflow) to try a branch, a runner or a
+# native-image setting without cutting a release: a manual run only uploads workflow artifacts,
+# it never writes to a GitHub Release. Examples:
+#   platforms: darwin-arm64     native-args: -Dquarkus.native.native-image-xmx=6g
+#   platforms: darwin-arm64     macos-runner: macos-latest-xlarge
+#
+# Mandrel has no macOS distribution, so every binary here uses GraalVM Community, which has no
+# -H:-AOTSingleCallsiteInline option to pass.
+
+on:
+  workflow_call:
+    inputs:
+      platforms:
+        description: Comma-separated platforms to build (darwin-arm64, darwin-amd64, windows-amd64)
+        required: false
+        type: string
+        default: darwin-arm64,darwin-amd64,windows-amd64
+      version:
+        description: Version the smoke test expects /_floci/health to report (default, the pom version)
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Comma-separated platforms to build (darwin-arm64, darwin-amd64, windows-amd64)
+        required: false
+        type: string
+        default: darwin-arm64,darwin-amd64,windows-amd64
+      native-args:
+        description: Extra Maven arguments for every build, e.g. -Dquarkus.native.native-image-xmx=6g
+        required: false
+        type: string
+        default: ''
+      macos-runner:
+        description: Runner label for both macOS builds
+        required: false
+        type: string
+        default: macos-latest
+      timeout-minutes:
+        description: Job timeout for every build (0 keeps 60 for darwin-arm64 and 90 for the others)
+        required: false
+        type: number
+        default: 0
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Resolve the expected version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the version
+        id: version
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          version=${REQUESTED:-$(mvn -q -B help:evaluate -Dexpression=project.version -DforceStdout)}
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Expected version: $version"
+
+  build-binary-darwin-arm64:
+    name: Build standalone binary (darwin-arm64)
+    needs: prepare
+    if: contains(format(',{0},', inputs.platforms), ',darwin-arm64,')
+    runs-on: ${{ inputs.macos-runner || 'macos-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes || 60 }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm-community'
+          cache: maven
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build native executable
+        env:
+          NATIVE_ARGS: ${{ inputs.native-args }}
+        # NATIVE_ARGS splits on spaces into separate Maven arguments.
+        run: |
+          read -ra extra <<< "$NATIVE_ARGS"
+          mvn clean package -Dnative -DskipTests -B ${extra[@]+"${extra[@]}"}
+
+      - name: Smoke-test the standalone binary
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+        run: .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$EXPECTED_VERSION"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-darwin-arm64
+          path: target/*-runner
+          if-no-files-found: error
+          retention-days: 7
+
+  build-binary-darwin-amd64:
+    name: Build standalone binary (darwin-amd64, Rosetta)
+    # native-image cannot cross-compile, and Intel macOS runners queue for hours, so an x86_64
+    # GraalVM runs under Rosetta 2 on the Apple Silicon runner (floci-cli's recipe).
+    # setup-graalvm has no architecture override, so the x86_64 JDK is installed by hand: GraalVM
+    # Community, like the other binaries, pinned to 25.0.1 (the last release with a macOS x64 build)
+    # and checked against its published SHA-256 before anything built with it is signed.
+    needs: prepare
+    if: contains(format(',{0},', inputs.platforms), ',darwin-amd64,')
+    runs-on: ${{ inputs.macos-runner || 'macos-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes || 90 }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rosetta 2
+        run: sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Install x86_64 GraalVM
+        env:
+          GRAALVM_X64_URL: https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-25.0.1/graalvm-community-jdk-25.0.1_macos-x64_bin.tar.gz
+          GRAALVM_X64_SHA256: a3d895b4cd1c783badbd277ec70409806bd4102fca0d2a60dbaeb0bab41aec30
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/graalvm-x64.tar.gz" "$GRAALVM_X64_URL"
+          echo "$GRAALVM_X64_SHA256  $RUNNER_TEMP/graalvm-x64.tar.gz" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/graalvm-x64"
+          tar -xzf "$RUNNER_TEMP/graalvm-x64.tar.gz" -C "$RUNNER_TEMP/graalvm-x64" --strip-components 1
+          echo "JAVA_HOME=$RUNNER_TEMP/graalvm-x64/Contents/Home" >> "$GITHUB_ENV"
+          echo "GRAALVM_HOME=$RUNNER_TEMP/graalvm-x64/Contents/Home" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/graalvm-x64/Contents/Home/bin" >> "$GITHUB_PATH"
+
+      - name: Build native executable (x86_64 under Rosetta)
+        env:
+          NATIVE_ARGS: ${{ inputs.native-args }}
+        # NATIVE_ARGS splits on spaces into separate Maven arguments.
+        run: |
+          read -ra extra <<< "$NATIVE_ARGS"
+          arch -x86_64 mvn clean package -Dnative -DskipTests -B ${extra[@]+"${extra[@]}"}
+
+      - name: Verify the binary is x86_64
+        run: file target/*-runner | grep -q x86_64
+
+      - name: Smoke-test the standalone binary
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+        run: arch -x86_64 .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$EXPECTED_VERSION"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-darwin-amd64
+          path: target/*-runner
+          if-no-files-found: error
+          retention-days: 7
+
+  build-binary-windows-amd64:
+    name: Build standalone binary (windows-amd64)
+    needs: prepare
+    if: contains(format(',{0},', inputs.platforms), ',windows-amd64,')
+    runs-on: windows-latest
+    timeout-minutes: ${{ inputs.timeout-minutes || 90 }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
+        with:
+          java-version: '25'
+          distribution: 'graalvm-community'
+          cache: maven
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build native executable
+        # Keeps the Windows snappy-java and JNA dispatch libraries every other build excludes
+        # (see quarkus.native.resources in application.yml).
+        shell: bash
+        env:
+          NATIVE_ARGS: ${{ inputs.native-args }}
+        # NATIVE_ARGS splits on spaces into separate Maven arguments.
+        run: |
+          read -ra extra <<< "$NATIVE_ARGS"
+          mvn clean package -Dnative -DskipTests -B \
+            "-Dfloci.native.windows-jni-include=*" \
+            -Dfloci.native.windows-jni-exclude=none \
+            ${extra[@]+"${extra[@]}"}
+
+      - name: Smoke-test the standalone binary
+        shell: bash
+        env:
+          EXPECTED_VERSION: ${{ needs.prepare.outputs.version }}
+        run: .github/scripts/smoke-binary.sh "$(ls target/*-runner.exe)" "$EXPECTED_VERSION"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-windows-amd64
+          path: target/*-runner.exe
+          if-no-files-found: error
+          retention-days: 7

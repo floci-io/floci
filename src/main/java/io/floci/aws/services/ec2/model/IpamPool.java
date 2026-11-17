@@ -27,7 +27,6 @@ public class IpamPool {
     private Integer allocationDefaultNetmaskLength;
     private List<IpamPoolCidr> provisionedCidrs = new ArrayList<>();
     private List<IpamPoolAllocation> allocations = new ArrayList<>();
-    private List<Tag> tags = new ArrayList<>();
     /** Idempotency token of the CreateIpamPool call that created this pool. */
     private String clientToken;
 
@@ -89,9 +88,6 @@ public class IpamPool {
 
     public List<IpamPoolAllocation> getAllocations() { return allocations; }
     public void setAllocations(List<IpamPoolAllocation> allocations) { this.allocations = allocations; }
-
-    public List<Tag> getTags() { return tags; }
-    public void setTags(List<Tag> tags) { this.tags = tags; }
 
     public String getClientToken() { return clientToken; }
     public void setClientToken(String clientToken) { this.clientToken = clientToken; }

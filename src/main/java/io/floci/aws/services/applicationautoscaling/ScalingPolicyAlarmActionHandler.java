@@ -86,6 +86,17 @@ public class ScalingPolicyAlarmActionHandler implements AlarmActionHandler {
             LOG.debugv("No scaling policy found for alarm action {0}", actionArn);
             return;
         }
+        synchronized (service.targetLock(region, policy.getServiceNamespace(), policy.getResourceId(),
+                policy.getScalableDimension())) {
+            ScalingPolicy currentPolicy = service.findPolicyByArn(actionArn, region).orElse(null);
+            if (currentPolicy == null) {
+                return;
+            }
+            execute(currentPolicy, alarm, metricValue, region);
+        }
+    }
+
+    private void execute(ScalingPolicy policy, MetricAlarm alarm, double metricValue, String region) {
         ScalableTarget target = service.findTarget(region, policy.getServiceNamespace(),
                 policy.getResourceId(), policy.getScalableDimension()).orElse(null);
         if (target == null) {

@@ -170,6 +170,17 @@ class NativeDynamoDbTableServiceTest {
     }
 
     @Test
+    void creationTagsKeepATagATagResourceAlreadyPutOnTheStoredTable() {
+        TableDefinition table = dynamoDbService.createTable(TABLE, List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")), 5L, 5L, REGION);
+        dynamoDbService.tagResource(table.getTableArn(), Map.of("stage", "prod", "team", "web"), REGION);
+
+        dynamoDbService.putCreationTags(table, Map.of("team", "data", "env", "test"));
+
+        assertEquals(Map.of("stage", "prod", "team", "web", "env", "test"), table.getTags());
+    }
+
+    @Test
     void createSettingsSurviveARestart() {
         Map<String, String> tags = new LinkedHashMap<>();
         tags.put("env", "test");

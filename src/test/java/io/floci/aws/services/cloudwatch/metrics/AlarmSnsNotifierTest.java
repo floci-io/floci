@@ -112,6 +112,18 @@ class AlarmSnsNotifierTest {
     }
 
     @Test
+    void disablingAndReenablingActionsControlsSubsequentNotifications() {
+        service.setAlarmActionsEnabled(List.of("test-alarm"), false, REGION);
+        service.setAlarmState("test-alarm", "ALARM", "breached while disabled", null, REGION);
+        verifyNoInteractions(sns);
+        assertEquals("ALARM", service.describeAlarms(List.of("test-alarm"), null, REGION).getFirst().getStateValue());
+        service.setAlarmActionsEnabled(List.of("test-alarm"), true, REGION);
+        verifyNoInteractions(sns);
+        service.setAlarmState("test-alarm", "OK", "recovered after enabling", null, REGION);
+        verify(sns).publish(eq(TOPIC), isNull(), contains("recovered after enabling"), anyString(), eq(REGION));
+    }
+
+    @Test
     void failedTargetDoesNotPreventOtherTargetsOrStateChange() {
         String missing = "arn:aws:sns:us-east-1:000000000000:missing";
         alarm.setAlarmActions(List.of(missing, "arn:aws:autoscaling:us-east-1:000000000000:scalingPolicy:x", TOPIC));

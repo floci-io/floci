@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -24,6 +25,8 @@ class EmrSparkStepsTest {
     // A cluster's Applications, as RunJobFlow stores them, in a case of their own.
     private static final String HIVE_AND_SPARK = "[{\"Name\": \"Spark\"}, {\"Name\": \"hive\"}]";
     private static final String RELEASE = "emr-7.5.0";
+    // The pig.properties lines Floci gives every Pig after its exectype, ahead of the cluster's.
+    private static final String FLOCIS_PIG_LINES = "mapreduce.job.working.dir = /user/${user.name}";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -35,39 +38,42 @@ class EmrSparkStepsTest {
 
         // Options come before the application, so --master after it is the application's own argument.
         assertEquals(List.of("--verbose", "--conf", "spark.executor.cores=2", "--class", "com.example.Report",
-                "s3://bucket/jobs/report.jar", "--master", "kept"), EmrSparkSteps.application(step));
+                "s3://bucket/jobs/report.jar", "--master", "kept"), EmrSparkSteps.application(step, false));
     }
 
     @Test
     void sparkSubmitMayBeNamedByItsPath() {
         assertEquals(List.of("s3://bucket/jobs/report.py"), EmrSparkSteps.application(
-                step("command-runner.jar", null, "/usr/bin/spark-submit", "s3://bucket/jobs/report.py")));
+                step("command-runner.jar", null, "/usr/bin/spark-submit", "s3://bucket/jobs/report.py"), false));
     }
 
     @Test
     void aCustomJarRunsItsMainClassOrElseItsManifests() {
         assertEquals(List.of("--class", "com.example.Report", "s3://bucket/jobs/report.jar", "2026-10-25"),
-                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", "com.example.Report", "2026-10-25")));
+                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", "com.example.Report", "2026-10-25"),
+                        false));
         assertEquals(List.of("s3://bucket/jobs/report.jar"),
-                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", null)));
+                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", null), false));
     }
 
     @Test
     void aCustomJarAtEmrsStreamingJarPathRunsTheImagesCopy() {
         assertEquals(List.of("/usr/lib/hadoop/hadoop-streaming.jar", "-input", "s3://bucket/in/"),
                 EmrSparkSteps.application(step("/usr/lib/hadoop-mapreduce/hadoop-streaming.jar", null, "-input",
-                        "s3://bucket/in/")));
+                        "s3://bucket/in/"), false));
         assertEquals(List.of("/home/hadoop/hadoop-streaming.jar"),
-                EmrSparkSteps.application(step("/home/hadoop/hadoop-streaming.jar", null)));
+                EmrSparkSteps.application(step("/home/hadoop/hadoop-streaming.jar", null), false));
     }
 
     @Test
     void stepsOtherThanSparkAreNotRun() {
-        assertNull(EmrSparkSteps.application(step("command-runner.jar", null, "hive-script", "--run-hive-script")));
-        assertNull(EmrSparkSteps.application(step("command-runner.jar", null)));
+        assertNull(EmrSparkSteps.application(step("command-runner.jar", null, "hive-script", "--run-hive-script"),
+                false));
+        assertNull(EmrSparkSteps.application(step("command-runner.jar", null), false));
         assertNull(EmrSparkSteps.application(
-                step("s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar", null, "s3://b/x.sh")));
-        assertNull(EmrSparkSteps.application(step(null, null)));
+                step("s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar", null, "s3://b/x.sh"),
+                        false));
+        assertNull(EmrSparkSteps.application(step(null, null), false));
     }
 
     @Test
@@ -77,18 +83,19 @@ class EmrSparkStepsTest {
                 "aws s3 cp s3://bucket/my-script.sh /home/hadoop; chmod u+x /home/hadoop/my-script.sh;"
                         + " cd /home/hadoop; ./my-script.sh");
 
-        assertEquals(bash, EmrSparkSteps.command(step("command-runner.jar", null, bash.toArray(String[]::new))));
+        assertEquals(bash, EmrSparkSteps.command(step("command-runner.jar", null, bash.toArray(String[]::new)), false));
         assertEquals(List.of("python3", "-c", "print(1)"),
-                EmrSparkSteps.command(step("command-runner.jar", null, "python3", "-c", "print(1)")));
+                EmrSparkSteps.command(step("command-runner.jar", null, "python3", "-c", "print(1)"), false));
         assertNull(EmrSparkSteps.command(
-                step("command-runner.jar", null, "spark-submit", "s3://bucket/jobs/report.py")));
+                step("command-runner.jar", null, "spark-submit", "s3://bucket/jobs/report.py"), false));
     }
 
     @Test
     void aScriptRunnerStepFetchesItsScriptAndRunsItWithItsArguments() {
         for (String jar : List.of("script-runner.jar",
                 "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar")) {
-            List<String> command = EmrSparkSteps.command(step(jar, null, "s3://bucket/my-script.sh", "--day", "1"));
+            List<String> command = EmrSparkSteps.command(step(jar, null, "s3://bucket/my-script.sh", "--day", "1"),
+                    false);
 
             assertEquals(List.of("bash", "-c"), command.subList(0, 2));
             assertTrue(command.get(2).contains("aws s3 cp --only-show-errors"));
@@ -102,7 +109,8 @@ class EmrSparkStepsTest {
             throws Exception {
         // Not executable yet: script-runner makes it so, as it does a script it fetched from S3.
         Files.writeString(workingDirectory.resolve("my-script.sh"), "#!/bin/sh\nprintf 'ran:%s|' \"$@\"\n");
-        List<String> command = EmrSparkSteps.command(step("script-runner.jar", null, "my-script.sh", "--day", "1 2"));
+        List<String> command = EmrSparkSteps.command(step("script-runner.jar", null, "my-script.sh", "--day", "1 2"),
+                false);
 
         BootstrapProcess.Result ended =
                 BootstrapProcess.run(new ProcessBuilder(command).directory(workingDirectory.toFile()));
@@ -115,7 +123,7 @@ class EmrSparkStepsTest {
         // The Release Guide's own S3DistCp step.
         List<String> command = EmrSparkSteps.command(step("command-runner.jar", null, "s3-dist-cp",
                 "--s3Endpoint=s3.amazonaws.com", "--src=s3://bucket/logs/j-3GYXXXXXX9IOJ/node/",
-                "--dest=hdfs:///output", "--srcPattern=.*[a-zA-Z,]+"));
+                "--dest=hdfs:///output", "--srcPattern=.*[a-zA-Z,]+"), false);
         // A spark-submit that shows what it was given and keeps the program, in place of the image's.
         Path sparkSubmit = folder.resolve("spark-submit");
         Files.writeString(sparkSubmit, "#!/bin/sh\nprintf '%s|' \"$@\"\ncp \"$3\" " + folder.resolve("kept.py") + "\n");
@@ -147,16 +155,87 @@ class EmrSparkStepsTest {
                 "-cacheFile", "s3://bucket/sample_dataset.dat#sample_dataset_cached.dat"};
         String[] indexer = {"hadoop-lzo", "com.hadoop.compression.lzo.DistributedLzoIndexer", "s3://bucket/logs/"};
 
-        assertEquals(List.of(streaming), EmrSparkSteps.command(step("command-runner.jar", null, streaming)));
-        assertEquals(List.of(indexer), EmrSparkSteps.command(step("command-runner.jar", null, indexer)));
+        assertEquals(List.of(streaming), EmrSparkSteps.command(step("command-runner.jar", null, streaming), false));
+        assertEquals(List.of(indexer), EmrSparkSteps.command(step("command-runner.jar", null, indexer), false));
+    }
+
+    @Test
+    void aPigStepRunsEmrsPigScriptUnlessItsClusterLacksTheOneItInstalls() {
+        // The Release Guide's Pig step, as the AWS CLI turns Type=PIG into one.
+        String[] pig = {"pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/do-reports2.pig", "-p",
+                "INPUT=s3://bucket/input", "-p", "OUTPUT=s3://bucket/output"};
+
+        assertEquals(List.of(pig), EmrSparkSteps.command(step("command-runner.jar", null, pig), false));
+        // On a cluster that installs Pig, which Floci has not added, EMR would run it.
+        assertNull(EmrSparkSteps.command(step("command-runner.jar", null, pig), true));
+        // pig itself is a command like any other, there or not.
+        assertEquals(List.of("pig", "-e", "fs -ls /"),
+                EmrSparkSteps.command(step("command-runner.jar", null, "pig", "-e", "fs -ls /"), false));
+    }
+
+    @Test
+    void aClusterInstallsPigWhenItsApplicationsNameIt() {
+        assertTrue(EmrSparkSteps.installsPig(RELEASE, "[{\"Name\": \"Hadoop\"}, {\"Name\": \"Pig\"}]", objectMapper));
+        assertTrue(EmrSparkSteps.installsPig(RELEASE, "[{\"Name\": \"pig\"}]", objectMapper));
+        for (String applications : new String[]{HIVE_AND_SPARK, "[]", null, "[{"}) {
+            assertFalse(EmrSparkSteps.installsPig(RELEASE, applications, objectMapper));
+        }
+        // "Pig and Oozie are not included" in a release of the AWS runtime for Apache Spark.
+        assertFalse(EmrSparkSteps.installsPig("emr-spark-8.1.0", "[{\"Name\": \"Pig\"}]", objectMapper));
+    }
+
+    @Test
+    void aPigCommandRunsOnTezWithTheClustersTezSiteThenItsPigProperties() {
+        String configurations = """
+                [{"Classification": "pig-properties", "Properties": {"pig.exec.reducers.max": "8"}},
+                 {"Classification": "tez-site", "Properties": {"tez.grouping.max-size": "268435456",
+                   "tez.am.resource.memory.mb": "2048"}},
+                 {"Classification": "pig-properties", "Properties": {"tez.am.resource.memory.mb": "1536"}},
+                 {"Classification": "hive-site", "Properties": {"hive.exec.reducers.max": "4"}}]""";
+
+        Map<String, String> variables = EmrSparkSteps.pigEnvironment(configurations, objectMapper);
+
+        // Tez, as EMR's Pig 0.16.0 and later, from a working directory S3A takes as HDFS does, then tez-site's, then
+        // pig-properties', a later line winning.
+        assertEquals(String.join("\n", "exectype = tez", "mapreduce.job.working.dir = /user/${user.name}",
+                "tez.grouping.max-size = 268435456",
+                "tez.am.resource.memory.mb = 1536", "pig.exec.reducers.max = 8"),
+                variables.get("FLOCI_PIG_PROPERTIES"));
+        assertEquals(Set.of("FLOCI_PIG_PROPERTIES"), variables.keySet());
+    }
+
+    @Test
+    void aClustersPigPropertiesCanRunPigOnMapReduce() {
+        // "You can explicitly set exectype=mapreduce in the pig-properties configuration classification".
+        String configurations = """
+                [{"Classification": "pig-properties", "Properties": {"exectype": "mapreduce"}}]""";
+
+        assertEquals("exectype = mapreduce\n" + FLOCIS_PIG_LINES,
+                EmrSparkSteps.pigEnvironment(configurations, objectMapper).get("FLOCI_PIG_PROPERTIES"));
+    }
+
+    @Test
+    void aClustersPigLog4jAndPigEnvReachItsPigsConfiguration() {
+        String configurations = """
+                [{"Classification": "pig-log4j", "Properties": {"log4j.logger.org.apache.pig": "DEBUG, A"}},
+                 {"Classification": "pig-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"PIG_HEAPSIZE": "2048", "BAD NAME": "x"}}]}]""";
+
+        Map<String, String> variables = EmrSparkSteps.pigEnvironment(configurations, objectMapper);
+
+        // Pig reads the log4j.properties its log4jconf names, which gets pig-log4j's lines.
+        assertEquals("exectype = tez\n" + FLOCIS_PIG_LINES + "\nlog4jconf = /tmp/floci-pig-conf/log4j.properties",
+                variables.get("FLOCI_PIG_PROPERTIES"));
+        assertEquals("log4j.logger.org.apache.pig = DEBUG, A", variables.get("FLOCI_PIG_LOG4J"));
+        assertEquals("export PIG_HEAPSIZE='2048'", variables.get("FLOCI_PIG_ENV"));
     }
 
     @Test
     void toolsTheImageDoesNotHaveAreNotRun() {
-        assertNull(EmrSparkSteps.command(step("command-runner.jar", null, "pig-script", "--run-pig-script")));
-        assertNull(EmrSparkSteps.command(step("command-runner.jar", null)));
-        assertNull(EmrSparkSteps.command(step("script-runner.jar", null)));
-        assertNull(EmrSparkSteps.command(step("s3://bucket/jars/app.jar", null, "1")));
+        assertNull(EmrSparkSteps.command(step("command-runner.jar", null, "pig-script", "--run-pig-script"), true));
+        assertNull(EmrSparkSteps.command(step("command-runner.jar", null), false));
+        assertNull(EmrSparkSteps.command(step("script-runner.jar", null), false));
+        assertNull(EmrSparkSteps.command(step("s3://bucket/jars/app.jar", null, "1"), false));
     }
 
     @Test
@@ -208,7 +287,7 @@ class EmrSparkStepsTest {
             assertNull(EmrSparkSteps.hive(query, RELEASE, applications, null, objectMapper));
         }
         // Where hive-script then runs, it says what EMR's says without Hive: "Hive isn't installed."
-        assertEquals(query.getArgs(), EmrSparkSteps.command(query));
+        assertEquals(query.getArgs(), EmrSparkSteps.command(query, false));
         for (EmrStep other : List.of(step("command-runner.jar", null, "spark-submit", "s3://bucket/app.py"),
                 step("command-runner.jar", null, "hive-scripts"),
                 step("script-runner.jar", null, "s3://bucket/hive.sh"),

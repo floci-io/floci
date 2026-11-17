@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
@@ -16,11 +17,15 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -65,13 +70,67 @@ final class EmrServiceFixture {
         final List<List<String>> hdfs = new ArrayList<>();
         // Each HDFS's metastore service asked for.
         final List<HiveMetastore> metastores = new ArrayList<>();
+        // Each HDFS's YARN asked for.
+        final List<Yarn> yarns = new ArrayList<>();
+        // Each cluster and S3 folder its YARN applications' logs were put in.
+        final List<List<String>> containerLogs = new ArrayList<>();
+        // Floci's address on a cluster's network, which a node running YARN gives its executors.
+        static final String FLOCI_ON_NETWORK = "http://floci:4566";
+        // Whether a cluster's primary node has a network of its own, as with a docker-network that is not shared.
+        boolean ownNetwork;
         RuntimeException hdfsFailure;
         // Runs as each HDFS starts, with what tells it the step is past starting.
         Consumer<BooleanSupplier> whileStartingHdfs = stopped -> { };
         final List<String> removed = new ArrayList<>();
         final List<Set<String>> kept = new ArrayList<>();
+        // Each resize asked for: its cluster and the nodes it wants.
+        final List<ClusterStorage.Yarn> resizes = new ArrayList<>();
         boolean refuse;
         Runnable whileCreating = () -> { };
+        // Whether a cluster's network has an instance metadata relay, as where its steps have a network of Floci's.
+        boolean metadata;
+        // What a relay's start throws, if anything.
+        RuntimeException metadataFailure;
+        // Each relay started: its cluster and image; each instance given an address, by id; each address released.
+        final List<List<String>> relays = new ArrayList<>();
+        final List<Instance> given = new ArrayList<>();
+        final List<String> released = new ArrayList<>();
+        // How each cluster's nodes are known as EC2 instances.
+        final Map<String, Function<String, Instance>> identities = new HashMap<>();
+
+        @Override
+        public boolean metadataServed(String dockerNetwork) {
+            return metadata;
+        }
+
+        @Override
+        public String metadataNetwork(String clusterId, String accountId, String region, String relayImage,
+                                      String dockerNetwork) {
+            if (!metadata) {
+                return null;
+            }
+            relays.add(List.of(clusterId, relayImage));
+            if (metadataFailure != null) {
+                throw metadataFailure;
+            }
+            return HDFS_NETWORK;
+        }
+
+        @Override
+        public String metadataAddress(String clusterId, Instance instance) {
+            given.add(instance);
+            return "169.254.0." + given.size();
+        }
+
+        @Override
+        public void releaseMetadataAddress(String address) {
+            released.add(address);
+        }
+
+        @Override
+        public void identify(String clusterId, Function<String, Instance> nodes) {
+            identities.put(clusterId, nodes);
+        }
 
         @Override
         public SparkJobRunner.Storage volumes(String clusterId) {
@@ -85,20 +144,42 @@ final class EmrServiceFixture {
         }
 
         @Override
+        public boolean ownNetwork(String dockerNetwork) {
+            return ownNetwork;
+        }
+
+        @Override
+        public void resize(String clusterId, Supplier<Yarn> yarn) {
+            resizes.add(yarn.get());
+        }
+
+        @Override
+        public void archiveContainerLogs(String clusterId, String accountId, String region, String logFolder) {
+            containerLogs.add(List.of(clusterId, logFolder));
+        }
+
+        @Override
         public SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host,
                                            String image, String dockerNetwork, HiveMetastore hiveMetastore,
+                                           Supplier<Yarn> yarn,
                                            BooleanSupplier stopped) {
             hdfs.add(Arrays.asList(clusterId, host, image, dockerNetwork, String.valueOf(hiveMetastore != null),
                     hiveMetastore != null ? hiveMetastore.role() : null));
             if (hiveMetastore != null) {
                 metastores.add(hiveMetastore);
             }
+            if (yarn != null) {
+                yarns.add(yarn.get());
+            }
             whileStartingHdfs.accept(stopped);
             if (hdfsFailure != null) {
                 throw hdfsFailure;
             }
             SparkJobRunner.Storage storage = volumes(clusterId).withHdfs(host, HDFS_ADDRESS, HDFS_NETWORK);
-            return hiveMetastore != null ? storage.withHiveMetastore("thrift://" + host + ":9083") : storage;
+            if (hiveMetastore != null) {
+                storage = storage.withHiveMetastore("thrift://" + host + ":9083");
+            }
+            return yarn != null ? storage.withYarn(host, FLOCI_ON_NETWORK) : storage;
         }
 
         @Override
@@ -116,17 +197,25 @@ final class EmrServiceFixture {
     /** Makes no image: answers {@link #IMAGE} for each, or throws {@link #failure} when it is set. */
     static final class RecordingReleaseImages implements ReleaseImages {
         static final String IMAGE = "sha256:" + "3".repeat(64);
-        // Each image asked for: its release, then the two it is made of.
+        // Each image asked for: its release, then the two it is made of, then whether it has Hive, and Pig.
         final List<List<String>> asked = new ArrayList<>();
+        // Each image released, by id.
+        final List<String> released = new ArrayList<>();
         RuntimeException failure;
 
         @Override
-        public String image(String releaseLabel, String sparkImage, String hiveImage) {
-            asked.add(List.of(releaseLabel, sparkImage, hiveImage));
+        public String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive,
+                            boolean withPig) {
+            asked.add(List.of(releaseLabel, sparkImage, hiveImage, String.valueOf(withHive), String.valueOf(withPig)));
             if (failure != null) {
                 throw failure;
             }
             return IMAGE;
+        }
+
+        @Override
+        public void released(String imageId) {
+            released.add(imageId);
         }
     }
 
@@ -142,7 +231,7 @@ final class EmrServiceFixture {
     // The docker runner mode's step threads, not yet run.
     private final List<Runnable> stepThreads = new ArrayList<>();
     private boolean waking;
-    private final InMemoryStorageFactory storage;
+    final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
     private final BootstrapRunner bootstrap;
     // The docker runner mode's; null in the immediate one.
@@ -215,6 +304,11 @@ final class EmrServiceFixture {
         return new EmrServiceFixture(storage, clock, runner, bootstrap, clusterStorage, releaseImages, iam, durations);
     }
 
+    /** A new service on the same storage and clock, as {@link #restart} builds, in the {@code immediate} mode. */
+    EmrServiceFixture restartImmediate() {
+        return new EmrServiceFixture(storage, clock, null, null, null, null, iam, durations);
+    }
+
     /**
      * A new service on the same storage and clock, as {@link #restart} builds, but with {@code runner},
      * its wakeups set on {@code wakeups}, and leftover drivers removed when it starts.
@@ -236,6 +330,18 @@ final class EmrServiceFixture {
                 iam);
     }
 
+    /**
+     * A new service on the same storage and clock, as {@link #restart} builds, with Floci's Pig on, its steps' threads
+     * this fixture's, and its events not delivered.
+     */
+    EmrService withPig() {
+        EmulatorConfig config = config(false);
+        when(config.services().emr().pig().enabled()).thenReturn(true);
+        return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                iam);
+    }
+
     private EmulatorConfig config(boolean reconcile) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().emr().defaultReleaseLabel()).thenReturn("emr-7.5.0");
@@ -245,6 +351,9 @@ final class EmrServiceFixture {
         when(config.services().emr().imageTemplate()).thenReturn(Optional.empty());
         when(config.services().emr().hiveImageTemplate()).thenReturn(Optional.empty());
         when(config.services().emr().dockerNetwork()).thenReturn(Optional.empty());
+        when(config.services().emr().yarnNodeMemoryMb()).thenReturn(4096);
+        when(config.services().emr().yarnNodeVcores()).thenReturn(4);
+        when(config.services().emr().yarnMaxWorkerNodes()).thenReturn(4);
         when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
         return config;
     }
@@ -296,6 +405,11 @@ final class EmrServiceFixture {
                     ? detail.path("state").asText() + " " + detail.path("name").asText()
                     : detail.path("state").asText();
         }).toList();
+    }
+
+    /** Each step's state, in order. */
+    static List<String> stepStates(List<EmrStep> steps) {
+        return steps.stream().map(EmrStep::getState).toList();
     }
 
     static EmrCluster cluster(String name, boolean keepAlive, EmrStep... steps) {

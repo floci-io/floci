@@ -143,14 +143,18 @@ class CloudFormationIamAttachmentProvisionerTest {
         assertEquals("CREATE_FAILED", result.getStatus());
         // Both the primary write and the failure-triggered restore use the ID-verified overload,
         // guarding against a role replaced under the same name mid-attempt in either direction.
+        // The restore goes through the seam that does not hold the document to being a policy:
+        // putting back what the store already held is not a new write.
         ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
-        verify(iamService, times(2)).updateAssumeRolePolicy(
+        verify(iamService).updateAssumeRolePolicy(
                 eq("existing-role"), docCaptor.capture(), eq(role.getRoleId()));
-        List<String> calls = docCaptor.getAllValues();
-        assertEquals(mapper.readTree(newTrustPolicyJson), mapper.readTree(calls.get(0)),
-                "first call applies the template's new trust policy");
-        assertEquals(priorTrustPolicy, calls.get(1),
-                "second call restores the role's pre-update trust policy after the failure");
+        assertEquals(mapper.readTree(newTrustPolicyJson), mapper.readTree(docCaptor.getValue()),
+                "the write applies the template's new trust policy");
+        ArgumentCaptor<String> restoreCaptor = ArgumentCaptor.forClass(String.class);
+        verify(iamService).restoreAssumeRolePolicy(
+                eq("existing-role"), restoreCaptor.capture(), eq(role.getRoleId()));
+        assertEquals(priorTrustPolicy, restoreCaptor.getValue(),
+                "the restore puts the role's pre-update trust policy back after the failure");
         verify(iamService, never()).updateAssumeRolePolicy(anyString(), anyString());
     }
 

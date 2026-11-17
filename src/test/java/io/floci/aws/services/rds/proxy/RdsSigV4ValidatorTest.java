@@ -9,7 +9,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.Method;
-import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.List;
 import java.util.logging.LogRecord;
@@ -688,19 +687,13 @@ class RdsSigV4ValidatorTest {
                 () -> assertFalse(validator.validate(token, dbUser, exampleBinding())));
 
         List<String> refusals = records.stream()
-                .map(RdsSigV4ValidatorTest::render)
+                .map(LogCapture::formatted)
                 .filter(message -> message.contains("rds-db:connect"))
                 .toList();
         assertEquals(1, refusals.size(), "expected one refusal warning, got: " + records);
         assertTrue(refusals.get(0).contains("INJECTED"));
         assertFalse(refusals.get(0).contains("\r") || refusals.get(0).contains("\n"),
                 "control characters must be stripped from the warning: " + refusals.get(0));
-    }
-
-    private static String render(LogRecord record) {
-        return record.getParameters() == null
-                ? record.getMessage()
-                : MessageFormat.format(record.getMessage(), record.getParameters());
     }
 
     @Test

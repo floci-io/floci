@@ -1,0 +1,1190 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_kinesis_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "AddTagsToStream": "AddTagsToStreamInput",
+    "CreateChannel": "CreateChannelInput",
+    "CreateStream": "CreateStreamInput",
+    "DecreaseStreamRetentionPeriod": "DecreaseStreamRetentionPeriodInput",
+    "DeleteChannel": "DeleteChannelInput",
+    "DeleteResourcePolicy": "DeleteResourcePolicyInput",
+    "DeleteStream": "DeleteStreamInput",
+    "DeregisterStreamConsumer": "DeregisterStreamConsumerInput",
+    "DescribeAccountSettings": "DescribeAccountSettingsInput",
+    "DescribeChannel": "DescribeChannelInput",
+    "DescribeLimits": "DescribeLimitsInput",
+    "DescribeStream": "DescribeStreamInput",
+    "DescribeStreamConsumer": "DescribeStreamConsumerInput",
+    "DescribeStreamSummary": "DescribeStreamSummaryInput",
+    "DisableEnhancedMonitoring": "DisableEnhancedMonitoringInput",
+    "EnableEnhancedMonitoring": "EnableEnhancedMonitoringInput",
+    "GetRecords": "GetRecordsInput",
+    "GetResourcePolicy": "GetResourcePolicyInput",
+    "GetShardIterator": "GetShardIteratorInput",
+    "IncreaseStreamRetentionPeriod": "IncreaseStreamRetentionPeriodInput",
+    "ListChannels": "ListChannelsInput",
+    "ListShards": "ListShardsInput",
+    "ListStreamConsumers": "ListStreamConsumersInput",
+    "ListStreams": "ListStreamsInput",
+    "ListTagsForResource": "ListTagsForResourceInput",
+    "ListTagsForStream": "ListTagsForStreamInput",
+    "MergeShards": "MergeShardsInput",
+    "PutRecord": "PutRecordInput",
+    "PutRecords": "PutRecordsInput",
+    "PutResourcePolicy": "PutResourcePolicyInput",
+    "RegisterStreamConsumer": "RegisterStreamConsumerInput",
+    "RemoveTagsFromStream": "RemoveTagsFromStreamInput",
+    "SplitShard": "SplitShardInput",
+    "StartStreamEncryption": "StartStreamEncryptionInput",
+    "StopStreamEncryption": "StopStreamEncryptionInput",
+    "SubscribeToShard": "SubscribeToShardInput",
+    "TagResource": "TagResourceInput",
+    "UntagResource": "UntagResourceInput",
+    "UpdateAccountSettings": "UpdateAccountSettingsInput",
+    "UpdateChannel": "UpdateChannelInput",
+    "UpdateMaxRecordSize": "UpdateMaxRecordSizeInput",
+    "UpdateShardCount": "UpdateShardCountInput",
+    "UpdateStreamMode": "UpdateStreamModeInput",
+    "UpdateStreamRecordDistributionStrategy": "UpdateStreamRecordDistributionStrategyInput",
+    "UpdateStreamWarmThroughput": "UpdateStreamWarmThroughputInput"
+  },
+  "shapes": {
+    "AddTagsToStreamInput": {
+      "type": "structure",
+      "required": [
+        "Tags"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "Tags": "TagMap",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "BooleanObject": {
+      "type": "boolean"
+    },
+    "BucketARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "arn:aws[-a-z0-9]*:s3:::[a-z0-9._-]{3,63}"
+    },
+    "ChannelARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "arn:aws.*:kinesis:.*:\\d{12}:channel/\\S+"
+    },
+    "ChannelEncryptionConfiguration": {
+      "type": "structure",
+      "required": [
+        "EncryptionType",
+        "KeyId"
+      ],
+      "members": {
+        "EncryptionType": "ChannelEncryptionType",
+        "KeyId": "KeyId"
+      }
+    },
+    "ChannelEncryptionType": {
+      "type": "string",
+      "enum": [
+        "KMS"
+      ]
+    },
+    "ChannelLoggingConfiguration": {
+      "type": "structure",
+      "required": [
+        "CloudWatchLogs"
+      ],
+      "members": {
+        "CloudWatchLogs": "CloudWatchLogs"
+      }
+    },
+    "ChannelLoggingUpdateInput": {
+      "type": "structure",
+      "required": [
+        "CloudWatchLogs"
+      ],
+      "members": {
+        "CloudWatchLogs": "CloudWatchLogsUpdateInput"
+      }
+    },
+    "ChannelName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.-]+"
+    },
+    "ChannelStreamConfiguration": {
+      "type": "structure",
+      "required": [
+        "StreamARN",
+        "RecordConfiguration"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "RecordConfiguration": "RecordConfiguration"
+      }
+    },
+    "ChannelStreamConfigurationList": {
+      "type": "list",
+      "min": 1,
+      "max": 10000,
+      "member": "ChannelStreamConfiguration"
+    },
+    "CloudWatchLogGroupName": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[\\.\\-_/#A-Za-z0-9]+"
+    },
+    "CloudWatchLogStreamName": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[^:*]*"
+    },
+    "CloudWatchLogs": {
+      "type": "structure",
+      "required": [
+        "Enabled"
+      ],
+      "members": {
+        "Enabled": "BooleanObject",
+        "LogGroupName": "CloudWatchLogGroupName",
+        "LogStreamName": "CloudWatchLogStreamName"
+      }
+    },
+    "CloudWatchLogsUpdateInput": {
+      "type": "structure",
+      "required": [
+        "Enabled"
+      ],
+      "members": {
+        "Enabled": "BooleanObject",
+        "LogGroupName": "CloudWatchLogGroupName",
+        "LogStreamName": "CloudWatchLogStreamName"
+      }
+    },
+    "ConsumerARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "^(arn):aws.*:kinesis:.*:\\d{12}:.*stream\\/[a-zA-Z0-9_.-]+\\/consumer\\/[a-zA-Z0-9_.-]+:[0-9]+"
+    },
+    "ConsumerName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.-]+"
+    },
+    "CreateChannelInput": {
+      "type": "structure",
+      "required": [
+        "ChannelName",
+        "ServiceExecutionRoleARN",
+        "StreamConfigurationList"
+      ],
+      "members": {
+        "ChannelName": "ChannelName",
+        "ServiceExecutionRoleARN": "RoleARN",
+        "StreamConfigurationList": "ChannelStreamConfigurationList",
+        "S3DestinationConfiguration": "S3DestinationConfiguration",
+        "S3TablesDestinationConfiguration": "S3TablesDestinationConfiguration",
+        "EncryptionConfiguration": "ChannelEncryptionConfiguration",
+        "Tags": "TagMap",
+        "LoggingConfiguration": "ChannelLoggingConfiguration"
+      }
+    },
+    "CreateStreamInput": {
+      "type": "structure",
+      "required": [
+        "StreamName"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "ShardCount": "PositiveIntegerObject",
+        "StreamModeDetails": "StreamModeDetails",
+        "Tags": "TagMap",
+        "WarmThroughputMiBps": "NaturalIntegerObject",
+        "MaxRecordSizeInKiB": "MaxRecordSizeInKiB",
+        "RecordDistributionStrategy": "RecordDistributionStrategy"
+      }
+    },
+    "DataFreshnessInSeconds": {
+      "type": "integer"
+    },
+    "DeadLetterQueueS3Configuration": {
+      "type": "structure",
+      "required": [
+        "BucketARN",
+        "ExpectedBucketOwner"
+      ],
+      "members": {
+        "BucketARN": "BucketARN",
+        "ExpectedBucketOwner": "ExpectedBucketOwner",
+        "ErrorOutputPrefix": "S3ErrorOutputPrefix"
+      }
+    },
+    "DecreaseStreamRetentionPeriodInput": {
+      "type": "structure",
+      "required": [
+        "RetentionPeriodHours"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "RetentionPeriodHours": "RetentionPeriodHours",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "DeleteChannelInput": {
+      "type": "structure",
+      "required": [
+        "ChannelARN"
+      ],
+      "members": {
+        "ChannelARN": "ChannelARN"
+      }
+    },
+    "DeleteResourcePolicyInput": {
+      "type": "structure",
+      "required": [
+        "ResourceARN"
+      ],
+      "members": {
+        "ResourceARN": "ResourceARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "DeleteStreamInput": {
+      "type": "structure",
+      "members": {
+        "StreamName": "StreamName",
+        "EnforceConsumerDeletion": "BooleanObject",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "DeregisterStreamConsumerInput": {
+      "type": "structure",
+      "members": {
+        "StreamARN": "StreamARN",
+        "ConsumerName": "ConsumerName",
+        "ConsumerARN": "ConsumerARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "DescribeAccountSettingsInput": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeChannelInput": {
+      "type": "structure",
+      "required": [
+        "ChannelARN"
+      ],
+      "members": {
+        "ChannelARN": "ChannelARN"
+      }
+    },
+    "DescribeLimitsInput": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeStreamConsumerInput": {
+      "type": "structure",
+      "members": {
+        "StreamARN": "StreamARN",
+        "ConsumerName": "ConsumerName",
+        "ConsumerARN": "ConsumerARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "DescribeStreamInput": {
+      "type": "structure",
+      "members": {
+        "StreamName": "StreamName",
+        "Limit": "DescribeStreamInputLimit",
+        "ExclusiveStartShardId": "ShardId",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "DescribeStreamInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "DescribeStreamSummaryInput": {
+      "type": "structure",
+      "members": {
+        "StreamName": "StreamName",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "DisableEnhancedMonitoringInput": {
+      "type": "structure",
+      "required": [
+        "ShardLevelMetrics"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "ShardLevelMetrics": "MetricsNameList",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "EnableEnhancedMonitoringInput": {
+      "type": "structure",
+      "required": [
+        "ShardLevelMetrics"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "ShardLevelMetrics": "MetricsNameList",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "EncryptionType": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "KMS"
+      ]
+    },
+    "ExpectedBucketOwner": {
+      "type": "string",
+      "min": 12,
+      "max": 12,
+      "pattern": "\\d{12}"
+    },
+    "GSRSchemaARN": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "arn:aws[-a-z0-9]*:glue:[-a-z0-9]+:\\d{12}:schema/[-a-zA-Z0-9_$#.]+/[-a-zA-Z0-9_$#.]+"
+    },
+    "GetRecordsInput": {
+      "type": "structure",
+      "required": [
+        "ShardIterator"
+      ],
+      "members": {
+        "ShardIterator": "ShardIterator",
+        "Limit": "GetRecordsInputLimit",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId",
+        "DryRun": "BooleanObject"
+      }
+    },
+    "GetRecordsInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "GetResourcePolicyInput": {
+      "type": "structure",
+      "required": [
+        "ResourceARN"
+      ],
+      "members": {
+        "ResourceARN": "ResourceARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "GetShardIteratorInput": {
+      "type": "structure",
+      "required": [
+        "ShardId",
+        "ShardIteratorType"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "ShardId": "ShardId",
+        "ShardIteratorType": "ShardIteratorType",
+        "StartingSequenceNumber": "SequenceNumber",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId",
+        "DryRun": "BooleanObject"
+      }
+    },
+    "HashKey": {
+      "type": "string",
+      "pattern": "^(0|([1-9]\\d{0,38}))$"
+    },
+    "IncreaseStreamRetentionPeriodInput": {
+      "type": "structure",
+      "required": [
+        "RetentionPeriodHours"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "RetentionPeriodHours": "RetentionPeriodHours",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "KeyId": {
+      "type": "string",
+      "min": 1,
+      "max": 2048
+    },
+    "ListChannelsInput": {
+      "type": "structure",
+      "members": {
+        "StreamFilter": "StreamFilterList",
+        "MaxResults": "ListChannelsInputLimit",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListChannelsInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "ListShardsInput": {
+      "type": "structure",
+      "members": {
+        "StreamName": "StreamName",
+        "NextToken": "NextToken",
+        "ExclusiveStartShardId": "ShardId",
+        "MaxResults": "ListShardsInputLimit",
+        "ShardFilter": "ShardFilter",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "ListShardsInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "ListStreamConsumersInput": {
+      "type": "structure",
+      "required": [
+        "StreamARN"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "NextToken": "NextToken",
+        "MaxResults": "ListStreamConsumersInputLimit",
+        "StreamId": "StreamId"
+      }
+    },
+    "ListStreamConsumersInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "ListStreamsInput": {
+      "type": "structure",
+      "members": {
+        "Limit": "ListStreamsInputLimit",
+        "ExclusiveStartStreamName": "StreamName",
+        "NextToken": "NextToken"
+      }
+    },
+    "ListStreamsInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "ListTagsForResourceInput": {
+      "type": "structure",
+      "required": [
+        "ResourceARN"
+      ],
+      "members": {
+        "ResourceARN": "ResourceARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "ListTagsForStreamInput": {
+      "type": "structure",
+      "members": {
+        "StreamName": "StreamName",
+        "ExclusiveStartTagKey": "TagKey",
+        "Limit": "ListTagsForStreamInputLimit",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "ListTagsForStreamInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MaxRecordSizeInKiB": {
+      "type": "integer",
+      "min": 1024,
+      "max": 10240
+    },
+    "MergeShardsInput": {
+      "type": "structure",
+      "required": [
+        "ShardToMerge",
+        "AdjacentShardToMerge"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "ShardToMerge": "ShardId",
+        "AdjacentShardToMerge": "ShardId",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "MetricsName": {
+      "type": "string",
+      "enum": [
+        "IncomingBytes",
+        "IncomingRecords",
+        "OutgoingBytes",
+        "OutgoingRecords",
+        "WriteProvisionedThroughputExceeded",
+        "ReadProvisionedThroughputExceeded",
+        "IteratorAgeMilliseconds",
+        "ALL"
+      ]
+    },
+    "MetricsNameList": {
+      "type": "list",
+      "min": 1,
+      "max": 7,
+      "member": "MetricsName"
+    },
+    "MinimumThroughputBillingCommitmentInput": {
+      "type": "structure",
+      "required": [
+        "Status"
+      ],
+      "members": {
+        "Status": "MinimumThroughputBillingCommitmentInputStatus"
+      }
+    },
+    "MinimumThroughputBillingCommitmentInputStatus": {
+      "type": "string",
+      "enum": [
+        "ENABLED",
+        "DISABLED"
+      ]
+    },
+    "NaturalIntegerObject": {
+      "type": "integer",
+      "min": 0
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 1,
+      "max": 1048576
+    },
+    "PartitionField": {
+      "type": "structure",
+      "required": [
+        "Transform",
+        "SourceName"
+      ],
+      "members": {
+        "Transform": "PartitionTransform",
+        "SourceName": "PartitionSourceName"
+      }
+    },
+    "PartitionFieldList": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "PartitionField"
+    },
+    "PartitionKey": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "PartitionSourceName": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9\\.\\_]+"
+    },
+    "PartitionSpec": {
+      "type": "structure",
+      "required": [
+        "PartitionFields"
+      ],
+      "members": {
+        "PartitionFields": "PartitionFieldList"
+      }
+    },
+    "PartitionTransform": {
+      "type": "string",
+      "enum": [
+        "TIME_HOUR"
+      ]
+    },
+    "Policy": {
+      "type": "string"
+    },
+    "PositiveIntegerObject": {
+      "type": "integer",
+      "min": 1
+    },
+    "PutRecordInput": {
+      "type": "structure",
+      "required": [
+        "Data"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "PartitionKey": "PartitionKey",
+        "ExplicitHashKey": "HashKey",
+        "SequenceNumberForOrdering": "SequenceNumber",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId",
+        "DryRun": "BooleanObject"
+      }
+    },
+    "PutRecordsInput": {
+      "type": "structure",
+      "required": [
+        "Records"
+      ],
+      "members": {
+        "Records": "PutRecordsRequestEntryList",
+        "StreamName": "StreamName",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId",
+        "DryRun": "BooleanObject"
+      }
+    },
+    "PutRecordsRequestEntry": {
+      "type": "structure",
+      "required": [
+        "Data"
+      ],
+      "members": {
+        "ExplicitHashKey": "HashKey",
+        "PartitionKey": "PartitionKey"
+      }
+    },
+    "PutRecordsRequestEntryList": {
+      "type": "list",
+      "min": 1,
+      "max": 500,
+      "member": "PutRecordsRequestEntry"
+    },
+    "PutResourcePolicyInput": {
+      "type": "structure",
+      "required": [
+        "ResourceARN",
+        "Policy"
+      ],
+      "members": {
+        "ResourceARN": "ResourceARN",
+        "StreamId": "StreamId",
+        "Policy": "Policy"
+      }
+    },
+    "RecordConfiguration": {
+      "type": "structure",
+      "required": [
+        "RecordFormatType"
+      ],
+      "members": {
+        "RecordFormatType": "RecordFormatType",
+        "GSRSchemaARN": "GSRSchemaARN"
+      }
+    },
+    "RecordDistributionStrategy": {
+      "type": "string",
+      "enum": [
+        "AUTO",
+        "USER_PARTITION_KEY"
+      ]
+    },
+    "RecordFormatType": {
+      "type": "string",
+      "enum": [
+        "GSR_JSON",
+        "JSON",
+        "STRING",
+        "BYTE_ARRAY"
+      ]
+    },
+    "RegisterStreamConsumerInput": {
+      "type": "structure",
+      "required": [
+        "StreamARN",
+        "ConsumerName"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "ConsumerName": "ConsumerName",
+        "StreamId": "StreamId",
+        "Tags": "TagMap"
+      }
+    },
+    "RemoveTagsFromStreamInput": {
+      "type": "structure",
+      "required": [
+        "TagKeys"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "TagKeys": "TagKeyList",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "ResourceARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "arn:aws.*:kinesis:.*:\\d{12}:.*(stream|channel)/\\S+"
+    },
+    "RetentionPeriodHours": {
+      "type": "integer"
+    },
+    "RoleARN": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "arn:aws[-a-z0-9]*:iam::\\d{12}:role/[a-zA-Z_0-9+=,.@\\-_/]+"
+    },
+    "S3CompressionType": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "GZIP",
+        "ZSTD"
+      ]
+    },
+    "S3DestinationConfiguration": {
+      "type": "structure",
+      "required": [
+        "StorageConfiguration"
+      ],
+      "members": {
+        "DataFreshnessInSeconds": "DataFreshnessInSeconds",
+        "DeadLetterQueueS3Configuration": "DeadLetterQueueS3Configuration",
+        "StorageConfiguration": "S3StorageConfiguration"
+      }
+    },
+    "S3DestinationUpdateInput": {
+      "type": "structure",
+      "required": [
+        "DataFreshnessInSeconds"
+      ],
+      "members": {
+        "DataFreshnessInSeconds": "DataFreshnessInSeconds"
+      }
+    },
+    "S3ErrorOutputPrefix": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[0-9A-Za-z!\\-_'.*()\\/]+"
+    },
+    "S3OutputKeyTemplate": {
+      "type": "string",
+      "min": 1,
+      "max": 1024,
+      "pattern": "[0-9A-Za-z!\\-_'.*()\\/=:{}]+"
+    },
+    "S3StorageClass": {
+      "type": "string",
+      "enum": [
+        "STANDARD",
+        "INTELLIGENT_TIERING",
+        "GLACIER_IR"
+      ]
+    },
+    "S3StorageConfiguration": {
+      "type": "structure",
+      "required": [
+        "BucketARN",
+        "ExpectedBucketOwner",
+        "CompressionType"
+      ],
+      "members": {
+        "BucketARN": "BucketARN",
+        "ExpectedBucketOwner": "ExpectedBucketOwner",
+        "OutputKeyTemplate": "S3OutputKeyTemplate",
+        "StorageClass": "S3StorageClass",
+        "CompressionType": "S3CompressionType"
+      }
+    },
+    "S3TablesCompressionType": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "ZSTD",
+        "SNAPPY"
+      ]
+    },
+    "S3TablesConfiguration": {
+      "type": "structure",
+      "required": [
+        "TableBucketARN",
+        "Namespace",
+        "TableName",
+        "CompressionType"
+      ],
+      "members": {
+        "TableBucketARN": "TableBucketARN",
+        "Namespace": "S3TablesNamespace",
+        "TableName": "S3TablesTableName",
+        "CompressionType": "S3TablesCompressionType",
+        "PartitionSpec": "PartitionSpec"
+      }
+    },
+    "S3TablesConfigurationList": {
+      "type": "list",
+      "min": 1,
+      "max": 10000,
+      "member": "S3TablesConfiguration"
+    },
+    "S3TablesDestinationConfiguration": {
+      "type": "structure",
+      "required": [
+        "DeadLetterQueueS3Configuration",
+        "S3TablesConfigurationList"
+      ],
+      "members": {
+        "DataFreshnessInSeconds": "DataFreshnessInSeconds",
+        "DeadLetterQueueS3Configuration": "DeadLetterQueueS3Configuration",
+        "S3TablesConfigurationList": "S3TablesConfigurationList"
+      }
+    },
+    "S3TablesDestinationUpdateInput": {
+      "type": "structure",
+      "required": [
+        "DataFreshnessInSeconds"
+      ],
+      "members": {
+        "DataFreshnessInSeconds": "DataFreshnessInSeconds"
+      }
+    },
+    "S3TablesNamespace": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[0-9a-z_]+"
+    },
+    "S3TablesTableName": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[0-9a-z_]+"
+    },
+    "ScalingType": {
+      "type": "string",
+      "enum": [
+        "UNIFORM_SCALING"
+      ]
+    },
+    "SequenceNumber": {
+      "type": "string",
+      "pattern": "^(0|([1-9]\\d{0,128}))$"
+    },
+    "ShardFilter": {
+      "type": "structure",
+      "required": [
+        "Type"
+      ],
+      "members": {
+        "Type": "ShardFilterType",
+        "ShardId": "ShardId"
+      }
+    },
+    "ShardFilterType": {
+      "type": "string",
+      "enum": [
+        "AFTER_SHARD_ID",
+        "AT_TRIM_HORIZON",
+        "FROM_TRIM_HORIZON",
+        "AT_LATEST",
+        "AT_TIMESTAMP",
+        "FROM_TIMESTAMP"
+      ]
+    },
+    "ShardId": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.-]+"
+    },
+    "ShardIterator": {
+      "type": "string",
+      "min": 1,
+      "max": 512
+    },
+    "ShardIteratorType": {
+      "type": "string",
+      "enum": [
+        "AT_SEQUENCE_NUMBER",
+        "AFTER_SEQUENCE_NUMBER",
+        "TRIM_HORIZON",
+        "LATEST",
+        "AT_TIMESTAMP"
+      ]
+    },
+    "SplitShardInput": {
+      "type": "structure",
+      "required": [
+        "ShardToSplit",
+        "NewStartingHashKey"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "ShardToSplit": "ShardId",
+        "NewStartingHashKey": "HashKey",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "StartStreamEncryptionInput": {
+      "type": "structure",
+      "required": [
+        "EncryptionType",
+        "KeyId"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "EncryptionType": "EncryptionType",
+        "KeyId": "KeyId",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "StartingPosition": {
+      "type": "structure",
+      "required": [
+        "Type"
+      ],
+      "members": {
+        "Type": "ShardIteratorType",
+        "SequenceNumber": "SequenceNumber"
+      }
+    },
+    "StopStreamEncryptionInput": {
+      "type": "structure",
+      "required": [
+        "EncryptionType",
+        "KeyId"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "EncryptionType": "EncryptionType",
+        "KeyId": "KeyId",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "StreamARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "arn:aws.*:kinesis:.*:\\d{12}:stream/\\S+"
+    },
+    "StreamFilter": {
+      "type": "structure",
+      "required": [
+        "StreamARN"
+      ],
+      "members": {
+        "StreamARN": "StreamARN"
+      }
+    },
+    "StreamFilterList": {
+      "type": "list",
+      "min": 1,
+      "max": 10000,
+      "member": "StreamFilter"
+    },
+    "StreamId": {
+      "type": "string",
+      "min": 1,
+      "max": 24,
+      "pattern": "[a-z0-9]{20}-[a-z0-9]{3}"
+    },
+    "StreamMode": {
+      "type": "string",
+      "enum": [
+        "PROVISIONED",
+        "ON_DEMAND"
+      ]
+    },
+    "StreamModeDetails": {
+      "type": "structure",
+      "required": [
+        "StreamMode"
+      ],
+      "members": {
+        "StreamMode": "StreamMode"
+      }
+    },
+    "StreamName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.-]+"
+    },
+    "SubscribeToShardInput": {
+      "type": "structure",
+      "required": [
+        "ConsumerARN",
+        "ShardId",
+        "StartingPosition"
+      ],
+      "members": {
+        "ConsumerARN": "ConsumerARN",
+        "StreamId": "StreamId",
+        "ShardId": "ShardId",
+        "StartingPosition": "StartingPosition",
+        "DryRun": "BooleanObject"
+      }
+    },
+    "TableBucketARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "arn:aws[-a-z0-9]*:s3tables:[-a-z0-9]+:\\d{12}:bucket/[a-z0-9_-]{3,63}"
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "TagKeyList": {
+      "type": "list",
+      "min": 1,
+      "max": 50,
+      "member": "TagKey"
+    },
+    "TagMap": {
+      "type": "map",
+      "min": 1,
+      "max": 200,
+      "key": "TagKey",
+      "value": "TagValue"
+    },
+    "TagResourceInput": {
+      "type": "structure",
+      "required": [
+        "Tags",
+        "ResourceARN"
+      ],
+      "members": {
+        "Tags": "TagMap",
+        "ResourceARN": "ResourceARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256
+    },
+    "UntagResourceInput": {
+      "type": "structure",
+      "required": [
+        "TagKeys",
+        "ResourceARN"
+      ],
+      "members": {
+        "TagKeys": "TagKeyList",
+        "ResourceARN": "ResourceARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "UpdateAccountSettingsInput": {
+      "type": "structure",
+      "required": [
+        "MinimumThroughputBillingCommitment"
+      ],
+      "members": {
+        "MinimumThroughputBillingCommitment": "MinimumThroughputBillingCommitmentInput"
+      }
+    },
+    "UpdateChannelInput": {
+      "type": "structure",
+      "required": [
+        "ChannelARN"
+      ],
+      "members": {
+        "ChannelARN": "ChannelARN",
+        "S3DestinationConfiguration": "S3DestinationUpdateInput",
+        "S3TablesDestinationConfiguration": "S3TablesDestinationUpdateInput",
+        "LoggingConfiguration": "ChannelLoggingUpdateInput"
+      }
+    },
+    "UpdateMaxRecordSizeInput": {
+      "type": "structure",
+      "required": [
+        "MaxRecordSizeInKiB"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId",
+        "MaxRecordSizeInKiB": "MaxRecordSizeInKiB"
+      }
+    },
+    "UpdateShardCountInput": {
+      "type": "structure",
+      "required": [
+        "TargetShardCount",
+        "ScalingType"
+      ],
+      "members": {
+        "StreamName": "StreamName",
+        "TargetShardCount": "PositiveIntegerObject",
+        "ScalingType": "ScalingType",
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId"
+      }
+    },
+    "UpdateStreamModeInput": {
+      "type": "structure",
+      "required": [
+        "StreamARN",
+        "StreamModeDetails"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId",
+        "StreamModeDetails": "StreamModeDetails",
+        "WarmThroughputMiBps": "NaturalIntegerObject"
+      }
+    },
+    "UpdateStreamRecordDistributionStrategyInput": {
+      "type": "structure",
+      "required": [
+        "StreamARN",
+        "RecordDistributionStrategy"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "StreamId": "StreamId",
+        "RecordDistributionStrategy": "RecordDistributionStrategy"
+      }
+    },
+    "UpdateStreamWarmThroughputInput": {
+      "type": "structure",
+      "required": [
+        "WarmThroughputMiBps"
+      ],
+      "members": {
+        "StreamARN": "StreamARN",
+        "StreamName": "StreamName",
+        "StreamId": "StreamId",
+        "WarmThroughputMiBps": "NaturalIntegerObject"
+      }
+    }
+  }
+}

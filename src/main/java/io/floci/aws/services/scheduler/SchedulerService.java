@@ -12,6 +12,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -24,12 +25,14 @@ import org.jboss.logging.Logger;
 
 import java.time.DateTimeException;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class SchedulerService {
+public class SchedulerService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(SchedulerService.class);
 
@@ -39,6 +42,7 @@ public class SchedulerService {
             "arn:(?:" + AwsArnUtils.PARTITION_REGEX + "):iam::\\d{12}:role/[\\w+=,.@/-]+");
     private static final String ROLE_ARN_MODEL_PATTERN = "^arn:aws(-[a-z]+)?:iam::\\d{12}:role\\/[\\w+=,.@\\/-]+$"; // partition-literal: the Scheduler model's RoleArn pattern, quoted verbatim in the error message
     private static final String DEFAULT_GROUP = "default";
+    private static final String GROUP_RESOURCE = "schedule-group/";
     // ListScheduleGroups and ListSchedules model MaxResults as 1-100 and NextToken as 1-2048 chars.
     private static final int MAX_PAGE_SIZE = 100;
     private static final int MAX_TOKEN_LENGTH = 2048;
@@ -69,6 +73,53 @@ public class SchedulerService {
         this.groupStore = groupStore;
         this.scheduleStore = scheduleStore;
         this.regionResolver = regionResolver;
+    }
+
+    // ──────────────────────────── IAM lookups ────────────────────────────
+
+    @Override
+    public String namespace() {
+        return "scheduler";
+    }
+
+    /** Scheduler mints no part of an ARN a request names, so there is nothing to look up by name. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The schedule group Scheduler acts on for a request naming none, {@code default}, which every account has in
+     * every Region. Reads only: the group is not stored until a request uses it.
+     */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "schedule-group".equals(type) ? Optional.of(buildGroupArn(region, DEFAULT_GROUP)) : Optional.empty();
+    }
+
+    /**
+     * The tags of the schedule group stored under {@code arn}, in the account and Region the ARN names, by key, which
+     * IAM gives a resource-tag condition; empty when there is none, the default group before a request stores it among
+     * them. Reads that one group's entry, a pre-multi-account one of the default account in place, and matches it on
+     * the whole ARN, leaving it as it is.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "scheduler")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.resource().startsWith(GROUP_RESOURCE)) {
+            return Map.of();
+        }
+        String key = groupKey(parsed.region(), parsed.resource().substring(GROUP_RESOURCE.length()));
+        String account = parsed.accountId();
+        Optional<ScheduleGroup> group = groupStore instanceof AccountAwareStorageBackend<ScheduleGroup> aware
+                ? aware.getForAccount(account, key).or(() -> aware.getLegacyForAccount(account, key))
+                : groupStore.get(key);
+        return group.filter(stored -> arn.equals(stored.getArn()))
+                .<Map<String, String>>map(stored -> Map.copyOf(stored.getTags()))
+                .orElse(Map.of());
     }
 
     // ──────────────────────────── Schedule Groups ────────────────────────────
@@ -160,8 +211,14 @@ public class SchedulerService {
             return;
         }
         ScheduleGroup group = getScheduleGroup(name, region);
-        group.getTags().putAll(tags);
-        group.setLastModificationDate(Instant.now());
+        // A new map in place of the old, never a change to the one a tag lookup may be copying (storedTags, the tag
+        // listing), so each reads one whole set; writers of the group take turns.
+        synchronized (group) {
+            Map<String, String> updated = new HashMap<>(group.getTags());
+            updated.putAll(tags);
+            group.setTags(updated);
+            group.setLastModificationDate(Instant.now());
+        }
         groupStore.put(groupKey(region, group.getName()), group);
     }
 
@@ -170,8 +227,12 @@ public class SchedulerService {
             return;
         }
         ScheduleGroup group = getScheduleGroup(name, region);
-        tagKeys.forEach(group.getTags()::remove);
-        group.setLastModificationDate(Instant.now());
+        synchronized (group) {
+            Map<String, String> updated = new HashMap<>(group.getTags());
+            tagKeys.forEach(updated::remove);
+            group.setTags(updated);
+            group.setLastModificationDate(Instant.now());
+        }
         groupStore.put(groupKey(region, group.getName()), group);
     }
 
@@ -476,7 +537,7 @@ public class SchedulerService {
     }
 
     private String buildGroupArn(String region, String name) {
-        return regionResolver.buildArn("scheduler", region, "schedule-group/" + name);
+        return regionResolver.buildArn("scheduler", region, GROUP_RESOURCE + name);
     }
 
     private static String groupKey(String region, String name) {

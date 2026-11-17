@@ -17,8 +17,10 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IamRestRoutesTest {
 
@@ -44,7 +46,89 @@ class IamRestRoutesTest {
                }}
              }}""";
 
+    @ParameterizedTest
+    @ValueSource(strings = {"controltower", "signer"})
+    void sharedTagAlternativesCarryMemberLocations(String scope) {
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        Map<String, String> operations = Map.of("POST", "TagResource", "GET", "ListTagsForResource",
+                "DELETE", "UntagResource");
+        operations.forEach((method, operation) -> {
+            IamRestRoutes.Match bare = vendored.match(scope, method, "/tags/", null).orElseThrow();
+            assertEquals(operation, bare.operation());
+            assertEquals(Map.of(), bare.labels());
+            assertEquals(Map.of("resourceArn", "POST".equals(method) ? "body" : "?resourceArn"), bare.located());
+            IamRestRoutes.Match path = vendored.match(scope, method, "/tags/arn%3Aresource%2Fitem", null).orElseThrow();
+            assertEquals(operation, path.operation());
+            assertEquals(Map.of("resourceArn", "arn:resource/item"), path.labels());
+            assertEquals(Map.of(), path.located());
+        });
+    }
+
+    /**
+     * API Gateway v1 tags with a PUT on {@code /tags/{resource_arn}}, a label spanning the slashes of an ARN sent
+     * unencoded, and the shared tags controller's bare path tags with a POST naming the ARN in its body: that
+     * alternative is matched by its own method, never the operation's.
+     */
+    @Test
+    void anAlternativeIsMatchedByItsOwnMethod() {
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        IamRestRoutes.Match bare = vendored.match("apigateway", "POST", "/tags", null).orElseThrow();
+        assertEquals("TagResource", bare.operation());
+        assertEquals(Map.of("resourceArn", "body"), bare.located());
+        assertEquals(Optional.empty(), vendored.operation("apigateway", "PUT", "/tags", null));
+        assertEquals(Optional.of("TagResource"),
+                vendored.operation("apigateway", "PUT", "/tags/arn:aws:apigateway:us-east-1::/restapis/abc", null));
+        assertEquals(Optional.of("GetTags"), vendored.operation("apigateway", "GET", "/tags", null));
+        assertEquals(Optional.of("TagResource"),
+                vendored.operation("apigateway", "POST", "/v2/tags/arn:aws:apigateway:us-east-1::/apis/abc", null));
+
+        IamRestRoutes own = routes(ROUTES.replace("\"requestUri\": \"/things/{ThingName}?tagging\"",
+                "\"requestUri\": \"/things/{ThingName}?tagging\", \"alternatives\": [{\"method\": \"PUT\", "
+                        + "\"requestUri\": \"/tagging\", \"located\": {\"ThingName\": \"body\"}}]"));
+        assertEquals(Optional.of("TagThing"), own.operation("svc", "PUT", "/tagging", null));
+        assertEquals(Optional.empty(), own.operation("svc", "POST", "/tagging", null));
+    }
+
+    @Test
+    void anAlternativeOfNoKnownMethodIsRejected() {
+        String alternative = ROUTES.replace("\"requestUri\": \"/things/\"",
+                "\"requestUri\": \"/things/\", \"alternatives\": [{\"method\": \"FETCH\", \"requestUri\": \"/other\", "
+                        + "\"located\": {\"member\": \"body\"}}]");
+        assertThrows(IllegalStateException.class, () -> routes(alternative));
+    }
+
+    @Test
+    void malformedAlternativeMemberSourceIsRejected() {
+        String alternative = ROUTES.replace("\"requestUri\": \"/things/\"",
+                "\"requestUri\": \"/things/\", \"alternatives\": [{\"requestUri\": \"/other\", "
+                        + "\"located\": {\"member\": \"header\"}}]");
+        assertThrows(IllegalStateException.class, () -> routes(alternative));
+    }
+
     private final IamRestRoutes routes = routes(ROUTES);
+
+    /**
+     * A model AWS documents outside botocore routes another API's requests, which carry none of the operation's
+     * members: each of its routes, Glue's Iceberg REST endpoint's among the vendored ones, says so, and a botocore
+     * model's does not.
+     */
+    @Test
+    void aDocumentedModelsRoutesTakeRequestsCarryingNoMembers() {
+        IamRestRoutes documented = routes(ROUTES.replace("\"svc\": {\"credentialScope\": \"svc\",",
+                "\"svc\": {\"credentialScope\": \"svc\", \"documented\": {\"page\": \"https://docs.example/svc\"},"));
+        assertTrue(documented.documents("svc"));
+        assertTrue(documented.match("svc", "GET", "/things/web", null).orElseThrow().documented());
+        assertFalse(routes.documents("svc"));
+        assertFalse(routes.match("svc", "GET", "/things/web", null).orElseThrow().documented());
+
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        assertTrue(vendored.match("glue", "POST", "/iceberg/v1/catalogs/:/namespaces/db/tables/t", null)
+                .orElseThrow().documented());
+        assertFalse(vendored.match("lambda", "GET", "/2015-03-31/functions/fn", null).orElseThrow().documented());
+
+        assertThrows(IllegalStateException.class, () -> routes(ROUTES.replace("\"svc\": {\"credentialScope\": \"svc\",",
+                "\"svc\": {\"credentialScope\": \"svc\", \"documented\": \"a page\",")));
+    }
 
     @Test
     void routeDataIsBundledWithTheApplicationRatherThanOnlyWithTests() throws Exception {
@@ -133,6 +217,22 @@ class IamRestRoutesTest {
         assertEquals(Optional.of("ListThings"), get("/things/"));
         assertEquals(Optional.of("GetThing"), get("/things/web%2Fpart"));
         assertEquals(Optional.of("GetRoot"), get("/"));
+    }
+
+    /**
+     * A path a route filter moved under an internal prefix, given without it, was matched decoded, so a label's value
+     * may hold the slashes its encoding hid: when the path matches no route with each label taking one segment, its
+     * labels take the segments their values span. A route that matches with one segment a label still wins, and an
+     * ordinary path's labels never span.
+     */
+    @Test
+    void aPathMovedUnderAPrefixMayHoldTheSlashesItsLabelsWereDecodedTo() {
+        assertEquals(Optional.of("GetThing"), routes.operation("svc", "GET", "/things/web/part", null, true));
+        assertEquals(Optional.empty(), routes.operation("svc", "GET", "/things/web/part", null, false));
+        assertEquals(Map.of("ThingName", "a/b", "PartPath", "c"),
+                routes.match("svc", "GET", "/things/a/b/parts/c", null, true)
+                        .map(IamRestRoutes.Match::labels).orElse(Map.of()));
+        assertEquals(Optional.of("ListParts"), routes.operation("svc", "GET", "/things/web/parts/list", null, true));
     }
 
     /**

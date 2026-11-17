@@ -1,0 +1,1552 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_athena_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "BatchGetNamedQuery": "BatchGetNamedQueryInput",
+    "BatchGetPreparedStatement": "BatchGetPreparedStatementInput",
+    "BatchGetQueryExecution": "BatchGetQueryExecutionInput",
+    "CancelCapacityReservation": "CancelCapacityReservationInput",
+    "CreateCapacityReservation": "CreateCapacityReservationInput",
+    "CreateDataCatalog": "CreateDataCatalogInput",
+    "CreateNamedQuery": "CreateNamedQueryInput",
+    "CreateNotebook": "CreateNotebookInput",
+    "CreatePreparedStatement": "CreatePreparedStatementInput",
+    "CreatePresignedNotebookUrl": "CreatePresignedNotebookUrlRequest",
+    "CreateWorkGroup": "CreateWorkGroupInput",
+    "DeleteCapacityReservation": "DeleteCapacityReservationInput",
+    "DeleteDataCatalog": "DeleteDataCatalogInput",
+    "DeleteNamedQuery": "DeleteNamedQueryInput",
+    "DeleteNotebook": "DeleteNotebookInput",
+    "DeletePreparedStatement": "DeletePreparedStatementInput",
+    "DeleteWorkGroup": "DeleteWorkGroupInput",
+    "ExportNotebook": "ExportNotebookInput",
+    "GetCalculationExecution": "GetCalculationExecutionRequest",
+    "GetCalculationExecutionCode": "GetCalculationExecutionCodeRequest",
+    "GetCalculationExecutionStatus": "GetCalculationExecutionStatusRequest",
+    "GetCapacityAssignmentConfiguration": "GetCapacityAssignmentConfigurationInput",
+    "GetCapacityReservation": "GetCapacityReservationInput",
+    "GetDataCatalog": "GetDataCatalogInput",
+    "GetDatabase": "GetDatabaseInput",
+    "GetNamedQuery": "GetNamedQueryInput",
+    "GetNotebookMetadata": "GetNotebookMetadataInput",
+    "GetPreparedStatement": "GetPreparedStatementInput",
+    "GetQueryExecution": "GetQueryExecutionInput",
+    "GetQueryResults": "GetQueryResultsInput",
+    "GetQueryRuntimeStatistics": "GetQueryRuntimeStatisticsInput",
+    "GetResourceDashboard": "GetResourceDashboardRequest",
+    "GetSession": "GetSessionRequest",
+    "GetSessionEndpoint": "GetSessionEndpointRequest",
+    "GetSessionStatus": "GetSessionStatusRequest",
+    "GetTableMetadata": "GetTableMetadataInput",
+    "GetWorkGroup": "GetWorkGroupInput",
+    "ImportNotebook": "ImportNotebookInput",
+    "ListApplicationDPUSizes": "ListApplicationDPUSizesInput",
+    "ListCalculationExecutions": "ListCalculationExecutionsRequest",
+    "ListCapacityReservations": "ListCapacityReservationsInput",
+    "ListDataCatalogs": "ListDataCatalogsInput",
+    "ListDatabases": "ListDatabasesInput",
+    "ListEngineVersions": "ListEngineVersionsInput",
+    "ListExecutors": "ListExecutorsRequest",
+    "ListNamedQueries": "ListNamedQueriesInput",
+    "ListNotebookMetadata": "ListNotebookMetadataInput",
+    "ListNotebookSessions": "ListNotebookSessionsRequest",
+    "ListPreparedStatements": "ListPreparedStatementsInput",
+    "ListQueryExecutions": "ListQueryExecutionsInput",
+    "ListSessions": "ListSessionsRequest",
+    "ListTableMetadata": "ListTableMetadataInput",
+    "ListTagsForResource": "ListTagsForResourceInput",
+    "ListWorkGroups": "ListWorkGroupsInput",
+    "PutCapacityAssignmentConfiguration": "PutCapacityAssignmentConfigurationInput",
+    "StartCalculationExecution": "StartCalculationExecutionRequest",
+    "StartQueryExecution": "StartQueryExecutionInput",
+    "StartSession": "StartSessionRequest",
+    "StopCalculationExecution": "StopCalculationExecutionRequest",
+    "StopQueryExecution": "StopQueryExecutionInput",
+    "TagResource": "TagResourceInput",
+    "TerminateSession": "TerminateSessionRequest",
+    "UntagResource": "UntagResourceInput",
+    "UpdateCapacityReservation": "UpdateCapacityReservationInput",
+    "UpdateDataCatalog": "UpdateDataCatalogInput",
+    "UpdateNamedQuery": "UpdateNamedQueryInput",
+    "UpdateNotebook": "UpdateNotebookInput",
+    "UpdateNotebookMetadata": "UpdateNotebookMetadataInput",
+    "UpdatePreparedStatement": "UpdatePreparedStatementInput",
+    "UpdateWorkGroup": "UpdateWorkGroupInput"
+  },
+  "shapes": {
+    "AclConfiguration": {
+      "type": "structure",
+      "required": [
+        "S3AclOption"
+      ],
+      "members": {
+        "S3AclOption": "S3AclOption"
+      }
+    },
+    "Age": {
+      "type": "integer",
+      "min": 0,
+      "max": 10080
+    },
+    "AmazonResourceName": {
+      "type": "string",
+      "min": 1,
+      "max": 1011
+    },
+    "AuthenticationType": {
+      "type": "string",
+      "enum": [
+        "DIRECTORY_IDENTITY"
+      ]
+    },
+    "AwsAccountId": {
+      "type": "string",
+      "min": 12,
+      "max": 12,
+      "pattern": "^[0-9]+$"
+    },
+    "BatchGetNamedQueryInput": {
+      "type": "structure",
+      "required": [
+        "NamedQueryIds"
+      ],
+      "members": {
+        "NamedQueryIds": "NamedQueryIdList"
+      }
+    },
+    "BatchGetPreparedStatementInput": {
+      "type": "structure",
+      "required": [
+        "PreparedStatementNames",
+        "WorkGroup"
+      ],
+      "members": {
+        "PreparedStatementNames": "PreparedStatementNameList",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "BatchGetQueryExecutionInput": {
+      "type": "structure",
+      "required": [
+        "QueryExecutionIds"
+      ],
+      "members": {
+        "QueryExecutionIds": "QueryExecutionIdList"
+      }
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "BoxedBoolean": {
+      "type": "boolean"
+    },
+    "BytesScannedCutoffValue": {
+      "type": "long",
+      "min": 10000000
+    },
+    "CalculationConfiguration": {
+      "type": "structure",
+      "members": {
+        "CodeBlock": "CodeBlock"
+      }
+    },
+    "CalculationExecutionId": {
+      "type": "string",
+      "min": 1,
+      "max": 36
+    },
+    "CalculationExecutionState": {
+      "type": "string",
+      "enum": [
+        "CREATING",
+        "CREATED",
+        "QUEUED",
+        "RUNNING",
+        "CANCELING",
+        "CANCELED",
+        "COMPLETED",
+        "FAILED"
+      ]
+    },
+    "CancelCapacityReservationInput": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "CapacityReservationName"
+      }
+    },
+    "CapacityAssignment": {
+      "type": "structure",
+      "members": {
+        "WorkGroupNames": "WorkGroupNamesList"
+      }
+    },
+    "CapacityAssignmentsList": {
+      "type": "list",
+      "member": "CapacityAssignment"
+    },
+    "CapacityReservationName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9._-]+"
+    },
+    "CatalogNameString": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[\\u0020-\\uD7FF\\uE000-\\uFFFD\\uD800\\uDC00-\\uDBFF\\uDFFF\\t]*"
+    },
+    "Classification": {
+      "type": "structure",
+      "members": {
+        "Name": "NameString",
+        "Properties": "ParametersMap"
+      }
+    },
+    "ClassificationList": {
+      "type": "list",
+      "member": "Classification"
+    },
+    "ClientRequestToken": {
+      "type": "string",
+      "min": 1,
+      "max": 36,
+      "pattern": "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+    },
+    "CloudWatchLoggingConfiguration": {
+      "type": "structure",
+      "required": [
+        "Enabled"
+      ],
+      "members": {
+        "Enabled": "BoxedBoolean",
+        "LogGroup": "LogGroupName",
+        "LogStreamNamePrefix": "LogStreamNamePrefix",
+        "LogTypes": "LogTypesMap"
+      }
+    },
+    "CodeBlock": {
+      "type": "string",
+      "max": 68000
+    },
+    "CoordinatorDpuSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 1
+    },
+    "CreateCapacityReservationInput": {
+      "type": "structure",
+      "required": [
+        "TargetDpus",
+        "Name"
+      ],
+      "members": {
+        "TargetDpus": "TargetDpusInteger",
+        "Name": "CapacityReservationName",
+        "Tags": "TagList"
+      }
+    },
+    "CreateDataCatalogInput": {
+      "type": "structure",
+      "required": [
+        "Name",
+        "Type"
+      ],
+      "members": {
+        "Name": "CatalogNameString",
+        "Type": "DataCatalogType",
+        "Description": "DescriptionString",
+        "Parameters": "ParametersMap",
+        "Tags": "TagList"
+      }
+    },
+    "CreateNamedQueryInput": {
+      "type": "structure",
+      "required": [
+        "Name",
+        "Database",
+        "QueryString"
+      ],
+      "members": {
+        "Name": "NameString",
+        "Description": "DescriptionString",
+        "Database": "DatabaseString",
+        "QueryString": "QueryString",
+        "ClientRequestToken": "IdempotencyToken",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "CreateNotebookInput": {
+      "type": "structure",
+      "required": [
+        "WorkGroup",
+        "Name"
+      ],
+      "members": {
+        "WorkGroup": "WorkGroupName",
+        "Name": "NotebookName",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "CreatePreparedStatementInput": {
+      "type": "structure",
+      "required": [
+        "StatementName",
+        "WorkGroup",
+        "QueryStatement"
+      ],
+      "members": {
+        "StatementName": "StatementName",
+        "WorkGroup": "WorkGroupName",
+        "QueryStatement": "QueryString",
+        "Description": "DescriptionString"
+      }
+    },
+    "CreatePresignedNotebookUrlRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId"
+      }
+    },
+    "CreateWorkGroupInput": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "WorkGroupName",
+        "Configuration": "WorkGroupConfiguration",
+        "Description": "WorkGroupDescriptionString",
+        "Tags": "TagList"
+      }
+    },
+    "CustomerContentEncryptionConfiguration": {
+      "type": "structure",
+      "required": [
+        "KmsKey"
+      ],
+      "members": {
+        "KmsKey": "KmsKey"
+      }
+    },
+    "DataCatalogType": {
+      "type": "string",
+      "enum": [
+        "LAMBDA",
+        "GLUE",
+        "HIVE",
+        "FEDERATED"
+      ]
+    },
+    "DatabaseString": {
+      "type": "string",
+      "min": 1,
+      "max": 255
+    },
+    "DefaultExecutorDpuSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 1
+    },
+    "DeleteCapacityReservationInput": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "CapacityReservationName"
+      }
+    },
+    "DeleteDataCatalogInput": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "CatalogNameString",
+        "DeleteCatalogOnly": "Boolean"
+      }
+    },
+    "DeleteNamedQueryInput": {
+      "type": "structure",
+      "required": [
+        "NamedQueryId"
+      ],
+      "members": {
+        "NamedQueryId": "NamedQueryId"
+      }
+    },
+    "DeleteNotebookInput": {
+      "type": "structure",
+      "required": [
+        "NotebookId"
+      ],
+      "members": {
+        "NotebookId": "NotebookId"
+      }
+    },
+    "DeletePreparedStatementInput": {
+      "type": "structure",
+      "required": [
+        "StatementName",
+        "WorkGroup"
+      ],
+      "members": {
+        "StatementName": "StatementName",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "DeleteWorkGroupInput": {
+      "type": "structure",
+      "required": [
+        "WorkGroup"
+      ],
+      "members": {
+        "WorkGroup": "WorkGroupName",
+        "RecursiveDeleteOption": "BoxedBoolean"
+      }
+    },
+    "DescriptionString": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "EncryptionConfiguration": {
+      "type": "structure",
+      "required": [
+        "EncryptionOption"
+      ],
+      "members": {
+        "EncryptionOption": "EncryptionOption",
+        "KmsKey": "String"
+      }
+    },
+    "EncryptionOption": {
+      "type": "string",
+      "enum": [
+        "SSE_S3",
+        "SSE_KMS",
+        "CSE_KMS"
+      ]
+    },
+    "EngineConfiguration": {
+      "type": "structure",
+      "members": {
+        "CoordinatorDpuSize": "CoordinatorDpuSize",
+        "MaxConcurrentDpus": "MaxConcurrentDpus",
+        "DefaultExecutorDpuSize": "DefaultExecutorDpuSize",
+        "AdditionalConfigs": "ParametersMap",
+        "SparkProperties": "ParametersMap",
+        "Classifications": "ClassificationList"
+      }
+    },
+    "EngineVersion": {
+      "type": "structure",
+      "members": {
+        "SelectedEngineVersion": "NameString",
+        "EffectiveEngineVersion": "NameString"
+      }
+    },
+    "ExecutionParameter": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "ExecutionParameters": {
+      "type": "list",
+      "min": 1,
+      "member": "ExecutionParameter"
+    },
+    "ExecutorState": {
+      "type": "string",
+      "enum": [
+        "CREATING",
+        "CREATED",
+        "REGISTERED",
+        "TERMINATING",
+        "TERMINATED",
+        "FAILED"
+      ]
+    },
+    "ExportNotebookInput": {
+      "type": "structure",
+      "required": [
+        "NotebookId"
+      ],
+      "members": {
+        "NotebookId": "NotebookId"
+      }
+    },
+    "ExpressionString": {
+      "type": "string",
+      "min": 0,
+      "max": 256
+    },
+    "FilterDefinition": {
+      "type": "structure",
+      "members": {
+        "Name": "NotebookName"
+      }
+    },
+    "GetCalculationExecutionCodeRequest": {
+      "type": "structure",
+      "required": [
+        "CalculationExecutionId"
+      ],
+      "members": {
+        "CalculationExecutionId": "CalculationExecutionId"
+      }
+    },
+    "GetCalculationExecutionRequest": {
+      "type": "structure",
+      "required": [
+        "CalculationExecutionId"
+      ],
+      "members": {
+        "CalculationExecutionId": "CalculationExecutionId"
+      }
+    },
+    "GetCalculationExecutionStatusRequest": {
+      "type": "structure",
+      "required": [
+        "CalculationExecutionId"
+      ],
+      "members": {
+        "CalculationExecutionId": "CalculationExecutionId"
+      }
+    },
+    "GetCapacityAssignmentConfigurationInput": {
+      "type": "structure",
+      "required": [
+        "CapacityReservationName"
+      ],
+      "members": {
+        "CapacityReservationName": "CapacityReservationName"
+      }
+    },
+    "GetCapacityReservationInput": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "CapacityReservationName"
+      }
+    },
+    "GetDataCatalogInput": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "CatalogNameString",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "GetDatabaseInput": {
+      "type": "structure",
+      "required": [
+        "CatalogName",
+        "DatabaseName"
+      ],
+      "members": {
+        "CatalogName": "CatalogNameString",
+        "DatabaseName": "NameString",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "GetNamedQueryInput": {
+      "type": "structure",
+      "required": [
+        "NamedQueryId"
+      ],
+      "members": {
+        "NamedQueryId": "NamedQueryId"
+      }
+    },
+    "GetNotebookMetadataInput": {
+      "type": "structure",
+      "required": [
+        "NotebookId"
+      ],
+      "members": {
+        "NotebookId": "NotebookId"
+      }
+    },
+    "GetPreparedStatementInput": {
+      "type": "structure",
+      "required": [
+        "StatementName",
+        "WorkGroup"
+      ],
+      "members": {
+        "StatementName": "StatementName",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "GetQueryExecutionInput": {
+      "type": "structure",
+      "required": [
+        "QueryExecutionId"
+      ],
+      "members": {
+        "QueryExecutionId": "QueryExecutionId"
+      }
+    },
+    "GetQueryResultsInput": {
+      "type": "structure",
+      "required": [
+        "QueryExecutionId"
+      ],
+      "members": {
+        "QueryExecutionId": "QueryExecutionId",
+        "NextToken": "Token",
+        "MaxResults": "MaxQueryResults",
+        "QueryResultType": "QueryResultType"
+      }
+    },
+    "GetQueryRuntimeStatisticsInput": {
+      "type": "structure",
+      "required": [
+        "QueryExecutionId"
+      ],
+      "members": {
+        "QueryExecutionId": "QueryExecutionId"
+      }
+    },
+    "GetResourceDashboardRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceARN"
+      ],
+      "members": {
+        "ResourceARN": "AmazonResourceName"
+      }
+    },
+    "GetSessionEndpointRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId"
+      }
+    },
+    "GetSessionRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId"
+      }
+    },
+    "GetSessionStatusRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId"
+      }
+    },
+    "GetTableMetadataInput": {
+      "type": "structure",
+      "required": [
+        "CatalogName",
+        "DatabaseName",
+        "TableName"
+      ],
+      "members": {
+        "CatalogName": "CatalogNameString",
+        "DatabaseName": "NameString",
+        "TableName": "NameString",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "GetWorkGroupInput": {
+      "type": "structure",
+      "required": [
+        "WorkGroup"
+      ],
+      "members": {
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "IdempotencyToken": {
+      "type": "string",
+      "min": 32,
+      "max": 128
+    },
+    "IdentityCenterConfiguration": {
+      "type": "structure",
+      "members": {
+        "EnableIdentityCenter": "BoxedBoolean",
+        "IdentityCenterInstanceArn": "IdentityCenterInstanceArn"
+      }
+    },
+    "IdentityCenterInstanceArn": {
+      "type": "string",
+      "min": 0,
+      "max": 255,
+      "pattern": "^arn:(aws|aws-us-gov|aws-cn|aws-iso|aws-iso-b):sso:::instance/(sso)?ins-[a-zA-Z0-9-.]{16}$"
+    },
+    "ImportNotebookInput": {
+      "type": "structure",
+      "required": [
+        "WorkGroup",
+        "Name",
+        "Type"
+      ],
+      "members": {
+        "WorkGroup": "WorkGroupName",
+        "Name": "NotebookName",
+        "Payload": "Payload",
+        "Type": "NotebookType",
+        "NotebookS3LocationUri": "S3Uri",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "KeyString": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[\\u0020-\\uD7FF\\uE000-\\uFFFD\\uD800\\uDC00-\\uDBFF\\uDFFF\\t]*"
+    },
+    "KmsKey": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "^arn:aws[a-z\\-]*:kms:([a-z0-9\\-]+):\\d{12}:key/?[a-zA-Z_0-9+=,.@\\-_/]+$|^arn:aws[a-z\\-]*:kms:([a-z0-9\\-]+):\\d{12}:alias/?[a-zA-Z_0-9+=,.@\\-_/]+$|^alias/[a-zA-Z0-9/_-]+$|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+    },
+    "ListApplicationDPUSizesInput": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "MaxApplicationDPUSizesCount",
+        "NextToken": "Token"
+      }
+    },
+    "ListCalculationExecutionsRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId",
+        "StateFilter": "CalculationExecutionState",
+        "MaxResults": "MaxCalculationsCount",
+        "NextToken": "SessionManagerToken"
+      }
+    },
+    "ListCapacityReservationsInput": {
+      "type": "structure",
+      "members": {
+        "NextToken": "Token",
+        "MaxResults": "MaxCapacityReservationsCount"
+      }
+    },
+    "ListDataCatalogsInput": {
+      "type": "structure",
+      "members": {
+        "NextToken": "Token",
+        "MaxResults": "MaxDataCatalogsCount",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "ListDatabasesInput": {
+      "type": "structure",
+      "required": [
+        "CatalogName"
+      ],
+      "members": {
+        "CatalogName": "CatalogNameString",
+        "NextToken": "Token",
+        "MaxResults": "MaxDatabasesCount",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "ListEngineVersionsInput": {
+      "type": "structure",
+      "members": {
+        "NextToken": "Token",
+        "MaxResults": "MaxEngineVersionsCount"
+      }
+    },
+    "ListExecutorsRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId",
+        "ExecutorStateFilter": "ExecutorState",
+        "MaxResults": "MaxListExecutorsCount",
+        "NextToken": "SessionManagerToken"
+      }
+    },
+    "ListNamedQueriesInput": {
+      "type": "structure",
+      "members": {
+        "NextToken": "Token",
+        "MaxResults": "MaxNamedQueriesCount",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "ListNotebookMetadataInput": {
+      "type": "structure",
+      "required": [
+        "WorkGroup"
+      ],
+      "members": {
+        "Filters": "FilterDefinition",
+        "NextToken": "Token",
+        "MaxResults": "MaxNotebooksCount",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "ListNotebookSessionsRequest": {
+      "type": "structure",
+      "required": [
+        "NotebookId"
+      ],
+      "members": {
+        "NotebookId": "NotebookId",
+        "MaxResults": "MaxSessionsCount",
+        "NextToken": "Token"
+      }
+    },
+    "ListPreparedStatementsInput": {
+      "type": "structure",
+      "required": [
+        "WorkGroup"
+      ],
+      "members": {
+        "WorkGroup": "WorkGroupName",
+        "NextToken": "Token",
+        "MaxResults": "MaxPreparedStatementsCount"
+      }
+    },
+    "ListQueryExecutionsInput": {
+      "type": "structure",
+      "members": {
+        "NextToken": "Token",
+        "MaxResults": "MaxQueryExecutionsCount",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "ListSessionsRequest": {
+      "type": "structure",
+      "required": [
+        "WorkGroup"
+      ],
+      "members": {
+        "WorkGroup": "WorkGroupName",
+        "StateFilter": "SessionState",
+        "MaxResults": "MaxSessionsCount",
+        "NextToken": "SessionManagerToken"
+      }
+    },
+    "ListTableMetadataInput": {
+      "type": "structure",
+      "required": [
+        "CatalogName",
+        "DatabaseName"
+      ],
+      "members": {
+        "CatalogName": "CatalogNameString",
+        "DatabaseName": "NameString",
+        "Expression": "ExpressionString",
+        "NextToken": "Token",
+        "MaxResults": "MaxTableMetadataCount",
+        "WorkGroup": "WorkGroupName"
+      }
+    },
+    "ListTagsForResourceInput": {
+      "type": "structure",
+      "required": [
+        "ResourceARN"
+      ],
+      "members": {
+        "ResourceARN": "AmazonResourceName",
+        "NextToken": "Token",
+        "MaxResults": "MaxTagsCount"
+      }
+    },
+    "ListWorkGroupsInput": {
+      "type": "structure",
+      "members": {
+        "NextToken": "Token",
+        "MaxResults": "MaxWorkGroupsCount"
+      }
+    },
+    "LogGroupName": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "^[a-zA-Z0-9._/-]+$"
+    },
+    "LogStreamNamePrefix": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "^[^:*]*$"
+    },
+    "LogTypeKey": {
+      "type": "string"
+    },
+    "LogTypeValue": {
+      "type": "string"
+    },
+    "LogTypeValuesList": {
+      "type": "list",
+      "member": "LogTypeValue"
+    },
+    "LogTypesMap": {
+      "type": "map",
+      "key": "LogTypeKey",
+      "value": "LogTypeValuesList"
+    },
+    "ManagedLoggingConfiguration": {
+      "type": "structure",
+      "required": [
+        "Enabled"
+      ],
+      "members": {
+        "Enabled": "BoxedBoolean",
+        "KmsKey": "KmsKey"
+      }
+    },
+    "ManagedQueryResultsConfiguration": {
+      "type": "structure",
+      "required": [
+        "Enabled"
+      ],
+      "members": {
+        "Enabled": "Boolean",
+        "EncryptionConfiguration": "ManagedQueryResultsEncryptionConfiguration"
+      }
+    },
+    "ManagedQueryResultsConfigurationUpdates": {
+      "type": "structure",
+      "members": {
+        "Enabled": "BoxedBoolean",
+        "EncryptionConfiguration": "ManagedQueryResultsEncryptionConfiguration",
+        "RemoveEncryptionConfiguration": "BoxedBoolean"
+      }
+    },
+    "ManagedQueryResultsEncryptionConfiguration": {
+      "type": "structure",
+      "required": [
+        "KmsKey"
+      ],
+      "members": {
+        "KmsKey": "KmsKey"
+      }
+    },
+    "MaxApplicationDPUSizesCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "MaxCalculationsCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "MaxCapacityReservationsCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MaxConcurrentDpus": {
+      "type": "integer",
+      "min": 2,
+      "max": 5000
+    },
+    "MaxDataCatalogsCount": {
+      "type": "integer",
+      "min": 2,
+      "max": 50
+    },
+    "MaxDatabasesCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MaxEngineVersionsCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 10
+    },
+    "MaxListExecutorsCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "MaxNamedQueriesCount": {
+      "type": "integer",
+      "min": 0,
+      "max": 50
+    },
+    "MaxNotebooksCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MaxPreparedStatementsCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MaxQueryExecutionsCount": {
+      "type": "integer",
+      "min": 0,
+      "max": 50
+    },
+    "MaxQueryResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 1000
+    },
+    "MaxSessionsCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "MaxTableMetadataCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MaxTagsCount": {
+      "type": "integer",
+      "min": 75
+    },
+    "MaxWorkGroupsCount": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "CloudWatchLoggingConfiguration": "CloudWatchLoggingConfiguration",
+        "ManagedLoggingConfiguration": "ManagedLoggingConfiguration",
+        "S3LoggingConfiguration": "S3LoggingConfiguration"
+      }
+    },
+    "NameString": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "NamedQueryDescriptionString": {
+      "type": "string",
+      "min": 0,
+      "max": 1024
+    },
+    "NamedQueryId": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "\\S+"
+    },
+    "NamedQueryIdList": {
+      "type": "list",
+      "min": 1,
+      "max": 50,
+      "member": "NamedQueryId"
+    },
+    "NotebookId": {
+      "type": "string",
+      "min": 1,
+      "max": 36,
+      "pattern": "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}"
+    },
+    "NotebookName": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "(?!.*[/:\\\\])[\\u0020-\\uD7FF\\uE000-\\uFFFD\\uD800\\uDC00-\\uDBFF\\uDFFF\\t]+"
+    },
+    "NotebookType": {
+      "type": "string",
+      "enum": [
+        "IPYNB"
+      ]
+    },
+    "ParametersMap": {
+      "type": "map",
+      "key": "KeyString",
+      "value": "ParametersMapValue"
+    },
+    "ParametersMapValue": {
+      "type": "string",
+      "max": 51200
+    },
+    "Payload": {
+      "type": "string",
+      "min": 1,
+      "max": 10485760
+    },
+    "PreparedStatementNameList": {
+      "type": "list",
+      "member": "StatementName"
+    },
+    "PutCapacityAssignmentConfigurationInput": {
+      "type": "structure",
+      "required": [
+        "CapacityReservationName",
+        "CapacityAssignments"
+      ],
+      "members": {
+        "CapacityReservationName": "CapacityReservationName",
+        "CapacityAssignments": "CapacityAssignmentsList"
+      }
+    },
+    "QueryExecutionContext": {
+      "type": "structure",
+      "members": {
+        "Database": "DatabaseString",
+        "Catalog": "CatalogNameString"
+      }
+    },
+    "QueryExecutionId": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "\\S+"
+    },
+    "QueryExecutionIdList": {
+      "type": "list",
+      "min": 1,
+      "max": 50,
+      "member": "QueryExecutionId"
+    },
+    "QueryResultType": {
+      "type": "string",
+      "enum": [
+        "DATA_MANIFEST",
+        "DATA_ROWS"
+      ]
+    },
+    "QueryResultsS3AccessGrantsConfiguration": {
+      "type": "structure",
+      "required": [
+        "EnableS3AccessGrants",
+        "AuthenticationType"
+      ],
+      "members": {
+        "EnableS3AccessGrants": "BoxedBoolean",
+        "CreateUserLevelPrefix": "BoxedBoolean",
+        "AuthenticationType": "AuthenticationType"
+      }
+    },
+    "QueryString": {
+      "type": "string",
+      "min": 1,
+      "max": 262144
+    },
+    "ResultConfiguration": {
+      "type": "structure",
+      "members": {
+        "OutputLocation": "ResultOutputLocation",
+        "EncryptionConfiguration": "EncryptionConfiguration",
+        "ExpectedBucketOwner": "AwsAccountId",
+        "AclConfiguration": "AclConfiguration"
+      }
+    },
+    "ResultConfigurationUpdates": {
+      "type": "structure",
+      "members": {
+        "OutputLocation": "ResultOutputLocation",
+        "RemoveOutputLocation": "BoxedBoolean",
+        "EncryptionConfiguration": "EncryptionConfiguration",
+        "RemoveEncryptionConfiguration": "BoxedBoolean",
+        "ExpectedBucketOwner": "AwsAccountId",
+        "RemoveExpectedBucketOwner": "BoxedBoolean",
+        "AclConfiguration": "AclConfiguration",
+        "RemoveAclConfiguration": "BoxedBoolean"
+      }
+    },
+    "ResultOutputLocation": {
+      "type": "string"
+    },
+    "ResultReuseByAgeConfiguration": {
+      "type": "structure",
+      "required": [
+        "Enabled"
+      ],
+      "members": {
+        "Enabled": "Boolean",
+        "MaxAgeInMinutes": "Age"
+      }
+    },
+    "ResultReuseConfiguration": {
+      "type": "structure",
+      "members": {
+        "ResultReuseByAgeConfiguration": "ResultReuseByAgeConfiguration"
+      }
+    },
+    "RoleArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "^arn:aws[a-z\\-]*:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+$"
+    },
+    "S3AclOption": {
+      "type": "string",
+      "enum": [
+        "BUCKET_OWNER_FULL_CONTROL"
+      ]
+    },
+    "S3LoggingConfiguration": {
+      "type": "structure",
+      "required": [
+        "Enabled"
+      ],
+      "members": {
+        "Enabled": "BoxedBoolean",
+        "KmsKey": "KmsKey",
+        "LogLocation": "S3OutputLocation"
+      }
+    },
+    "S3OutputLocation": {
+      "type": "string",
+      "max": 1024,
+      "pattern": "^s3://[a-z0-9][a-z0-9\\-]*[a-z0-9](/.*)?$"
+    },
+    "S3Uri": {
+      "type": "string",
+      "max": 1024,
+      "pattern": "^(https|s3|S3)://([^/]+)/?(.*)$"
+    },
+    "SessionId": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "SessionIdleTimeoutInMinutes": {
+      "type": "integer",
+      "min": 1,
+      "max": 480
+    },
+    "SessionManagerToken": {
+      "type": "string",
+      "max": 2048
+    },
+    "SessionState": {
+      "type": "string",
+      "enum": [
+        "CREATING",
+        "CREATED",
+        "IDLE",
+        "BUSY",
+        "TERMINATING",
+        "TERMINATED",
+        "DEGRADED",
+        "FAILED"
+      ]
+    },
+    "StartCalculationExecutionRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId",
+        "Description": "DescriptionString",
+        "CalculationConfiguration": "CalculationConfiguration",
+        "CodeBlock": "CodeBlock",
+        "ClientRequestToken": "IdempotencyToken"
+      }
+    },
+    "StartQueryExecutionInput": {
+      "type": "structure",
+      "required": [
+        "QueryString"
+      ],
+      "members": {
+        "QueryString": "QueryString",
+        "ClientRequestToken": "IdempotencyToken",
+        "QueryExecutionContext": "QueryExecutionContext",
+        "ResultConfiguration": "ResultConfiguration",
+        "WorkGroup": "WorkGroupName",
+        "ExecutionParameters": "ExecutionParameters",
+        "ResultReuseConfiguration": "ResultReuseConfiguration",
+        "EngineConfiguration": "EngineConfiguration"
+      }
+    },
+    "StartSessionRequest": {
+      "type": "structure",
+      "required": [
+        "WorkGroup",
+        "EngineConfiguration"
+      ],
+      "members": {
+        "Description": "DescriptionString",
+        "WorkGroup": "WorkGroupName",
+        "EngineConfiguration": "EngineConfiguration",
+        "ExecutionRole": "RoleArn",
+        "MonitoringConfiguration": "MonitoringConfiguration",
+        "NotebookVersion": "NameString",
+        "SessionIdleTimeoutInMinutes": "SessionIdleTimeoutInMinutes",
+        "ClientRequestToken": "IdempotencyToken",
+        "Tags": "TagList",
+        "CopyWorkGroupTags": "BoxedBoolean"
+      }
+    },
+    "StatementName": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[a-zA-Z_][a-zA-Z0-9_@:]{1,256}"
+    },
+    "StopCalculationExecutionRequest": {
+      "type": "structure",
+      "required": [
+        "CalculationExecutionId"
+      ],
+      "members": {
+        "CalculationExecutionId": "CalculationExecutionId"
+      }
+    },
+    "StopQueryExecutionInput": {
+      "type": "structure",
+      "required": [
+        "QueryExecutionId"
+      ],
+      "members": {
+        "QueryExecutionId": "QueryExecutionId"
+      }
+    },
+    "String": {
+      "type": "string"
+    },
+    "Tag": {
+      "type": "structure",
+      "members": {
+        "Key": "TagKey",
+        "Value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "TagKeyList": {
+      "type": "list",
+      "member": "TagKey"
+    },
+    "TagList": {
+      "type": "list",
+      "member": "Tag"
+    },
+    "TagResourceInput": {
+      "type": "structure",
+      "required": [
+        "ResourceARN",
+        "Tags"
+      ],
+      "members": {
+        "ResourceARN": "AmazonResourceName",
+        "Tags": "TagList"
+      }
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256
+    },
+    "TargetDpusInteger": {
+      "type": "integer",
+      "min": 4
+    },
+    "TerminateSessionRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "SessionId"
+      }
+    },
+    "Token": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "UntagResourceInput": {
+      "type": "structure",
+      "required": [
+        "ResourceARN",
+        "TagKeys"
+      ],
+      "members": {
+        "ResourceARN": "AmazonResourceName",
+        "TagKeys": "TagKeyList"
+      }
+    },
+    "UpdateCapacityReservationInput": {
+      "type": "structure",
+      "required": [
+        "TargetDpus",
+        "Name"
+      ],
+      "members": {
+        "TargetDpus": "TargetDpusInteger",
+        "Name": "CapacityReservationName"
+      }
+    },
+    "UpdateDataCatalogInput": {
+      "type": "structure",
+      "required": [
+        "Name",
+        "Type"
+      ],
+      "members": {
+        "Name": "CatalogNameString",
+        "Type": "DataCatalogType",
+        "Description": "DescriptionString",
+        "Parameters": "ParametersMap"
+      }
+    },
+    "UpdateNamedQueryInput": {
+      "type": "structure",
+      "required": [
+        "NamedQueryId",
+        "Name",
+        "QueryString"
+      ],
+      "members": {
+        "NamedQueryId": "NamedQueryId",
+        "Name": "NameString",
+        "Description": "NamedQueryDescriptionString",
+        "QueryString": "QueryString"
+      }
+    },
+    "UpdateNotebookInput": {
+      "type": "structure",
+      "required": [
+        "NotebookId",
+        "Payload",
+        "Type"
+      ],
+      "members": {
+        "NotebookId": "NotebookId",
+        "Payload": "Payload",
+        "Type": "NotebookType",
+        "SessionId": "SessionId",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "UpdateNotebookMetadataInput": {
+      "type": "structure",
+      "required": [
+        "NotebookId",
+        "Name"
+      ],
+      "members": {
+        "NotebookId": "NotebookId",
+        "ClientRequestToken": "ClientRequestToken",
+        "Name": "NotebookName"
+      }
+    },
+    "UpdatePreparedStatementInput": {
+      "type": "structure",
+      "required": [
+        "StatementName",
+        "WorkGroup",
+        "QueryStatement"
+      ],
+      "members": {
+        "StatementName": "StatementName",
+        "WorkGroup": "WorkGroupName",
+        "QueryStatement": "QueryString",
+        "Description": "DescriptionString"
+      }
+    },
+    "UpdateWorkGroupInput": {
+      "type": "structure",
+      "required": [
+        "WorkGroup"
+      ],
+      "members": {
+        "WorkGroup": "WorkGroupName",
+        "Description": "WorkGroupDescriptionString",
+        "ConfigurationUpdates": "WorkGroupConfigurationUpdates",
+        "State": "WorkGroupState"
+      }
+    },
+    "WorkGroupConfiguration": {
+      "type": "structure",
+      "members": {
+        "ResultConfiguration": "ResultConfiguration",
+        "ManagedQueryResultsConfiguration": "ManagedQueryResultsConfiguration",
+        "EnforceWorkGroupConfiguration": "BoxedBoolean",
+        "PublishCloudWatchMetricsEnabled": "BoxedBoolean",
+        "BytesScannedCutoffPerQuery": "BytesScannedCutoffValue",
+        "RequesterPaysEnabled": "BoxedBoolean",
+        "EngineVersion": "EngineVersion",
+        "AdditionalConfiguration": "NameString",
+        "ExecutionRole": "RoleArn",
+        "MonitoringConfiguration": "MonitoringConfiguration",
+        "EngineConfiguration": "EngineConfiguration",
+        "CustomerContentEncryptionConfiguration": "CustomerContentEncryptionConfiguration",
+        "EnableMinimumEncryptionConfiguration": "BoxedBoolean",
+        "IdentityCenterConfiguration": "IdentityCenterConfiguration",
+        "QueryResultsS3AccessGrantsConfiguration": "QueryResultsS3AccessGrantsConfiguration"
+      }
+    },
+    "WorkGroupConfigurationUpdates": {
+      "type": "structure",
+      "members": {
+        "EnforceWorkGroupConfiguration": "BoxedBoolean",
+        "ResultConfigurationUpdates": "ResultConfigurationUpdates",
+        "ManagedQueryResultsConfigurationUpdates": "ManagedQueryResultsConfigurationUpdates",
+        "PublishCloudWatchMetricsEnabled": "BoxedBoolean",
+        "BytesScannedCutoffPerQuery": "BytesScannedCutoffValue",
+        "RemoveBytesScannedCutoffPerQuery": "BoxedBoolean",
+        "RequesterPaysEnabled": "BoxedBoolean",
+        "EngineVersion": "EngineVersion",
+        "RemoveCustomerContentEncryptionConfiguration": "BoxedBoolean",
+        "AdditionalConfiguration": "NameString",
+        "ExecutionRole": "RoleArn",
+        "CustomerContentEncryptionConfiguration": "CustomerContentEncryptionConfiguration",
+        "EnableMinimumEncryptionConfiguration": "BoxedBoolean",
+        "QueryResultsS3AccessGrantsConfiguration": "QueryResultsS3AccessGrantsConfiguration",
+        "MonitoringConfiguration": "MonitoringConfiguration",
+        "EngineConfiguration": "EngineConfiguration"
+      }
+    },
+    "WorkGroupDescriptionString": {
+      "type": "string",
+      "min": 0,
+      "max": 1024
+    },
+    "WorkGroupName": {
+      "type": "string",
+      "pattern": "[a-zA-Z0-9._-]{1,128}"
+    },
+    "WorkGroupNamesList": {
+      "type": "list",
+      "member": "WorkGroupName"
+    },
+    "WorkGroupState": {
+      "type": "string",
+      "enum": [
+        "ENABLED",
+        "DISABLED"
+      ]
+    }
+  }
+}

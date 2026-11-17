@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
@@ -652,7 +653,7 @@ class DynamoDbPartiQLIntegrationTest {
             [{"S":"a","N":null},{"N":"abc"}]                  | The parameter cannot be converted to a numeric value: abc
             """)
     void aParameterIsRefusedAtTheFirstValueThatCannotBeRead(String parameters, String message) {
-        String deep = "{\"M\":{\"n\":".repeat(40) + "{\"S\":\"leaf\"}" + "}}".repeat(40);
+        String deep = nestedMap(40, "n", "{\"S\":\"leaf\"}");
 
         request("DynamoDB_20120810.ExecuteStatement", """
                 {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' AND x = ? AND y = ?","Parameters":%s}

@@ -30,9 +30,18 @@ public class VirtualMfaDevice {
     private Instant enableDate;
     private Instant createDate = Instant.now();
     private Map<String, String> tags = new ConcurrentHashMap<>();
+    /**
+     * The last TOTP step this device authenticated an STS call with, or null while it has
+     * authenticated none. RFC 6238 says a verifier "MUST NOT accept the second attempt of the OTP
+     * generated for the same time step", so a step at or before this one is refused and one code
+     * cannot mint a second session inside its window.
+     */
+    private Long lastUsedTotpStep;
 
     public VirtualMfaDevice() {}
 
+    public Long getLastUsedTotpStep() { return lastUsedTotpStep; }
+    public void setLastUsedTotpStep(Long lastUsedTotpStep) { this.lastUsedTotpStep = lastUsedTotpStep; }
     public String getSerialNumber() { return serialNumber; }
     public void setSerialNumber(String serialNumber) { this.serialNumber = serialNumber; }
     public String getDeviceName() { return deviceName; }
