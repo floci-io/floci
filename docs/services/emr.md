@@ -46,7 +46,7 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `CreatePersistentAppUI` | Makes a cluster's persistent application UIs; see [Application UIs](#application-uis) |
 | `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
 | `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
-| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, a page of Floci's |
+| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
 | `GetClusterSessionCredentials` | Returns temporary basic credentials for a runtime role enabled cluster; see [Application UIs](#application-uis) |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
@@ -373,11 +373,29 @@ not Jupyter:
 
 ## Application UIs
 
-Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI, YARN timeline server
-or on-cluster UI: a presigned URL opens a page Floci serves at `/_aws/emr/app-ui` on its own address (`base-url`, or
-`hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for. The link is signed with a key
-Floci makes as it starts and lasts an hour, as no source gives AWS's; one changed, past its hour or given before
-Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
+Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI or YARN timeline
+server: a presigned URL to one of those opens a page Floci serves at `/_aws/emr/app-ui` on its own address
+(`base-url`, or `hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for, and so does
+one to an on-cluster UI in the `immediate` mode. The link is signed with a key Floci makes as it starts and lasts an
+hour, as no source gives AWS's; one changed, past its hour or given before Floci restarted opens a `403` page, and one
+whose cluster has gone a `404`.
+
+In the `docker` mode, an on-cluster UI that runs on the cluster's primary node opens for real: the `ResourceManager`
+("YARN ResourceManager | http://master-public-dns-name:8088/"), an `ApplicationMaster` through the ResourceManager's
+web proxy, and the `JobHistoryServer`, on a cluster whose primary node runs YARN (see **YARN**). Each opens on a host of
+its own, as AWS's application UIs are on hosts of their own under "emrappui-prod.us-east-1.amazonaws.com", which "are
+registered in the Public Suffix List": `http://<secret>-<port>.emrappui.<Floci's host and port>/`, the secret 26
+random letters and digits that only this link holds, so the host itself is the link's authority, as the interface
+takes no AWS credentials. Floci's host must resolve its subdomains: `localhost` and `localhost.floci.io` do, and Floci's
+TLS certificate names `*.emrappui.localhost` and `*.emrappui.localhost.floci.io`. Requests to the host go on to that
+port of the primary node, which Floci reaches at a port Docker publishes on the host's loopback interface alone, or,
+Floci in a container, on the cluster's network, which its container joins; the node's daemons write their links to
+one another by the node's name, and Floci makes each such link, in the text it sends, a link to that interface's own
+host under the same secret, so the ResourceManager's links to a job's history and to its containers' logs on the
+NodeManager of a primary node that works open too. A NodeManager on a core or task node, which Floci does not reach,
+keeps its links as written. The link lasts an hour, as the page's does, after which its host answers with a `403`
+page; once its cluster has ended, its host answers with a `404` one. A request's body goes on to the interface as it
+arrives, and an interface that sends nothing for a minute has the request given up with a `502` page.
 
 * **CreatePersistentAppUI** takes an EMR cluster's ARN of the account in the Region as its `TargetResourceArn`; Floci
   keeps none for an EMR on EKS virtual cluster. The persistent Spark History Server is there "Starting with Amazon
@@ -395,8 +413,14 @@ Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
   any source gives. A tag without its `Key`, "the minimum required information for a valid tag", is refused, as it is
   for sessions, Studios and notebook executions.
 * **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
-  refused. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI, the `ResourceManager` by default, while
-  the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. Both are `PresignedURLReady` at once.
+  refused, and the URL is `PresignedURLReady` at once. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI,
+  the `ResourceManager` by default, while the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. With an
+  `ApplicationId`, the ResourceManager's link lands on the application's page, an application master's on its UI
+  through the web proxy, and the JobHistory server's on the job of that id (`job_` in place of `application_`); without
+  one, on the cluster's applications, its running ones, and its jobs. A link Floci opens for real is
+  `PresignedURLReady` once the primary node is: until then, as on a cluster no step has run on yet, the node starts as
+  a step's would ("Used to determine if the presigned URL is ready"), and its host answers with a `503` page meanwhile.
+  Any other is ready at once.
 * **GetClusterSessionCredentials** gives "temporary, HTTP basic credentials that are associated with a given runtime
   IAM role and used by a cluster with fine-grained access control activated": a random username and password that
   expire in an hour, as no source gives AWS's lifetime, for a `RUNNING` or `WAITING` cluster on `emr-6.11.0` or later

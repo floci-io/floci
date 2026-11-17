@@ -7,6 +7,7 @@ import io.floci.aws.core.common.LinkSigner;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emr.model.EmrCluster;
@@ -15,8 +16,10 @@ import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -24,14 +27,25 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * A cluster's application user interfaces: the persistent ones "hosted off-cluster" (Amazon EMR Management Guide, "View
  * persistent application user interfaces in Amazon EMR") and the on-cluster ones, both reached through presigned URLs.
- * Floci keeps a persistent application UI's record, but serves no Spark History Server, Tez UI, YARN timeline server
- * or on-cluster UI: a presigned URL opens a page of Floci's own about the cluster ({@link EmrAppUiController}), signed
- * with a key of this process and valid for {@link #VALIDITY}.
+ * In the docker runner mode, an on-cluster UI that runs on the cluster's primary node, its ResourceManager, an
+ * application master through it, its MapReduce JobHistory server, or the NodeManager of a primary node that works,
+ * opens for real through {@link EmrAppUiProxy}, on a host of its own under {@link #UI_HOST}, as AWS's are under
+ * "emrappui-prod.us-east-1.amazonaws.com" (Management Guide, "View Amazon EMR application history"). Floci keeps a
+ * persistent application UI's record, but serves no Spark History Server, Tez UI or YARN timeline server: a link to
+ * one of those, and to any on-cluster UI elsewhere, opens a page of Floci's own about the cluster
+ * ({@link EmrAppUiController}). Either link is valid for {@link #VALIDITY}: the page's is signed with a key of this
+ * process, and a proxied interface's host holds a secret this process gave it.
  */
 @ApplicationScoped
 public class EmrAppUiService {
@@ -50,6 +64,23 @@ public class EmrAppUiService {
     static final Duration LOGS_KEPT = Duration.ofDays(30);
     // No source gives AWS's status values; Floci reports this one for every persistent application UI.
     static final String ACTIVE = "ACTIVE";
+    /** The label under Floci's host name an on-cluster UI's own host is in. */
+    static final String UI_HOST = "emrappui";
+    // A link's secret: 26 characters of base32, 130 random bits, in lower case, as a host name is read without case.
+    private static final int SECRET_LENGTH = 26;
+    private static final String BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
+    static final String RESOURCE_MANAGER = "ResourceManager";
+    static final String APPLICATION_MASTER = "ApplicationMaster";
+    static final String JOB_HISTORY_SERVER = "JobHistoryServer";
+    // No source gives AWS's wording for these; they are Floci's.
+    static final String NO_SUCH_INTERFACE = "This link opens none of the cluster's interfaces on that port.";
+    static final String CLUSTER_ENDED = "Cluster %s is no longer running, and its on-cluster application UIs are"
+            + " there only while it is RUNNING or WAITING.";
+    // How long a port found on the cluster's primary node is used before it is asked for again.
+    private static final Duration ENDPOINT_RECHECK = Duration.ofSeconds(10);
+    static final String NOT_READY = "The cluster's primary node is not running yet: it starts once a step runs, or a"
+            + " link to one of its interfaces is asked for. Try again in a moment.";
+    private static final Pattern APPLICATION_ID = Pattern.compile("application_(\\d+_\\d+)");
 
     private final AccountAwareStorageBackend<EmrPersistentAppUi> store;
     private final EmrService clusters;
@@ -57,6 +88,9 @@ public class EmrAppUiService {
     private final Clock clock;
     private final String baseUrl;
     private final LinkSigner signer;
+    // The links to proxied interfaces this process has given, by their secret, until they expire.
+    private final Map<String, Grant> grants = new ConcurrentHashMap<>();
+    private final SecureRandom random = new SecureRandom();
 
     @Inject
     public EmrAppUiService(StorageFactory storageFactory, EmrService clusters, RegionResolver regionResolver,
@@ -179,11 +213,17 @@ public class EmrAppUiService {
         return url(appUi.getClusterId(), type != null ? type : appUi.getTypes().get(0), applicationId);
     }
 
+    /** A presigned URL, and whether what it opens is ready: none for a dry run. */
+    public record Presigned(String url, boolean ready) {
+    }
+
     /**
      * A presigned URL to one of the cluster's on-cluster UIs, by default its ResourceManager, which there is only while
-     * the cluster runs or waits; for a dry run the request is checked and no URL is made.
+     * the cluster runs or waits; for a dry run the request is checked and no URL is made. One Floci proxies is ready
+     * once the cluster's primary node is: until then, as on a cluster no step has run on yet, the node starts, and the
+     * URL is not ready, as "Used to determine if the presigned URL is ready" says of {@code PresignedURLReady}.
      */
-    public String onClusterUrl(String clusterId, String type, String applicationId, boolean dryRun) {
+    public Presigned onClusterUrl(String clusterId, String type, String applicationId, boolean dryRun) {
         List<String> violations = new ArrayList<>();
         if (clusterId == null) {
             violations.add(SmithyValidationErrors.notNull("clusterId"));
@@ -198,7 +238,147 @@ public class EmrAppUiService {
             throw EmrService.invalid("Cluster " + clusterId + " is " + cluster.getState()
                     + ", and its on-cluster application UIs are there only while it is RUNNING or WAITING.");
         }
-        return dryRun ? null : url(clusterId, type != null ? type : "ResourceManager", applicationId);
+        if (dryRun) {
+            return new Presigned(null, true);
+        }
+        String asked = type != null ? type : RESOURCE_MANAGER;
+        Optional<EmrService.WebInterfaces> served = clusters.webInterfaces(cluster);
+        Integer port = served.map(interfaces -> portOf(asked, interfaces)).orElse(null);
+        if (port == null) {
+            return new Presigned(url(clusterId, asked, applicationId), true);
+        }
+        Instant now = clock.instant();
+        grants.values().removeIf(grant -> !now.isBefore(grant.expires()));
+        String secret = secret();
+        grants.put(secret, new Grant(regionResolver.getAccountId(), regionResolver.getRegion(), clusterId,
+                served.get().primaryHost(), served.get().ports(), now.plus(VALIDITY), new ConcurrentHashMap<>()));
+        boolean ready = clusters.webInterface(clusterId, port).isPresent();
+        if (!ready) {
+            clusters.startPrimaryNode(clusterId);
+        }
+        URI base = URI.create(baseUrl);
+        return new Presigned(base.getScheme() + "://" + secret + "-" + port + "." + UI_HOST + "."
+                + base.getRawAuthority() + landing(asked, applicationId), ready);
+    }
+
+    // The interface's port on the primary node, where Floci serves it: an application master's UI through the
+    // ResourceManager's web proxy.
+    private static Integer portOf(String type, EmrService.WebInterfaces interfaces) {
+        int port = switch (type) {
+            case RESOURCE_MANAGER, APPLICATION_MASTER -> EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT;
+            case JOB_HISTORY_SERVER -> EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT;
+            default -> 0;
+        };
+        return interfaces.ports().contains(port) ? port : null;
+    }
+
+    // Where the link lands: the interface's page of the application asked for, else its first. A MapReduce job's id
+    // is its application's, job_ in place of application_.
+    private static String landing(String type, String applicationId) {
+        String application = applicationId != null ? pathSegment(applicationId) : null;
+        return switch (type) {
+            case APPLICATION_MASTER -> application != null ? "/proxy/" + application + "/" : "/cluster/apps/RUNNING";
+            case JOB_HISTORY_SERVER -> {
+                Matcher matcher = applicationId != null ? APPLICATION_ID.matcher(applicationId) : null;
+                yield matcher != null && matcher.matches() ? "/jobhistory/job/job_" + matcher.group(1) : "/jobhistory";
+            }
+            default -> application != null ? "/cluster/app/" + application : "/cluster";
+        };
+    }
+
+    private static String pathSegment(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
+    private String secret() {
+        StringBuilder secret = new StringBuilder(SECRET_LENGTH);
+        for (int i = 0; i < SECRET_LENGTH; i++) {
+            secret.append(BASE32.charAt(random.nextInt(BASE32.length())));
+        }
+        return secret.toString();
+    }
+
+    /**
+     * A link to a proxied interface: the cluster's, as the account in the Region; its primary node's name and web
+     * interfaces' ports; when it expires; and where Floci reaches each port, once found.
+     */
+    private record Grant(String accountId, String region, String clusterId, String primaryHost, Set<Integer> ports,
+                         Instant expires, Map<Integer, Found> endpoints) {
+    }
+
+    // Where Floci found a port of the cluster's own primary node's container, and when, which is asked again once
+    // ENDPOINT_RECHECK has passed: a port the node no longer has may be another container's by then.
+    private record Found(ContainerLifecycleManager.EndpointInfo endpoint, Instant at) {
+    }
+
+    /**
+     * Where a request to a proxied interface's host goes: the interface's address on the primary node, and each link
+     * to one of the node's interfaces its pages hold, by the node's name, as the browser reaches that interface; else
+     * why it is refused, with its HTTP status.
+     */
+    public record UiRoute(String host, int port, Map<String, String> rewrites, Runnable unreachable, int status,
+                          String refusal) {
+
+        static UiRoute refused(int status, String refusal) {
+            return new UiRoute(null, 0, Map.of(), () -> { }, status, refusal);
+        }
+    }
+
+    /**
+     * The route of a request whose {@code Host} is {@code hostHeader}, over {@code scheme}; null where the host is not
+     * a proxied interface's, {@code <secret>-<port>.}{@value #UI_HOST}{@code .<Floci's host>}.
+     */
+    public UiRoute route(String hostHeader, String scheme) {
+        String host = hostHeader.toLowerCase(Locale.ROOT);
+        int dot = host.indexOf('.');
+        int dash = dot > 0 ? host.lastIndexOf('-', dot) : -1;
+        if (dash != SECRET_LENGTH || !host.startsWith(UI_HOST + ".", dot + 1)) {
+            return null;
+        }
+        String secret = host.substring(0, dash);
+        int port;
+        try {
+            port = Integer.parseInt(host.substring(dash + 1, dot));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        Grant grant = grants.get(secret);
+        if (grant == null || !clock.instant().isBefore(grant.expires())) {
+            return UiRoute.refused(403, EmrAppUiController.INVALID);
+        }
+        if (!grant.ports().contains(port)) {
+            return UiRoute.refused(404, NO_SUCH_INTERFACE);
+        }
+        // The interface is there only while its cluster runs or waits: once it ends, its node's ports are no longer
+        // its own.
+        EmrCluster cluster = RequestScopes.callAs(grant.accountId(), grant.region(),
+                () -> clusters.findDescribedCluster(grant.clusterId()).orElse(null));
+        if (cluster == null || !EmrClusterLifecycle.RUNNING.equals(cluster.getState())
+                && !EmrClusterLifecycle.WAITING.equals(cluster.getState())) {
+            return UiRoute.refused(404, String.format(CLUSTER_ENDED, grant.clusterId()));
+        }
+        Instant now = clock.instant();
+        Found found = grant.endpoints().get(port);
+        if (found == null || !now.isBefore(found.at().plus(ENDPOINT_RECHECK))) {
+            ContainerLifecycleManager.EndpointInfo endpoint = RequestScopes.callAs(grant.accountId(), grant.region(),
+                    () -> clusters.webInterface(grant.clusterId(), port)).orElse(null);
+            if (endpoint == null) {
+                grant.endpoints().remove(port);
+                return UiRoute.refused(503, NOT_READY);
+            }
+            found = new Found(endpoint, now);
+            grant.endpoints().put(port, found);
+        }
+        // The node's daemons write links to one another by the node's name, which the browser reaches as each
+        // interface's own host, under this one's Floci host and port.
+        String rest = host.substring(dot);
+        Map<String, String> rewrites = new LinkedHashMap<>();
+        for (int other : grant.ports()) {
+            rewrites.put("http://" + grant.primaryHost() + ":" + other, scheme + "://" + secret + "-" + other + rest);
+        }
+        Found routed = found;
+        return new UiRoute(found.endpoint().host(), found.endpoint().port(), rewrites,
+                () -> grant.endpoints().remove(port, routed), 0, null);
     }
 
     /** What a page link names: an interface of a cluster, for an application or none, and when it expires. */

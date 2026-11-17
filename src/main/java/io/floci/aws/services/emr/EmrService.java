@@ -23,6 +23,7 @@ import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.core.common.SparkConnectProxy;
 import io.floci.aws.core.common.SparkConnectTargets;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -114,6 +115,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final int SESSION_PASSWORD_BYTES = 24;
     // No source gives how long GetClusterSessionCredentials' credentials last; Floci's expire in an hour.
     private static final Duration SESSION_CREDENTIALS_VALIDITY = Duration.ofHours(1);
+    // How long the command that starts a cluster's primary node for its application UIs may run: it runs nothing.
+    private static final Duration PRIMARY_NODE_START = Duration.ofMinutes(5);
     // AWS's answer to a change on a terminated cluster, for AddJobFlowSteps and ModifyInstanceFleet; Floci
     // gives it to AddInstanceGroups and AddInstanceFleet too, for one shutting down.
     private static final String JOB_FLOW_SHUT_DOWN =
@@ -171,6 +174,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final Executor stepExecutor;
     // The commands other EMR services run on a cluster ({@link #runOnCluster}), by run id, with their cluster's id.
     private final Map<String, String> clusterRuns = new HashMap<>();
+    // The clusters whose primary node an application UI link is starting, by account and id, and how many it has.
+    private final Set<String> primaryNodeStarts = ConcurrentHashMap.newKeySet();
+    private final AtomicLong primaryNodeStartCount = new AtomicLong();
     // The Spark Connect servers of the sessions, in the docker runner mode, and the tokens given for every session.
     private final SparkConnectServers sessionServers;
     private final SessionOwner sessionOwner = new SessionOwner();
@@ -960,6 +966,68 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     private static String reasonOf(RuntimeException e) {
         return e.getMessage() != null ? e.getMessage() : e.toString();
+    }
+
+    /**
+     * The web interfaces of a cluster's primary node an on-cluster application UI link opens, by port, and the name
+     * its daemons write into the links of their pages, the node's private DNS name.
+     */
+    public record WebInterfaces(String primaryHost, Set<Integer> ports) {
+    }
+
+    /**
+     * The web interfaces Floci serves of a cluster's primary node, where it runs YARN there, in the docker runner
+     * mode: its ResourceManager, its MapReduce JobHistory server, and, where the node works, its NodeManager; empty
+     * elsewhere.
+     */
+    public Optional<WebInterfaces> webInterfaces(EmrCluster cluster) {
+        if (!runsOnClusters() || !runsYarn(cluster)) {
+            return Optional.empty();
+        }
+        Set<Integer> ports = new LinkedHashSet<>(List.of(EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT,
+                EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT));
+        if (yarnOf(cluster).primaryWorks()) {
+            ports.add(EmrClusterStorage.NODE_MANAGER_WEB_PORT);
+        }
+        return Optional.of(new WebInterfaces(masterPrivateDnsName(cluster), Set.copyOf(ports)));
+    }
+
+    /** Where Floci reaches a web interface's port on the cluster's primary node, once the node is ready. */
+    public Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+        return clusterStorage == null ? Optional.empty() : clusterStorage.webInterface(clusterId, port);
+    }
+
+    /**
+     * Starts the cluster's primary node, its HDFS and YARN, as its first step would, by running nothing on it
+     * ({@link #runOnCluster}), unless such a start is under way already: an application UI link may be asked for
+     * before any step has run.
+     */
+    public void startPrimaryNode(String clusterId) {
+        String key = regionResolver.getAccountId() + "/" + clusterId;
+        if (!primaryNodeStarts.add(key)) {
+            return;
+        }
+        runOnCluster(clusterId, "ui-" + clusterId + "-" + primaryNodeStartCount.incrementAndGet(), null,
+                List.of("true"), Map.of(), PRIMARY_NODE_START, new ClusterRun() {
+                    @Override
+                    public void started() {
+                        // The node is ready before the command's container starts.
+                    }
+
+                    @Override
+                    public void ended(SparkJobRunner.Outcome outcome) {
+                        primaryNodeStarts.remove(key);
+                        if (outcome.failure() != null) {
+                            LOG.warnv("Could not start the primary node of EMR cluster {0} for its application"
+                                    + " UIs: {1}", clusterId, outcome.failure());
+                        }
+                    }
+
+                    @Override
+                    public boolean cancelled() {
+                        return false;
+                    }
+                });
     }
 
     /** Stops a command {@link #runOnCluster} runs, which then ends as stopped. */

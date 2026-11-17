@@ -898,8 +898,8 @@ public class EmrHandler {
     private Response handleGetPersistentAppUiPresignedUrl(JsonNode request) {
         bool(request, "AuthProxyCall");
         string(request, "ExecutionRoleArn");
-        return presignedUrl(appUis.persistentUrl(string(request, "PersistentAppUIId"),
-                string(request, "PersistentAppUIType"), string(request, "ApplicationId")));
+        return presignedUrl(new EmrAppUiService.Presigned(appUis.persistentUrl(string(request, "PersistentAppUIId"),
+                string(request, "PersistentAppUIType"), string(request, "ApplicationId")), true));
     }
 
     private Response handleGetOnClusterAppUiPresignedUrl(JsonNode request) {
@@ -909,11 +909,11 @@ public class EmrHandler {
                 string(request, "ApplicationId"), Boolean.TRUE.equals(dryRun)));
     }
 
-    // A presigned URL's answer: ready at once, and the URL, none for a dry run.
-    private Response presignedUrl(String url) {
+    // A presigned URL's answer: whether it is ready, and the URL, none for a dry run.
+    private Response presignedUrl(EmrAppUiService.Presigned presigned) {
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("PresignedURLReady", true);
-        putIfSet(response, "PresignedURL", url);
+        response.put("PresignedURLReady", presigned.ready());
+        putIfSet(response, "PresignedURL", presigned.url());
         return Response.ok(response).build();
     }
 
