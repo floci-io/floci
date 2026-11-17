@@ -1,10 +1,10 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.lambda.LambdaClient;
@@ -14,14 +14,10 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.Bucket;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyExistsException;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -35,13 +31,10 @@ class LambdaTasksBucketVisibilityIntegrationTest {
     URI baseUri;
 
     @Test
-    void deploymentBucketsStayOutOfBothSdkListingPaths() throws Exception {
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("test", "test"));
-        try (S3Client s3 = S3Client.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                .forcePathStyle(true).credentialsProvider(credentials).build();
-             LambdaClient lambda = LambdaClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                     .credentialsProvider(credentials).build()) {
+    void deploymentBucketsStayOutOfBothSdkListingPaths() {
+        try (S3Client s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true),
+                "test", Region.US_EAST_1, baseUri);
+             LambdaClient lambda = AwsTestClients.create(LambdaClient.builder(), "test", Region.US_EAST_1, baseUri)) {
             String suffix = UUID.randomUUID().toString();
             String customerBucket = "awslambda-customer-" + suffix + "-tasks";
             String first = "tasks-first-" + suffix;
@@ -51,16 +44,20 @@ class LambdaTasksBucketVisibilityIntegrationTest {
             try {
                 assertEquals(200, s3.createBucket(request -> request.bucket(customerBucket))
                         .sdkHttpResponse().statusCode());
-                FunctionCode code = FunctionCode.builder().zipFile(SdkBytes.fromByteArray(archive())).build();
+                byte[] zip = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => 'ok';");
+                FunctionCode code = FunctionCode.builder().zipFile(SdkBytes.fromByteArray(zip)).build();
                 for (String name : List.of(first, second)) {
-                    lambda.createFunction(request -> request.functionName(name).runtime("python3.12")
-                            .handler("handler.handler").role("arn:aws:iam::000000000000:role/lambda-role")
+                    lambda.createFunction(request -> request.functionName(name).runtime("nodejs20.x")
+                            .handler("index.handler").role("arn:aws:iam::000000000000:role/lambda-role")
                             .code(code));
                     createdFunctions.add(name);
                     BucketAlreadyExistsException conflict = assertThrows(BucketAlreadyExistsException.class,
                             () -> s3.createBucket(request -> request.bucket(
                                     LambdaService.tasksBucketName("us-east-1"))));
                     assertEquals(409, conflict.statusCode());
+                    assertEquals("The requested bucket name is not available. "
+                            + "The bucket namespace is shared by all users of the system. "
+                            + "Please select a different name and try again.", conflict.awsErrorDetails().errorMessage());
                 }
                 assertBucketVisibility(s3, customerBucket);
                 lambda.deleteFunction(request -> request.functionName(first));
@@ -93,15 +90,5 @@ class LambdaTasksBucketVisibilityIntegrationTest {
             assertFalse(names.contains(LambdaService.tasksBucketName("us-east-1")),
                     "Lambda package storage must not appear in customer bucket listings");
         }
-    }
-
-    private static byte[] archive() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("handler.py"));
-            zip.write("def handler(event, context):\n    return 'ok'\n".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
     }
 }

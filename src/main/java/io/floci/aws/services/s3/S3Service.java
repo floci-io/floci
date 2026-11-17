@@ -598,7 +598,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (existing.isPresent()) {
             Bucket bucket = existing.get();
             if (!internal && bucket.isServiceOwned()) {
-                throw new AwsException("BucketAlreadyExists", "The requested bucket name is not available.", 409);
+                throw bucketAlreadyExists();
             }
             if (!internal && isDefaultS3Region(bucket.getRegion()) && isDefaultS3Region(region)) {
                 LOG.infov("Bucket already exists in default region, treating CreateBucket as idempotent: {0}", bucketName);
@@ -608,10 +608,7 @@ public class S3Service implements Resettable, ResourceProvider {
                     "Your previous request to create the named bucket succeeded and you already own it.", 409);
         }
         if (!internal && globalBucketNamespace && resolveBucketEntry(bucketName).isPresent()) {
-            throw new AwsException("BucketAlreadyExists",
-                    "The requested bucket name is not available. The bucket namespace is shared by all users of the system. "
-                            + "Please select a different name and try again.",
-                    409);
+            throw bucketAlreadyExists();
         }
 
         Bucket bucket = new Bucket(bucketName);
@@ -622,6 +619,13 @@ public class S3Service implements Resettable, ResourceProvider {
         bucketStore.put(bucketName, bucket);
         LOG.infov("Created bucket: {0} in region: {1}", bucketName, region);
         return bucket;
+    }
+
+    private static AwsException bucketAlreadyExists() {
+        return new AwsException("BucketAlreadyExists",
+                "The requested bucket name is not available. The bucket namespace is shared by all users of the system. "
+                        + "Please select a different name and try again.",
+                409);
     }
 
     private static String ownershipControlsXml(String ownership) {

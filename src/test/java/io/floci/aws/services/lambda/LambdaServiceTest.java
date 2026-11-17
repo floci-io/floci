@@ -18,6 +18,7 @@ import io.floci.aws.services.lambda.zip.ZipExtractor;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.LambdaCodeFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -2497,11 +2498,7 @@ class LambdaServiceTest {
 
     @Test
     void lambdaPackagesStayReadableWithoutLeavingCustomerBuckets(@TempDir Path directory) throws Exception {
-        StorageFactory s3Storage = mock(StorageFactory.class);
-        when(s3Storage.create(anyString(), anyString(), any()))
-                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(s3Storage.create(anyString(), anyString(), any(), any()))
-                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        StorageFactory s3Storage = new InMemoryStorageFactory("000000000000");
         EmulatorConfig s3Config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(s3Config.storage().persistentPath()).thenReturn(directory.toString());
         when(s3Config.storage().services().s3().mode()).thenReturn(Optional.of("memory"));
