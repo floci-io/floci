@@ -1145,6 +1145,32 @@ class IamRestRouteEnforcementIntegrationTest {
         return sink;
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Resource Explorer holds on the view a request names, so an
+     * allow on one team's tag lets the caller read that team's view and not another's.
+     */
+    @Test
+    void aResourceExplorerResourceTagConditionReadsTheTagsOfTheView() {
+        String tagged = taggedView("data");
+        String other = taggedView("web");
+        String user = user("route-view-tags");
+
+        policy(user, onTeam("Allow", "resource-explorer-2:GetView", "data"));
+        request(user, "resource-explorer-2", "POST", "/GetView", "{\"ViewArn\":\"" + tagged + "\"}").statusCode(200);
+        refused(request(user, "resource-explorer-2", "POST", "/GetView", "{\"ViewArn\":\"" + other + "\"}"),
+                "resource-explorer-2:GetView");
+    }
+
+    /** The ARN of a Resource Explorer view an administrator creates tagged with the team, deleted after the test. */
+    private String taggedView(String team) {
+        String view = adminOf("resource-explorer-2").body("{\"ViewName\":\"route-view-" + suffix()
+                        + "\",\"Tags\":{\"team\":\"" + team + "\"}}").post("/CreateView")
+                .then().statusCode(200).extract().path("View.ViewArn");
+        cleanup.register(() -> adminOf("resource-explorer-2").body("{\"ViewArn\":\"" + view + "\"}")
+                .post("/DeleteView"));
+        return view;
+    }
+
     @Test
     void oamIsCheckedOnTheArnItsIdentifiersHold() {
         String sink = oamSink("{}");

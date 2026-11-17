@@ -3201,7 +3201,8 @@ floci populates:
   snapshot schedules, event subscriptions and integrations, SSM for its parameters, documents and associations,
   EMR for its clusters, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its instances,
   permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource shares,
-  and Payment Cryptography for its keys. Tag keys differing only in case are one condition key holding every value.
+  Payment Cryptography for its keys, and Resource Explorer for its indexes and views. Tag keys differing only in
+  case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
