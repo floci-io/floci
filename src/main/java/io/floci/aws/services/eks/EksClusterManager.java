@@ -1743,7 +1743,7 @@ public class EksClusterManager
         LOG.warnv("EKS cluster {0} (account {1}) starts under its account-qualified Docker name; "
                 + "a pre-upgrade {2} named {3} survives but carries no verifiable owning account, "
                 + "so it is NOT adopted. If its data belongs to this cluster, copy it into the "
-                + "cluster's qualified volume manually (docker volume inspect {3}).",
+                + "cluster''s qualified volume manually (docker volume inspect {3}).",
                 cluster.getName(), cluster.getAccountId(), kind, legacy);
     }
 
