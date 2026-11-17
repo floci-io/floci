@@ -618,6 +618,31 @@ class AccountServiceTest {
         assertNull(service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountName());
     }
 
+    @Test
+    void accountKeepsItsOrganizationNameOnceItLeaves() {
+        when(organizations.findAccount(ACCOUNT_ID))
+                .thenReturn(Optional.of(organizationAccount("CREATED", "ACTIVE", Instant.EPOCH)));
+
+        service.accountPlacementChanged(MANAGEMENT_ACCOUNT_ID, ACCOUNT_ID);
+        when(organizations.findAccount(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        assertEquals("Team Account",
+                service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountName());
+    }
+
+    @Test
+    void joiningAnOrganizationKeepsTheNameTheAccountAlreadyHas() {
+        service.putAccountName(ACCOUNT_ID, accountNameRequest("Own Name"));
+        when(organizations.findAccount(ACCOUNT_ID))
+                .thenReturn(Optional.of(organizationAccount("INVITED", "ACTIVE", Instant.EPOCH)));
+
+        service.accountPlacementChanged(MANAGEMENT_ACCOUNT_ID, ACCOUNT_ID);
+        when(organizations.findAccount(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+        assertEquals("Own Name",
+                service.getAccountInformation(ACCOUNT_ID, mapper.createObjectNode()).accountName());
+    }
+
     private static OrganizationAccount organizationAccount(String joinedMethod, String status, Instant joined) {
         OrganizationAccount account = new OrganizationAccount();
         account.setId(ACCOUNT_ID);

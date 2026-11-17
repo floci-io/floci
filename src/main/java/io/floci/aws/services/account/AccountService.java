@@ -12,6 +12,7 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.account.model.AccountInformation;
 import io.floci.aws.services.account.model.AlternateContact;
 import io.floci.aws.services.account.model.ContactInformation;
+import io.floci.aws.services.organizations.AccountPlacementListener;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.organizations.model.Organization;
 import io.floci.aws.services.organizations.model.OrganizationAccount;
@@ -26,7 +27,7 @@ import java.util.Optional;
 import java.util.Set;
 
 @ApplicationScoped
-public class AccountService implements Resettable, StoredResourceArns {
+public class AccountService implements Resettable, StoredResourceArns, AccountPlacementListener {
     private static final String ACCOUNT_MANAGEMENT_SERVICE_PRINCIPAL = ServicePrincipals.of("account");
     private static final Set<String> COUNTRIES_REQUIRING_STATE_OR_REGION =
             Set.of("US", "CA", "GB", "DE", "JP", "IN", "BR");
@@ -133,6 +134,19 @@ public class AccountService implements Resettable, StoredResourceArns {
         // Kept for the account as well, so the name outlives its organization.
         accountNames.putForAccount(targetAccountId, ACCOUNT_NAME_KEY, name);
         organizationsService.renameAccount(targetAccountId, name);
+    }
+
+    /**
+     * Keeps the Organizations name of an account created in or invited into an organization, which
+     * {@code GetAccountInformation} answers once the account leaves it. A name the account already has stays.
+     */
+    @Override
+    public void accountPlacementChanged(String managementAccountId, String accountId) {
+        if (accountNames.getForAccount(accountId, ACCOUNT_NAME_KEY).isPresent()) {
+            return;
+        }
+        organizationsService.findAccount(accountId)
+                .ifPresent(account -> accountNames.putForAccount(accountId, ACCOUNT_NAME_KEY, account.getName()));
     }
 
     private static AccountInformation informationOf(OrganizationAccount account) {

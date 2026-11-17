@@ -132,6 +132,26 @@ class AccountOrganizationsContextIntegrationTest {
     }
 
     @Test
+    void removedAccountKeepsTheNameItWasCreatedWith() {
+        String removed = createAccount("account-removed-unnamed");
+
+        organizations("RemoveAccountFromOrganization", "{\"AccountId\":\"" + removed + "\"}");
+
+        account(removed, "/getAccountInformation", "{}").statusCode(200)
+                .body("AccountName", equalTo("account-removed-unnamed"));
+    }
+
+    @Test
+    void accountThatLeavesKeepsItsName() {
+        String leaving = createAccount("account-that-leaves");
+
+        OrganizationsRequests.request(leaving, "LeaveOrganization", "{}").when().post("/").then().statusCode(200);
+
+        account(leaving, "/getAccountInformation", "{}").statusCode(200)
+                .body("AccountName", equalTo("account-that-leaves"));
+    }
+
+    @Test
     void managementAccountRenamesItselfWithoutAnAccountId() {
         account(MANAGEMENT, "/putAccountName", accountNameRequest("Management Account").toString())
                 .statusCode(200);
