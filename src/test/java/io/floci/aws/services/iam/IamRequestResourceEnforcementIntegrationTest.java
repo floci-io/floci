@@ -847,11 +847,7 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     @Test
     void aCertificateIsCheckedOnItsArn() {
-        String arn = adminJson("acm", "CertificateManager.RequestCertificate")
-                .body("{\"DomainName\":\"res-" + suffix() + ".example.com\"}").post("/").then().statusCode(200)
-                .extract().path("CertificateArn");
-        cleanup.register(() -> adminJson("acm", "CertificateManager.DeleteCertificate")
-                .body("{\"CertificateArn\":\"" + arn + "\"}").post("/"));
+        String arn = certificate(null);
         assertTrue(arn.startsWith("arn:aws:acm:" + REGION + ":" + ACCOUNT + ":certificate/"), arn);
 
         User user = user("res-certificate");
@@ -859,6 +855,45 @@ class IamRequestResourceEnforcementIntegrationTest {
         describeCertificate(user, arn).statusCode(200);
         refusedJson(describeCertificate(user, "arn:aws:acm:" + REGION + ":" + ACCOUNT + ":certificate/" + UUID.randomUUID()),
                 "acm:DescribeCertificate");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags ACM holds on the certificate a request names, as a tag call
+     * leaves them, so an allow on one team's tag lets the caller read that team's certificate and not another's, and
+     * a deny on it holds, also for the certificate's id under another Region's ARN, which is checked in the request's
+     * Region too, where the handler reads it.
+     */
+    @Test
+    void anAcmResourceTagConditionReadsTheTagsOfTheCertificate() {
+        String tagged = certificate(teamTag("web"));
+        String other = certificate(teamTag("web"));
+        adminJson("acm", "CertificateManager.AddTagsToCertificate").body("{\"CertificateArn\":\"" + tagged
+                + "\",\"Tags\":" + teamTag("data") + "}").post("/").then().statusCode(200);
+
+        User user = user("res-acm-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"acm:DescribeCertificate\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeCertificate(user, tagged).statusCode(200);
+        refusedJson(describeCertificate(user, other), "acm:DescribeCertificate");
+
+        User denied = user("res-acm-tag-deny");
+        denied.policy(allowOn("acm:DescribeCertificate", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"acm:DescribeCertificate\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":"
+                + "{\"aws:ResourceTag/team\":\"data\"}}}");
+        refusedJson(describeCertificate(denied, tagged), "acm:DescribeCertificate");
+        describeCertificate(denied, other).statusCode(200);
+        refusedJson(describeCertificate(denied, tagged.replace(":" + REGION + ":", ":eu-west-1:")),
+                "acm:DescribeCertificate");
+    }
+
+    /** The ARN of a certificate an administrator requests, with the {@code tags} list if any, deleted afterwards. */
+    private String certificate(String tags) {
+        String arn = adminJson("acm", "CertificateManager.RequestCertificate")
+                .body("{\"DomainName\":\"res-" + suffix() + ".example.com\"" + (tags == null ? "" : ",\"Tags\":" + tags)
+                        + "}").post("/").then().statusCode(200).extract().path("CertificateArn");
+        cleanup.register(() -> adminJson("acm", "CertificateManager.DeleteCertificate")
+                .body("{\"CertificateArn\":\"" + arn + "\"}").post("/"));
+        return arn;
     }
 
     /**
