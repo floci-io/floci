@@ -107,6 +107,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final String RUNNER_DOCKER = "docker";
     // The service a step's driver belongs to, which names it and labels it.
     private static final String SERVICE = "emr";
+    // The resource of a cluster's ARN, before its id.
+    private static final String CLUSTER_RESOURCE = "cluster/";
     // The reason of a cluster a failed bootstrap action ended, as Terraform reported a real one's
     // (hashicorp/terraform-provider-aws#4378) and the Management Guide's VPC errors page quotes it.
     private static final String BOOTSTRAP_ACTION_FAILED =
@@ -1019,22 +1021,58 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     // ──────────────────────────── Tags ────────────────────────────
 
+    /** Puts a new map, the held tags with {@code tags} added, in place of the cluster's, so a lookup reads it whole. */
     public void addTags(String resourceId, Map<String, String> tags) {
         run(() -> {
             EmrCluster cluster = requireCluster(resourceId);
             rejectTerminatedTagging(cluster);
-            cluster.getTags().putAll(tags);
+            Map<String, String> updated = new LinkedHashMap<>(cluster.getTags());
+            updated.putAll(tags);
+            cluster.setTags(updated);
             clusterStore.put(resourceId, cluster);
         });
     }
 
+    /** Puts a new map, the held tags without {@code keys}, in place of the cluster's, so a lookup reads it whole. */
     public void removeTags(String resourceId, List<String> keys) {
         run(() -> {
             EmrCluster cluster = requireCluster(resourceId);
             rejectTerminatedTagging(cluster);
-            keys.forEach(cluster.getTags()::remove);
+            Map<String, String> updated = new LinkedHashMap<>(cluster.getTags());
+            keys.forEach(updated::remove);
+            cluster.setTags(updated);
             clusterStore.put(resourceId, cluster);
         });
+    }
+
+    /**
+     * The tags held on the cluster stored under {@code arn}, in the account it names, read in place: the cluster of
+     * that id in the ARN's Region, or one recorded with no Region, as the tag handlers find it; empty for an ARN
+     * naming nothing stored or naming anything but a cluster.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "elasticmapreduce")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        if (!resource.startsWith(CLUSTER_RESOURCE) || resource.indexOf('/', CLUSTER_RESOURCE.length()) >= 0
+                || !arn.equals(AwsArnUtils.Arn.of("elasticmapreduce", parsed.region(), parsed.accountId(), resource)
+                        .toString())) {
+            return Map.of();
+        }
+        Map<String, String> held = new LinkedHashMap<>();
+        AccountAwareStorageBackend.readInAccount(clusterStore, parsed.accountId(),
+                        resource.substring(CLUSTER_RESOURCE.length()))
+                .filter(cluster -> cluster.getRegion() == null || cluster.getRegion().equals(parsed.region()))
+                .map(EmrCluster::getTags)
+                .ifPresent(tags -> tags.forEach((key, value) -> {
+                    if (key != null && value != null) {
+                        held.put(key, value);
+                    }
+                }));
+        return held;
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
