@@ -1,5 +1,6 @@
 package io.floci.aws.services.emr.model;
 
+import io.floci.aws.services.emrserverless.SparkConnectSession;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -12,7 +13,7 @@ import java.util.Map;
  * repeated StartSession is a retry. Its engine and monitoring configurations are kept as the request's raw JSON.
  */
 @RegisterForReflection
-public class EmrSession {
+public class EmrSession implements SparkConnectSession {
 
     private String id;
     private String clusterId;
@@ -36,6 +37,8 @@ public class EmrSession {
     private Map<String, String> tags = new LinkedHashMap<>();
     private String clientRequestToken;
     private String request;
+    // Whether Floci runs a Spark Connect server for it, as it does in the docker runner mode.
+    private boolean containerSession;
 
     public EmrSession() {}
 
@@ -87,4 +90,6 @@ public class EmrSession {
     public void setClientRequestToken(String clientRequestToken) { this.clientRequestToken = clientRequestToken; }
     public String getRequest() { return request; }
     public void setRequest(String request) { this.request = request; }
+    public boolean isContainerSession() { return containerSession; }
+    public void setContainerSession(boolean containerSession) { this.containerSession = containerSession; }
 }

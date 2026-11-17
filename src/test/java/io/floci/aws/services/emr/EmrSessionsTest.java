@@ -198,7 +198,8 @@ class EmrSessionsTest {
 
         SparkConnectEndpoint endpoint = service.sessionEndpoint(clusterId, sessionId);
 
-        assertEquals("http://localhost:4566/_aws/emr/sessions/" + clusterId + "/" + sessionId, endpoint.url());
+        // Spark Connect's sc:// URL holds no path, so the endpoint is Floci's address and the token names the session.
+        assertEquals("http://localhost:4566", endpoint.url());
         assertTrue(endpoint.authToken().matches("[0-9a-f]{64}"), endpoint.authToken());
         assertTrue(Duration.between(fixture.clock.instant(), endpoint.authTokenExpiresAt())
                 .compareTo(Duration.ofMinutes(59)) > 0);

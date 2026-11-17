@@ -208,8 +208,10 @@ included; see [Step Functions: Amazon EMR tasks](step-functions.md#amazon-emr-ta
 ## Sessions
 
 A session is "a managed connection between your local PySpark client and a Spark Connect Server running on your Amazon
-EMR cluster" (Management Guide, "Interactive sessions"). Floci keeps a session and its lifecycle on its cluster, but
-starts no Spark Connect server for it, in either runner mode, so nothing answers Spark Connect at its endpoint.
+EMR cluster" (Management Guide, "Interactive sessions"). With `runner-mode` set to `docker`, Floci runs that server on
+the session's cluster, and a client reaches it through Floci (see [Running a session's Spark Connect
+server](#running-a-sessions-spark-connect-server)). With the default `immediate` mode, Floci keeps a session and its
+lifecycle on its cluster but runs no server for it.
 
 * **Starting**: `StartSession` needs a cluster created with `SessionEnabled` (which `DescribeCluster` reports), on
   "release emr-spark-8.0.0 or later", with "The Spark application installed on the cluster", that is `RUNNING` or
@@ -225,22 +227,52 @@ starts no Spark Connect server for it, in either runner mode, so nothing answers
   `ValidationException`. A retry with the same `ClientRequestToken` that asks for the same session answers as the
   first call did, a member left out, empty or at its default counting as the same; the token reused for a different
   session is refused with `InvalidRequestException`.
-* **States**: `StartSession` answers `SUBMITTED`, as "When a session is first created, it enters the SUBMITTED state",
-  and the session is `IDLE` from then on, with `StartedAt` and `IdleSince` its creation time. It is `TERMINATED` once
+* **States**: `StartSession` answers `SUBMITTED`, as "When a session is first created, it enters the SUBMITTED state".
+  In the `immediate` mode the session is `IDLE` from then on, with `StartedAt` and `IdleSince` its creation time; in
+  the `docker` mode it goes through `STARTING` and `IDLE`, then `BUSY` and back (see below). It is `TERMINATED` once
   it has been idle for its `SessionIdleTimeoutInMinutes` (60 when not given: "The default timeout is 60 minutes"), when
   `TerminateSession` ends it, or when its cluster shuts down, its `StateChangeReason` saying which. Floci never reports
-  `STARTING`, `STARTED`, `BUSY`, `TERMINATING` or `FAILED`.
-* **TerminateSession** ends a session at once as `TERMINATED`; AWS's passes through `TERMINATING` first. A session that
-  has already ended is refused with `InvalidRequestException`, in Floci's own wording.
-* **GetSessionEndpoint** answers for a session that has not ended with an endpoint on Floci's own address
-  (`/_aws/emr/sessions/<clusterId>/<sessionId>`) and a fresh `AuthToken` that expires in an hour, as "Authentication
-  tokens expire after 1 hour". Nothing answers Spark Connect there, and no `Credentials` are given. A session that has
-  ended is refused with `InvalidRequestException`, in Floci's own wording.
+  `STARTED`.
+* **TerminateSession** ends a session with no server at once as `TERMINATED`; one whose server runs is `TERMINATING`
+  until its server has stopped, as "the session enters the TERMINATING state and then transitions to TERMINATED". A
+  session that has already ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **GetSessionEndpoint** answers for a session that has not ended with Floci's own address as its endpoint, such as
+  `http://localhost:4566`, and a fresh `AuthToken` that expires in an hour, as "Authentication tokens expire after 1
+  hour". AWS's endpoint is an `https://` URL per session without a port; a Spark Connect URL holds no path, so Floci's
+  is its address alone, port included, and the token names the session. No `Credentials` are given. A session that has
+  ended, or is `TERMINATING`, is refused with `InvalidRequestException`, in Floci's own wording.
 * **ListSessions** returns the newest sessions first, as "Newer sessions are returned first", the later of two started
   in the same millisecond first too, filtered by `SessionStates`, at most `MaxResults` (1 to 100, 100 by default) to a
   page.
 * A session's `EngineConfigurations`, `MonitoringConfiguration` and `Tags` are kept as given and reported by
-  `GetSession`; none of them configures anything, and no session logs are written.
+  `GetSession`. In the `docker` mode the engine configurations' `spark-defaults` configure its server (below); the
+  monitoring configuration configures nothing, and no session logs are written.
+
+### Running a session's Spark Connect server
+
+With `runner-mode` set to `docker`, each session runs a Spark Connect server on its cluster, as "Amazon EMR launches a
+Spark Connect Server as a YARN application on your cluster": a container on the cluster, as a step's is, in the image
+its steps run in, its HDFS and YARN started first where they are not running, the server's driver in that container
+and its executors on the cluster's YARN. Its `spark-defaults` are the cluster's, then the session's
+`EngineConfigurations`, which are "applied to the Spark Connect Server for that session only"; Floci sets
+`spark.connect.grpc.binding.port` itself. It runs as the session's `ExecutionRoleArn`, else the cluster's instance
+profile. The server's port is published on the Docker host's loopback interface only, and clients reach it through
+Floci, as an EMR Serverless session's are (see EMR Serverless, "Running a session's Spark Connect server").
+
+* **Connecting**: build the connection string from `GetSessionEndpoint`'s answer as AWS's guide does, but keep the
+  endpoint's port: `sc://localhost:4566/;x-aws-proxy-auth=<AuthToken>;authorization=<SessionId>`, with
+  `;use_ssl=true` only where Floci's TLS is on. The token names the session; the `authorization` parameter, which
+  AWS's proxy reads, is dropped before the call reaches the server. The client's PySpark must match the release's
+  Spark.
+* **Tokens**: a call whose token Floci did not give, or which has expired, fails with gRPC's `UNAUTHENTICATED`; one
+  to a session that is not `IDLE` or `BUSY`, or, in the `immediate` mode, to any session, with `UNAVAILABLE`, in
+  Floci's own wording.
+* **States**: a session is `SUBMITTED` until its container runs, `STARTING` until the server answers, then `IDLE`,
+  with `StartedAt` and `IdleSince` set. No source says when a session is `BUSY`: Floci makes it `BUSY` while a call
+  runs on its server, and `IDLE` again once none does, its idle timeout counting from then. A server that does not
+  answer within 10 minutes, or stops on its own, fails its session, its `StateChangeReason` saying why; one Floci
+  stopped running when it restarted fails too, and its container, if one is left, goes. The cluster's end ends its
+  sessions and stops their servers.
 
 ## Studios
 
@@ -879,7 +911,7 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_CLUSTER_STARTUP_DELAY_SECONDS` | `0` | Seconds a new cluster takes to be ready to run steps, the first half `STARTING` and the second `BOOTSTRAPPING`; `0` makes it ready as soon as it is created |
 | `FLOCI_SERVICES_EMR_STEP_DURATION_SECONDS` | `0` | Seconds a step stays `RUNNING` before it completes; `0` completes it as soon as it starts |
 | `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
-| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps)) |
+| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step, and each session's Spark Connect server, in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps) and [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label; a mirror sets `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` too |
 | `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image a `docker` cluster takes HDFS and YARN from, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the Hadoop of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |

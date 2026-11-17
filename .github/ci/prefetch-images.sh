@@ -122,14 +122,18 @@ starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsDockerIntegrationTest Em
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 # EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsDockerIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
-# HDFS in it, EmrDockerRunnerDockerIntegrationTest's and the nightly EmrFlociContainerNightlyIntegrationTest's and
-# EmrPigStepsNightlyIntegrationTest's included.
+# HDFS in it, EmrDockerRunnerDockerIntegrationTest's and the nightly EmrFlociContainerNightlyIntegrationTest's,
+# EmrPigStepsNightlyIntegrationTest's and EmrSessionServerNightlyIntegrationTest's included (an emr-spark-* cluster's
+# Hadoop comes from it too).
 starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest EmrDockerRunnerDockerIntegrationTest \
-    EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest \
+    EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrSessionServerNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
 # The nightly EmrServerlessSparkConnectNightlyIntegrationTest runs a session's Spark Connect server, and its client, in
 # the emr-7.13.0 image, 3.7 GB, the first release with sessions.
 starts EmrServerlessSparkConnectNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark/emr-7.13.0:latest
+# The nightly EmrSessionServerNightlyIntegrationTest runs an EMR session's Spark Connect server on an emr-spark-8.1.0
+# cluster, Spark 4, sessions needing the AWS runtime for Apache Spark, and its client in that image.
+starts EmrSessionServerNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
