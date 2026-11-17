@@ -118,6 +118,20 @@ create_key() {
     assert_failure
     [[ "$output" == *"ValidationException"* ]]
 }
+@test "Payment Cryptography control plane: a key is stopped and started again" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography stop-key-usage --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.Enabled')" = "false" ]
+    [ -n "$(json_get "$output" '.Key.UsageStopTimestamp')" ]
+
+    run aws_cmd payment-cryptography start-key-usage --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.Enabled')" = "true" ]
+    [ -n "$(json_get "$output" '.Key.UsageStartTimestamp')" ]
+}
 
 @test "Payment Cryptography control plane: a key pair is created with the usage its derived keys have" {
     # The usage a derived key is for is named when the key pair is made, as the export

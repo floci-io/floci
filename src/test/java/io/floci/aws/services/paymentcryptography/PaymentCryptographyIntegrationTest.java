@@ -68,6 +68,13 @@ class PaymentCryptographyIntegrationTest {
 
     private static final String CREATE_KEY = CREATE_KEY_BODY.formatted("");
 
+    /** The member that makes a key disabled, as the request names it. */
+    private static final String DISABLED = """
+            ,"Enabled":false""";
+
+    /** A key that is made disabled when it is created. */
+    private static final String CREATE_DISABLED_KEY = CREATE_KEY_BODY.formatted(DISABLED);
+
     private static final String CREATE_WRAPPING_KEY = """
             {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
              "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
@@ -895,6 +902,60 @@ class PaymentCryptographyIntegrationTest {
                 "{\"Version\":\"2012-10-17\",\"Statement\":[]} {\"Version\":\"2012-10-17\"}"))
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
+    }
+    @Test
+    void aKeyIsStoppedAndStartedAgain() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.UsageStopTimestamp", notNullValue());
+
+        assertKeyIsStarted(call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+    }
+
+    @Test
+    void aKeyCreatedDisabledIsStarted() {
+        // A key may be made disabled, and it is enabled again with the same operation that
+        // starts a key that was stopped.
+        String arn = call("CreateKey", CREATE_DISABLED_KEY)
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        assertKeyIsStarted(call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+    }
+
+    @Test
+    void aStoppedKeyStopsItsReplica() {
+        // The reference says a stop on the primary stops the usage of the replicas too, so
+        // the replica of the key is disabled as well.
+        String arn = call("CreateKey", createReplicatedKeyBody("[\"us-west-2\"]"))
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        // The replica goes with the primary, so one delete takes both.
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+        String replicaArn = arn.replace(":us-east-1:", ":us-west-2:");
+
+        call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false));
+
+        callIn("us-west-2", "GetKey", "{\"KeyIdentifier\":\"" + replicaArn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.UsageStopTimestamp", notNullValue());
+    }
+
+    /** A key that is started is enabled again, and it says when its use began. */
+    private static void assertKeyIsStarted(Response answer) {
+        answer.then().statusCode(200)
+                .body("Key.Enabled", equalTo(true))
+                .body("Key.UsageStartTimestamp", notNullValue());
     }
 
     @Test
