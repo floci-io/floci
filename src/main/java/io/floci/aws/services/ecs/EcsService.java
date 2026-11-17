@@ -2464,6 +2464,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         task.setExecutionStoppedAt(Instant.now());
         task.bumpVersion();
         containerManager.releaseTaskNetwork(task, region);
+        lbRegistrar.releaseInstancePorts(task.getTaskArn());
         if (task.getContainers() != null) {
             task.getContainers().forEach(c -> {
                 c.setLastStatus("STOPPED");
@@ -4016,9 +4017,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public ContainerInstance registerContainerInstance(RegisterContainerInstanceRequest request,
                                                         String region) {
-        EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
         String instanceId = identityDocumentInstanceId(request.getInstanceIdentityDocument())
                 .orElseGet(() -> "i-floci-" + UUID.randomUUID().toString().substring(0, 8));
+        EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
         String instanceArn = request.getContainerInstanceArn() != null
                 ? request.getContainerInstanceArn()
                 : regionResolver.buildArn("ecs", region,
@@ -4051,20 +4052,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * The {@code instanceId} of the EC2 instance identity document the ECS agent registers with, which
-     * is the EC2 instance AWS records the container instance as. Empty when the caller sent no document
-     * or one that names no instance.
+     * is the EC2 instance AWS records the container instance as. Empty when the caller sent no
+     * document. A document that is not JSON, or names no instance, is rejected rather than replaced
+     * by a generated id, so a registration never silently stands for some other instance.
      */
     static Optional<String> identityDocumentInstanceId(String identityDocument) {
         if (identityDocument == null || identityDocument.isBlank()) {
             return Optional.empty();
         }
+        String instanceId;
         try {
-            String instanceId = IDENTITY_DOCUMENT_JSON.readTree(identityDocument).path("instanceId").asText("");
-            return instanceId.isBlank() ? Optional.empty() : Optional.of(instanceId);
+            instanceId = IDENTITY_DOCUMENT_JSON.readTree(identityDocument).path("instanceId").asText("");
         } catch (JsonProcessingException e) {
-            LOG.debugv("Ignoring an instance identity document that is not JSON: {0}", e.getMessage());
-            return Optional.empty();
+            throw new AwsException("InvalidParameterException",
+                    "instanceIdentityDocument is not a valid instance identity document.", 400);
         }
+        if (instanceId.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "instanceIdentityDocument does not name an instanceId.", 400);
+        }
+        return Optional.of(instanceId);
     }
 
     /**
@@ -5668,6 +5675,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
         String region = taskRegion(task);
         containerManager.releaseTaskNetwork(task, region);
+        lbRegistrar.releaseInstancePorts(taskArn);
         if (eventPublisher != null) {
             eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
         }

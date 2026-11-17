@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Bridges ECS services to ELBv2: when an ECS service declares a {@code loadBalancers}
@@ -54,7 +55,8 @@ public class EcsLoadBalancerRegistrar {
     // taskArn → the targets registered for it, persisted so they can be released after a restart
     private final AccountAwareStorageBackend<EcsRegisteredTargets> ledger;
     private final Ec2InstancePorts instancePorts;
-    // taskArn → the container instance host ports the task holds, memory-only like the task itself
+    // taskArn → the container instance host ports the task holds until it stops, memory-only like the
+    // task itself. Each list is immutable and replaced through compute(), which is atomic per task.
     private final Map<String, List<InstancePort>> heldInstancePorts = new ConcurrentHashMap<>();
 
     private record InstancePort(String accountId, String instanceId, int port, Ec2InstancePorts.Endpoint endpoint) {}
@@ -89,8 +91,8 @@ public class EcsLoadBalancerRegistrar {
      */
     public void registerTask(EcsTask task, EcsServiceModel svc, String ec2InstanceId, String region) {
         List<EcsRegisteredTargets.Target> planned = new ArrayList<>();
-        forEachTarget(task, svc, (tgArn, td, binding) -> {
-            TargetDescription target = instanceTarget(task, region, tgArn, ec2InstanceId, td, binding.hostPort())
+        forEachTarget(task, svc, (tgArn, td, container, binding) -> {
+            TargetDescription target = instanceTarget(task, region, tgArn, ec2InstanceId, td, container, binding)
                     .orElse(td);
             planned.add(new EcsRegisteredTargets.Target(tgArn, target.getId(), target.getPort()));
         });
@@ -132,7 +134,7 @@ public class EcsLoadBalancerRegistrar {
     public Duration deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
         List<Duration> drains = new ArrayList<>();
         if (task.getTaskArn() == null) {
-            forEachTarget(task, svc, (tgArn, td, binding) -> drains.add(deregister(region, tgArn, td)));
+            forEachTarget(task, svc, (tgArn, td, container, binding) -> drains.add(deregister(region, tgArn, td)));
         } else {
             Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
             if (recorded.isPresent()) {
@@ -140,7 +142,6 @@ public class EcsLoadBalancerRegistrar {
                 ledger.delete(task.getTaskArn());
             }
         }
-        releaseInstancePorts(task.getTaskArn());
         return drains.stream().max(Comparator.naturalOrder()).orElse(Duration.ZERO);
     }
 
@@ -275,10 +276,15 @@ public class EcsLoadBalancerRegistrar {
      * container publishes on the instance, or, when another task on the instance already holds that
      * one, as when Docker published nothing and the containers share a container port, a port from
      * the ephemeral range the ECS agent assigns dynamic host ports from.
+     *
+     * <p>The container's other published host ports are taken on the instance too, where free, as a
+     * bridge-mode task occupies every host port it maps: a target group whose health checks name one
+     * of them then reaches the container. The task holds all of them until it stops, see
+     * {@link #releaseInstancePorts}.
      */
     private Optional<TargetDescription> instanceTarget(EcsTask task, String region, String tgArn,
                                                        String ec2InstanceId, TargetDescription containerTarget,
-                                                       int hostPort) {
+                                                       Container container, NetworkBinding binding) {
         if (ec2InstanceId == null || ec2InstanceId.isBlank() || task.getTaskArn() == null) {
             return Optional.empty();
         }
@@ -289,27 +295,42 @@ public class EcsLoadBalancerRegistrar {
         String accountId = AwsArnUtils.parse(tgArn).accountId();
         Ec2InstancePorts.Endpoint endpoint = new Ec2InstancePorts.Endpoint(containerTarget.getId(),
                 containerTarget.getPort());
-        List<InstancePort> held = heldInstancePorts.computeIfAbsent(task.getTaskArn(),
-                ignored -> new ArrayList<>());
-        synchronized (held) {
-            Integer port = held.stream()
-                    .filter(p -> p.instanceId().equals(ec2InstanceId) && p.endpoint().equals(endpoint))
-                    .map(InstancePort::port)
-                    .findFirst()
-                    .orElseGet(() -> bindInstancePort(accountId, ec2InstanceId, hostPort, endpoint));
-            if (port == null) {
-                LOG.warnv("No free host port on {0} for ECS task {1}; registering its container address instead",
-                        ec2InstanceId, task.getTaskArn());
-                return Optional.empty();
+        AtomicReference<Integer> trafficPort = new AtomicReference<>();
+        heldInstancePorts.compute(task.getTaskArn(), (taskArn, held) -> {
+            List<InstancePort> ports = held == null ? new ArrayList<>() : new ArrayList<>(held);
+            Integer port = heldPort(ports, ec2InstanceId, endpoint)
+                    .orElseGet(() -> bindInstancePort(accountId, ec2InstanceId, binding.hostPort(), endpoint));
+            if (port != null && heldPort(ports, ec2InstanceId, endpoint).isEmpty()) {
+                ports.add(new InstancePort(accountId, ec2InstanceId, port, endpoint));
             }
-            if (held.stream().noneMatch(p -> p.instanceId().equals(ec2InstanceId) && p.port() == port)) {
-                held.add(new InstancePort(accountId, ec2InstanceId, port, endpoint));
+            for (NetworkBinding other : container.getNetworkBindings()) {
+                Ec2InstancePorts.Endpoint otherEndpoint = new Ec2InstancePorts.Endpoint(containerTarget.getId(),
+                        EcsTaskAddress.isLoopback(containerTarget.getId()) ? other.hostPort() : other.containerPort());
+                if (other.hostPort() > 0 && heldPort(ports, ec2InstanceId, otherEndpoint).isEmpty()
+                        && instancePorts.bind(accountId, ec2InstanceId, other.hostPort(), otherEndpoint)) {
+                    ports.add(new InstancePort(accountId, ec2InstanceId, other.hostPort(), otherEndpoint));
+                }
             }
-            TargetDescription target = new TargetDescription();
-            target.setId(ec2InstanceId);
-            target.setPort(port);
-            return Optional.of(target);
+            trafficPort.set(port);
+            return List.copyOf(ports);
+        });
+        if (trafficPort.get() == null) {
+            LOG.warnv("No free host port on {0} for ECS task {1}; registering its container address instead",
+                    ec2InstanceId, task.getTaskArn());
+            return Optional.empty();
         }
+        TargetDescription target = new TargetDescription();
+        target.setId(ec2InstanceId);
+        target.setPort(trafficPort.get());
+        return Optional.of(target);
+    }
+
+    private static Optional<Integer> heldPort(List<InstancePort> held, String instanceId,
+                                              Ec2InstancePorts.Endpoint endpoint) {
+        return held.stream()
+                .filter(p -> p.instanceId().equals(instanceId) && p.endpoint().equals(endpoint))
+                .map(InstancePort::port)
+                .findFirst();
     }
 
     private Integer bindInstancePort(String accountId, String instanceId, int preferred,
@@ -325,7 +346,12 @@ public class EcsLoadBalancerRegistrar {
         return null;
     }
 
-    private void releaseInstancePorts(String taskArn) {
+    /**
+     * Frees the container instance host ports {@link #registerTask} took for the task. Called once the
+     * task is STOPPED rather than when it leaves its target groups: a draining task's containers still
+     * run, so on AWS they still occupy those ports and a replacement on the same instance gets others.
+     */
+    public void releaseInstancePorts(String taskArn) {
         if (taskArn == null) {
             return;
         }
@@ -333,16 +359,15 @@ public class EcsLoadBalancerRegistrar {
         if (held == null) {
             return;
         }
-        synchronized (held) {
-            for (InstancePort port : held) {
-                instancePorts.release(port.accountId(), port.instanceId(), port.port(), port.endpoint());
-            }
+        for (InstancePort port : held) {
+            instancePorts.release(port.accountId(), port.instanceId(), port.port(), port.endpoint());
         }
     }
 
     @FunctionalInterface
     private interface TargetAction {
-        void accept(String targetGroupArn, TargetDescription containerTarget, NetworkBinding binding);
+        void accept(String targetGroupArn, TargetDescription containerTarget, Container container,
+                    NetworkBinding binding);
     }
 
     private void forEachTarget(EcsTask task, EcsServiceModel svc, TargetAction action) {
@@ -375,7 +400,7 @@ public class EcsLoadBalancerRegistrar {
             TargetDescription td = new TargetDescription();
             td.setId(containerManager.resolveContainerHost(container));
             td.setPort(EcsTaskAddress.isLoopback(td.getId()) ? binding.hostPort() : binding.containerPort());
-            action.accept(lb.getTargetGroupArn(), td, binding);
+            action.accept(lb.getTargetGroupArn(), td, container, binding);
         }
     }
 }

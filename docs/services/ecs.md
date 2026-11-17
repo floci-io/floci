@@ -572,8 +572,11 @@ Known differences from AWS:
   that instance port at the task's container. When another task on the same instance already holds
   the host port, as when Floci runs in Docker and publishes no host ports so the tasks share a
   container port, the target gets a port from the ECS agent's dynamic range (32768 to 60999)
-  instead, and `networkBindings` keeps reporting the published port. An `ip` target group, or a
-  task with no container instance, gets the container's own address.
+  instead, and `networkBindings` keeps reporting the published port. The container's other
+  published host ports are taken on the instance too where free, so a target group health check on
+  one of them reaches the container. The task holds these ports until it is `STOPPED`, through its
+  deregistration delay, so a replacement on the same instance gets other ones. An `ip` target
+  group, or a task with no container instance, gets the container's own address.
 - A rolling deployment of a service with `loadBalancers` stops a stale task only once every
   replacement's targets report `healthy`. A replacement that never turns healthy holds the
   deployment.
@@ -803,7 +806,9 @@ change increments.
 
 The container instance's `ec2InstanceId` is the `instanceId` of the `instanceIdentityDocument` the
 agent registers with, so it names the EC2 instance the agent runs on, as on AWS. A registration
-without a document gets a generated `i-floci-...` id.
+without a document gets a generated `i-floci-...` id; one whose document is not JSON or names no
+`instanceId` fails with `InvalidParameterException`. Floci does not check
+`instanceIdentityDocumentSignature`.
 
 `DeregisterContainerInstance` leaves the instance in the cluster as `INACTIVE` rather than
 dropping it, so a later `DescribeContainerInstances` still answers for it, as on AWS. A cluster's

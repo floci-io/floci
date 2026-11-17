@@ -2,6 +2,7 @@ package io.floci.aws.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -22,9 +23,11 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** REPLICA services on the EC2 launch type run their tasks on the cluster's container instances. */
@@ -97,11 +100,38 @@ class EcsServiceEc2PlacementTest {
     }
 
     @Test
-    void identityDocumentWithoutAnInstanceIdNamesNoInstance() {
+    void registrationWithoutAnIdentityDocumentGetsAGeneratedInstanceId() {
         assertEquals(Optional.empty(), EcsService.identityDocumentInstanceId(null));
-        assertEquals(Optional.empty(), EcsService.identityDocumentInstanceId("not json"));
-        assertEquals(Optional.empty(), EcsService.identityDocumentInstanceId("{\"region\":\"us-east-1\"}"));
-        assertTrue(EcsService.identityDocumentInstanceId("{\"instanceId\":\"i-1\"}").isPresent());
+        assertEquals(Optional.empty(), EcsService.identityDocumentInstanceId(" "));
+    }
+
+    @Test
+    void malformedIdentityDocumentIsRejectedAndRegistersNothing() {
+        EcsService service = newMockModeService();
+        service.createCluster("identity-doc-invalid", REGION);
+
+        for (String document : List.of("not json", "{\"region\":\"us-east-1\"}", "{\"instanceId\":\"\"}")) {
+            AwsException error = assertThrows(AwsException.class, () -> service.registerContainerInstance(
+                    "identity-doc-invalid", document, List.of(), REGION), document);
+            assertEquals("InvalidParameterException", error.getErrorCode(), document);
+        }
+        assertTrue(service.listContainerInstances("identity-doc-invalid", null, REGION).isEmpty());
+    }
+
+    @Test
+    void stoppedTaskReleasesItsInstanceHostPorts() {
+        EcsLoadBalancerRegistrar registrar = mock(EcsLoadBalancerRegistrar.class);
+        EcsService service = newMockModeService(registrar);
+        service.createCluster("release-ports", REGION);
+        service.registerContainerInstance("release-ports", null, List.of(), REGION);
+        registerTaskDef(service);
+        service.createService("release-ports", "web", "ec2-placement-fam", 1, LaunchType.EC2, List.of(), null, REGION);
+        service.reconcileServices();
+        EcsTask task = tasks(service, "release-ports").getFirst();
+
+        service.stopTask("release-ports", task.getTaskArn(), "test", REGION);
+
+        verify(registrar).releaseInstancePorts(task.getTaskArn());
     }
 
     private static List<EcsTask> tasks(EcsService service, String cluster) {
@@ -117,6 +147,10 @@ class EcsServiceEc2PlacementTest {
     }
 
     private static EcsService newMockModeService() {
+        return newMockModeService(mock(EcsLoadBalancerRegistrar.class));
+    }
+
+    private static EcsService newMockModeService(EcsLoadBalancerRegistrar registrar) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(true);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -124,7 +158,7 @@ class EcsServiceEc2PlacementTest {
                 new RegionResolver(REGION, "000000000000"),
                 mock(EcsContainerManager.class),
                 config,
-                mock(EcsLoadBalancerRegistrar.class),
+                registrar,
                 new InMemoryStorageFactory(),
                 null);
         service.initializeStorage();

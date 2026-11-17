@@ -377,8 +377,60 @@ class EcsLoadBalancerRegistrarTest {
 
         registrar.deregisterTask(task, svc, REGION);
         assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty());
+        assertTrue(instancePorts.isBound("000000000000", "i-0abc1234def567890", 34800),
+                "a draining task's container still runs, so it keeps its host port");
+
+        registrar.releaseInstancePorts(task.getTaskArn());
         assertFalse(instancePorts.isBound("000000000000", "i-0abc1234def567890", 34800),
-                "the host port is free again once the task is gone");
+                "the host port is free again once the task has stopped");
+    }
+
+    @Test
+    void replacementOnTheSameInstanceDoesNotTakeADrainingTasksHostPort() {
+        String tgArn = createTargetGroup("reg-tg-instance-drain", "instance");
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+        EcsTask draining = taskWithContainer("web", 8080, 8080);
+        EcsTask replacement = taskWithContainer("web", 8080, 8080);
+        doReturn("172.19.0.21").when(containerManager).resolveContainerHost(draining.getContainers().getFirst());
+        doReturn("172.19.0.22").when(containerManager).resolveContainerHost(replacement.getContainers().getFirst());
+
+        registrar.registerTask(draining, svc, "i-0drain0000000000a", REGION);
+        registrar.deregisterTask(draining, svc, REGION);
+        registrar.registerTask(replacement, svc, "i-0drain0000000000a", REGION);
+
+        assertEquals(new Ec2InstancePorts.Endpoint("172.19.0.21", 8080),
+                instancePorts.find("000000000000", "i-0drain0000000000a", 8080).orElseThrow(),
+                "in-flight requests to the draining target still reach the draining task");
+        List<TargetHealth> health = elbV2Service.describeTargetHealth(REGION, tgArn, null);
+        assertEquals(1, health.size());
+        assertEquals(32768, health.get(0).getTarget().getPort());
+
+        registrar.releaseInstancePorts(draining.getTaskArn());
+        registrar.deregisterTask(replacement, svc, REGION);
+        registrar.releaseInstancePorts(replacement.getTaskArn());
+    }
+
+    @Test
+    void otherPublishedHostPortsOfTheContainerAreTakenOnTheInstance() {
+        String tgArn = createTargetGroup("reg-tg-instance-hc", "instance");
+        Container container = new Container();
+        container.setName("web");
+        container.setNetworkBindings(List.of(
+                new NetworkBinding("0.0.0.0", 8080, 35000, "tcp"),
+                new NetworkBinding("0.0.0.0", 8081, 35001, "tcp")));
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:" + REGION + ":000000000000:task/c/" + UUID.randomUUID());
+        task.setContainers(List.of(container));
+        EcsServiceModel svc = serviceWithLb(tgArn, "web", 8080);
+
+        registrar.registerTask(task, svc, "i-0healthport00000a", REGION);
+
+        assertEquals(new Ec2InstancePorts.Endpoint("127.0.0.1", 35001),
+                instancePorts.find("000000000000", "i-0healthport00000a", 35001).orElseThrow(),
+                "a health check on the container's other host port reaches the container");
+        registrar.deregisterTask(task, svc, REGION);
+        registrar.releaseInstancePorts(task.getTaskArn());
+        assertFalse(instancePorts.isBound("000000000000", "i-0healthport00000a", 35001));
     }
 
     @Test
@@ -403,6 +455,8 @@ class EcsLoadBalancerRegistrarTest {
 
         registrar.deregisterTask(first, svc, REGION);
         registrar.deregisterTask(second, svc, REGION);
+        registrar.releaseInstancePorts(first.getTaskArn());
+        registrar.releaseInstancePorts(second.getTaskArn());
     }
 
     @Test
