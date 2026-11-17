@@ -2106,13 +2106,10 @@ class EksClusterManagerTest {
             manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
 
             verify(metadataServer).reconcileClusterNodeAddresses(any(), any());
-            // imds=true, imdsPodNetwork=false (default): 2 commands (install probe, start proxy)
-            assertEquals(2, capturedCmds.size());
-            // First command: install probe
-            assertTrue(capturedCmds.get(0)[2].contains("command -v socat"));
-            // Second command: start command with 169.254.169.254
-            assertTrue(capturedCmds.get(1)[2].contains("169.254.169.254"));
-            assertTrue(capturedCmds.get(1)[2].contains("TCP:floci-host:9169"));
+            // imds=true, imdsPodNetwork=false (default): the node's requests alone go to the metadata service
+            assertEquals(1, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildImdsForwardCommand(null, false, "floci-host", 9169),
+                    capturedCmds.get(0));
 
             assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
         }
@@ -2127,18 +2124,10 @@ class EksClusterManagerTest {
             manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
 
             verify(metadataServer).reconcileClusterNodeAddresses(any(), any());
-            assertEquals(3, capturedCmds.size());
-            // First command: install probe
-            assertTrue(capturedCmds.get(0)[2].contains("command -v socat"));
-            // Second command: start command with 169.254.169.254
-            assertTrue(capturedCmds.get(1)[2].contains("169.254.169.254"));
-            assertTrue(capturedCmds.get(1)[2].contains("TCP:floci-host:9169"));
-            // Third command: pod network routing with iptables
-            assertTrue(capturedCmds.get(2)[2].contains("FLOCI-LINK-LOCAL"));
-            assertTrue(capturedCmds.get(2)[2].contains("10.42.0.0/16"));
-            assertTrue(capturedCmds.get(2)[2].contains("169.254.169.254"));
-            assertFalse(capturedCmds.get(2)[2].contains("169.254.170.23"),
-                    "IMDS pod routing must not route Pod Identity traffic");
+            // The node's and the pod network's requests go to the metadata service, in one command
+            assertEquals(1, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildImdsForwardCommand(null, true, "floci-host", 9169),
+                    capturedCmds.get(0));
 
             assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
         }
@@ -2435,23 +2424,22 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void podNetworkRoutingFailureLogsWarningAndDoesNotAbort() {
+        void aForwardThatFailsLogsAWarningAndDoesNotAbort() {
             when(eks.imdsPodNetwork()).thenReturn(true);
 
             InspectExecCmd inspectExec = Mockito.mock(InspectExecCmd.class);
             InspectExecResponse inspectResponse = Mockito.mock(InspectExecResponse.class);
-            // Simulate install and start succeeding (0), but routing failing (1)
-            when(inspectResponse.getExitCodeLong()).thenReturn(0L, 0L, 1L);
+            when(inspectResponse.getExitCodeLong()).thenReturn(1L);
             when(inspectExec.exec()).thenReturn(inspectResponse);
             when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
 
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
 
-            // Pod network routing failure logs warning and continues without throwing
+            // The forward's failure logs a warning and continues without throwing
             manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
 
-            assertEquals(3, capturedCmds.size());
+            assertEquals(1, capturedCmds.size());
             assertNotNull(manager.getRegisteredClusterNodeInstance(cluster));
         }
 

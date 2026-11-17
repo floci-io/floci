@@ -21,7 +21,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -38,8 +37,21 @@ class EksPodNetworkRoutingTest {
             "-t nat -D FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT"
                     + " --to-destination 169.254.170.23:80");
 
+    /** As {@link #EARLIER_RULES_REMOVED}, for IMDS. */
+    private static final List<String> EARLIER_IMDS_RULES_REMOVED = List.of(
+            "-t nat -S PREROUTING",
+            "-t nat -D PREROUTING -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT"
+                    + " --to-destination 172.18.0.9:9169",
+            "-t nat -S OUTPUT",
+            "-t nat -D OUTPUT -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:9169",
+            "-t nat -S FLOCI-LINK-LOCAL",
+            "-t nat -D FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT"
+                    + " --to-destination 169.254.169.254:80");
+
     /** Where the relay an older Floci ran for the address kept its PID. */
     private static final Path RELAY_PID_FILE = Path.of("/tmp/floci-pod-identity-proxy.pid");
+    /** As {@link #RELAY_PID_FILE}, for IMDS. */
+    private static final Path IMDS_RELAY_PID_FILE = Path.of("/tmp/floci-imds-proxy.pid");
 
     @Test
     void linkLocalEndpointValidatesInput() {
@@ -60,66 +72,6 @@ class EksPodNetworkRoutingTest {
         LinkLocalEndpoint ep = new LinkLocalEndpoint("169.254.169.254", 80);
         assertEquals("169.254.169.254", ep.ip());
         assertEquals(80, ep.port());
-    }
-
-    @Test
-    void buildRoutingCommandRejectsNullOrEmptyEndpoints() {
-        assertThrows(IllegalArgumentException.class, () ->
-                EksPodNetworkRouting.buildRoutingCommand(null, null));
-        assertThrows(IllegalArgumentException.class, () ->
-                EksPodNetworkRouting.buildRoutingCommand("10.42.0.0/16", List.of()));
-    }
-
-    @Test
-    void buildRoutingCommandUsesDefaultPodCidrWhenNullOrBlank() {
-        String[] cmdNull = EksPodNetworkRouting.buildRoutingCommand(null, EksPodNetworkRouting.DEFAULT_ENDPOINTS);
-        assertEquals(3, cmdNull.length);
-        assertEquals("sh", cmdNull[0]);
-        assertEquals("-c", cmdNull[1]);
-        assertTrue(cmdNull[2].contains(EksPodNetworkRouting.DEFAULT_POD_CIDR));
-
-        String[] cmdBlank = EksPodNetworkRouting.buildRoutingCommand("   ", EksPodNetworkRouting.DEFAULT_ENDPOINTS);
-        assertTrue(cmdBlank[2].contains(EksPodNetworkRouting.DEFAULT_POD_CIDR));
-    }
-
-    @Test
-    void buildRoutingCommandGeneratesIdempotentChainAndRules() {
-        String[] cmd = EksPodNetworkRouting.buildRoutingCommand("10.42.0.0/16", List.of(
-                new LinkLocalEndpoint("169.254.169.254", 80),
-                new LinkLocalEndpoint("169.254.170.23", 80)
-        ));
-
-        String script = cmd[2];
-        assertNotNull(script);
-
-        // Finds iptables binary across standard and k3s aux locations
-        assertTrue(script.contains("IPTABLES=$(command -v iptables 2>/dev/null || command -v /bin/aux/iptables 2>/dev/null || true)"));
-        assertTrue(script.contains("iptables not found in container"));
-
-        // Creates custom chain idempotently
-        assertTrue(script.contains("$IPTABLES -t nat -N FLOCI-LINK-LOCAL 2>/dev/null || true"));
-
-        // Inserts jump in PREROUTING only if not already present
-        assertTrue(script.contains("$IPTABLES -t nat -C PREROUTING -j FLOCI-LINK-LOCAL 2>/dev/null || $IPTABLES -t nat -I PREROUTING 1 -j FLOCI-LINK-LOCAL"));
-
-        // Adds rule for IMDS endpoint with check before append
-        String imdsCheck = "$IPTABLES -t nat -C FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.169.254 -p tcp --dport 80 -j DNAT --to-destination 169.254.169.254:80 2>/dev/null";
-        String imdsAdd = "$IPTABLES -t nat -A FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.169.254 -p tcp --dport 80 -j DNAT --to-destination 169.254.169.254:80";
-        assertTrue(script.contains(imdsCheck + " || " + imdsAdd));
-
-        // Adds rule for Pod Identity endpoint with check before append
-        String podIdCheck = "$IPTABLES -t nat -C FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.170.23 -p tcp --dport 80 -j DNAT --to-destination 169.254.170.23:80 2>/dev/null";
-        String podIdAdd = "$IPTABLES -t nat -A FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.170.23 -p tcp --dport 80 -j DNAT --to-destination 169.254.170.23:80";
-        assertTrue(script.contains(podIdCheck + " || " + podIdAdd));
-    }
-
-    @Test
-    void buildRoutingCommandSupportsCustomCidr() {
-        String customCidr = "192.168.0.0/16";
-        String[] cmd = EksPodNetworkRouting.buildRoutingCommand(customCidr, EksPodNetworkRouting.DEFAULT_ENDPOINTS);
-        String script = cmd[2];
-
-        assertTrue(script.contains("-s 192.168.0.0/16 -d 169.254.169.254"));
     }
 
     @ParameterizedTest
@@ -177,6 +129,75 @@ class EksPodNetworkRoutingTest {
                 + address + ":4566");
         assertEquals(expected, Files.readAllLines(dir.resolve("iptables-calls")));
         assertEquals(looksUp ? List.of(host) : List.of(), calls(dir.resolve("nslookup-calls")));
+    }
+
+    @Test
+    void imdsForwardRefusesABadHostOrPodCidr() {
+        assertThrows(IllegalArgumentException.class,
+                () -> EksPodNetworkRouting.buildImdsForwardCommand(null, true, "floci;reboot", 9169));
+        assertThrows(IllegalArgumentException.class,
+                () -> EksPodNetworkRouting.buildImdsForwardCommand("10.42.0.0/16; id", true, "floci", 9169));
+        assertThrows(IllegalArgumentException.class,
+                () -> EksPodNetworkRouting.buildImdsForwardCommand(null, true, "floci", 0));
+    }
+
+    /**
+     * IMDS goes to Floci's metadata service as the Pod Identity address goes to its credentials endpoint, once the
+     * rules an earlier Floci left for it are gone: from the node always, and from the pod network only when asked.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void imdsForwardReplacesEarlierRulesAndTakesThePodNetworkOnlyWhenAsked(boolean podNetwork, @TempDir Path dir)
+            throws Exception {
+        Path bin = fakeStockNode(dir);
+        Path hosts = Files.writeString(dir.resolve("hosts"), "172.18.0.7 floci-under-test.internal\n");
+
+        int exit = HelperShellFixture.run(EksPodNetworkRouting.buildImdsForwardCommand(null, podNetwork,
+                        "floci-under-test.internal", 9169, hosts.toString()), dir,
+                Map.of("PATH", bin.toString(), "http_proxy", "http://127.0.0.1:9"));
+
+        assertEquals(0, exit, HelperShellFixture.output(dir));
+        List<String> expected = new ArrayList<>(EARLIER_IMDS_RULES_REMOVED);
+        if (podNetwork) {
+            expected.add("-t nat -I PREROUTING 1 -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp --dport 80 -j DNAT"
+                    + " --to-destination 172.18.0.7:9169");
+        }
+        expected.add("-t nat -I OUTPUT 1 -d 169.254.169.254/32 -p tcp --dport 80 -j DNAT --to-destination"
+                + " 172.18.0.7:9169");
+        assertEquals(expected, Files.readAllLines(dir.resolve("iptables-calls")));
+    }
+
+    /**
+     * The IMDS relay an older Floci ran on the node's loopback would keep the address local to the node, so the
+     * forward stops it, while its PID file still names it, and takes its address off the loopback. The forward runs
+     * traced, so the test sees the {@code kill} it sends.
+     */
+    @Test
+    void imdsForwardRetiresTheRelayAnOlderFlociRan(@TempDir Path dir) throws Exception {
+        Path bin = fakeStockNode(dir);
+        HelperShellFixture.writeTool(bin, "ip", "echo \"$*\" >> '" + dir.resolve("ip-calls") + "'\n"
+                + "if [ \"$*\" = 'addr show dev lo' ]; then\n"
+                + "  echo '    inet 127.0.0.1/8 scope host lo'\n"
+                + "  echo '    inet 169.254.169.254/32 scope global lo'\n"
+                + "fi\n");
+        Process relay = startFakeRelay(bin, "169.254.169.254");
+        try {
+            Files.writeString(IMDS_RELAY_PID_FILE, relay.pid() + "\n");
+
+            int exit = HelperShellFixture.run(
+                    traced(EksPodNetworkRouting.buildImdsForwardCommand(null, true, "172.18.0.7", 9169)), dir,
+                    Map.of("PATH", bin.toString()));
+
+            assertEquals(0, exit, HelperShellFixture.output(dir));
+            assertEquals(List.of("kill " + relay.pid()), tracedKills(dir), HelperShellFixture.output(dir));
+            assertTrue(relay.waitFor(10, TimeUnit.SECONDS), "the relay is still running");
+            assertFalse(Files.exists(IMDS_RELAY_PID_FILE));
+            assertEquals(List.of("addr show dev lo", "addr del 169.254.169.254/32 dev lo"),
+                    calls(dir.resolve("ip-calls")));
+        } finally {
+            relay.destroyForcibly();
+            Files.deleteIfExists(IMDS_RELAY_PID_FILE);
+        }
     }
 
     /** Without the add-on nothing answers on the address: every rule for it goes, the others stay. */
@@ -309,9 +330,9 @@ class EksPodNetworkRoutingTest {
     /**
      * A bin directory of stand-ins for a stock k3s node's tools, beside the host's awk, sed, grep,
      * env, sleep, cat, tr and rm. iptables records its arguments in {@code iptables-calls} and lists,
-     * in {@code PREROUTING} and {@code OUTPUT}, a rule an earlier Floci on 172.18.0.9 left for the
-     * address and one rule of another's, and in {@code FLOCI-LINK-LOCAL} the rule an older Floci sent
-     * the address to its relay with, beside the IMDS one. nslookup records its arguments in
+     * in {@code PREROUTING} and {@code OUTPUT}, the rules an earlier Floci on 172.18.0.9 left for the
+     * Pod Identity address and for IMDS and one rule of another's, and in {@code FLOCI-LINK-LOCAL} the
+     * rules an older Floci sent each address to its relay with. nslookup records its arguments in
      * {@code nslookup-calls} and answers as BusyBox's.
      */
     private static Path fakeStockNode(Path dir) throws Exception {
@@ -322,11 +343,14 @@ class EksPodNetworkRoutingTest {
                 + "  echo '-P PREROUTING ACCEPT'\n"
                 + "  echo '-A PREROUTING -s 10.42.0.0/16 -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT"
                 + " --to-destination 172.18.0.9:4566'\n"
+                + "  echo '-A PREROUTING -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT"
+                + " --to-destination 172.18.0.9:9169'\n"
                 + "  echo '-A PREROUTING -j FLOCI-LINK-LOCAL'\n"
                 + "fi\n"
                 + "if [ \"$*\" = '-t nat -S OUTPUT' ]; then\n"
                 + "  echo '-P OUTPUT ACCEPT'\n"
                 + "  echo '-A OUTPUT -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:4566'\n"
+                + "  echo '-A OUTPUT -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:9169'\n"
                 + "  echo '-A OUTPUT -j KUBE-SERVICES'\n"
                 + "fi\n"
                 + "if [ \"$*\" = '-t nat -S FLOCI-LINK-LOCAL' ]; then\n"

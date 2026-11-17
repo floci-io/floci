@@ -855,7 +855,7 @@ services:
 ## Instance Metadata Service (IMDS)
 The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the node group's type, which also sizes the container unless `floci.services.eks.node-instance-type` is set.
 
-When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
+When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, NAT rules send metadata requests to Floci's IMDS server (see below).
 
 Both IMDSv1 and IMDSv2 (`PUT /latest/api/token`) are supported. The cluster container is registered as a synthesized EC2 instance node associated with the cluster's IAM role:
 
@@ -871,23 +871,24 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 
 ### Reachability and network namespaces
 
-The link-local proxy attaches to the loopback interface of the k3s container network namespace (the node network namespace).
+NAT rules in the k3s container's network namespace (the node network namespace) send `169.254.169.254:80` straight to Floci's metadata service, as they send the EKS Pod Identity address to its credentials endpoint. No relay process runs in the node, so nothing is installed there: a stock `rancher/k3s` image, which has `iptables` but no package manager, answers IMDS too.
 
-- **Reachable from node network namespace:** Workloads configured with `hostNetwork: true` share the node network namespace and can reach `169.254.169.254:80`. This allows local testing of host-network security policies, intrusion-detection rules, and credential exfiltration defenses.
-- **Default isolation for ordinary pods:** By default, pods running in separate pod network namespaces cannot reach `169.254.169.254`. CNI portmap rules on the node intercept local traffic, preserving node credential isolation for multi-tenant or untrusted workloads.
-- **Opt-in pod network routing:** When `floci.services.eks.imds-pod-network=true` is set alongside `floci.services.eks.imds=true`, iptables DNAT rules are programmed in a custom `FLOCI-LINK-LOCAL` chain at the head of `PREROUTING`. Traffic originating from the pod CIDR (`10.42.0.0/16`) targeting `169.254.169.254:80` matches first and is routed directly to the local node listener, preempting CNI portmap rules. This enables standard AWS SDK credential resolution inside ordinary pods without requiring `hostNetwork: true`.
+- **Reachable from node network namespace:** An `OUTPUT` rule takes the node's own requests. Workloads configured with `hostNetwork: true` share the node network namespace and can reach `169.254.169.254:80`. This allows local testing of host-network security policies, intrusion-detection rules, and credential exfiltration defenses.
+- **Default isolation for ordinary pods:** By default, pods running in separate pod network namespaces cannot reach `169.254.169.254`: no rule takes their requests, preserving node credential isolation for multi-tenant or untrusted workloads.
+- **Opt-in pod network routing:** When `floci.services.eks.imds-pod-network=true` is set alongside `floci.services.eks.imds=true`, a `PREROUTING` rule at the head of the chain takes requests from the pod CIDR (`10.42.0.0/16`) for `169.254.169.254:80` too, and the node's masquerade rule (flannel's) carries the answers back. This enables standard AWS SDK credential resolution inside ordinary pods without requiring `hostNetwork: true`.
+- **Nodes an older Floci set up:** the rules and the `socat` relay an older Floci left for the address, on the node's loopback, are removed when the node starts or is adopted.
 
 ### Configuration
 
-IMDS proxy initialization is disabled by default (`floci.services.eks.imds=false`). Set `FLOCI_SERVICES_EKS_IMDS=true` to enable the proxy setup inside the k3s container.
+IMDS is disabled by default (`floci.services.eks.imds=false`). Set `FLOCI_SERVICES_EKS_IMDS=true` to add the forward inside the k3s container.
 
-Pod network reachability is also disabled by default (`floci.services.eks.imds-pod-network=false`) to maintain pod isolation. Set `FLOCI_SERVICES_EKS_IMDS_POD_NETWORK=true` together with `FLOCI_SERVICES_EKS_IMDS=true` to route pod traffic to the link-local proxy.
+Pod network reachability is also disabled by default (`floci.services.eks.imds-pod-network=false`) to maintain pod isolation. Set `FLOCI_SERVICES_EKS_IMDS_POD_NETWORK=true` together with `FLOCI_SERVICES_EKS_IMDS=true` to forward pod traffic too.
 
-A failure to configure the proxy (for example on custom minimal images lacking network utilities) logs a warning and allows cluster startup to continue.
+A failure to configure the forward (for example on a custom image without `iptables`) logs a warning and allows cluster startup to continue.
 
 ### Hop limits
 
-EC2 metadata options store `HttpPutResponseHopLimit`, but the userspace TCP proxy relay terminates the incoming connection and opens a new connection to Floci, regenerating the IP packet TTL. Hop limits are recorded on the instance metadata options model but are not enforced by the userspace proxy.
+EC2 metadata options store `HttpPutResponseHopLimit`, but Floci's metadata service sets no TTL on the packets of its answers, so a hop limit is recorded on the instance metadata options model but not enforced.
 
 ## IRSA (IAM Roles for Service Accounts)
 
