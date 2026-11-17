@@ -1,11 +1,13 @@
 package io.floci.aws.services.athena;
 
+import io.floci.aws.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TrinoSqlCompatibilityTest {
@@ -258,5 +260,105 @@ class TrinoSqlCompatibilityTest {
     void aSemicolonAfterAHiveBackslashEscapeSeparatesStatementsAsOnAthena() {
         assertTrue(TrinoSqlCompatibility.holdsSeveralStatements(
                 "CREATE EXTERNAL TABLE t (id string COMMENT 'a\\'; b') LOCATION 's3://bucket/t/'"));
+    }
+
+    @Test
+    void parametersAreBoundInOrderEachAsAnExpressionOfItsOwn() {
+        assertEquals("SELECT 'eu' AS s, (1 + 1) * 2 AS n FROM t WHERE d = date('2026-11-10')",
+                TrinoSqlCompatibility.bindParameters("SELECT ? AS s, ? * 2 AS n FROM t WHERE d = date(?)",
+                        List.of("'eu'", "1 + 1", "'2026-11-10'")));
+        assertEquals("SELECT (ARRAY[1, 2]), (f(a, b)), 'x, y', 10, (-1)",
+                TrinoSqlCompatibility.bindParameters("SELECT ?, ?, ?, ?, ?",
+                        List.of("ARRAY[1, 2]", "f(a, b)", "'x, y'", "10", "-1")));
+    }
+
+    /** As on Athena (engine v3), which returns these values as the strings 1);SELECT(2, 1;SELECT2 and 1,2. */
+    @Test
+    void aValueThatIsNotOneExpressionIsBoundAsAStringOfItsTokens() {
+        assertEquals("SELECT '1);SELECT(2' AS a, '1;SELECT2' AS b, '1,2' AS c, '''a b'',1' AS d",
+                TrinoSqlCompatibility.bindParameters("SELECT ? AS a, ? AS b, ? AS c, ? AS d",
+                        List.of("1); SELECT (2", "1; SELECT 2", "1, 2", "'a b', 1")));
+    }
+
+    /** Brackets as many as they close but not pairing up make no expression either; nested ones that pair do. */
+    @Test
+    void aValueWhoseBracketsDoNotPairUpIsBoundAsAStringOfItsTokens() {
+        assertEquals("SELECT '(1]' AS a, '([)]' AS b, (f([1], (2))) AS c",
+                TrinoSqlCompatibility.bindParameters("SELECT ? AS a, ? AS b, ? AS c",
+                        List.of("(1]", "([ ) ]", "f([1], (2))")));
+    }
+
+    /**
+     * An open quote would turn the literals after the placeholder inside out, so the semicolons in them would end
+     * the statement. Athena (engine v3) returns {@code 'a} as the string {@code 'a}.
+     */
+    @Test
+    void aValueLeavingAQuoteOpenIsBoundAsAStringAndAddsNoStatement() {
+        String bound = TrinoSqlCompatibility.bindParameters(
+                "INSERT INTO t VALUES (?, '); INSERT INTO t2 VALUES (9); --')", List.of("'a"));
+
+        assertEquals("INSERT INTO t VALUES ('''a', '); INSERT INTO t2 VALUES (9); --')", bound);
+        assertFalse(TrinoSqlCompatibility.holdsSeveralStatements(bound));
+        assertEquals("INSERT INTO t VALUES ('''' || '); INSERT INTO t VALUES (9); --')",
+                TrinoSqlCompatibility.bindParameters("INSERT INTO t VALUES (? || '); INSERT INTO t VALUES (9); --')",
+                        List.of("'")));
+    }
+
+    /** As on Athena (engine v3): a lone name is a string, even where a column has it; TRUE, NULL and the like are not. */
+    @Test
+    void aLoneNameIsBoundAsAStringAndAKeywordAsAnExpression() {
+        assertEquals("SELECT 'x' AS a, '\"x\"' AS b, (true) AS c, (null) AS d, (current_date) AS e, (abs(-3)) AS f",
+                TrinoSqlCompatibility.bindParameters("SELECT ? AS a, ? AS b, ? AS c, ? AS d, ? AS e, ? AS f",
+                        List.of("x", "\"x\"", "true", "null", "current_date", "abs(-3)")));
+    }
+
+    /** Athena (engine v3) returns 1 for both: the value is a token of its own. */
+    @Test
+    void aBoundValueIsSpacedFromTheTokensAroundIt() {
+        assertEquals("SELECT 1 e2", TrinoSqlCompatibility.bindParameters("SELECT ?e2", List.of("1")));
+        assertEquals("SELECT 1", TrinoSqlCompatibility.bindParameters("SELECT?", List.of("1")));
+        assertEquals("SELECT (1 + 1)", TrinoSqlCompatibility.bindParameters("SELECT?", List.of("1 + 1")));
+        assertEquals("SELECT 'a' || 'b'", TrinoSqlCompatibility.bindParameters("SELECT ? || 'b'", List.of("'a'")));
+    }
+
+    /** A literal goes in as if written in place, so a JSON path given as a parameter is translated too. */
+    @Test
+    void aLiteralValueIsBoundBareAndTranslatedAsIfWrittenInPlace() {
+        assertEquals("SELECT json_extract_scalar(j, '/a b') AS v", TrinoSqlCompatibility.translate(
+                TrinoSqlCompatibility.bindParameters("SELECT json_extract_scalar(j, ?) AS v",
+                        List.of("'$[\"a b\"]'"))));
+    }
+
+    @Test
+    void aQuestionMarkInALiteralAQuotedIdentifierOrACommentIsNotAPlaceholder() {
+        assertEquals("SELECT '?' AS \"?\", 'x' AS v -- ?\n/* ? */",
+                TrinoSqlCompatibility.bindParameters("SELECT '?' AS \"?\", ? AS v -- ?\n/* ? */", List.of("'x'")));
+    }
+
+    @Test
+    void aStatementWithoutPlaceholdersRunsAsWrittenWhateverItsParameters() {
+        assertEquals("SELECT 1 AS a", TrinoSqlCompatibility.bindParameters("SELECT 1 AS a", List.of("1")));
+        assertEquals("SELECT 1 AS a", TrinoSqlCompatibility.bindParameters("SELECT 1 AS a", null));
+    }
+
+    @Test
+    void aLineCommentInAValueRunsOnOverTheValuesAfterIt() {
+        assertEquals("SELECT 1 AS a", TrinoSqlCompatibility.bindParameters("SELECT ? AS a", List.of("1 -- x")));
+        assertEquals("INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 2 but found 1",
+                assertThrows(AwsException.class, () -> TrinoSqlCompatibility.bindParameters("SELECT ? AS a, ? AS b",
+                        List.of("1 -- x", "2"))).getMessage());
+    }
+
+    @Test
+    void aParameterCountThatDoesNotMatchFailsAtWhereTheStatementStarts() {
+        assertEquals("INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 1 but found 2",
+                assertThrows(AwsException.class, () -> TrinoSqlCompatibility.bindParameters("SELECT ? AS a",
+                        List.of("1", "2"))).getMessage());
+        assertEquals("INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 1 but found 0",
+                assertThrows(AwsException.class, () -> TrinoSqlCompatibility.bindParameters("SELECT ? AS a",
+                        List.of())).getMessage());
+        assertEquals("INVALID_PARAMETER_USAGE: line 2:1: Incorrect number of parameters: expected 1 but found 0",
+                assertThrows(AwsException.class, () -> TrinoSqlCompatibility.bindParameters("-- lead\nSELECT ? AS a",
+                        null)).getMessage());
     }
 }
