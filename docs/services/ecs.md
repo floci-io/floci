@@ -413,6 +413,13 @@ existing provider counts; tasks from a previous deployment do not cover the new 
 With no launch type, no strategy and no cluster default, a task keeps Floci's `FARGATE` default: a
 local cluster has no container instances, so an EC2 default would have nowhere to place it.
 
+A `REPLICA` service task placed on the `EC2` launch type, or on a capacity provider other than
+`FARGATE` and `FARGATE_SPOT`, runs on an `ACTIVE` container instance of the cluster: the one
+running the fewest tasks, among the instances registered for that capacity provider when any are,
+otherwise among those registered for none. `DescribeTasks` then reports its
+`containerInstanceArn`. A cluster with no container instance to offer still runs the task, without
+one, where AWS would leave it unplaced. Placement constraints and strategies are not evaluated.
+
 #### Task metadata endpoint
 
 Floci serves the [task metadata endpoint version
@@ -559,6 +566,17 @@ Known differences from AWS:
   and rolls the running tasks: a replacement on the new deployment normally starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
+- A task of a service with `loadBalancers` that runs on a container instance is registered in a
+  target group of target type `instance` as ECS registers it on AWS: the container instance's
+  `ec2InstanceId` on the container's host port. The load balancer and its health checks reach
+  that instance port at the task's container. When another task on the same instance already holds
+  the host port, as when Floci runs in Docker and publishes no host ports so the tasks share a
+  container port, the target gets a port from the ECS agent's dynamic range (32768 to 60999)
+  instead, and `networkBindings` keeps reporting the published port. The container's other
+  published host ports are taken on the instance too where free, so a target group health check on
+  one of them reaches the container. The task holds these ports until it is `STOPPED`, through its
+  deregistration delay, so a replacement on the same instance gets other ones. An `ip` target
+  group, or a task with no container instance, gets the container's own address.
 - A rolling deployment of a service with `loadBalancers` stops a stale task only once every
   replacement's targets report `healthy`. A replacement that never turns healthy holds the
   deployment.
@@ -785,6 +803,12 @@ re-registered `containerInstanceArn` all round-trip. The agent version is report
 `versionInfo`, which is where the `ContainerInstance` shape puts it, not as a top-level
 `agentVersion`. An instance also reports `registeredAt` and a `version` counter that each state
 change increments.
+
+The container instance's `ec2InstanceId` is the `instanceId` of the `instanceIdentityDocument` the
+agent registers with, so it names the EC2 instance the agent runs on, as on AWS. A registration
+without a document gets a generated `i-floci-...` id; one whose document is not JSON or names no
+`instanceId` fails with `InvalidParameterException`. Floci does not check
+`instanceIdentityDocumentSignature`.
 
 `DeregisterContainerInstance` leaves the instance in the cluster as `INACTIVE` rather than
 dropping it, so a later `DescribeContainerInstances` still answers for it, as on AWS. A cluster's

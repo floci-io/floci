@@ -1,6 +1,8 @@
 package io.floci.aws.services.ecs;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -128,6 +130,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
+    private static final ObjectMapper IDENTITY_DOCUMENT_JSON = new ObjectMapper();
     private static final String DEFAULT_CLUSTER = "default";
 
     private final RegionResolver regionResolver;
@@ -1972,6 +1975,46 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return task;
     }
 
+    /**
+     * The container instance an EC2 replica task runs on: the ACTIVE instance of the cluster running
+     * the fewest tasks, among those registered for the placement's capacity provider when any are,
+     * otherwise among those registered for none. Null for a Fargate placement, and when the cluster
+     * has no instance to offer, which leaves the task running without one as before container
+     * instances were considered.
+     */
+    private String containerInstanceFor(EcsCluster cluster, Placement placement) {
+        if (placement.launchType() != LaunchType.EC2) {
+            return null;
+        }
+        String prefix = containerInstanceKey(cluster.getClusterArn(), "");
+        List<ContainerInstance> active = containerInstances.entrySet().stream()
+                .filter(e -> e.getKey().startsWith(prefix))
+                .map(Map.Entry::getValue)
+                .filter(ci -> "ACTIVE".equals(ci.getStatus()))
+                .toList();
+        String provider = placement.capacityProviderName();
+        List<ContainerInstance> candidates = active;
+        if (provider != null) {
+            List<ContainerInstance> ofProvider = active.stream()
+                    .filter(ci -> provider.equals(ci.getCapacityProviderName()))
+                    .toList();
+            candidates = !ofProvider.isEmpty() ? ofProvider : active.stream()
+                    .filter(ci -> ci.getCapacityProviderName() == null || ci.getCapacityProviderName().isBlank())
+                    .toList();
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        Map<String, Long> load = tasks.values().stream()
+                .filter(t -> t.getContainerInstanceArn() != null)
+                .filter(t -> !TaskStatus.STOPPED.name().equals(t.getLastStatus()))
+                .collect(Collectors.groupingBy(EcsTask::getContainerInstanceArn, Collectors.counting()));
+        return candidates.stream()
+                .min(Comparator.comparingLong(ci -> load.getOrDefault(ci.getContainerInstanceArn(), 0L)))
+                .map(ContainerInstance::getContainerInstanceArn)
+                .orElse(null);
+    }
+
     /** Where a task runs: a launch type, or the capacity provider that chose one for it. */
     private record Placement(LaunchType launchType, String capacityProviderName) {}
 
@@ -2428,6 +2471,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         task.setExecutionStoppedAt(Instant.now());
         task.bumpVersion();
         containerManager.releaseTaskNetwork(task, region);
+        lbRegistrar.releaseInstancePorts(task.getTaskArn());
         if (task.getContainers() != null) {
             task.getContainers().forEach(c -> {
                 c.setLastStatus("STOPPED");
@@ -2457,7 +2501,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private void registerTaskWithLoadBalancers(EcsTask task, EcsCluster cluster, String region) {
         EcsServiceModel svc = owningService(task, cluster);
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
-            lbRegistrar.registerTask(task, svc, region);
+            ContainerInstance instance = task.getContainerInstanceArn() == null ? null
+                    : resolveContainerInstance(cluster.getClusterArn(), task.getContainerInstanceArn());
+            lbRegistrar.registerTask(task, svc, instance != null ? instance.getEc2InstanceId() : null, region);
         }
     }
 
@@ -4049,8 +4095,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public ContainerInstance registerContainerInstance(RegisterContainerInstanceRequest request,
                                                         String region) {
+        String instanceId = identityDocumentInstanceId(request.getInstanceIdentityDocument())
+                .orElseGet(() -> "i-floci-" + UUID.randomUUID().toString().substring(0, 8));
         EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
-        String instanceId = "i-floci-" + UUID.randomUUID().toString().substring(0, 8);
         String instanceArn = request.getContainerInstanceArn() != null
                 ? request.getContainerInstanceArn()
                 : regionResolver.buildArn("ecs", region,
@@ -4079,6 +4126,30 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         refreshRegisteredInstanceCount(cluster, region);
         LOG.infov("Registered container instance: {0} in cluster {1}", instanceArn, cluster.getClusterName());
         return instance;
+    }
+
+    /**
+     * The {@code instanceId} of the EC2 instance identity document the ECS agent registers with, which
+     * is the EC2 instance AWS records the container instance as. Empty when the caller sent no
+     * document. A document that is not JSON, or names no instance, is rejected rather than replaced
+     * by a generated id, so a registration never silently stands for some other instance.
+     */
+    static Optional<String> identityDocumentInstanceId(String identityDocument) {
+        if (identityDocument == null || identityDocument.isBlank()) {
+            return Optional.empty();
+        }
+        String instanceId;
+        try {
+            instanceId = IDENTITY_DOCUMENT_JSON.readTree(identityDocument).path("instanceId").asText("");
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidParameterException",
+                    "instanceIdentityDocument is not a valid instance identity document.", 400);
+        }
+        if (instanceId.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "instanceIdentityDocument does not name an instanceId.", 400);
+        }
+        return Optional.of(instanceId);
     }
 
     /**
@@ -5682,6 +5753,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
         String region = taskRegion(task);
         containerManager.releaseTaskNetwork(task, region);
+        lbRegistrar.releaseInstancePorts(taskArn);
         if (eventPublisher != null) {
             eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
         }
@@ -6198,7 +6270,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     .toList();
             for (Placement placement : serviceTaskPlacements(svc, currentTasks, toStart)) {
                 try {
-                    EcsTask launched = launchServiceTask(cluster, svc, placement, null, region);
+                    EcsTask launched = launchServiceTask(cluster, svc, placement,
+                            containerInstanceFor(cluster, placement), region);
                     recordLaunchFailure(svc, null, null);
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getTaskArn(), svc.getServiceName());
