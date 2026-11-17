@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.ServicePrincipals;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -52,6 +53,14 @@ public class AssumeRolePolicyEvaluator {
     private final ObjectMapper objectMapper;
     private final IamPolicyEvaluator policyEvaluator;
 
+    /**
+     * The organization an account belongs to, when Organizations is deployed. A field rather than
+     * a constructor parameter so a caller that builds this evaluator itself needs nothing of it,
+     * and narrow for the same reason the rest of IAM reads organizations through a port.
+     */
+    @Inject
+    Instance<PrincipalOrganization> principalOrganizations;
+
     @Inject
     public AssumeRolePolicyEvaluator(ObjectMapper objectMapper, IamPolicyEvaluator policyEvaluator) {
         this.objectMapper = objectMapper;
@@ -95,16 +104,32 @@ public class AssumeRolePolicyEvaluator {
      */
     public boolean allowsAnyPrincipalOf(String trustPolicyDocument, String account, String partition) {
         String root = AwsArnUtils.Arn.global(partition, "iam", account, "root").toString();
-        if (allows(trustPolicyDocument, IamService.CallerArns.accountRoot(root, account), account, Map.of())) {
+        if (allows(trustPolicyDocument, inOrganizationOf(IamService.CallerArns.accountRoot(root, account), account),
+                account, Map.of())) {
             return true;
         }
         for (String principal : allowedAwsPrincipals(trustPolicyDocument)) {
             if (AwsArnUtils.isArn(principal) && account.equals(AwsArnUtils.parse(principal).accountId())
-                    && allows(trustPolicyDocument, callerNamed(principal), account, Map.of())) {
+                    && allows(trustPolicyDocument, inOrganizationOf(callerNamed(principal), account),
+                            account, Map.of())) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * The principal in the organization its account belongs to, so a trust policy written on
+     * {@code aws:PrincipalOrgID} and its two companions reads the same keys here as it does for a
+     * caller resolved from a credential. Left as it is when Organizations answers nothing.
+     */
+    private IamService.CallerArns inOrganizationOf(IamService.CallerArns caller, String account) {
+        if (principalOrganizations == null || !principalOrganizations.isResolvable()) {
+            return caller;
+        }
+        return principalOrganizations.get().organizationContextOf(account)
+                .map(caller::withOrganization)
+                .orElse(caller);
     }
 
     /** The {@code Principal.AWS} entries of the Allow statements that apply to {@code sts:AssumeRole}. */

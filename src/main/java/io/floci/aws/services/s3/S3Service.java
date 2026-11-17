@@ -1733,7 +1733,9 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         String account = accessKeyId.matches("\\d{12}") ? accessKeyId : ownerId();
         String rootArn = regionResolver.buildGlobalArn("iam", account, "root");
-        return Optional.of(CallerArns.accountRoot(rootArn, account));
+        CallerArns root = CallerArns.accountRoot(rootArn, account);
+        return Optional.of(iamService == null ? root
+                : root.withOrganization(iamService.organizationContextOf(account).orElse(null)));
     }
 
     /**

@@ -142,8 +142,9 @@ part in authorizing calls to the function:
   authorized against the function as its name gives it, as the Service Reference lists the function
   alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
-- `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
-  admits no caller.
+- `aws:PrincipalOrgID` is in the request context for a caller whose account is in an organization,
+  so a grant added with `PrincipalOrgID` admits the callers of that organization and no others. A
+  caller in no organization carries no value for the key, and such a grant then admits none.
 
 ### Qualified reads
 
