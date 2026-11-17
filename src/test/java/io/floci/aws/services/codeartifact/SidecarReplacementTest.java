@@ -1,5 +1,7 @@
 package io.floci.aws.services.codeartifact;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.model.Container;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.config.EmulatorConfig;
@@ -11,6 +13,7 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerHostResolver;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
@@ -80,16 +83,30 @@ class SidecarReplacementTest {
         liveNames.put(baseName + "-11111111-1111-1111-1111-111111111111", "stale-unique");
         liveNames.put(baseName + "-other-repository", "unrelated");
         liveNames.put(baseName + "-22222222-2222-2222-2222-222222222222", "foreign-namespace");
-        when(lifecycle.listContainersForReconciliation()).thenAnswer(invocation -> {
+        DockerClient docker = mock(DockerClient.class);
+        ListContainersCmd list = mock(ListContainersCmd.class);
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        when(docker.listContainersCmd()).thenReturn(list);
+        when(list.withShowAll(true)).thenReturn(list);
+        when(list.withLabelFilter(any(Map.class))).thenReturn(list);
+        Map<String, Map<String, String>> liveLabels = new HashMap<>();
+        RunLabelledContainers runs = new CodeArtifactContainerRuns(lifecycle, config).containers();
+        when(list.exec()).thenAnswer(invocation -> {
             List<Container> inventory = new ArrayList<>();
             liveNames.forEach((name, id) -> {
                 Container container = mock(Container.class);
                 when(container.getId()).thenReturn(id);
                 when(container.getNames()).thenReturn(new String[]{"/" + name});
-                Map<String, String> labels = new HashMap<>(ContainerStorageHelper.defaultLabels(config));
+                Map<String, String> labels = new HashMap<>(ContainerStorageHelper.resourceIdentityLabels(
+                        "codeartifact", "repository", null, null));
+                labels.putAll(runs.labels());
+                labels.put("io.floci.codeartifact.run", "previous-run");
                 if (id.equals("foreign-namespace")) {
-                    labels.put("floci_namespace", "other");
+                    labels.put(ContainerStorageHelper.OWNER_LABEL, "other");
+                } else if (id.equals("unrelated")) {
+                    labels.put(ContainerStorageHelper.SERVICE_LABEL, "other-service");
                 }
+                labels.putAll(liveLabels.getOrDefault(id, Map.of()));
                 when(container.getLabels()).thenReturn(labels);
                 inventory.add(container);
             });
@@ -102,10 +119,14 @@ class SidecarReplacementTest {
         AtomicInteger created = new AtomicInteger();
         when(lifecycle.create(any())).thenAnswer(invocation -> {
             ContainerSpec spec = invocation.getArgument(0);
+            assertEquals("codeartifact", spec.labels().get(ContainerStorageHelper.SERVICE_LABEL));
+            assertEquals("repository", spec.labels().get(ContainerStorageHelper.RESOURCE_ID_LABEL));
+            runs.labels().forEach((key, value) -> assertEquals(value, spec.labels().get(key)));
             String id = "container-" + created.incrementAndGet();
             assertFalse(liveNames.containsKey(spec.name()), "Docker cannot create a duplicate live name");
             liveNames.put(spec.name(), id);
             createdNames.put(id, spec.name());
+            liveLabels.put(id, spec.labels());
             return id;
         });
         doAnswer(invocation -> {
@@ -126,7 +147,7 @@ class SidecarReplacementTest {
             EndpointInfo endpoint = new EndpointInfo("127.0.0.1", port);
             return new ContainerInfo(id, Map.of(8080, endpoint, 4873, endpoint, 8000, endpoint));
         });
-        Manager manager = manager(format, builder, lifecycle, config);
+        Manager manager = manager(format, builder, lifecycle, config, runs);
         boolean admitted = false;
         try {
             manager.register().accept("repository");
@@ -177,26 +198,26 @@ class SidecarReplacementTest {
     }
 
     private static Manager manager(Format format, ContainerBuilder builder,
-                                   ContainerLifecycleManager lifecycle, EmulatorConfig config) {
+                                   ContainerLifecycleManager lifecycle, EmulatorConfig config, RunLabelledContainers runs) {
         return switch (format) {
             case PYPI -> {
-                PypiserverSidecarManager manager = new PypiserverSidecarManager(builder, lifecycle, config);
+                PypiserverSidecarManager manager = new PypiserverSidecarManager(builder, lifecycle, config, runs);
                 yield new Manager(manager::ensureReady, manager::registerRepository,
                         manager::beginUse, manager::endUse, manager::stopManagedContainers);
             }
             case NPM -> {
-                VerdaccioSidecarManager manager = spy(new VerdaccioSidecarManager(builder, lifecycle, config));
+                VerdaccioSidecarManager manager = spy(new VerdaccioSidecarManager(builder, lifecycle, config, runs));
                 doNothing().when(manager).copyConfig(anyString(), anyLong());
                 yield new Manager(manager::ensureReady, manager::registerRepository,
                         manager::beginUse, manager::endUse, manager::stopManagedContainers);
             }
             case NUGET -> {
-                BagetterSidecarManager manager = new BagetterSidecarManager(builder, lifecycle, config);
+                BagetterSidecarManager manager = new BagetterSidecarManager(builder, lifecycle, config, runs);
                 yield new Manager(manager::ensureReady, manager::registerRepository,
                         manager::beginUse, manager::endUse, manager::stopManagedContainers);
             }
             case CARGO -> {
-                KellnrSidecarManager manager = new KellnrSidecarManager(builder, lifecycle, config);
+                KellnrSidecarManager manager = new KellnrSidecarManager(builder, lifecycle, config, runs);
                 yield new Manager(manager::ensureReady, manager::registerRepository,
                         manager::beginUse, manager::endUse, manager::stopManagedContainers);
             }

@@ -9,8 +9,10 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.PerKeyContainerPool;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.inject.Named;
 import org.jboss.logging.Logger;
 
 import java.util.List;
@@ -41,13 +43,15 @@ public class PypiserverSidecarManager implements ContainerTeardown {
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
     private final SidecarRepositoryLease lease;
+    private final RunLabelledContainers runContainers;
 
     @Inject
     public PypiserverSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
-                                     EmulatorConfig config) {
+                                     EmulatorConfig config, @Named("codeartifact") RunLabelledContainers runContainers) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
+        this.runContainers = runContainers;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
         this.lease = new SidecarRepositoryLease("pypiserver", pool);
     }
@@ -94,8 +98,7 @@ public class PypiserverSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String pypiRepositoryId) {
         String image = config.services().codeartifact().pypiImage();
-        SidecarContainerReconciler.reconcile(config, lifecycleManager, pool,
-                pypiRepositoryId, "floci-pypiserver-" + pypiRepositoryId);
+        runContainers.removeLeftovers();
         String containerName = ContainerStorageHelper.dockerName(config, "floci-pypiserver-" + pypiRepositoryId
                 + "-" + UUID.randomUUID());
 
@@ -105,6 +108,8 @@ public class PypiserverSidecarManager implements ContainerTeardown {
         // can reach the host bypass that check entirely, the same reasoning as Verdaccio's binding.
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("codeartifact", pypiRepositoryId, null, null))
+                .withLabels(runContainers.labels())
                 .withLoopbackPortBinding(PYPISERVER_PORT, 0)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withEmbeddedDns()

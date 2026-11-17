@@ -9,8 +9,10 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.PerKeyContainerPool;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.inject.Named;
 import org.jboss.logging.Logger;
 
 import java.util.UUID;
@@ -49,13 +51,15 @@ public class BagetterSidecarManager implements ContainerTeardown {
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
     private final SidecarRepositoryLease lease;
+    private final RunLabelledContainers runContainers;
 
     @Inject
     public BagetterSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
-                                EmulatorConfig config) {
+                                EmulatorConfig config, @Named("codeartifact") RunLabelledContainers runContainers) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
+        this.runContainers = runContainers;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
         this.lease = new SidecarRepositoryLease("BaGetter", pool);
     }
@@ -103,8 +107,7 @@ public class BagetterSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String nugetRepositoryId) {
         String image = config.services().codeartifact().nugetImage();
-        SidecarContainerReconciler.reconcile(config, lifecycleManager, pool,
-                nugetRepositoryId, "floci-bagetter-" + nugetRepositoryId);
+        runContainers.removeLeftovers();
         String containerName = ContainerStorageHelper.dockerName(config, "floci-bagetter-" + nugetRepositoryId
                 + "-" + UUID.randomUUID());
 
@@ -120,6 +123,8 @@ public class BagetterSidecarManager implements ContainerTeardown {
         // an explicit path.
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("codeartifact", nugetRepositoryId, null, null))
+                .withLabels(runContainers.labels())
                 .withEnv("ApiKey", "")
                 // Already the image's own shipped default; set explicitly so a future image
                 // default change can't quietly start resolving packages from the real nuget.org,

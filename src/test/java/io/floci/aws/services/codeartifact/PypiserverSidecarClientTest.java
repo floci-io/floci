@@ -708,7 +708,8 @@ class PypiserverSidecarClientTest {
     }
 
     private PypiserverSidecarManager manager() {
-        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config);
+        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     private PypiserverSidecarClient client(PypiserverSidecarManager manager) {

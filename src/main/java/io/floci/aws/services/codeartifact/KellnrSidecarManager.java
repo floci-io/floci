@@ -9,8 +9,10 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.PerKeyContainerPool;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.inject.Named;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
@@ -60,6 +62,7 @@ public class KellnrSidecarManager implements ContainerTeardown {
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
     private final SidecarRepositoryLease lease;
+    private final RunLabelledContainers runContainers;
     // One random admin password per repository's own container, regenerated every time
     // startContainer() runs for that key (including an internal pool restart of an unhealthy
     // container under the same key): KellnrSidecarClient reads this fresh on every admin login
@@ -68,10 +71,11 @@ public class KellnrSidecarManager implements ContainerTeardown {
 
     @Inject
     public KellnrSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
-                                EmulatorConfig config) {
+                                EmulatorConfig config, @Named("codeartifact") RunLabelledContainers runContainers) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
+        this.runContainers = runContainers;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
         this.lease = new SidecarRepositoryLease("Kellnr", pool);
     }
@@ -147,8 +151,7 @@ public class KellnrSidecarManager implements ContainerTeardown {
 
     private PerKeyContainerPool.StartedContainer startContainer(String cargoRepositoryId) {
         String image = config.services().codeartifact().cargoImage();
-        SidecarContainerReconciler.reconcile(config, lifecycleManager, pool,
-                cargoRepositoryId, "floci-kellnr-" + cargoRepositoryId);
+        runContainers.removeLeftovers();
         String containerName = ContainerStorageHelper.dockerName(config, "floci-kellnr-" + cargoRepositoryId
                 + "-" + UUID.randomUUID());
 
@@ -168,6 +171,8 @@ public class KellnrSidecarManager implements ContainerTeardown {
         // live), see this class's own javadoc for why that default is never left in place.
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels("codeartifact", cargoRepositoryId, null, null))
+                .withLabels(runContainers.labels())
                 .withEnv("KELLNR_ORIGIN__HOSTNAME", "localhost")
                 .withEnv("KELLNR_SETUP__ADMIN_PWD", adminPassword)
                 .withLoopbackPortBinding(KELLNR_PORT, 0)
