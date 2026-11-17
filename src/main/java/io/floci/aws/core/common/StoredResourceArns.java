@@ -42,9 +42,11 @@ import java.util.Optional;
  * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
  * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
  * another account an association runs and the tags of a parameter, a document or an association; CloudFront, for the
- * key value store a name names and the tags of any resource it tags); looked up lazily by {@code ResourceArnBuilder}
- * and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or
- * an ARN is of, so IAM never depends on that service directly.</p>
+ * key value store a name names and the tags of any resource it tags; ECS, for the revision a task definition
+ * reference resolves to, its default cluster and the tags of a cluster, a task definition, a service, a capacity
+ * provider, a task or a container instance); looked up lazily by {@code ResourceArnBuilder} and
+ * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
+ * ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

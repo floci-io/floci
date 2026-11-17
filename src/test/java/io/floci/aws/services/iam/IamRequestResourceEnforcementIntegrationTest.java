@@ -65,6 +65,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static final String EVENTS = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":";
     private static final String TARGETS = "arn:aws:application-autoscaling:" + REGION + ":" + ACCOUNT + ":scalable-target/";
     private static final String REDSHIFT = "arn:aws:redshift:" + REGION + ":" + ACCOUNT + ":";
+    /** The X-Amz-Target prefix of ECS operations. */
+    private static final String ECS_API = "AmazonEC2ContainerServiceV20141113.";
     private static final String WORKGROUPS = "arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT + ":workgroup/";
     /** The AWS Load Balancer Controller's create, tag-on-create and listener statements (its policy v2.14.0). */
     private static final String CONTROLLER_CREATE = "{\"Effect\":\"Allow\",\"Action\":[\"elasticloadbalancing:CreateLoadBalancer\","
@@ -691,6 +693,33 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code ecs:ResourceTag} or {@code aws:ResourceTag} condition reads the tags ECS holds on the cluster a request
+     * names, by its name or by its ARN, as a tag call leaves them, so an allow on one team's tag lets the caller read
+     * that team's cluster and not another's.
+     */
+    @Test
+    void anEcsResourceTagConditionReadsTheTagsOfTheCluster() {
+        String tagged = ecsCluster("res-tag-cluster-" + suffix(), "web");
+        String other = ecsCluster("res-tag-cluster-" + suffix(), "web");
+        String arns = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":cluster/";
+        adminJson("ecs", ECS_API + "TagResource").body("{\"resourceArn\":\"" + arns + tagged
+                + "\",\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}").post("/").then().statusCode(200);
+
+        User user = user("res-ecs-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ecs:DescribeClusters\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"ecs:ResourceTag/team\":\"data\"}}},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"ecs:ListTagsForResource\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "ecs", ECS_API + "DescribeClusters", "1.1", "{\"clusters\":[\"" + tagged + "\"]}").statusCode(200);
+        refusedJson(send(user, "ecs", ECS_API + "DescribeClusters", "1.1", "{\"clusters\":[\"" + other + "\"]}"),
+                "ecs:DescribeClusters");
+        send(user, "ecs", ECS_API + "ListTagsForResource", "1.1", "{\"resourceArn\":\"" + arns + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "ecs", ECS_API + "ListTagsForResource", "1.1", "{\"resourceArn\":\"" + arns + other
+                + "\"}"), "ecs:ListTagsForResource");
+    }
+
+    /**
      * An {@code ssm:resourceTag} or {@code aws:ResourceTag} condition reads the tags SSM holds on the parameter or the
      * document a request names, so an allow on one team's tag lets the caller read that team's and not another's.
      */
@@ -734,6 +763,13 @@ class IamRequestResourceEnforcementIntegrationTest {
         return created("ecr", "AmazonEC2ContainerRegistry_V20150921.CreateRepository", "{\"repositoryName\":\""
                 + name + "\",\"tags\":" + teamTag(team) + "}", "AmazonEC2ContainerRegistry_V20150921.DeleteRepository",
                 "{\"repositoryName\":\"" + name + "\",\"force\":true}", name);
+    }
+
+    /** An ECS cluster of the name, tagged with the team, deleted afterwards. */
+    private String ecsCluster(String name, String team) {
+        return created("ecs", ECS_API + "CreateCluster", "{\"clusterName\":\"" + name + "\",\"tags\":[{\"key\":"
+                + "\"team\",\"value\":\"" + team + "\"}]}", ECS_API + "DeleteCluster", "{\"cluster\":\"" + name + "\"}",
+                name);
     }
 
     /**
