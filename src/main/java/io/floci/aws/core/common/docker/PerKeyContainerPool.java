@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -52,25 +53,23 @@ public class PerKeyContainerPool {
 
     /** Protects every container observed during an admitted use, including an unhealthy predecessor. */
     public void beginUse(String key) {
-        Object lock = startLocks.computeIfAbsent(key, k -> new Object());
-        synchronized (lock) {
-            activeUses.merge(key, 1, Integer::sum);
-        }
+        activeUses.merge(key, 1, Integer::sum);
     }
 
     /** Releases a use and removes retired containers once the last admitted use has finished. */
     public void endUse(String key) {
         Object lock = startLocks.computeIfAbsent(key, k -> new Object());
         synchronized (lock) {
-            Integer active = activeUses.get(key);
-            if (active == null) {
-                throw new IllegalStateException("No active container use for key " + key);
-            }
-            if (active == 1) {
-                activeUses.remove(key);
+            AtomicBoolean drained = new AtomicBoolean();
+            activeUses.compute(key, (k, active) -> {
+                if (active == null) {
+                    throw new IllegalStateException("No active container use for key " + key);
+                }
+                drained.set(active == 1);
+                return active == 1 ? null : active - 1;
+            });
+            if (drained.get()) {
                 stopRetired(key, true);
-            } else {
-                activeUses.put(key, active - 1);
             }
         }
     }
@@ -140,12 +139,21 @@ public class PerKeyContainerPool {
             }
             if (existing != null) {
                 LOG.warnv("Sidecar container for key {0} is no longer healthy; restarting it", key);
-                if (activeUses.containsKey(key)) {
-                    retiredContainers.computeIfAbsent(key, k -> new ArrayList<>()).add(existing);
-                } else {
+                StartedContainer predecessor = existing;
+                AtomicBoolean retained = new AtomicBoolean();
+                // Admission and detachment share a short map operation, never startup or Docker I/O.
+                // A use admitted after detachment cannot discover the predecessor in containers.
+                activeUses.compute(key, (k, active) -> {
+                    retained.set(active != null);
+                    if (active != null) {
+                        retiredContainers.computeIfAbsent(key, unused -> new ArrayList<>()).add(predecessor);
+                    }
+                    containers.remove(key, predecessor);
+                    return active;
+                });
+                if (!retained.get()) {
                     lifecycleManager.stopAndRemove(existing.containerId(), null);
                 }
-                containers.remove(key, existing);
             }
             long startedGeneration = generation.get();
             StartedContainer started = starter.start();
