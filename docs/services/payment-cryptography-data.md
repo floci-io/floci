@@ -25,6 +25,7 @@ client that talks to the control plane does not reach it by accident.
 | `VerifyCardValidationData` | Verify a card verification value against the one the issuer holds, on `POST /cardvalidationdata/verify` |
 | `GenerateAuthRequestCryptogram` | Generate the cryptogram an authorization request carries, on `POST /cryptogram/generate` |
 | `VerifyAuthRequestCryptogram` | Verify the cryptogram an authorization request carries, on `POST /cryptogram/verify` |
+| `GenerateAs2805KekValidation` | Make or answer the AS2805 KEK validation of a key encryption key, on `POST /as2805kekvalidation/generate` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -216,6 +217,26 @@ client that talks to the control plane does not reach it by accident.
   wrong cryptogram is the one outcome worse than an error. The EMV 4.1 tree derivation, the
   one the `Emv2000` attributes ask for, is refused as well: it is over the master key and
   the ATC, and this service does not implement that construction.
+- **The KEK validation is the AS2805 ceremony two nodes use to prove they hold the same
+  key.** The node that starts the exchange makes a random number of eight, sixteen or
+  twenty-four bytes, gives every byte the odd parity the standard's Single DES asks for,
+  and enciphers it under a variant of the key it holds: the key exclusive-ored with the
+  mask the request names, repeated over the key's length. The node that answers deciphers
+  that number, inverts every bit of it, and enciphers the inverted value under the other
+  variant of its own key. The first node compares the answer with the one it computed, so
+  two nodes whose keys differ do not agree. The random number is enciphered a block at a
+  time, in the cipher the key's own algorithm names, and it is sixteen bytes long when the
+  request does not name a length.
+- **The key of a KEK validation is a key encryption key.** It is the one AS2805 calls the
+  terminal major key, the usage `TR31_K0_KEY_ENCRYPTION_KEY`. The reference does not name
+  the usage the key must have for this operation, so the one the service's own AS2805
+  import gives that key is the one it asks for. The request form enciphers, so the key must
+  allow `Encrypt`; the response form deciphers, so it must allow `Decrypt`.
+- **The two variant masks are the standard's two forms of the ceremony.** The `82` form is
+  the one an independent implementation of the ceremony confirms, byte for byte. The `82C0`
+  form is the same ceremony under the longer of the two masks the reference names, and the
+  mask of its inverted number is that form's `84`: two nodes validating under it agree
+  with each other, but not with the reference.
 - **The card requests are checked against the model.** The account number is twelve to
   nineteen digits, the expiry is four of them, the service code is three, and the PAN
   sequence number is two: the EMV ones, as the model states them. A formatted account
