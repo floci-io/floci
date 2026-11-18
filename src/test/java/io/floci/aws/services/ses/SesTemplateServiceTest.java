@@ -410,6 +410,29 @@ class SesTemplateServiceTest {
         assertEquals("Unable to find <ghost> for <000000000000>", missing.getMessage());
     }
 
+    // probed: a whitespace-only text part beside an HTML part is still written as a part
+    @Test
+    void renderTestTemplate_whitespaceOnlyPartStaysAPart() {
+        service.createTemplate(new EmailTemplate("blank-text", "S", " ", "<p>x</p>"), REGION);
+        String mime = service.renderTestTemplate("blank-text", "{}", REGION, "000000000000");
+        assertTrue(mime.contains("Content-Type: multipart/alternative; "));
+        assertTrue(mime.contains("Content-Type: text/plain; charset=UTF-8\r\n"
+                + "Content-Transfer-Encoding: 7bit\r\n\r\n \r\n--"));
+        assertTrue(mime.contains("Content-Transfer-Encoding: 7bit\r\n\r\n<p>x</p>\r\n--"));
+    }
+
+    // probed: a part whose variables render to nothing, or to whitespace, is written empty
+    @Test
+    void renderTestTemplate_partRenderingToNothingStaysAPart() {
+        service.createTemplate(new EmailTemplate("empty-html", "S", "t", "{{h}}"), REGION);
+        String empty = service.renderTestTemplate("empty-html", "{\"h\": \"\"}", REGION, "000000000000");
+        assertTrue(empty.contains("Content-Type: text/html; charset=UTF-8\r\n"
+                + "Content-Transfer-Encoding: 7bit\r\n\r\n\r\n--"));
+        String blank = service.renderTestTemplate("empty-html", "{\"h\": \" \"}", REGION, "000000000000");
+        assertTrue(blank.contains("Content-Type: text/html; charset=UTF-8\r\n"
+                + "Content-Transfer-Encoding: 7bit\r\n\r\n \r\n--"));
+    }
+
     // probed: every spelling of the list-management placeholder renders as this sample link
     @Test
     void renderTestTemplate_showsASampleUnsubscribeLink() {

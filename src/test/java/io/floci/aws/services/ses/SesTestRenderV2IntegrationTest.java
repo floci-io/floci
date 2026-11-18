@@ -84,7 +84,7 @@ class SesTestRenderV2IntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(6)
     void testRenderEmailTemplate_unknownTemplateWithMalformedData_reportsTheData() {
         given()
             .contentType("application/json")

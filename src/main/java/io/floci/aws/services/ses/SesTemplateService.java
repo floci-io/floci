@@ -267,9 +267,20 @@ public class SesTemplateService implements SesTaggable {
                 .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
                         "Unable to find <" + templateName + "> for <" + accountId + ">", 400));
         String subject = applyTemplateData(template.getSubject(), templateData, TEST_RENDER_UNSUBSCRIBE_URL);
-        String text = applyTemplateData(template.getTextPart(), templateData, TEST_RENDER_UNSUBSCRIBE_URL);
-        String html = applyTemplateData(template.getHtmlPart(), templateData, TEST_RENDER_UNSUBSCRIBE_URL);
+        String text = renderStoredPart(template.getTextPart(), templateData);
+        String html = renderStoredPart(template.getHtmlPart(), templateData);
         return buildTestRenderMime(subject, text, html, Instant.now(clock), nextBoundary());
+    }
+
+    /**
+     * Null when the template has no such part. A stored part stays a part of the message whatever
+     * it renders to: SES writes a whitespace-only part, and one whose variables render to nothing.
+     */
+    private static String renderStoredPart(String stored, JsonNode templateData) {
+        if (stored == null || stored.isEmpty()) {
+            return null;
+        }
+        return applyTemplateData(stored, templateData, TEST_RENDER_UNSUBSCRIBE_URL);
     }
 
     static JsonNode parseRenderingData(ObjectMapper mapper, String raw) {
@@ -336,12 +347,13 @@ public class SesTemplateService implements SesTaggable {
 
     /**
      * A template with both a text and an HTML part renders as multipart/alternative. One with a
-     * single part renders as that part alone, with nothing after its encoded body.
+     * single part renders as that part alone, with nothing after its encoded body. A null part
+     * is absent; an empty or blank one is written as it is.
      */
     static String buildTestRenderMime(String subject, String text, String html,
                                        Instant date, String boundary) {
-        boolean hasText = text != null && !text.isBlank();
-        boolean hasHtml = html != null && !html.isBlank();
+        boolean hasText = text != null;
+        boolean hasHtml = html != null;
         StringBuilder out = new StringBuilder();
         out.append("Date: ").append(RENDER_DATE.format(date)).append("\r\n");
         out.append("Subject: ").append(SesMimeEncoding.encodeSubject(sanitizeSubject(subject))).append("\r\n");
