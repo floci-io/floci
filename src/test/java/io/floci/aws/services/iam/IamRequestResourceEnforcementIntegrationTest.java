@@ -988,10 +988,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void aPipelineAndAWebhookAreCheckedOnTheArnsTheirNamesGive() {
         String name = "res-pipeline-" + suffix();
-        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
-                .then().statusCode(200);
-        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
-                .body("{\"name\":\"" + name + "\"}").post("/"));
+        createPipeline(name, null);
         String pipelineArn = adminJson("codepipeline", "CodePipeline_20150709.GetPipeline")
                 .body("{\"name\":\"" + name + "\"}").post("/").then().statusCode(200).extract().path("metadata.pipelineArn");
         assertEquals("arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + name, pipelineArn);
@@ -1013,6 +1010,38 @@ class IamRequestResourceEnforcementIntegrationTest {
         user.policy(allowOn("codepipeline:DeleteWebhook", hookArn));
         refusedJson(codePipeline(user, "DeleteWebhook", "{\"name\":\"" + hook + "-other\"}"), "codepipeline:DeleteWebhook");
         codePipeline(user, "DeleteWebhook", "{\"name\":\"" + hook + "\"}").statusCode(200);
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CodePipeline holds on the pipeline a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller read that team's pipeline and not
+     * another's.
+     */
+    @Test
+    void aCodePipelineResourceTagConditionReadsTheTagsOfThePipeline() {
+        String web = "[{\"key\":\"team\",\"value\":\"web\"}]";
+        String tagged = "res-pipeline-tagged-" + suffix();
+        String other = "res-pipeline-other-" + suffix();
+        createPipeline(tagged, web);
+        createPipeline(other, web);
+        adminJson("codepipeline", "CodePipeline_20150709.TagResource")
+                .body("{\"resourceArn\":\"arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + tagged
+                        + "\",\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-pipeline-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"codepipeline:GetPipeline\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        codePipeline(user, "GetPipeline", "{\"name\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(codePipeline(user, "GetPipeline", "{\"name\":\"" + other + "\"}"), "codepipeline:GetPipeline");
+    }
+
+    /** Creates the pipeline {@code name} as an administrator, with the {@code tags} list if any, deleted afterwards. */
+    private void createPipeline(String name, String tags) {
+        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name, tags)).post("/")
+                .then().statusCode(200);
+        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
+                .body("{\"name\":\"" + name + "\"}").post("/"));
     }
 
     /** {@code StartPipelineExecution} names its pipeline by a bare {@code name}, on which it is checked. */
@@ -1037,12 +1066,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     void anUpdateIsCheckedOnThePipelineItNamesNotOneItsRoleHolds() {
         String allowed = "res-pipeline-" + suffix();
         String other = allowed + "-other";
-        for (String name : List.of(allowed, other)) {
-            adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
-                    .then().statusCode(200);
-            cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
-                    .body("{\"name\":\"" + name + "\"}").post("/"));
-        }
+        createPipeline(allowed, null);
+        createPipeline(other, null);
         String allowedArn = "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + allowed;
         User user = user("res-pipeline-update");
         user.policy(allowOn("codepipeline:UpdatePipeline", allowedArn) + ","
@@ -1056,10 +1081,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void aWebhooksTagsAreCheckedOnTheWebhookNotItsPipeline() {
         String name = "res-pipeline-" + suffix();
-        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
-                .then().statusCode(200);
-        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
-                .body("{\"name\":\"" + name + "\"}").post("/"));
+        createPipeline(name, null);
         String hook = "res-hook-" + suffix();
         String codePipeline = "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":";
         User user = user("res-webhook-tags");
@@ -2799,12 +2821,18 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     /** A pipeline with a source and a build stage, the two stages CodePipeline requires. */
     private static String pipeline(String name) {
+        return pipeline(name, null);
+    }
+
+    /** A CreatePipeline or UpdatePipeline body for the pipeline {@code name}, with the {@code tags} list if any. */
+    private static String pipeline(String name, String tags) {
         return "{\"pipeline\":{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/codepipeline-role\","
                 + "\"artifactStore\":{\"type\":\"S3\",\"location\":\"codepipeline-artifacts\"},\"stages\":["
                 + "{\"name\":\"Source\",\"actions\":[{\"name\":\"SourceAction\",\"actionTypeId\":{\"category\":\"Source\","
                 + "\"owner\":\"AWS\",\"provider\":\"S3\",\"version\":\"1\"},\"runOrder\":1}]},"
                 + "{\"name\":\"Build\",\"actions\":[{\"name\":\"BuildAction\",\"actionTypeId\":{\"category\":\"Build\","
-                + "\"owner\":\"AWS\",\"provider\":\"CodeBuild\",\"version\":\"1\"},\"runOrder\":1}]}]}}";
+                + "\"owner\":\"AWS\",\"provider\":\"CodeBuild\",\"version\":\"1\"},\"runOrder\":1}]}]}"
+                + (tags == null ? "" : ",\"tags\":" + tags) + "}";
     }
 
     private static RequestSpecification tagged(RequestSpecification request) {

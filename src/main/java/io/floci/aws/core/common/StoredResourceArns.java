@@ -49,10 +49,10 @@ import java.util.Optional;
  * the tags of a signing profile; Access Analyzer, for the tags of an analyzer; Managed Service for Apache Flink, for
  * the tags of an application; S3 Vectors, for the tags of a vector bucket or an index; Timestream for InfluxDB, for the
  * tags of a DB instance, a DB cluster, a parameter group or a backup; CloudTrail, for the tags of a trail; Budgets, for
- * the tags of a budget or a budget action; AWS FIS, for the tags of an experiment template, an experiment or an
- * action); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through
- * {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on that
- * service directly.</p>
+ * the tags of a budget or a budget action; AWS FIS, for the tags of an experiment template, an experiment or an action;
+ * CodePipeline, for the tags of a pipeline, a webhook or a custom action type); looked up lazily by
+ * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
+ * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone
