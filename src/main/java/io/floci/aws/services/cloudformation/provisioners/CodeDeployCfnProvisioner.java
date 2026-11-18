@@ -66,8 +66,8 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        String explicitName = ctx.resolveOptional(props, "ApplicationName");
-        boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
+        String explicitName = written(props, "ApplicationName", ctx);
+        boolean hasExplicitName = explicitName != null;
         String priorPhysicalId = ctx.priorPhysicalId();
 
         // ApplicationName and ComputePlatform are create-only; only tags update in place.
@@ -88,12 +88,21 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.reusesPriorEntity(name)) {
             reconcileTags(codeDeployService.applicationArn(ctx.region(), name), tags);
         } else {
-            String computePlatform = ctx.resolveOptional(props, "ComputePlatform");
-            codeDeployService.createApplication(ctx.region(), name,
-                    computePlatform == null || computePlatform.isBlank() ? null : computePlatform, toTagList(tags));
+            codeDeployService.createApplication(ctx.region(), name, written(props, "ComputePlatform", ctx),
+                    toTagList(tags));
         }
         r.setPhysicalId(name);
         ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /**
+     * A property's value, or null when it is absent or resolves to nothing: the engine resolves
+     * {@code AWS::NoValue} to blank. A blank written into the template is kept, so CodeDeploy rejects
+     * it as on AWS rather than the provisioner silently generating a name or defaulting the platform.
+     */
+    private static String written(JsonNode props, String name, ProvisionContext ctx) {
+        String value = ctx.resolveOptional(props, name);
+        return value == null || (value.isBlank() && !props.get(name).isTextual()) ? null : value;
     }
 
     private void reconcileTags(String arn, Map<String, String> desired) {

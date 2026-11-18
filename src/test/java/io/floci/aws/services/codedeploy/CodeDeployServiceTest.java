@@ -100,6 +100,27 @@ class CodeDeployServiceTest {
     }
 
     @Test
+    void createApplicationValidatesTheNameAndComputePlatformAsCodeDeployDoes() {
+        assertEquals("ApplicationNameRequiredException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, null, null, null)).getErrorCode());
+        assertEquals("ApplicationNameRequiredException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "", null, null)).getErrorCode());
+        assertEquals("InvalidApplicationNameException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "a".repeat(101), null, null)).getErrorCode());
+        assertEquals("InvalidApplicationNameException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "has space", null, null)).getErrorCode());
+        assertEquals("InvalidComputePlatformException", assertThrows(AwsException.class,
+                () -> service.createApplication(REGION, "bad-platform", "Windows", null)).getErrorCode());
+
+        for (String platform : List.of("Server", "Lambda", "ECS", "Kubernetes")) {
+            assertEquals(platform, service.createApplication(REGION, "app-" + platform, platform, null)
+                    .getComputePlatform());
+        }
+        assertEquals(100, service.createApplication(REGION, "a".repeat(100), null, null)
+                .getApplicationName().length());
+    }
+
+    @Test
     void onPremisesRegistrationAndDeregistrationUseTheDeploymentClock() {
         Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
         CodeDeployService target = newService(Duration.ofHours(1), clock);

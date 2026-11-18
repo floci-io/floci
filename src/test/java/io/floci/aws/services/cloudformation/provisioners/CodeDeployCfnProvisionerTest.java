@@ -94,6 +94,31 @@ class CodeDeployCfnProvisionerTest {
     }
 
     @Test
+    void aBlankWrittenIntoTheTemplateReachesCodeDeployToBeRejected() {
+        when(codeDeploy.createApplication(eq("us-east-1"), eq(""), any(), any()))
+                .thenThrow(new AwsException("ApplicationNameRequiredException", "required", 400));
+        ObjectNode props = mapper.createObjectNode().put("ApplicationName", "").put("ComputePlatform", "");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, ctx(null)));
+
+        verify(codeDeploy).createApplication("us-east-1", "", "", List.of());
+    }
+
+    @Test
+    void aPropertyThatResolvesToNoValueIsAbsent() {
+        when(codeDeploy.createApplication(eq("us-east-1"), anyString(), eq(null), any()))
+                .thenAnswer(inv -> app(inv.getArgument(1)));
+        ObjectNode props = mapper.createObjectNode();
+        props.putObject("ApplicationName").put("Ref", "AWS::NoValue");
+        props.putObject("ComputePlatform").put("Ref", "AWS::NoValue");
+        StackResource r = resource();
+
+        provisioner.provision(r, props, ctx(null));
+
+        assertTrue(r.getPhysicalId().startsWith("my-stack-App-"), r.getPhysicalId());
+    }
+
+    @Test
     void anUpdateReconcilesTagsOnTheSameApplication() {
         when(codeDeploy.applicationArn("us-east-1", "my-app")).thenReturn(ARN);
         when(codeDeploy.listTagsForResource(ARN)).thenReturn(List.of(
