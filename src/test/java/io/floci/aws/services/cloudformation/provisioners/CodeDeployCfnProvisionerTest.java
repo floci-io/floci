@@ -10,6 +10,7 @@ import io.floci.aws.services.codedeploy.CodeDeployService;
 import io.floci.aws.services.codedeploy.model.Application;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -59,6 +60,14 @@ class CodeDeployCfnProvisionerTest {
         r.setLogicalId("App");
         r.setResourceType("AWS::CodeDeploy::Application");
         r.setAttributes(new HashMap<>());
+        return r;
+    }
+
+    /** A provisioned application whose tag keys {@code keys} the stack set. */
+    private static StackResource owning(String... keys) {
+        StackResource r = resource();
+        r.getAttributes().put(CodeDeployCfnProvisioner.TAG_KEYS_ATTR,
+                "[" + String.join(",", Arrays.stream(keys).map(k -> "\"" + k + "\"").toList()) + "]");
         return r;
     }
 
@@ -126,7 +135,7 @@ class CodeDeployCfnProvisionerTest {
                 Map.of("Key", "team", "Value", "core"), Map.of("Key", "owner", "Value", "alice")));
         ObjectNode props = mapper.createObjectNode().put("ApplicationName", "my-app");
         props.putArray("Tags").add(mapper.createObjectNode().put("Key", "team").put("Value", "edge"));
-        StackResource r = resource();
+        StackResource r = owning("team", "owner");
 
         provisioner.provision(r, props, ctx("my-app"));
 
@@ -204,13 +213,78 @@ class CodeDeployCfnProvisionerTest {
         when(codeDeploy.applicationArn("us-east-1", "my-app")).thenReturn(ARN);
         when(codeDeploy.listTagsForResource(ARN)).thenReturn(List.of(
                 Map.of("Key", "team", "Value", "core"), Map.of("Key", "owner", "Value", "alice")));
-        StackResource r = resource();
+        StackResource r = owning("team", "owner");
 
         provisioner.provision(r, mapper.createObjectNode().put("ApplicationName", "my-app"), ctx("my-app"));
 
         verify(codeDeploy).untagResource(eq(ARN),
                 argThat(keys -> keys.size() == 2 && keys.containsAll(List.of("team", "owner"))));
         verify(codeDeploy, never()).tagResource(anyString(), any());
+    }
+
+    @Test
+    void aTagAddedOutsideTheStackStays() {
+        when(codeDeploy.applicationArn("us-east-1", "my-app")).thenReturn(ARN);
+        when(codeDeploy.listTagsForResource(ARN)).thenReturn(List.of(
+                Map.of("Key", "team", "Value", "core"), Map.of("Key", "outside", "Value", "kept")));
+
+        provisioner.provision(owning("team"), mapper.createObjectNode().put("ApplicationName", "my-app"),
+                ctx("my-app"));
+
+        verify(codeDeploy).untagResource(ARN, List.of("team"));
+    }
+
+    /** An in-place update of my-app from team=core, owner=alice (both the stack's) to team=edge. */
+    private StackResource updatedInPlace() {
+        when(codeDeploy.applicationArn("us-east-1", "my-app")).thenReturn(ARN);
+        when(codeDeploy.listTagsForResource(ARN)).thenReturn(List.of(
+                Map.of("Key", "team", "Value", "core"), Map.of("Key", "owner", "Value", "alice")));
+        ObjectNode props = mapper.createObjectNode().put("ApplicationName", "my-app");
+        props.putArray("Tags").add(mapper.createObjectNode().put("Key", "team").put("Value", "edge"));
+        StackResource r = owning("owner", "team");
+        provisioner.provision(r, props, ctx("my-app"));
+        return r;
+    }
+
+    @Test
+    void rollingBackAnInPlaceUpdatePutsTheTagsBack() {
+        StackResource r = updatedInPlace();
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(codeDeploy).tagResource(eq(ARN), argThat(tags -> tags.size() == 2
+                && tags.containsAll(List.of(Map.of("Key", "team", "Value", "core"),
+                        Map.of("Key", "owner", "Value", "alice")))));
+        assertEquals("[\"owner\",\"team\"]", r.getAttributes().get(CodeDeployCfnProvisioner.TAG_KEYS_ATTR));
+        assertFalse(r.getAttributes().containsKey(CodeDeployCfnProvisioner.SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aCommittedInPlaceUpdateHasNothingToRollBack() {
+        StackResource r = updatedInPlace();
+
+        provisioner.completeUpdate(r);
+
+        assertFalse(r.getAttributes().containsKey(CodeDeployCfnProvisioner.SNAPSHOT_ATTR));
+        assertEquals("[\"team\"]", r.getAttributes().get(CodeDeployCfnProvisioner.TAG_KEYS_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void aTagUpdateThatFailsPutsTheTagsBackBeforeFailing() {
+        when(codeDeploy.applicationArn("us-east-1", "my-app")).thenReturn(ARN);
+        when(codeDeploy.listTagsForResource(ARN)).thenReturn(List.of(Map.of("Key", "team", "Value", "core")));
+        doThrow(new AwsException("InvalidTagsToAddException", "bad", 400)).doNothing()
+                .when(codeDeploy).tagResource(eq(ARN), any());
+        ObjectNode props = mapper.createObjectNode().put("ApplicationName", "my-app");
+        props.putArray("Tags")
+                .add(mapper.createObjectNode().put("Key", "team").put("Value", "edge"))
+                .add(mapper.createObjectNode().put("Key", "added").put("Value", "x"));
+
+        assertThrows(AwsException.class, () -> provisioner.provision(owning("team"), props, ctx("my-app")));
+
+        verify(codeDeploy).untagResource(ARN, List.of("added"));
+        verify(codeDeploy).tagResource(ARN, List.of(Map.of("Key", "team", "Value", "core")));
     }
 
     /** Replaces an unnamed application by changing its ComputePlatform; returns the resource. */

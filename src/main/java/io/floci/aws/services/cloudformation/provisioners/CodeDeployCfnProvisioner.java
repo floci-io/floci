@@ -1,11 +1,15 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.codedeploy.CodeDeployService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +26,11 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String TYPE = "AWS::CodeDeploy::Application";
     private static final int APPLICATION_NAME_MAX_LENGTH = 100;
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** The tags an in-place update is about to change, for {@link #rollbackUpdate} to put back. */
+    static final String SNAPSHOT_ATTR = "__FlociCodeDeployApplicationUpdateSnapshot";
+    /** The tag keys the template that provisioned the application set: the next update drops the ones it omits. */
+    static final String TAG_KEYS_ATTR = "__FlociCodeDeployTagKeys";
 
     private final CodeDeployService codeDeployService;
 
@@ -47,21 +56,40 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
+    /**
+     * A replacement or a stub migration is undone through the cleanup record, and an in-place update
+     * from the tag snapshot taken before it. The snapshot is spent only once the restore succeeded,
+     * so one that throws leaves it for ContinueUpdateRollback to retry.
+     */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        if (ReplacementCleanup.rollback(resource, this::delete)) {
+            return true;
+        }
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, SNAPSHOT_ATTR);
+        if (snapshot == null) {
+            return false;
+        }
+        restoreTags(snapshot);
+        Ec2Tags.restoreRecord(resource, TAG_KEYS_ATTR, snapshot);
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
+        return true;
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(SNAPSHOT_ATTR);
         if (ctx.isUpdate()) {
             ReplacementCleanup.endRollbackRetry(r);
         }
@@ -88,13 +116,14 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         // A stack from before this type had a provisioner, or deployed while CodeDeploy was disabled,
         // holds the dispatcher's stub, which names no application: taking over its id is a create.
         boolean stub = CfnResourceDispatcher.isStub(priorPhysicalId, attributesBefore);
+        r.setPhysicalId(name);
         if (ctx.reusesPriorEntity(name) && !stub) {
-            reconcileTags(codeDeployService.applicationArn(ctx.region(), name), tags);
+            updateTagsInPlace(r, ctx, name, tags);
         } else {
             codeDeployService.createApplication(ctx.region(), name, written(props, "ComputePlatform", ctx),
                     toTagList(tags));
         }
-        r.setPhysicalId(name);
+        Ec2Tags.recordKeys(r, TAG_KEYS_ATTR, tags);
         if (stub) {
             // The type has no Arn attribute; a rollback puts the stub's back from the cleanup record.
             r.getAttributes().remove("Arn");
@@ -112,16 +141,36 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         return value == null || (value.isBlank() && !props.get(name).isTextual()) ? null : value;
     }
 
-    private void reconcileTags(String arn, Map<String, String> desired) {
+    /**
+     * The update handler the registry schema gives the type: a tag change and nothing else. Only the
+     * keys the previous template or this one sets are the stack's to change or drop, so a tag added
+     * outside the stack stays, as on AWS. The tags those keys hold are snapshotted first, so a later
+     * resource's failure rolls them back, and a failure here puts them back before it propagates.
+     */
+    private void updateTagsInPlace(StackResource r, ProvisionContext ctx, String name, Map<String, String> desired) {
+        String arn = codeDeployService.applicationArn(ctx.region(), name);
         Map<String, String> current = new HashMap<>();
         codeDeployService.listTagsForResource(arn).forEach(t -> current.put(t.get("Key"), t.get("Value")));
-        List<String> stale = ProvisionContext.staleTagKeys(current, desired);
-        if (!stale.isEmpty()) {
-            codeDeployService.untagResource(arn, stale);
-        }
-        if (!desired.isEmpty()) {
-            codeDeployService.tagResource(arn, toTagList(desired));
-        }
+        Set<String> owned = Ec2Tags.ownedKeys(r, TAG_KEYS_ATTR, ctx);
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("name", name);
+        snapshot.put("region", ctx.region());
+        Ec2Tags.snapshotOwned(snapshot, owned, desired, current, r.getAttributes().get(TAG_KEYS_ATTR));
+        r.getAttributes().put(SNAPSHOT_ATTR, snapshot.toString());
+        CfnRollback.guarded(r, ctx, false, () -> { }, () -> restoreTags(snapshot),
+                () -> reconcileTags(arn, Ec2Tags.touched(owned, desired), desired));
+    }
+
+    private void restoreTags(JsonNode snapshot) {
+        List<String> touched = new ArrayList<>();
+        snapshot.path("touched").forEach(key -> touched.add(key.asText()));
+        String arn = codeDeployService.applicationArn(snapshot.path("region").asText(), snapshot.path("name").asText());
+        reconcileTags(arn, touched, CfnRollback.snapshotTags(snapshot));
+    }
+
+    private void reconcileTags(String arn, Collection<String> managedKeys, Map<String, String> desired) {
+        CfnRollback.reconcileTags(managedKeys, desired, dropped -> codeDeployService.untagResource(arn, dropped),
+                added -> codeDeployService.tagResource(arn, toTagList(added)));
     }
 
     private static List<Map<String, String>> toTagList(Map<String, String> tags) {
