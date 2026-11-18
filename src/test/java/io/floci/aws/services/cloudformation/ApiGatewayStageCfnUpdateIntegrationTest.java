@@ -11,10 +11,13 @@ import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
-/** An AWS::ApiGateway::Stage updated through a stack: in place, rolled back, moved by a new name or API, deleted. */
+/** An AWS::ApiGateway::Stage or Deployment updated through a stack: in place, rolled back, replaced or moved to a new API, deleted. */
 @QuarkusTest
 class ApiGatewayStageCfnUpdateIntegrationTest {
 
@@ -76,6 +79,96 @@ class ApiGatewayStageCfnUpdateIntegrationTest {
             CfnStackWaits.deleteStack(cf, stackId);
             cf.close();
         }
+    }
+
+    @Test
+    void aDeploymentDescriptionUpdateKeepsTheIdAndTheStageAndRollsBack() {
+        String stack = "apigw-cfn-deployment-inplace-it";
+        CloudFormationClient cf = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
+        try {
+            CfnStackWaits.createStack(cf, stack, deploymentStack("a", "", ""), "CREATE_COMPLETE");
+            String apiId = physicalId(cf, stack, "Api");
+            String id = physicalId(cf, stack, "Dep");
+            given().contentType("application/json")
+                    .body("{\"patchOperations\":[{\"op\":\"add\",\"path\":\"/variables/x\",\"value\":\"1\"}]}")
+                    .when().patch("/restapis/" + apiId + "/stages/live").then().statusCode(200);
+
+            CfnStackWaits.updateStack(cf, stack, deploymentStack("b", "", ""), "UPDATE_COMPLETE");
+            assertThat(physicalId(cf, stack, "Dep"), equalTo(id));
+            given().when().get("/restapis/" + apiId + "/deployments/" + id).then().statusCode(200)
+                    .body("description", equalTo("b"));
+            given().when().get("/restapis/" + apiId + "/deployments").then().body("item", hasSize(1));
+            given().when().get("/restapis/" + apiId + "/stages/live").then().statusCode(200)
+                    .body("variables.x", equalTo("1"));
+
+            CfnStackWaits.updateStack(cf, stack, deploymentStack("c", "", CfnStackWaits.failingResourceAfter("Dep")),
+                    "UPDATE_ROLLBACK_COMPLETE");
+            assertThat(physicalId(cf, stack, "Dep"), equalTo(id));
+            given().when().get("/restapis/" + apiId + "/deployments/" + id).then().statusCode(200)
+                    .body("description", equalTo("b"));
+
+            String canary = ",\"DeploymentCanarySettings\":{\"PercentTraffic\":10}";
+            CfnStackWaits.updateStack(cf, stack,
+                    deploymentStack("b", canary, CfnStackWaits.failingResourceAfter("Dep")), "UPDATE_ROLLBACK_COMPLETE");
+            assertThat(physicalId(cf, stack, "Dep"), equalTo(id));
+            given().when().get("/restapis/" + apiId + "/stages/live").then().statusCode(200)
+                    .body("deploymentId", equalTo(id)).body("variables.x", equalTo("1"));
+
+            CfnStackWaits.updateStack(cf, stack, deploymentStack("b", canary, ""), "UPDATE_COMPLETE");
+            String replaced = physicalId(cf, stack, "Dep");
+            assertThat(replaced, not(equalTo(id)));
+            given().when().get("/restapis/" + apiId + "/stages/live").then().statusCode(200)
+                    .body("deploymentId", equalTo(replaced)).body("variables.x", equalTo("1"));
+            given().when().get("/restapis/" + apiId + "/deployments/" + id).then().statusCode(404);
+        } finally {
+            CfnStackWaits.deleteStack(cf, stack);
+            cf.close();
+        }
+    }
+
+    @Test
+    void aMovedDeploymentReplacesTheOldOneAndDeleteRemovesItWithoutTheRestApi() {
+        String stack = "apigw-cfn-deployment-move-it";
+        CloudFormationClient cf = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
+        String stackId = stack;
+        try {
+            String[] a = outsideApi("dep-a");
+            String[] b = outsideApi("dep-b");
+            stackId = CfnStackWaits.createStack(cf, stack, outsideDeployment(a), "CREATE_COMPLETE").stackId();
+            String first = physicalId(cf, stack, "Dep");
+
+            CfnStackWaits.updateStack(cf, stack, outsideDeployment(b), "UPDATE_COMPLETE");
+            String moved = physicalId(cf, stack, "Dep");
+            assertThat(moved, not(equalTo(first)));
+            given().when().get("/restapis/" + b[0] + "/deployments/" + moved).then().statusCode(200);
+            given().when().get("/restapis/" + a[0] + "/deployments/" + first).then().statusCode(404);
+
+            CfnStackWaits.deleteStack(cf, stackId);
+            given().when().get("/restapis/" + b[0] + "/deployments/" + moved).then().statusCode(404);
+            given().when().get("/restapis/" + b[0] + "/stages/live").then().statusCode(404);
+        } finally {
+            CfnStackWaits.deleteStack(cf, stackId);
+            cf.close();
+        }
+    }
+
+    private static String outsideDeployment(String[] api) {
+        return """
+                {"Resources":{"Dep":{"Type":"AWS::ApiGateway::Deployment","Properties":{
+                  "RestApiId":"%s","StageName":"live"}}}}
+                """.formatted(api[0]);
+    }
+
+    private static String deploymentStack(String description, String extra, String later) {
+        return """
+                {"Resources":{
+                  "Api":{"Type":"AWS::ApiGateway::RestApi","Properties":{"Name":"cfn-dep"}},
+                  "M":{"Type":"AWS::ApiGateway::Method","Properties":{"RestApiId":{"Ref":"Api"},
+                    "ResourceId":{"Fn::GetAtt":["Api","RootResourceId"]},"HttpMethod":"GET",
+                    "AuthorizationType":"NONE","Integration":{"Type":"MOCK"}}},
+                  "Dep":{"Type":"AWS::ApiGateway::Deployment","DependsOn":"M","Properties":{
+                    "RestApiId":{"Ref":"Api"},"Description":"%s","StageName":"live"%s}}%s}}
+                """.formatted(description, extra, later);
     }
 
     /** An API made outside any stack with a method and a deployment: its id and the deployment id. */
