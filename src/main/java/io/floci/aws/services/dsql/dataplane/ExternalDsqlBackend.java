@@ -3,6 +3,7 @@ package io.floci.aws.services.dsql.dataplane;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.BackendAuthenticator;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.dsql.model.DsqlCluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -127,32 +128,32 @@ public class ExternalDsqlBackend implements DsqlBackend {
             try {
                 if (owner == Ownership.MISSING) {
                     // A role and its marker in one transaction, so no crash leaves the role unmarked.
-                    inTransaction(server, "CREATE ROLE " + quote(names.owner()) + " NOLOGIN",
-                            "COMMENT ON ROLE " + quote(names.owner()) + " IS " + literal(marker));
+                    inTransaction(server, "CREATE ROLE " + PostgresWire.quoteIdentifier(names.owner()) + " NOLOGIN",
+                            "COMMENT ON ROLE " + PostgresWire.quoteIdentifier(names.owner()) + " IS " + PostgresWire.quoteLiteral(marker));
                     createdOwner = true;
                 }
-                String password = literal(verifier(secret, names.admin()));
+                String password = PostgresWire.quoteLiteral(verifier(secret, names.admin()));
                 if (admin == Ownership.OURS) {
-                    execute(server, "ALTER ROLE " + quote(names.admin()) + " PASSWORD " + password);
+                    execute(server, "ALTER ROLE " + PostgresWire.quoteIdentifier(names.admin()) + " PASSWORD " + password);
                 } else {
                     inTransaction(server,
-                            "CREATE ROLE " + quote(names.admin()) + " LOGIN CREATEROLE PASSWORD " + password,
-                            "COMMENT ON ROLE " + quote(names.admin()) + " IS " + literal(marker));
+                            "CREATE ROLE " + PostgresWire.quoteIdentifier(names.admin()) + " LOGIN CREATEROLE PASSWORD " + password,
+                            "COMMENT ON ROLE " + PostgresWire.quoteIdentifier(names.admin()) + " IS " + PostgresWire.quoteLiteral(marker));
                     createdAdmin = true;
                 }
                 if (connect == Ownership.MISSING) {
-                    inTransaction(server, "CREATE ROLE " + quote(names.connect()) + " NOLOGIN",
-                            "COMMENT ON ROLE " + quote(names.connect()) + " IS " + literal(marker));
+                    inTransaction(server, "CREATE ROLE " + PostgresWire.quoteIdentifier(names.connect()) + " NOLOGIN",
+                            "COMMENT ON ROLE " + PostgresWire.quoteIdentifier(names.connect()) + " IS " + PostgresWire.quoteLiteral(marker));
                     createdConnect = true;
                 }
                 if (database == Ownership.MISSING) {
                     // CREATE DATABASE cannot run in a transaction; a crash before its COMMENT leaves it
                     // UNSTAMPED, which the next start recognises by its marked owner and stamps.
-                    execute(server, "CREATE DATABASE " + quote(names.database()) + " OWNER " + quote(names.owner()));
+                    execute(server, "CREATE DATABASE " + PostgresWire.quoteIdentifier(names.database()) + " OWNER " + PostgresWire.quoteIdentifier(names.owner()));
                     createdDatabase = true;
                 }
                 if (database != Ownership.OURS) {
-                    execute(server, "COMMENT ON DATABASE " + quote(names.database()) + " IS " + literal(marker));
+                    execute(server, "COMMENT ON DATABASE " + PostgresWire.quoteIdentifier(names.database()) + " IS " + PostgresWire.quoteLiteral(marker));
                 }
                 // The bootstrap takes CONNECT from PUBLIC and gives it to the connect role's members.
                 try (Connection connection = connect(names.database());
@@ -270,7 +271,7 @@ public class ExternalDsqlBackend implements DsqlBackend {
                                     role, cluster.getIdentifier());
                             continue;
                         }
-                        execute(server, "DROP ROLE IF EXISTS " + quote(role));
+                        execute(server, "DROP ROLE IF EXISTS " + PostgresWire.quoteIdentifier(role));
                     }
                 }
                 return null;
@@ -433,17 +434,17 @@ public class ExternalDsqlBackend implements DsqlBackend {
             } else if (created.connect() && databaseExists(server, names.database())) {
                 // A database this attempt did not create may keep the connect role's CONNECT, which
                 // would keep the role from being dropped.
-                execute(server, "REVOKE CONNECT ON DATABASE " + quote(names.database()) + " FROM "
-                        + quote(names.connect()));
+                execute(server, "REVOKE CONNECT ON DATABASE " + PostgresWire.quoteIdentifier(names.database()) + " FROM "
+                        + PostgresWire.quoteIdentifier(names.connect()));
             }
             if (created.admin()) {
-                execute(server, "DROP ROLE IF EXISTS " + quote(names.admin()));
+                execute(server, "DROP ROLE IF EXISTS " + PostgresWire.quoteIdentifier(names.admin()));
             }
             if (created.connect()) {
-                execute(server, "DROP ROLE IF EXISTS " + quote(names.connect()));
+                execute(server, "DROP ROLE IF EXISTS " + PostgresWire.quoteIdentifier(names.connect()));
             }
             if (created.owner()) {
-                execute(server, "DROP ROLE IF EXISTS " + quote(names.owner()));
+                execute(server, "DROP ROLE IF EXISTS " + PostgresWire.quoteIdentifier(names.owner()));
             }
         } catch (SQLException e) {
             failure.addSuppressed(e);
@@ -452,7 +453,7 @@ public class ExternalDsqlBackend implements DsqlBackend {
 
     private static void dropDatabase(Connection server, Names names) throws SQLException {
         endSessions(server, names);
-        execute(server, "DROP DATABASE IF EXISTS " + quote(names.database()) + " WITH (FORCE)");
+        execute(server, "DROP DATABASE IF EXISTS " + PostgresWire.quoteIdentifier(names.database()) + " WITH (FORCE)");
     }
 
     /**
@@ -680,15 +681,6 @@ public class ExternalDsqlBackend implements DsqlBackend {
 
     private EmulatorConfig.DsqlServiceConfig.External external() {
         return config.services().dsql().external();
-    }
-
-    /** An identifier quoted as quote_ident quotes one that needs it; always quoting is equivalent. */
-    private static String quote(String identifier) {
-        return '"' + identifier.replace("\"", "\"\"") + '"';
-    }
-
-    private static String literal(String value) {
-        return "'" + value.replace("'", "''") + "'";
     }
 
     /**

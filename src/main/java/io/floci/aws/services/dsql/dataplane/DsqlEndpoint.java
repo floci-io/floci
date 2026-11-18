@@ -489,7 +489,7 @@ public class DsqlEndpoint {
                 boolean changed = needsPassword(connection, backendRole, verifier);
                 if (changed) {
                     try (Statement statement = connection.createStatement()) {
-                        statement.execute("ALTER ROLE " + quoteIdentifier(backendRole) + " PASSWORD "
+                        statement.execute("ALTER ROLE " + PostgresWire.quoteIdentifier(backendRole) + " PASSWORD "
                                 + PostgresWire.quoteLiteral(verifier));
                     }
                 }
@@ -512,10 +512,6 @@ public class DsqlEndpoint {
                 return rows.next() && !verifier.equals(rows.getString(1));
             }
         }
-    }
-
-    private static String quoteIdentifier(String identifier) {
-        return '"' + identifier.replace("\"", "\"\"") + '"';
     }
 
     /**
