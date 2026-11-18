@@ -11,12 +11,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -31,6 +32,8 @@ class DsqlDataPlaneTest {
     private final CountDownLatch startBegun = new CountDownLatch(1);
     private final CountDownLatch startMayFinish = new CountDownLatch(1);
     private final List<Boolean> readies = new CopyOnWriteArrayList<>();
+    private final AtomicReference<CompletableFuture<Void>> shutdown = new AtomicReference<>();
+    private final List<Boolean> shutdownReturnedWhenDropped = new CopyOnWriteArrayList<>();
 
     @Test
     void withInMemoryStorageAClusterStillStartingAtShutdownIsDroppedAndNeverServed() throws Exception {
@@ -72,16 +75,15 @@ class DsqlDataPlaneTest {
         DsqlDataPlane plane = new DsqlDataPlane(config("memory"), databases, endpoint);
         DsqlCluster cluster = cluster();
         startsSlowly(cluster);
+        recordWhetherShutdownReturnedWhenDropped(cluster);
 
         plane.provision(cluster, readies::add);
         assertTrue(startBegun.await(10, TimeUnit.SECONDS));
-        CompletableFuture<Void> stopped = CompletableFuture.runAsync(() -> plane.onStop(null));
+        stopFlociOnceTheStartHasBegun(plane);
 
-        Thread.sleep(300);
-        assertFalse(stopped.isDone(), "the start is still running");
-        startMayFinish.countDown();
-        stopped.get(10, TimeUnit.SECONDS);
-        verify(databases).stop(cluster, true);
+        verify(databases, timeout(5_000)).stop(cluster, true);
+        shutdown.get().get(10, TimeUnit.SECONDS);
+        assertEquals(List.of(false), shutdownReturnedWhenDropped, "the start finished before Floci stopped");
     }
 
     @Test
@@ -93,18 +95,37 @@ class DsqlDataPlaneTest {
             assertTrue(startMayFinish.await(10, TimeUnit.SECONDS));
             return List.of();
         });
+        recordWhetherShutdownReturnedWhenDropped(cluster);
         CountDownLatch gone = new CountDownLatch(1);
 
         plane.deprovision(cluster, false, roles -> { }, gone::countDown);
         assertTrue(startBegun.await(10, TimeUnit.SECONDS));
-        CompletableFuture<Void> stopped = CompletableFuture.runAsync(() -> plane.onStop(null));
+        stopFlociOnceTheStartHasBegun(plane);
 
-        Thread.sleep(300);
-        assertFalse(stopped.isDone(), "the deletion is still running");
-        startMayFinish.countDown();
-        stopped.get(10, TimeUnit.SECONDS);
-        assertEquals(0, gone.getCount(), "it finished before Floci stopped");
-        verify(databases).stop(cluster, true);
+        shutdown.get().get(10, TimeUnit.SECONDS);
+        assertEquals(List.of(false), shutdownReturnedWhenDropped, "the deletion finished before Floci stopped");
+        assertEquals(0, gone.getCount());
+    }
+
+    /**
+     * Stops Floci on another thread and lets the start or deletion go on once the shutdown has
+     * stopped the endpoint, so the shutdown is past its first step when the work finishes.
+     */
+    private void stopFlociOnceTheStartHasBegun(DsqlDataPlane plane) {
+        doAnswer(invocation -> {
+            startMayFinish.countDown();
+            return null;
+        }).when(endpoint).stop();
+        shutdown.set(CompletableFuture.runAsync(() -> plane.onStop(null)));
+    }
+
+    /** Records, when the cluster's data is dropped, whether the shutdown had already returned. */
+    private void recordWhetherShutdownReturnedWhenDropped(DsqlCluster cluster) {
+        doAnswer(invocation -> {
+            CompletableFuture<Void> stopping = shutdown.get();
+            shutdownReturnedWhenDropped.add(stopping != null && stopping.isDone());
+            return null;
+        }).when(databases).stop(cluster, true);
     }
 
     private void startsSlowly(DsqlCluster cluster) throws Exception {
