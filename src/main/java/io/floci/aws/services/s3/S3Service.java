@@ -3226,7 +3226,8 @@ public class S3Service implements Resettable, ResourceProvider {
      * last entry returned, and the next request resumes at the entry immediately after it.
      *
      * @param versionIdMarker version id of the last entry of the previous page; only meaningful together with
-     *                        {@code keyMarker}, and ignored when the key it names holds no such version
+     *                        {@code keyMarker}; when the key no longer holds that version, every version of
+     *                        the key still stored is listed
      */
     public ListVersionsResult listObjectVersions(String bucketName, String prefix, String delimiter, int maxKeys,
                                                  String keyMarker, String versionIdMarker) {
@@ -3292,19 +3293,27 @@ public class S3Service implements Resettable, ResourceProvider {
                     .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
 
             if (versionIdMarker != null && !versionIdMarker.isEmpty()) {
-                List<S3Object> remaining = new ArrayList<>();
-                boolean afterMarker = false;
+                List<S3Object> markerKeyVersions = new ArrayList<>();
+                List<S3Object> laterKeys = new ArrayList<>();
                 for (S3Object v : versions) {
                     int keyCompare = v.getKey().compareTo(km);
-                    if (keyCompare < 0) {
-                        continue;
-                    }
-                    if (keyCompare > 0 || afterMarker) {
-                        remaining.add(v);
-                    } else if (versionIdMarker.equals(reportedVersionId(v))) {
-                        afterMarker = true;
+                    if (keyCompare == 0) {
+                        markerKeyVersions.add(v);
+                    } else if (keyCompare > 0) {
+                        laterKeys.add(v);
                     }
                 }
+                // A client that deletes each page before requesting the next one names a version that is gone;
+                // the versions of keyMarker still stored were not on an earlier page, so all of them are owed.
+                int markerIndex = -1;
+                for (int i = 0; i < markerKeyVersions.size() && markerIndex < 0; i++) {
+                    if (versionIdMarker.equals(reportedVersionId(markerKeyVersions.get(i)))) {
+                        markerIndex = i;
+                    }
+                }
+                List<S3Object> remaining = new ArrayList<>(
+                        markerKeyVersions.subList(markerIndex + 1, markerKeyVersions.size()));
+                remaining.addAll(laterKeys);
                 versions = remaining;
             } else {
                 versions = versions.stream()
