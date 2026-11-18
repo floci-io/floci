@@ -1709,6 +1709,29 @@ it is STS itself: Floci does not vary its token format by account preference, so
 observable in the summary rather than in a token. `v1Token` is reported as the default for an account
 that has never set one.
 
+### What a bad account property key answers
+
+A property key is read in three layers and two of them are settled by recordings.
+
+A key breaking the published shape, `accountPropertyKeyType` at 1 to 50 characters matching
+`^[A-Za-z][A-Za-z0-9/_-]*$`, is the declared constraint violation, a `ValidationError` naming the
+map's keys, which is what AWS answers and what this package already gave.
+
+A key that satisfies the shape and is not `Namespace/PropertyName` is `InvalidInput` 400 with
+`Property key must be in format Namespace/PropertyName: <key>`, recorded 2026-11-06 for a key
+carrying no separator at all, the key echoed as the request sent it. This package answered a
+sentence of its own describing the rule; the rule itself is unchanged, and the two other spellings
+it refuses, a trailing slash and several slashes, carry the same sentence without a recording of
+their own.
+
+The third layer is not implemented and is tracked rather than guessed. AWS also refuses a key whose
+namespace it does not recognise, `InvalidInput` 400 with `Unsupported namespace: <namespace>`,
+recorded 2026-10-25, where this emulator stores the property under whatever namespace the key
+names. Doing it needs the set of namespaces AWS recognises, and the recordings name exactly one
+real namespace and one invented one, so a check built from them would refuse namespaces AWS
+accepts. That is the wrong direction to be wrong in, so the set has to come from a source that
+publishes it.
+
 ### Organizations Root Access
 
 | Action | Description |
