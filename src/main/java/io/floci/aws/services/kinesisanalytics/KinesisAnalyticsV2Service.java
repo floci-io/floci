@@ -771,7 +771,7 @@ public class KinesisAnalyticsV2Service implements StoredResourceArns {
     }
 
     private void putApplication(FlinkApplication app) {
-        String region = AwsArnUtils.regionOrDefault(app.getApplicationArn(), config.defaultRegion());
+        String region = regionResolver.regionOf(app.getApplicationArn());
         String key = applicationKey(region, app.getApplicationName());
         if (app.getAccountId() != null && storage instanceof AccountAwareStorageBackend<FlinkApplication> aware) {
             aware.putForAccount(app.getAccountId(), key, app);

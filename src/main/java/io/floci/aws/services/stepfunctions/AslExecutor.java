@@ -22,6 +22,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.CsvParser;
 import io.floci.aws.core.common.CustomResourceLiveness;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServiceRegistry;
@@ -286,6 +287,7 @@ public class AslExecutor {
     private final EmrServerlessTaskInvoker emrServerlessTaskInvoker;
     private final SdkManagementTaskInvoker sdkManagementTaskInvoker;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
     private final Clock clock;
@@ -320,7 +322,8 @@ public class AslExecutor {
                        ServiceRegistry serviceRegistry, NestedTaskCredentials nestedTaskCredentials,
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
                        EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker,
-                       SdkManagementTaskInvoker sdkManagementTaskInvoker, EventBridgeInvoker eventBridgeInvoker) {
+                       SdkManagementTaskInvoker sdkManagementTaskInvoker, EventBridgeInvoker eventBridgeInvoker,
+                       RegionResolver regionResolver) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
@@ -328,7 +331,7 @@ public class AslExecutor {
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
                 nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
-                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker);
+                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker, regionResolver);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -348,7 +351,7 @@ public class AslExecutor {
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
                 ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
                 EmrServerlessTaskInvoker emrServerlessTaskInvoker, SdkManagementTaskInvoker sdkManagementTaskInvoker,
-                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker) {
+                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker, RegionResolver regionResolver) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
         this.emrTaskInvoker = emrTaskInvoker;
         this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
@@ -384,6 +387,11 @@ public class AslExecutor {
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
         this.config = config;
+        // Built without one, as by the constructors kept for tests, it reads the configuration's default Region, as
+        // the injected resolver does.
+        this.regionResolver = regionResolver != null || config == null
+                ? regionResolver
+                : new RegionResolver(config.defaultRegion(), config.defaultAccountId());
         this.clock = clock;
         this.sleeper = sleeper;
         this.nestedWaiter = nestedWaiter != null ? nestedWaiter : ExecutionStatusSubscription::awaitChange;
@@ -418,7 +426,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -440,7 +448,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -1490,7 +1498,7 @@ public class AslExecutor {
         // DynamoDB optimized integrations (4 actions)
         if (integration.isOptimizedService("dynamodb")) {
             String operation = integration.api();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             try {
                 return invokeDynamoDb(operation, input, region);
             } catch (AwsException e) {
@@ -1501,56 +1509,56 @@ public class AslExecutor {
         // AWS SDK service integrations: DynamoDB
         if (integration.isSdkService("dynamodb")) {
             String camelCaseAction = integration.api();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkDynamoDb(camelCaseAction, input, region);
         }
 
         // AWS SDK service integrations: Redshift Data API (provisioned clusters and Serverless workgroups)
         if (integration.isSdkService("redshiftdata") && integration.suffix().isEmpty()) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkRedshiftData(integration, input, region);
         }
 
         // AWS SDK service integration: RDS Data API ExecuteStatement
         if (integration.isSdkService("rdsdata")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkRdsData(integration, input, region);
         }
 
         // SQS optimized integration
         if (integration.is("sqs", "sendMessage")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeOptimizedSqsSendMessage(input, region);
         }
 
         // HTTP optimized integration
         if (integration.is("http", "invoke")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeHttp(input, region);
         }
 
         // AWS SDK service integration: SQS SendMessage
         if (integration.isSdk("sqs", "sendMessage")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkSqsSendMessage(input, region);
         }
 
         // SNS optimized integration
         if (integration.is("sns", "publish")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeSnsPublish(input, region, "SNS.");
         }
 
         // AWS SDK service integration: SNS Publish
         if (integration.isSdk("sns", "publish")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeSnsPublish(input, region, "Sns.");
         }
 
         // AWS SDK service integration: CloudFormation (query protocol → JSON)
         if (integration.isSdkService("cloudformation")) {
             String action = integration.api();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkCloudFormation(action, input, region);
         }
 
@@ -1565,7 +1573,8 @@ public class AslExecutor {
         }
 
         if (SdkManagementTaskInvoker.supports(integration)) {
-            return sdkManagementTaskInvoker.invoke(integration, input, extractRegionFromArn(sm.getStateMachineArn()));
+            return sdkManagementTaskInvoker.invoke(integration, input,
+                    regionResolver.regionOf(sm.getStateMachineArn()));
         }
 
         // ECS optimized integration: arn:<partition>:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
@@ -1585,7 +1594,7 @@ public class AslExecutor {
             String mode = taskToken != null
                     ? ".waitForTaskToken"
                     : integration.suffix();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeEcsRunTask(mode, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
                     jobSubmitted);
         }
@@ -1593,7 +1602,7 @@ public class AslExecutor {
         // EMR optimized integrations: request-response and .sync. AWS supports no .waitForTaskToken
         // variant, so one carrying a token falls through to Unsupported resource.
         if (integration.isOptimizedService("elasticmapreduce") && taskToken == null) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeEmr(integration, input, region, executionArn, executionDeadlineNanos, taskDeadlineNanos,
                     jobSubmitted);
         }
@@ -1601,33 +1610,33 @@ public class AslExecutor {
         // EMR Serverless optimized integrations: request-response and .sync, with no .waitForTaskToken
         // variant either.
         if (integration.isOptimizedService("emr-serverless") && taskToken == null) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeEmrServerless(integration, input, region, executionArn, executionDeadlineNanos,
                     taskDeadlineNanos, jobSubmitted);
         }
 
         // AWS SDK service integrations: Step Functions
         if (integration.isSdkService("sfn")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkSfn(integration, input, region);
         }
 
         // AWS SDK service integrations: EventBridge Scheduler
         if (integration.isSdkService("scheduler")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeAwsSdkScheduler(integration, input, region);
         }
 
         // EventBridge optimized integration
         if (integration.is("events", "putEvents")) {
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeOptimizedPutEvents(input, region);
         }
 
         // Nested state machine integration
         if (integration.isAnySuffix("states", "startExecution")) {
             String mode = integration.suffix();
-            String region = extractRegionFromArn(sm.getStateMachineArn());
+            String region = regionResolver.regionOf(sm.getStateMachineArn());
             return invokeNestedStateMachine(mode, input, region, executionArn, executionDeadlineNanos,
                     taskDeadlineNanos, rawParameters, jobSubmitted);
         }
@@ -1699,7 +1708,7 @@ public class AslExecutor {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode regions = objectMapper.createArrayNode();
         AwsPartition partition = AwsPartitions.find(AwsArnUtils.parse(stateMachineArn).partition())
-                .orElseGet(() -> AwsPartitions.forRegionOrCommercial(extractRegionFromArn(stateMachineArn)));
+                .orElseGet(() -> AwsPartitions.forRegionOrCommercial(regionResolver.regionOf(stateMachineArn)));
         for (AwsPartition.Region name : ec2Service.describeRegions(partition, false)) {
             ObjectNode region = objectMapper.createObjectNode();
             region.put("RegionName", name.id());
@@ -3881,7 +3890,7 @@ public class AslExecutor {
     }
 
     private MapRunIdentity newMapRunIdentity(JsonNode stateDef, StateMachine sm, JsonNode context) {
-        String region = extractRegionFromArn(sm.getStateMachineArn());
+        String region = regionResolver.regionOf(sm.getStateMachineArn());
         String account = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
         String smName = context.path("StateMachine").path("Name").asText(sm.getName());
         String label = stateDef.path("Label").asText(null);
@@ -3907,7 +3916,7 @@ public class AslExecutor {
         String transformation = writerConfig.path("Transformation").asText("NONE");
         String outputType = writerConfig.path("OutputType").asText("JSON");
 
-        String region = extractRegionFromArn(sm.getStateMachineArn());
+        String region = regionResolver.regionOf(sm.getStateMachineArn());
         String account = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
         String smName = context.path("StateMachine").path("Name").asText(sm.getName());
 
@@ -6219,7 +6228,7 @@ public class AslExecutor {
         }
         details.put("resource", profile.resource());
         if ("Task".equals(profile.prefix())) {
-            details.put("region", extractRegionFromArn(sm.getStateMachineArn()));
+            details.put("region", regionResolver.regionOf(sm.getStateMachineArn()));
             details.put("parameters", effectiveInput.toString());
         } else {
             details.put("input", effectiveInput.toString());
@@ -6510,10 +6519,6 @@ public class AslExecutor {
         } catch (Exception e) {
             return objectMapper.createObjectNode();
         }
-    }
-
-    private String extractRegionFromArn(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, config.defaultRegion());
     }
 
     private String normalizeS3Region(String region) {

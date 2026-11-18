@@ -2605,7 +2605,7 @@ public class EksClusterManager
                     clusterName, e.getMessage());
             return;
         }
-        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion());
+        String region = regionResolver.regionOf(cluster.getArn());
         String endpoint = "http://" + dockerHostResolver.resolve() + ":" + config.port();
         boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
         String content = buildRegistriesYaml(mirrorAccounts(resolveClusterAccountId(cluster), config.defaultAccountId()),
