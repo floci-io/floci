@@ -1,6 +1,6 @@
 package io.floci.aws.services.rds;
 
-import io.floci.aws.testing.RdsAdvertisePortProfile;
+import io.floci.aws.testing.S3EnforceAuthProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
@@ -9,9 +9,12 @@ import org.junit.jupiter.api.Test;
 import static io.floci.aws.testing.RdsRequests.rds;
 import static org.hamcrest.Matchers.containsString;
 
-/** With advertise-requested-port on, Describe* reports the Port the client asked for. */
+/**
+ * With advertise-requested-port on, Describe* reports the Port the client asked for. The setting,
+ * with RDS mocked, comes from {@link S3EnforceAuthProfile}.
+ */
 @QuarkusTest
-@TestProfile(RdsAdvertisePortProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class RdsAdvertiseRequestedPortIntegrationTest {
 
     @AfterEach

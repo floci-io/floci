@@ -1,8 +1,8 @@
 package io.floci.aws.services.bedrockruntime;
 
 import com.sun.net.httpserver.HttpServer;
+import io.floci.aws.testing.S3EnforceAuthProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,7 +13,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -31,13 +30,13 @@ import static org.hamcrest.Matchers.equalTo;
  * would pass without a disconnect closing them.
  */
 @QuarkusTest
-@TestProfile(BedrockProxyTimeoutIntegrationTest.SlowProxyBackendProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class BedrockProxyTimeoutIntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/bedrock/aws4_request";
-    private static final int PORT = 18931;
-    private static final String MAPPED_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0";
+    private static final int PORT = S3EnforceAuthProfile.BEDROCK_PROXY_PORT;
+    private static final String MAPPED_MODEL_ID = S3EnforceAuthProfile.BEDROCK_PROXY_MAPPED_MODEL_ID;
 
     private HttpServer backend;
 
@@ -95,18 +94,5 @@ class BedrockProxyTimeoutIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
-    }
-
-    public static final class SlowProxyBackendProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.bedrock-runtime.backend", "proxy",
-                    "floci.services.bedrock-runtime.proxy.url", "http://127.0.0.1:" + PORT + "/v1",
-                    "floci.services.bedrock-runtime.proxy.model-mapping",
-                            MAPPED_MODEL_ID + "=claude-3-haiku",
-                    "floci.services.bedrock-runtime.proxy.request-timeout-seconds", "1"
-            );
-        }
     }
 }
