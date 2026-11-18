@@ -428,29 +428,32 @@ class PaymentCryptographyServiceTest {
         PaymentCryptographyKey restored = service.restoreKey(key);
 
         assertEquals("CREATE_COMPLETE", restored.getKeyState());
-        assertTrue(restored.isEnabled(), "a restored key is disabled");
         assertEquals(0, restored.getDeletePendingTimestamp(),
                 "a restored key is still pending deletion");
         assertEquals("CREATE_COMPLETE", service.findKey("us-east-1", key.getArn()).getKeyState());
     }
 
     @Test
-    void aRestoredKeyIsInUseAgain() {
-        // A key that is restored is enabled, so the moments of its use are the moments of
-        // the restore: the use begins now, and the moment it stopped before the deletion is
-        // gone.
+    void aRestoredKeyIsDisabledUntilItsUseIsStartedAgain() {
+        // The reference's own restore example answers with a key that is disabled, and says
+        // that two members change: the state and the pending timestamp. It is StartKeyUsage
+        // that enables a key again.
         PaymentCryptographyKey key = createKey("us-east-1");
         service.stopKeyUsage(key);
+        long stoppedAt = service.findKey("us-east-1", key.getArn()).getUsageStopTimestamp();
         service.deleteKey(key);
-        long before = Instant.now().getEpochSecond();
 
         PaymentCryptographyKey restored = service.restoreKey(key);
 
-        assertTrue(restored.isEnabled(), "a restored key is disabled");
-        assertEquals(0, restored.getUsageStopTimestamp(),
-                "a restored key still carries the moment it was stopped");
-        assertTrue(restored.getUsageStartTimestamp() >= before,
-                "a restored key carries no moment its use began");
+        assertFalse(restored.isEnabled(), "a restored key is enabled");
+        assertEquals("CREATE_COMPLETE", restored.getKeyState());
+        assertEquals(stoppedAt, restored.getUsageStopTimestamp(),
+                "a restored key lost the moment it stopped");
+
+        PaymentCryptographyKey started = service.startKeyUsage(key);
+        assertTrue(started.isEnabled(), "a key that was started again is disabled");
+        assertEquals(0, started.getUsageStopTimestamp(),
+                "a key in use still carries the moment it stopped");
     }
 
     @Test
@@ -489,7 +492,7 @@ class PaymentCryptographyServiceTest {
         assertEquals("CREATE_COMPLETE", replica.getKeyState());
         assertEquals(0, replica.getDeletePendingTimestamp(),
                 "a replica of a restored key is still pending deletion");
-        assertTrue(replica.isEnabled(), "a replica of a restored key is disabled");
+        assertFalse(replica.isEnabled(), "a replica of a restored key is enabled");
     }
 
     @Test

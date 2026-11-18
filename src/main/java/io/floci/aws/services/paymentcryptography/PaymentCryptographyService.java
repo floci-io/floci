@@ -383,10 +383,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         PaymentCryptographyKey current = liveKey(key);
         // A replica is read-only: only the primary may be deleted.
         requireNotReplica(current, "only the primary may be deleted");
-        if ("DELETE_PENDING".equals(current.getKeyState())) {
-            throw new AwsException("ConflictException",
-                    "Key " + current.getArn() + " is already pending deletion", 400);
-        }
+        requireNotPendingDeletion(current, "it cannot be deleted again");
         long now = clock.instant().getEpochSecond();
         current.setKeyState("DELETE_PENDING");
         current.setEnabled(false);
@@ -404,7 +401,12 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      *
      * <p>Only a key in the state {@code DELETE_PENDING} can be restored; one that is not
      * pending deletion is refused with {@code ConflictException}, as the reference refuses
-     * it. A restored key is enabled again and carries no deletion timestamp.
+     * it.
+     *
+     * <p>The reference's own example of the restore says that two members change: the state
+     * goes back to {@code CREATE_COMPLETE} and the pending timestamp is removed. The key
+     * stays disabled, because the deletion disabled it and it is {@code StartKeyUsage} that
+     * enables a key again, and the moments of its use are the ones it had.
      *
      * <p>A replica is read-only, so the deletion is cancelled on the primary: a replica
      * that was restored on its own would be usable while the key it is a copy of is still
@@ -413,18 +415,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized PaymentCryptographyKey restoreKey(PaymentCryptographyKey key) {
         PaymentCryptographyKey current = liveKey(key);
         requireNotReplica(current, "only the primary may be restored");
-        if (!"DELETE_PENDING".equals(current.getKeyState())) {
-            throw new AwsException("ConflictException",
-                    "Key " + current.getArn() + " is not pending deletion", 400);
-        }
+        requirePendingDeletion(current, "it cannot be restored");
         current.setKeyState("CREATE_COMPLETE");
-        current.setEnabled(true);
         current.setDeletePendingTimestamp(0);
         current.setDeleteTimestamp(0);
-        // The key is in use again, so the moments of its use are the moments of the restore:
-        // the use begins now, and the moment it stopped before the deletion is gone.
-        current.setUsageStartTimestamp(clock.instant().getEpochSecond());
-        current.setUsageStopTimestamp(0);
         storeKey(current);
         // The replicas of a key carry the state of their primary, so a key that is restored
         // is restored in every region it replicates into.
@@ -732,6 +726,22 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         if ("DELETE_PENDING".equals(key.getKeyState())) {
             throw new AwsException("ConflictException",
                     "the key " + key.getArn() + " is pending deletion, and " + what, 400);
+        }
+    }
+
+    /**
+     * The refusal of a request that names a key whose deletion is not under way.
+     *
+     * <p>A scheduled deletion is cancelled while it is under way, so a key that is not
+     * pending deletion has nothing to cancel.
+     *
+     * @param key the key the request names
+     * @param what what the request wanted to do with the key, for the message
+     */
+    private static void requirePendingDeletion(PaymentCryptographyKey key, String what) {
+        if (!"DELETE_PENDING".equals(key.getKeyState())) {
+            throw new AwsException("ConflictException",
+                    "the key " + key.getArn() + " is not pending deletion, and " + what, 400);
         }
     }
 

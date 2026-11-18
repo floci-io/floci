@@ -59,16 +59,17 @@
   state `DELETE_PENDING` and the moment its deletion takes effect. The key is kept, so it
   stays readable and keeps its aliases and tags until the waiting period ends.
   `DeleteKeyInDays` is checked against the range the model states. `RestoreKey` cancels a
-  scheduled deletion and returns the key to `CREATE_COMPLETE`, enabled and with no pending
-  deletion timestamp; a key that is not pending deletion is refused with
-  `ConflictException`. The waiting period is not swept by a timer: the emulator keeps the
-  key pending rather than deleting it on a clock. A key that is already pending deletion
-  is refused with `ConflictException`, because the deletion is already under way, and the
-  replicas of the key carry its pending state and the moment the deletion takes effect, as
-  they carry the rest of its metadata. A replica is read-only, so the deletion is cancelled
-  on the primary: a request that names a replica is refused with `ValidationException`. A
-  restored key is in use again, so the moments of its use are the moments of the restore:
-  the use begins now, and the moment the key stopped before the deletion is gone.
+  scheduled deletion and returns the key to `CREATE_COMPLETE` with no pending deletion
+  timestamp; a key that is not pending deletion is refused with `ConflictException`. The
+  reference's own example of the restore says that two members change, the state and the
+  pending timestamp, so the restored key stays disabled and keeps the moments of its use:
+  it is `StartKeyUsage` that enables a key again. The waiting period is not swept by a
+  timer: the emulator keeps the key pending rather than deleting it on a clock. A key that
+  is already pending deletion is refused with `ConflictException`, because the deletion is
+  already under way, and the replicas of the key carry its pending state and the moment the
+  deletion takes effect, as they carry the rest of its metadata. A replica is read-only, so
+  the deletion is cancelled on the primary: a request that names a replica is refused with
+  `ValidationException`.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled`, `Tags`,
   `DeriveKeyUsage` and `ReplicationRegions`, and a key created disabled or with tags
   comes back that way. The `KeyUsage` and the

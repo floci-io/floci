@@ -149,7 +149,9 @@ create_key() {
     run aws_cmd payment-cryptography restore-key --key-identifier "$KEY_ARN"
     assert_success
     [ "$(json_get "$output" '.Key.KeyState')" = "CREATE_COMPLETE" ]
-    [ "$(json_get "$output" '.Key.Enabled')" = "true" ]
+    # The reference's own restore example answers with a key that is disabled: it is
+    # start-key-usage that enables a key again.
+    [ "$(json_get "$output" '.Key.Enabled')" = "false" ]
 }
 
 @test "Payment Cryptography control plane: a key pair is created with the usage its derived keys have" {

@@ -995,7 +995,7 @@ class PaymentCryptographyIntegrationTest {
         call("RestoreKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(200)
                     .body("Key.KeyState", equalTo("CREATE_COMPLETE"))
-                    .body("Key.Enabled", equalTo(true))
+                    .body("Key.Enabled", equalTo(false))
                     .body("Key.DeletePendingTimestamp", nullValue());
     }
 

@@ -793,7 +793,9 @@ class PaymentCryptographyTest {
         Key restored = client.restoreKey(k -> k.keyIdentifier(created.keyArn())).key();
 
         assertThat(restored.keyState()).isEqualTo(KeyState.CREATE_COMPLETE);
-        assertThat(restored.enabled()).isTrue();
+        // The reference's own restore example answers with a key that is disabled: it is
+        // StartKeyUsage that enables a key again.
+        assertThat(restored.enabled()).isFalse();
         assertThat(restored.deletePendingTimestamp()).isNull();
     }
 
