@@ -48,6 +48,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -478,6 +479,11 @@ public class EmrServerlessJobRunService implements Resettable {
         JobRunRecord record = runFor(resource);
         record.getJobRun().setTags(EmrServerlessService.withoutTags(record.getJobRun().getTags(), tagKeys));
         store.put(record.getJobRun().getJobRunId(), record);
+    }
+
+    /** The job run {@code jobRunId} of {@code account} as stored, read in place, for IAM's lookup of stored tags. */
+    Optional<JobRun> storedRun(String account, String jobRunId) {
+        return AccountAwareStorageBackend.readInAccount(store, account, jobRunId).map(JobRunRecord::getJobRun);
     }
 
     /** GetJobRun's {@code attempt}, an integer in the query string. */

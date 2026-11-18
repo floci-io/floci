@@ -82,7 +82,8 @@ public class EmrServerlessService {
             Set.of("RepositoryNotFoundException", "ImageNotFoundException", "ServerException");
     // A release label's major and minor versions.
     private static final Pattern RELEASE_VERSION = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})(?:\\..*)?");
-    private static final Pattern RESOURCE =
+    /** A tagging ARN's resource: an application's id, then {@code jobruns} or {@code sessions} and its id. */
+    static final Pattern RESOURCE =
             Pattern.compile("/applications/([0-9a-zA-Z]+)(?:/(jobruns|sessions)/([0-9a-zA-Z]+))?");
     private static final List<String> APPLICATION_STATES =
             List.of("CREATING", "CREATED", "STARTING", "STARTED", "STOPPING", "STOPPED", "TERMINATED");
@@ -567,6 +568,16 @@ public class EmrServerlessService {
         boolean session = "sessions".equals(matcher.group(2));
         return new ResourceArn(arn, matcher.group(1), session ? null : matcher.group(3),
                 session ? matcher.group(3) : null);
+    }
+
+    /**
+     * The application {@code applicationId} of {@code account} as stored, read in place, a record stored before storage
+     * was account-aware included, unless it was deleted, which leaves it TERMINATED: what IAM's lookup of stored tags
+     * reads, never under this service's lock, a tag call giving the application a new map.
+     */
+    Optional<Application> storedLive(String account, String applicationId) {
+        return AccountAwareStorageBackend.readInAccount(storage, account, applicationId)
+                .filter(app -> !"TERMINATED".equals(app.getState()));
     }
 
     /** Whether the application exists and has not been deleted, which leaves it TERMINATED. */
