@@ -78,6 +78,54 @@ class RdsDataServiceTest {
         assertEquals(Types.INTEGER, response.path("columnMetadata").get(0).path("arrayBaseColumnType").asInt());
     }
 
+    // Catches: the database name went into the JDBC URL as written, so a caller
+    // could append connection properties (allowLoadLocalInfile, autoDeserialize) to it.
+    @Test
+    void aDatabaseNameCarryingConnectionPropertiesIsRefusedBeforeAnyConnectionOpens() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
+        String injected = "app?allowLoadLocalInfile=true&autoDeserialize=true";
+
+        ObjectNode execute = harness.request("select 1");
+        execute.put("database", injected);
+        ObjectNode begin = harness.beginRequest();
+        begin.put("database", injected);
+        ObjectNode batch = harness.request("select 1");
+        batch.put("database", injected);
+        batch.putArray("parameterSets");
+        for (AwsException error : List.of(
+                assertThrows(AwsException.class, () -> harness.service.executeStatement(execute, REGION)),
+                assertThrows(AwsException.class, () -> harness.service.beginTransaction(begin, REGION)),
+                assertThrows(AwsException.class, () -> harness.service.batchExecuteStatement(batch, REGION)))) {
+            assertEquals("BadRequestException", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertEquals(0, harness.connectionsOpened.get());
+    }
+
+    @Test
+    void aDatabaseNameLongerThanTheModelAllowsIsRefused() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        ObjectNode request = harness.request("select 1");
+        request.put("database", "d".repeat(65));
+
+        AwsException error = assertThrows(AwsException.class, () -> harness.service.executeStatement(request, REGION));
+
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals("database must be at most 64 characters.", error.getMessage());
+        assertEquals(0, harness.connectionsOpened.get());
+    }
+
+    @Test
+    void anOrdinaryDatabaseNameWithAHyphenStillConnects() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        ObjectNode request = harness.request("select 1");
+        request.put("database", "orders-db_2");
+
+        harness.service.executeStatement(request, REGION);
+
+        assertEquals(1, harness.connectionsOpened.get());
+    }
+
     @Test
     void rejectsMultidimensionalArrayResultsThroughTheJdbcExecutionPath() throws Exception {
         TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);

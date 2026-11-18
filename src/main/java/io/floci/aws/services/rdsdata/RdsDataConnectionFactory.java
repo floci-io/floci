@@ -31,7 +31,30 @@ class RdsDataConnectionFactory {
         return DriverManager.getConnection(url, props);
     }
 
+    /** The longest database name the RDS Data API accepts ({@code DbName}, at most 64 characters). */
+    static final int MAX_DATABASE_NAME_LENGTH = 64;
+
+    /**
+     * The first character of {@code database} that would change the JDBC URL's structure rather than
+     * name a database (one that starts or separates connection properties, a path, a fragment, a user
+     * or an escape, whitespace, or a control character), or null when there is none. The database
+     * goes into the URL as written, so such a character would let the name add or override connection
+     * properties.
+     */
+    static Character urlUnsafeCharacter(String database) {
+        for (int i = 0; i < database.length(); i++) {
+            char c = database.charAt(i);
+            if ("?&=#/\\@;%:".indexOf(c) >= 0 || Character.isWhitespace(c) || Character.isISOControl(c)) {
+                return c;
+            }
+        }
+        return null;
+    }
+
     static String buildUrl(DatabaseEngine engine, String host, int port, String database) {
+        if (urlUnsafeCharacter(database) != null) {
+            throw new IllegalArgumentException("Database name cannot be used in a JDBC URL: " + database);
+        }
         return switch (engine) {
             case MYSQL, MARIADB -> "jdbc:mysql://" + host + ":" + port + "/" + database
                     + "?useSSL=false&allowPublicKeyRetrieval=true";
