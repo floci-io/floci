@@ -639,6 +639,27 @@ returned object", even though the `InstanceProfile` shape itself carries no such
 Tags on a role embedded in `InstanceProfileList` are always omitted, matching `GetInstanceProfile`'s
 own documented role subset.
 
+### What the instance profile pair refuses
+
+An instance profile holds one role, and both halves of that are recorded against a real account on
+2026-10-29.
+
+Adding a second role is `LimitExceeded` 409 with `Cannot exceed quota for
+InstanceSessionsPerInstanceProfile: 1`. The quota name is what tells an operator or a quota-aware
+client which of the operation's limits fired, and it is that one: AWS publishes no
+roles-per-instance-profile quota by any name, and this package used to answer prose instead of the
+`Cannot exceed quota for <name>: <n>` form it already writes for nine other quotas.
+
+Removing a role the profile does not hold is `NoSuchEntity` 404 with `Role <roleName> in Instance
+Profile <instanceProfileName> cannot be found.`, where this package removed nothing and answered
+200. A role that was deleted while the profile still lists it is a different case and is still
+removable, which is what the profile's own list decides.
+
+The two CloudFormation paths that detach a role read the profile's list and then remove what it
+named, so a pairing some other caller detaches in between is tolerated there rather than failing a
+stack delete or an update part way; a profile that has itself gone still ends the delete where it
+always did.
+
 ### Access Keys
 
 | Action | Description |
