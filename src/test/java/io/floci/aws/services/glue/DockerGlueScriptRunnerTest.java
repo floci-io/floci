@@ -8,13 +8,14 @@ import com.github.dockerjava.api.model.Container;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.S3Uri;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
-import io.floci.aws.services.iam.AssumeRolePolicyEvaluator;
+import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.SessionCreds;
@@ -343,13 +344,13 @@ class DockerGlueScriptRunnerTest {
     @Test
     void resolvesRoleNameViaIamServiceForScriptCredentials() {
         IamService iamService = mock(IamService.class);
-        AssumeRolePolicyEvaluator trust = mock(AssumeRolePolicyEvaluator.class);
+        ServiceRoleAuthorizer authorizer = mock(ServiceRoleAuthorizer.class);
         String resolvedArn = "arn:aws:iam::000000000000:role/service-role/glue-role";
         IamRole role = new IamRole("role-id", "glue-role", "/service-role/", resolvedArn, "{}");
         when(iamService.findRole("000000000000", "glue-role")).thenReturn(Optional.of(role));
         SessionCreds session = new SessionCreds("ASIAGLUE", "secret", "token");
         when(roleCredentials.forRole(resolvedArn, "000000000000", "jr_1")).thenReturn(Optional.of(session));
-        DockerGlueScriptRunner runner = runner("script", iamService, trust);
+        DockerGlueScriptRunner runner = runner("script", iamService, authorizer);
         container("script", false, 0L);
         inS3("glue-demo", "scripts/job.py", "pass");
 
@@ -375,12 +376,13 @@ class DockerGlueScriptRunnerTest {
     void enforcementRejectsRoleThatDoesNotTrustGlue() {
         when(config.services().iam().enforcementEnabled()).thenReturn(true);
         IamService iamService = mock(IamService.class);
-        AssumeRolePolicyEvaluator trust = mock(AssumeRolePolicyEvaluator.class);
+        ServiceRoleAuthorizer authorizer = mock(ServiceRoleAuthorizer.class);
         IamRole role = new IamRole("role-id", "glue", "/", ROLE, "{}");
         when(iamService.findRole("000000000000", "glue")).thenReturn(Optional.of(role));
-        when(trust.allowsService("{}", "glue.amazonaws.com",
-                "arn:aws:glue:us-east-1:000000000000:job/etl", "000000000000")).thenReturn(false);
-        DockerGlueScriptRunner runner = runner("script", iamService, trust);
+        when(authorizer.refusal(ROLE, "000000000000", "glue.amazonaws.com",
+                "arn:aws:glue:us-east-1:000000000000:job/etl", List.of()))
+                .thenReturn(Optional.of("The role " + ROLE + " does not trust glue.amazonaws.com."));
+        DockerGlueScriptRunner runner = runner("script", iamService, authorizer);
         container("script", false, 0L);
 
         GlueScriptRunner.Outcome outcome = runner.run(request(ROLE, clock.instant(), Duration.ZERO), progress);
@@ -393,14 +395,14 @@ class DockerGlueScriptRunnerTest {
     void enforcementAllowsRoleThatTrustsGlue() {
         when(config.services().iam().enforcementEnabled()).thenReturn(true);
         IamService iamService = mock(IamService.class);
-        AssumeRolePolicyEvaluator trust = mock(AssumeRolePolicyEvaluator.class);
+        ServiceRoleAuthorizer authorizer = mock(ServiceRoleAuthorizer.class);
         IamRole role = new IamRole("role-id", "glue", "/", ROLE, "{\"Statement\":[]}");
         when(iamService.findRole("000000000000", "glue")).thenReturn(Optional.of(role));
-        when(trust.allowsService("{\"Statement\":[]}", "glue.amazonaws.com",
-                "arn:aws:glue:us-east-1:000000000000:job/etl", "000000000000")).thenReturn(true);
+        when(authorizer.refusal(ROLE, "000000000000", "glue.amazonaws.com",
+                "arn:aws:glue:us-east-1:000000000000:job/etl", List.of())).thenReturn(Optional.empty());
         SessionCreds session = new SessionCreds("ASIAGLUE", "secret", "token");
         when(roleCredentials.forRole(ROLE, "000000000000", "jr_1")).thenReturn(Optional.of(session));
-        DockerGlueScriptRunner runner = runner("script", iamService, trust);
+        DockerGlueScriptRunner runner = runner("script", iamService, authorizer);
         container("script", false, 0L);
         inS3("glue-demo", "scripts/job.py", "pass");
 
@@ -408,6 +410,34 @@ class DockerGlueScriptRunnerTest {
 
         assertEquals(0, outcome.exitCode());
         verify(roleCredentials).unregister("000000000000", "ASIAGLUE");
+    }
+
+    @Test
+    void customRegionKeepsDeploymentPartitionForRoleName() {
+        RegionResolver chinaDeployment = new RegionResolver("cn-north-1", "000000000000", "aws-cn");
+        DockerGlueScriptRunner runner = runner("script", mock(IamService.class), mock(ServiceRoleAuthorizer.class),
+                chinaDeployment);
+        container("script", false, 0L);
+        inS3("glue-demo", "scripts/job.py", "pass");
+
+        runner.run(request("glue", "xx-custom-1", clock.instant(), Duration.ZERO), progress);
+
+        verify(roleCredentials).forRole("arn:aws-cn:iam::000000000000:role/glue", "000000000000", "jr_1");
+    }
+
+    @Test
+    void enforcementRejectsRoleArnOutsideCustomRegionPartition() {
+        when(config.services().iam().enforcementEnabled()).thenReturn(true);
+        RegionResolver chinaDeployment = new RegionResolver("cn-north-1", "000000000000", "aws-cn");
+        DockerGlueScriptRunner runner = runner("script", mock(IamService.class), mock(ServiceRoleAuthorizer.class),
+                chinaDeployment);
+        container("script", false, 0L);
+
+        GlueScriptRunner.Outcome outcome = runner.run(request(ROLE, "xx-custom-1", clock.instant(), Duration.ZERO),
+                progress);
+
+        assertTrue(outcome.failure().contains("another partition"));
+        verify(lifecycle, never()).create(any());
     }
 
     @Test
@@ -491,7 +521,11 @@ class DockerGlueScriptRunnerTest {
     }
 
     private GlueScriptRunner.Run request(String role, Instant startedOn, Duration timeout) {
-        return new GlueScriptRunner.Run("jr_1", "etl", "000000000000", "us-east-1", role, SCRIPT,
+        return request(role, "us-east-1", startedOn, timeout);
+    }
+
+    private GlueScriptRunner.Run request(String role, String region, Instant startedOn, Duration timeout) {
+        return new GlueScriptRunner.Run("jr_1", "etl", "000000000000", region, role, SCRIPT,
                 List.of("--JOB_NAME", "etl", "--JOB_RUN_ID", "jr_1"), "glue-image:5", null, startedOn, timeout);
     }
 
@@ -500,7 +534,12 @@ class DockerGlueScriptRunnerTest {
         return runner(id, null, null);
     }
 
-    private DockerGlueScriptRunner runner(String id, IamService iamService, AssumeRolePolicyEvaluator trust) {
+    private DockerGlueScriptRunner runner(String id, IamService iamService, ServiceRoleAuthorizer authorizer) {
+        return runner(id, iamService, authorizer, new RegionResolver("us-east-1", "000000000000"));
+    }
+
+    private DockerGlueScriptRunner runner(String id, IamService iamService, ServiceRoleAuthorizer authorizer,
+                                          RegionResolver regionResolver) {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         when(builder.newContainer(anyString())).thenReturn(spec);
         when(builder.resolveImage(anyString())).thenAnswer(image -> image.getArgument(0));
@@ -510,8 +549,8 @@ class DockerGlueScriptRunnerTest {
         when(lifecycle.resolveImageForLaunch(anyString(), eq(ImagePullBehavior.DEFAULT), isNull()))
                 .thenAnswer(pull -> new LaunchImage(pull.getArgument(0), null));
         when(awsEnv.flociEndpoint()).thenReturn(ENDPOINT);
-        return new DockerGlueScriptRunner(builder, lifecycle, logStreamer, awsEnv, roleCredentials, iamService, trust,
-                s3, config, clock, Duration.ZERO);
+        return new DockerGlueScriptRunner(builder, lifecycle, logStreamer, awsEnv, roleCredentials, iamService, authorizer,
+                regionResolver, s3, config, clock, Duration.ZERO);
     }
 
     private String container(String id, boolean running, Long exitCode) {

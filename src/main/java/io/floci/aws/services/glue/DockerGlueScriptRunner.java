@@ -5,8 +5,8 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.ContainerTeardown;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.S3Uri;
 import io.floci.aws.core.common.ServicePrincipals;
@@ -19,8 +19,8 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
-import io.floci.aws.services.iam.AssumeRolePolicyEvaluator;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.SessionCreds;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
@@ -70,7 +70,8 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials roleCredentials;
     private final IamService iamService;
-    private final AssumeRolePolicyEvaluator trustEvaluator;
+    private final ServiceRoleAuthorizer roleAuthorizer;
+    private final RegionResolver regionResolver;
     private final S3Service s3Service;
     private final EmulatorConfig config;
     private final Clock clock;
@@ -82,32 +83,33 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
     public DockerGlueScriptRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                                   ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
                                   LambdaExecutionRoleCredentials roleCredentials, IamService iamService,
-                                  AssumeRolePolicyEvaluator trustEvaluator, S3Service s3Service,
-                                  EmulatorConfig config, Clock clock) {
-        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, iamService, trustEvaluator,
-                s3Service, config, clock, POLL_INTERVAL);
+                                  ServiceRoleAuthorizer roleAuthorizer, RegionResolver regionResolver,
+                                  S3Service s3Service, EmulatorConfig config, Clock clock) {
+        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, iamService, roleAuthorizer,
+                regionResolver, s3Service, config, clock, POLL_INTERVAL);
     }
 
     DockerGlueScriptRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                            ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
-                           LambdaExecutionRoleCredentials roleCredentials, S3Service s3Service,
-                           EmulatorConfig config, Clock clock, Duration pollInterval) {
-        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, null, null, s3Service,
-                config, clock, pollInterval);
+                           LambdaExecutionRoleCredentials roleCredentials, RegionResolver regionResolver,
+                           S3Service s3Service, EmulatorConfig config, Clock clock, Duration pollInterval) {
+        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, null, null, regionResolver,
+                s3Service, config, clock, pollInterval);
     }
 
     DockerGlueScriptRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                            ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
                            LambdaExecutionRoleCredentials roleCredentials, IamService iamService,
-                           AssumeRolePolicyEvaluator trustEvaluator, S3Service s3Service,
-                           EmulatorConfig config, Clock clock, Duration pollInterval) {
+                           ServiceRoleAuthorizer roleAuthorizer, RegionResolver regionResolver,
+                           S3Service s3Service, EmulatorConfig config, Clock clock, Duration pollInterval) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.awsEnv = awsEnv;
         this.roleCredentials = roleCredentials;
         this.iamService = iamService;
-        this.trustEvaluator = trustEvaluator;
+        this.roleAuthorizer = roleAuthorizer;
+        this.regionResolver = regionResolver;
         this.s3Service = s3Service;
         this.config = config;
         this.clock = clock;
@@ -281,7 +283,7 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
             return Optional.empty();
         }
         if (enforcement) {
-            verifyRoleTrust(run, roleArn);
+            requireUsableRole(run, roleArn);
         }
         Optional<SessionCreds> session = roleCredentials.forRole(roleArn, run.accountId(), run.runId());
         if (session.isEmpty()) {
@@ -295,34 +297,26 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
     }
 
     private String resolveRoleArn(Run run, String roleRef, boolean enforcement) {
+        String partition = regionResolver.partitionForRegion(run.region());
         if (AwsArnUtils.looksLikeArn(roleRef)) {
             AwsArnUtils.Arn parsed;
             try {
                 parsed = AwsArnUtils.parse(roleRef);
             } catch (IllegalArgumentException e) {
-                if (enforcement) {
-                    throw new IllegalArgumentException("The role " + roleRef + " is not a valid ARN.", e);
-                }
-                return null;
+                LOG.debugv(e, "Glue job role {0} is not a valid ARN", roleRef);
+                // Under enforcement the authorizer words the refusal.
+                return enforcement ? roleRef : null;
             }
-            if (!"iam".equals(parsed.service()) || !parsed.resource().startsWith("role/")) {
-                if (enforcement) {
-                    throw new IllegalArgumentException("The role " + roleRef + " is not an IAM role.");
-                }
-                return null;
+            boolean namedRole = "iam".equals(parsed.service()) && parsed.resource().startsWith("role/")
+                    && !parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1).isBlank();
+            if (!namedRole) {
+                return enforcement ? roleRef : null;
             }
             if (!run.accountId().equals(parsed.accountId())) {
                 throw new IllegalArgumentException("Cross-account job role " + roleRef + " is not allowed.");
             }
-            if (enforcement && !AwsRegions.partitionFor(run.region()).equals(parsed.partition())) {
+            if (enforcement && !partition.equals(parsed.partition())) {
                 throw new IllegalArgumentException("The role " + roleRef + " belongs to another partition.");
-            }
-            String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
-            if (roleName.isBlank()) {
-                if (enforcement) {
-                    throw new IllegalArgumentException("The role " + roleRef + " has no role name.");
-                }
-                return null;
             }
             return roleRef;
         }
@@ -334,37 +328,25 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
             }
             return null;
         }
-        String partition = AwsRegions.partitionFor(run.region());
+        String expectedArn = AwsArnUtils.Arn.global(partition, "iam", run.accountId(), "role/" + roleRef).toString();
         if (iamService != null) {
             Optional<IamRole> found = iamService.findRole(run.accountId(), roleName);
             if (slash >= 0) {
-                String expectedArn = AwsArnUtils.Arn.global(partition, "iam", run.accountId(), "role/" + roleRef)
-                        .toString();
                 found = found.filter(role -> IamService.roleArnMatches(expectedArn, role));
             }
             if (found.isPresent()) {
                 return found.get().getArn();
             }
         }
-        return AwsArnUtils.Arn.global(partition, "iam", run.accountId(), "role/" + roleRef).toString();
+        return expectedArn;
     }
 
-    private void verifyRoleTrust(Run run, String roleArn) {
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(roleArn);
-        String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
-        IamRole role = iamService != null
-                ? iamService.findRole(run.accountId(), roleName)
-                        .filter(found -> IamService.roleArnMatches(roleArn, found))
-                        .orElse(null)
-                : null;
-        if (role == null) {
-            throw new IllegalArgumentException("The role " + roleArn + " does not exist.");
-        }
+    private void requireUsableRole(Run run, String roleArn) {
         String jobArn = AwsArnUtils.Arn.of("glue", run.region(), run.accountId(), "job/" + run.jobName()).toString();
-        String gluePrincipal = ServicePrincipals.of("glue");
-        if (trustEvaluator != null && !trustEvaluator.allowsService(
-                role.getAssumeRolePolicyDocument(), gluePrincipal, jobArn, run.accountId())) {
-            throw new IllegalArgumentException("The role " + roleArn + " does not trust " + gluePrincipal + ".");
+        Optional<String> refusal = roleAuthorizer.refusal(roleArn, run.accountId(), ServicePrincipals.of("glue"),
+                jobArn, List.of());
+        if (refusal.isPresent()) {
+            throw new IllegalArgumentException(refusal.get());
         }
     }
 

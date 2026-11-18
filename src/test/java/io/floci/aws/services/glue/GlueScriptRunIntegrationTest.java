@@ -79,10 +79,10 @@ class GlueScriptRunIntegrationTest {
     }
 
     private static String awaitEnd(String region, String jobName, String runId) throws InterruptedException {
-        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(1).toNanos();
         String state = state(region, jobName, runId);
         while ("RUNNING".equals(state) && System.nanoTime() < deadline) {
-            Thread.sleep(50);
+            Thread.sleep(10);
             state = state(region, jobName, runId);
         }
         return state;
