@@ -347,6 +347,18 @@ tags the bus had before it are put back. Changing `Description` or `Policy` duri
 rejected until transactional resource rollback is available; this prevents a failed stack update
 from leaving the live bus in the rejected configuration.
 
+## EventBridge rules
+
+`AWS::Events::Rule` reports a rule on the default event bus by its name, and a rule on a custom event
+bus as `<event bus name>|<rule name>`, in `Ref` and in `DescribeStackResources`, as AWS's resource
+provider for the type does. A bus given by ARN counts by its name when it is in the stack's account,
+and keeps its ARN, `<event bus ARN>|<rule name>`, when it is in another account. EventBridge's own
+operations take the rule name and the bus separately, so split the value at the `|` before calling
+`DescribeRule` or `DeleteRule`. `Fn::GetAtt` still gives `RuleName` and `Arn`. A rule saved by an
+earlier Floci keeps its bare name as its id until an update changes the rule. An update that moves a
+rule to another bus, or renames it, creates the rule on that bus or under that name and leaves the
+old rule where it was.
+
 ## EventBridge archives
 
 `AWS::Events::Archive` creates a real archive of the events sent to `SourceArn`, which must be an
