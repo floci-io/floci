@@ -92,7 +92,7 @@ without authentication relays these commands to the engine as sent.
 | Action | Description |
 | --- | --- |
 | `ValidateIamAuthToken` | Validate an IAM auth token (data-plane auth) |
-| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow`, `Tags` and `UserGroupIds` are kept and returned, with the group `ARN`. `UserGroupIds` needs `TransitEncryptionEnabled` or an `AuthToken` |
+| `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow`, `Tags`, `UserGroupIds` and `LogDeliveryConfigurations` are kept and returned, with the group `ARN`. Each enabled log delivery configuration reads back as `active`; Floci delivers no logs. `UserGroupIds` needs `TransitEncryptionEnabled` or an `AuthToken` |
 | `DescribeReplicationGroups` | List clusters and their connection info |
 | `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups (`UserGroupIdsToAdd`, `UserGroupIdsToRemove`, `RemoveUserGroups`). A cache with user groups no longer takes its AUTH token, `AuthTokenUpdateStrategy=DELETE` removes the token when adding a user group, and removing the last user group leaves the cache without access control. Changing the AUTH token (`ROTATE`, `SET`) is not supported |
 | `IncreaseReplicaCount` | Raise a cluster-mode-disabled group's replicas to `NewReplicaCount` (up to 5), with `ApplyImmediately=true`. See [Replicas and failover](#replicas-and-failover) |

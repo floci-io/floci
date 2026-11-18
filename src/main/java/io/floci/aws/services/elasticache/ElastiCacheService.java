@@ -34,6 +34,7 @@ import io.floci.aws.services.elasticache.model.ElastiCacheSnapshot;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
+import io.floci.aws.services.elasticache.model.LogDeliveryConfiguration;
 import io.floci.aws.services.elasticache.model.ReplicationGroup;
 import io.floci.aws.services.elasticache.model.ReplicationGroupSettings;
 import io.floci.aws.services.elasticache.model.ReplicationGroupStatus;
@@ -224,7 +225,22 @@ public class ElastiCacheService implements ResourceProvider {
             ReplicationGroupSettings settings,
             Map<String, String> tags,
             List<String> userGroupIds,
-            List<String> securityGroupIds) {
+            List<String> securityGroupIds,
+            List<LogDeliveryConfiguration> logDeliveryConfigurations) {
+
+        public CreateReplicationGroupRequest(String replicationGroupId, String description, AuthMode authMode,
+                                             String authToken, String region, String engine, String engineVersion,
+                                             String cacheNodeType, String cacheParameterGroupName,
+                                             String cacheSubnetGroupName, String clusterMode, Integer numNodeGroups,
+                                             Integer replicasPerNodeGroup, Integer numCacheClusters,
+                                             Boolean automaticFailoverEnabled, Boolean multiAzEnabled, Integer port,
+                                             ReplicationGroupSettings settings, Map<String, String> tags,
+                                             List<String> userGroupIds, List<String> securityGroupIds) {
+            this(replicationGroupId, description, authMode, authToken, region, engine, engineVersion, cacheNodeType,
+                    cacheParameterGroupName, cacheSubnetGroupName, clusterMode, numNodeGroups, replicasPerNodeGroup,
+                    numCacheClusters, automaticFailoverEnabled, multiAzEnabled, port, settings, tags, userGroupIds,
+                    securityGroupIds, List.of());
+        }
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
@@ -617,6 +633,7 @@ public class ElastiCacheService implements ResourceProvider {
         group.setCacheParameterGroupName(request.cacheParameterGroupName());
         group.setCacheSubnetGroupName(request.cacheSubnetGroupName());
         group.setSecurityGroupIds(request.securityGroupIds());
+        group.setLogDeliveryConfigurations(request.logDeliveryConfigurations());
         group.setAutomaticFailoverEnabled(Boolean.TRUE.equals(request.automaticFailoverEnabled()));
         group.setMultiAzEnabled(Boolean.TRUE.equals(request.multiAzEnabled()));
         group.setSnapshotWindow(ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);

@@ -18,6 +18,7 @@ import io.floci.aws.services.elasticache.model.ElastiCacheSnapshot;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
+import io.floci.aws.services.elasticache.model.LogDeliveryConfiguration;
 import io.floci.aws.services.elasticache.model.ReplicationGroup;
 import io.floci.aws.services.elasticache.model.ReplicationGroupSettings;
 import io.floci.aws.services.elasticache.model.ReplicationGroupStatus;
@@ -153,7 +154,8 @@ public class ElastiCacheQueryHandler {
                             replicationGroupSettings(params),
                             parseTags(params),
                             extractMemberList(params, "UserGroupIds.member."),
-                            parseSecurityGroupIds(params));
+                            parseSecurityGroupIds(params),
+                            parseLogDeliveryConfigurations(params));
             ReplicationGroup group = snapshotName != null && !snapshotName.isBlank()
                     ? service.createReplicationGroupFromSnapshot(request, snapshotName)
                     : service.createReplicationGroup(request);
@@ -174,6 +176,27 @@ public class ElastiCacheQueryHandler {
                 optionalInt(params.getFirst("SnapshotRetentionLimit")),
                 params.getFirst("SnapshotWindow"), params.getFirst("TransitEncryptionMode"),
                 boolParam(params, "TransitEncryptionEnabled"));
+    }
+
+    private static List<LogDeliveryConfiguration> parseLogDeliveryConfigurations(
+            MultivaluedMap<String, String> params) {
+        List<LogDeliveryConfiguration> configurations = new ArrayList<>();
+        for (String prefix : List.of("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.",
+                "LogDeliveryConfigurations.member.")) {
+            for (int index = 1; params.getFirst(prefix + index + ".LogType") != null; index++) {
+                String member = prefix + index + ".";
+                if ("false".equalsIgnoreCase(params.getFirst(member + "Enabled"))) {
+                    continue;
+                }
+                configurations.add(new LogDeliveryConfiguration(
+                        params.getFirst(member + "LogType"),
+                        params.getFirst(member + "DestinationType"),
+                        params.getFirst(member + "DestinationDetails.CloudWatchLogsDetails.LogGroup"),
+                        params.getFirst(member + "DestinationDetails.KinesisFirehoseDetails.DeliveryStream"),
+                        params.getFirst(member + "LogFormat")));
+            }
+        }
+        return configurations;
     }
 
     private static Integer optionalInt(String value) {
@@ -1272,6 +1295,28 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         return g.getAuthMode() == AuthMode.PASSWORD && g.getUserGroupIds().isEmpty();
     }
 
+    private static String logDeliveryConfigurationsXml(List<LogDeliveryConfiguration> configurations) {
+        XmlBuilder xml = new XmlBuilder().start("LogDeliveryConfigurations");
+        for (LogDeliveryConfiguration c : configurations) {
+            xml.start("LogDeliveryConfiguration")
+                    .elem("LogType", c.logType())
+                    .elem("DestinationType", c.destinationType())
+                    .start("DestinationDetails");
+            if (c.logGroup() != null) {
+                xml.start("CloudWatchLogsDetails").elem("LogGroup", c.logGroup()).end("CloudWatchLogsDetails");
+            }
+            if (c.deliveryStream() != null) {
+                xml.start("KinesisFirehoseDetails").elem("DeliveryStream", c.deliveryStream())
+                        .end("KinesisFirehoseDetails");
+            }
+            xml.end("DestinationDetails")
+                    .elem("LogFormat", c.logFormat())
+                    .elem("Status", "active")
+                    .end("LogDeliveryConfiguration");
+        }
+        return xml.end("LogDeliveryConfigurations").build();
+    }
+
     private String replicationGroupXml(ReplicationGroup g) {
         Endpoint ep = g.getConfigurationEndpoint();
         boolean authTokenEnabled = authTokenEnabled(g);
@@ -1305,6 +1350,9 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
         }
         if (g.getArn() != null) {
             xml.elem("ARN", g.getArn());
+        }
+        if (!g.getLogDeliveryConfigurations().isEmpty()) {
+            xml.raw(logDeliveryConfigurationsXml(g.getLogDeliveryConfigurations()));
         }
         if (!g.getUserGroupIds().isEmpty()) {
             xml.raw(memberListXml("UserGroupIds", g.getUserGroupIds()));
