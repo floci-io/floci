@@ -5,8 +5,8 @@ import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.OidcIdentity;
+import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -16,7 +16,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
-import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -36,9 +35,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * trust policy pinning the cluster's OIDC provider and subject, and asserts real temporary
  * credentials and claims are returned. Also asserts rejection when the subject is mismatched
  * or the cluster issuer is untrusted under IAM enforcement.
+ *
+ * <p>The real cluster, the OIDC signing key and IAM enforcement come from
+ * {@link S3IamEnforcementProfile}.
  */
 @QuarkusTest
-@TestProfile(EksIrsaDockerIntegrationTest.Profile.class)
+@TestProfile(S3IamEnforcementProfile.class)
 class EksIrsaDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksIrsaDockerIntegrationTest.class);
@@ -54,17 +56,6 @@ class EksIrsaDockerIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/iam/aws4_request, "
                     + "SignedHeaders=host, Signature=setup";
     private static final String ACCOUNT = "000000000000";
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.eks.mock", "false",
-                    "floci.services.eks.irsa-signing-key", "true",
-                    "floci.services.iam.enforcement-enabled", "true"
-            );
-        }
-    }
 
     @Inject
     DockerClient dockerClient;
