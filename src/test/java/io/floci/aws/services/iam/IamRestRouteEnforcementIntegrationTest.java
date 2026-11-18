@@ -1141,19 +1141,48 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void fisIsCheckedOnTheTemplateItsPathNames() {
-        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
-                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
-                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}}";
-        String id = adminOf("fis").body(template).post("/experimentTemplates")
-                .then().statusCode(200).extract().path("experimentTemplate.id");
-        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
-        String arn = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/" + id;
+        String id = fisTemplate(null);
+        String arn = fisTemplateArn(id);
         String user = user("route-fis");
 
         policy(user, allow("fis:GetExperimentTemplate", arn));
         request(user, "fis", "GET", "/experimentTemplates/" + id, null)
                 .statusCode(200).body("experimentTemplate.arn", equalTo(arn));
         refused(request(user, "fis", "GET", "/experimentTemplates/EXTother", null), "fis:GetExperimentTemplate");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags AWS FIS holds on the experiment template a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller read that team's template and not
+     * another's.
+     */
+    @Test
+    void aFisResourceTagConditionReadsTheTagsOfTheTemplate() {
+        String tagged = fisTemplate("{\"team\":\"web\"}");
+        String other = fisTemplate("{\"team\":\"web\"}");
+        adminOf("fis").body("{\"tags\":{\"team\":\"data\"}}").post("/tags/" + fisTemplateArn(tagged))
+                .then().statusCode(200);
+        String user = user("route-fis-tags");
+
+        policy(user, onTeam("Allow", "fis:GetExperimentTemplate", "data"));
+        request(user, "fis", "GET", "/experimentTemplates/" + tagged, null).statusCode(200);
+        refused(request(user, "fis", "GET", "/experimentTemplates/" + other, null), "fis:GetExperimentTemplate");
+    }
+
+    /** The id of an experiment template an administrator creates, with the {@code tags} JSON object if any. */
+    private String fisTemplate(String tags) {
+        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
+                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}"
+                + (tags == null ? "" : ",\"tags\":" + tags) + "}";
+        String id = adminOf("fis").body(template).post("/experimentTemplates")
+                .then().statusCode(200).extract().path("experimentTemplate.id");
+        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
+        return id;
+    }
+
+    private static String fisTemplateArn(String id) {
+        return "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/" + id;
     }
 
     @Test

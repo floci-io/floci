@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.TagHandler;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -38,6 +39,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Random;
 import java.util.Set;
@@ -58,7 +60,7 @@ import java.util.regex.Pattern;
  * impairs, and each completes once its duration runs out.</p>
  */
 @ApplicationScoped
-public class FisService implements TagHandler {
+public class FisService implements TagHandler, StoredResourceArns {
 
     private static final String SERVICE = "fis";
     private static final int MAX_PAGE_SIZE = 100;
@@ -629,6 +631,53 @@ public class FisService implements TagHandler {
         tagKeys.forEach(this::validateTagKey);
         tagKeys.forEach(current::remove);
         saveResourceTags(region, resource, current);
+    }
+
+    @Override
+    public String namespace() {
+        return SERVICE;
+    }
+
+    /** A request names a template, an experiment or an action by the id its ARN ends in: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the experiment template, the experiment or the action whose ARN is {@code arn}, in the request's
+     * account, where the tag handlers read: an ARN of another account names none. Read in place under the Region the
+     * ARN names and the id it ends in, a record stored before storage was account-aware included; a template or an
+     * experiment is matched on the whole ARN it records, an action, whose ARN is built rather than stored, on the ARN
+     * built for it. A tag call stores a new record, one at a time, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, SERVICE)) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = regionResolver.getAccountId();
+        int separator = parsed.resource().indexOf('/');
+        if (!parsed.accountId().equals(account) || separator <= 0) {
+            return Map.of();
+        }
+        String region = parsed.region();
+        String id = parsed.resource().substring(separator + 1);
+        Map<String, String> tags = switch (parsed.resource().substring(0, separator)) {
+            case "experiment-template" -> AccountAwareStorageBackend.readInAccount(stores.templates, account,
+                            templateKey(region, id))
+                    .filter(template -> arn.equals(template.getArn())).map(ExperimentTemplate::getTags).orElse(null);
+            case "experiment" -> AccountAwareStorageBackend.readInAccount(stores.experiments, account,
+                            experimentKey(region, id))
+                    .filter(experiment -> arn.equals(experiment.getArn())).map(Experiment::getTags).orElse(null);
+            case "action" -> arn.equals(regionResolver.buildArn(SERVICE, region, "action/" + id))
+                    ? AccountAwareStorageBackend.readInAccount(stores.actionTags, account, actionTagsKey(region, id))
+                            .orElse(null)
+                    : null;
+            default -> null;
+        };
+        return tags == null ? Map.of() : new LinkedHashMap<>(tags);
     }
 
     private void validateCreateTemplate(ObjectNode input) {
