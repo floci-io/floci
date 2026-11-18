@@ -53,6 +53,7 @@ class ExternalDsqlBackendIntegrationTest {
     private static final String CONNECT = "dsqlconnect_" + ID;
 
     private ExternalPostgresServer server;
+    private ExternalPostgresServer.Superuser postgres;
     private int port;
 
     @BeforeAll
@@ -63,6 +64,7 @@ class ExternalDsqlBackendIntegrationTest {
             throw new TestAbortedException(e.getMessage(), e);
         }
         port = server.port();
+        postgres = server.superuser();
     }
 
     @AfterAll
@@ -83,14 +85,14 @@ class ExternalDsqlBackendIntegrationTest {
 
         assertEquals(secret, cluster.getBackendSecret());
         String marker = "floci:dsql:" + cluster.getArn();
-        assertEquals(marker, single("postgres", "SELECT shobj_description(oid, 'pg_database') FROM pg_database"
+        assertEquals(marker, postgres.single("SELECT shobj_description(oid, 'pg_database') FROM pg_database"
                 + " WHERE datname = '" + DATABASE + "'"), "the database carries the cluster's marker");
         assertEquals(List.of(marker, marker, marker), List.of(
-                single("postgres", "SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '"
+                postgres.single("SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '"
                         + ADMIN + "'"),
-                single("postgres", "SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '"
+                postgres.single("SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '"
                         + CONNECT + "'"),
-                single("postgres", "SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '"
+                postgres.single("SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname = '"
                         + OWNER + "'")), "so do its admin, connect role and owner, which the start again reused");
         assertEquals(DATABASE, again.database());
         assertTrue(again.credentials().scramOnly(), "logins answer SCRAM alone");
@@ -101,11 +103,11 @@ class ExternalDsqlBackendIntegrationTest {
                 again.credentials().passwordFor(ADMIN)); Statement statement = admin.createStatement()) {
             statement.execute("CALL sys.run_role_ddl($$CREATE ROLE d" + ID + "_app$$)");
         }
-        assertEquals("false", single("postgres", "SELECT rolcreatedb::text FROM pg_roles WHERE rolname = '"
+        assertEquals("false", postgres.single("SELECT rolcreatedb::text FROM pg_roles WHERE rolname = '"
                 + ADMIN + "'"));
-        assertEquals("false", single("postgres", "SELECT has_database_privilege('public', '" + DATABASE
+        assertEquals("false", postgres.single("SELECT has_database_privilege('public', '" + DATABASE
                 + "', 'CONNECT')::text"));
-        assertEquals("true", single("postgres", "SELECT (pg_has_role('d" + ID + "_app', '" + CONNECT
+        assertEquals("true", postgres.single("SELECT (pg_has_role('d" + ID + "_app', '" + CONNECT
                 + "', 'USAGE') AND has_database_privilege('d" + ID + "_app', '" + DATABASE + "', 'CONNECT'))::text"),
                 "a role the admin created connects as a member of the connect role");
 
@@ -119,9 +121,9 @@ class ExternalDsqlBackendIntegrationTest {
             assertFalse(open.isValid(1), "the session was ended");
         }
 
-        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_database WHERE datname = '"
+        assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_database WHERE datname = '"
                 + DATABASE + "'"));
-        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + ID
+        assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + ID
                 + "%' OR rolname IN ('" + OWNER + "', '" + CONNECT + "')"));
         assertEquals(roles, backend.rolesToDrop(cluster), "with the database gone, the saved roles are dropped");
         backend.stop(cluster, true);
@@ -147,7 +149,7 @@ class ExternalDsqlBackendIntegrationTest {
             backend.stop(cluster, true);
         }
 
-        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
+        assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
                 + "%' OR rolname IN ('dsqlowner_" + id + "', 'dsqlconnect_" + id + "')"),
                 "no role of the cluster is left on the server");
     }
@@ -157,7 +159,7 @@ class ExternalDsqlBackendIntegrationTest {
         String id = "zyxwvutsrqponmlkjihgfedcba";
         String owner = "dsqlowner_" + id;
         DsqlCluster cluster = cluster(id);
-        try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+        try (Connection server = postgres.connect("postgres"); Statement statement = server.createStatement()) {
             // An owner and a database an earlier start created for this cluster, so they carry its marker.
             statement.execute("CREATE ROLE " + owner + " NOLOGIN");
             statement.execute("COMMENT ON ROLE " + owner + " IS '" + ExternalDsqlBackend.marker(cluster) + "'");
@@ -165,7 +167,7 @@ class ExternalDsqlBackendIntegrationTest {
             statement.execute("CREATE DATABASE dsql_" + id);
             statement.execute("COMMENT ON DATABASE dsql_" + id + " IS '" + ExternalDsqlBackend.marker(cluster) + "'");
         }
-        try (Connection database = connect("dsql_" + id); Statement statement = database.createStatement()) {
+        try (Connection database = postgres.connect("dsql_" + id); Statement statement = database.createStatement()) {
             statement.execute("CREATE SCHEMA sys");
             statement.execute("CREATE TABLE sys.backend_roles (unexpected int)");
         }
@@ -178,10 +180,10 @@ class ExternalDsqlBackendIntegrationTest {
         }
 
         assertTrue(failed, "the bootstrap fails on a sys.backend_roles of another shape");
-        assertEquals("1", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname = '" + owner + "'"));
-        assertEquals("1", single("postgres", "SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_" + id
+        assertEquals("1", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname = '" + owner + "'"));
+        assertEquals("1", postgres.single("SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_" + id
                 + "'"));
-        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
+        assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
                 + "_admin', 'dsqlconnect_" + id + "')"), "the admin and connect role this attempt created are dropped again");
         assertFalse(cluster.getBackendSecret() == null);
     }
@@ -199,16 +201,16 @@ class ExternalDsqlBackendIntegrationTest {
             String password = started.credentials().passwordFor(admin);
             assertFalse(DsqlEndpoint.setLoginPassword(started, admin), "a password already set is left as it is");
             assertTrue(verifier.startsWith("SCRAM-SHA-256$4096:"), verifier);
-            assertEquals(verifier, single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"
+            assertEquals(verifier, postgres.single("SELECT rolpassword FROM pg_authid WHERE rolname = '"
                     + admin + "'"), "the server keeps the verifier Floci sent, not one of its own");
-            try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+            try (Connection server = postgres.connect("postgres"); Statement statement = server.createStatement()) {
                 statement.execute("ALTER ROLE " + admin + " PASSWORD 'changed-behind-flocis-back'");
             }
 
             assertTrue(DsqlEndpoint.setLoginPassword(started, admin));
             assertFalse(DsqlEndpoint.setLoginPassword(started, admin), "once set, it is not set again");
 
-            assertEquals(verifier, single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"
+            assertEquals(verifier, postgres.single("SELECT rolpassword FROM pg_authid WHERE rolname = '"
                     + admin + "'"));
             try (Connection login = DriverManager.getConnection(started.jdbcUrl(), admin, password);
                  Statement statement = login.createStatement();
@@ -217,10 +219,10 @@ class ExternalDsqlBackendIntegrationTest {
                 assertEquals(admin, row.getString(1));
             }
             assertFalse(DsqlEndpoint.setLoginPassword(started, "d" + id + "_nosuch"), "a missing role is left alone");
-            assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname = 'd" + id
+            assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname = 'd" + id
                     + "_nosuch'"));
             assertFalse(DsqlEndpoint.setLoginPassword(started, owner), "a role that cannot log in is left alone");
-            assertEquals("true", single("postgres", "SELECT (rolpassword IS NULL)::text FROM pg_authid"
+            assertEquals("true", postgres.single("SELECT (rolpassword IS NULL)::text FROM pg_authid"
                     + " WHERE rolname = '" + owner + "'"));
         } finally {
             cluster.setPendingBackendRoles(backend.rolesToDrop(cluster));
@@ -242,17 +244,17 @@ class ExternalDsqlBackendIntegrationTest {
         List<String> roles = backend.rolesToDrop(cluster);
         // What DsqlDataPlane persists with the cluster before it drops anything.
         cluster.setPendingBackendRoles(roles);
-        try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+        try (Connection server = postgres.connect("postgres"); Statement statement = server.createStatement()) {
             // A deletion interrupted after its DROP DATABASE.
             statement.execute("DROP DATABASE dsql_" + id + " WITH (FORCE)");
         }
-        assertEquals("4", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
+        assertEquals("4", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
                 + "%' OR rolname IN ('dsqlowner_" + id + "', 'dsqlconnect_" + id + "')"));
 
         assertEquals(roles, backend.rolesToDrop(cluster), "with the database gone, the persisted list");
         backend.stop(cluster, true);
 
-        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
+        assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
                 + "%' OR rolname IN ('dsqlowner_" + id + "', 'dsqlconnect_" + id + "')"),
                 "the role created in the cluster is dropped too");
     }
@@ -262,14 +264,14 @@ class ExternalDsqlBackendIntegrationTest {
         String id = "qrstuvwxyzabcdefghijklmnop";
         String database = "dsql_" + id;
         DsqlCluster cluster = cluster(id);
-        try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+        try (Connection server = postgres.connect("postgres"); Statement statement = server.createStatement()) {
             statement.execute("CREATE ROLE someone_else NOLOGIN");
             statement.execute("CREATE DATABASE " + database + " OWNER someone_else");
             // Marked as this cluster's, so the start goes as far as the bootstrap.
             statement.execute("COMMENT ON DATABASE " + database + " IS '" + ExternalDsqlBackend.marker(cluster) + "'");
         }
         try {
-            try (Connection existing = connect(database); Statement statement = existing.createStatement()) {
+            try (Connection existing = postgres.connect(database); Statement statement = existing.createStatement()) {
                 statement.execute("CREATE SCHEMA sys AUTHORIZATION someone_else");
                 statement.execute("CREATE TABLE sys.backend_roles (unexpected int)");
                 statement.execute("ALTER TABLE sys.backend_roles OWNER TO someone_else");
@@ -283,16 +285,16 @@ class ExternalDsqlBackendIntegrationTest {
             }
 
             assertTrue(failed, "the bootstrap fails on a sys it does not own");
-            assertEquals("someone_else", single("postgres", "SELECT datdba::regrole::text FROM pg_database"
+            assertEquals("someone_else", postgres.single("SELECT datdba::regrole::text FROM pg_database"
                     + " WHERE datname = '" + database + "'"), "the database is left as it was");
-            assertEquals("someone_else", single(database, "SELECT nspowner::regrole::text FROM pg_namespace"
+            assertEquals("someone_else", postgres.single(database, "SELECT nspowner::regrole::text FROM pg_namespace"
                     + " WHERE nspname = 'sys'"));
-            assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
+            assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
                     + "_admin', 'dsqlowner_" + id + "', 'dsqlconnect_" + id + "')"),
                     "the admin, owner and connect role this attempt created are dropped");
-            assertEquals("1", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname = 'someone_else'"));
+            assertEquals("1", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname = 'someone_else'"));
         } finally {
-            try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+            try (Connection server = postgres.connect("postgres"); Statement statement = server.createStatement()) {
                 statement.execute("DROP DATABASE IF EXISTS " + database + " WITH (FORCE)");
                 statement.execute("DROP ROLE IF EXISTS someone_else");
             }
@@ -313,7 +315,7 @@ class ExternalDsqlBackendIntegrationTest {
         DsqlEndpoint endpoint = new DsqlEndpoint(mock(DsqlTlsCertificates.class), mock(IamService.class),
                 mock(IamPolicyEvaluator.class), scpProvider, resourcePolicyProviders, mock(DsqlPrincipals.class),
                 mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), Clock.systemUTC());
-        try (Connection other = connect(database); Statement statement = other.createStatement()) {
+        try (Connection other = postgres.connect(database); Statement statement = other.createStatement()) {
             // A session that has ended, which both logins purge.
             statement.execute("INSERT INTO sys.session_identity VALUES (2147483000, 'ended', 'ended')");
             other.setAutoCommit(false);
@@ -321,13 +323,13 @@ class ExternalDsqlBackendIntegrationTest {
 
             CompletableFuture<Boolean> recorded = CompletableFuture.supplyAsync(() ->
                     endpoint.recordSession(started, 2147483001, "arn:aws:iam::111122223333:root", "s1"));
-            await().atMost(Duration.ofSeconds(30)).until(() -> "1".equals(single("postgres",
+            await().atMost(Duration.ofSeconds(30)).until(() -> "1".equals(postgres.single("postgres",
                     "SELECT count(*)::text FROM pg_stat_activity WHERE datname = '" + database
                             + "' AND wait_event_type = 'Lock'")));
             other.commit();
 
             assertTrue(recorded.get(30, TimeUnit.SECONDS), "the login's purge passes over the row already gone");
-            assertEquals("s1", single(database, "SELECT session_id FROM sys.session_identity WHERE pid = 2147483001"));
+            assertEquals("s1", postgres.single(database, "SELECT session_id FROM sys.session_identity WHERE pid = 2147483001"));
         } finally {
             endpoint.stop();
             cluster.setPendingBackendRoles(backend.rolesToDrop(cluster));
@@ -339,7 +341,7 @@ class ExternalDsqlBackendIntegrationTest {
     void anUnmarkedDatabaseFailsTheStartAndIsLeftUntouched() throws Exception {
         String id = "aaaaabbbbbcccccdddddeeeeef";
         String database = "dsql_" + id;
-        onServer("CREATE DATABASE " + database);
+        postgres.execute("CREATE DATABASE " + database);
         try {
             DsqlCluster cluster = cluster(id);
 
@@ -347,16 +349,16 @@ class ExternalDsqlBackendIntegrationTest {
 
             assertTrue(refused.getMessage().contains("database \"" + database + "\" that Floci did not create"),
                     refused.getMessage());
-            assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
+            assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
                     + "_admin', 'dsqlowner_" + id + "', 'dsqlconnect_" + id + "')"), "no role was created");
-            assertEquals("true", single("postgres", "SELECT has_database_privilege('public', '" + database
+            assertEquals("true", postgres.single("SELECT has_database_privilege('public', '" + database
                     + "', 'CONNECT')::text"), "its privileges are as they were");
-            assertEquals("true", single("postgres", "SELECT (shobj_description(oid, 'pg_database') IS NULL)::text"
+            assertEquals("true", postgres.single("SELECT (shobj_description(oid, 'pg_database') IS NULL)::text"
                     + " FROM pg_database WHERE datname = '" + database + "'"), "and it is not marked");
-            assertEquals("0", single(database, "SELECT count(*)::text FROM pg_namespace WHERE nspname = 'sys'"),
+            assertEquals("0", postgres.single(database, "SELECT count(*)::text FROM pg_namespace WHERE nspname = 'sys'"),
                     "nothing was bootstrapped in it");
         } finally {
-            onServer("DROP DATABASE IF EXISTS " + database);
+            postgres.execute("DROP DATABASE IF EXISTS " + database);
         }
     }
 
@@ -365,11 +367,11 @@ class ExternalDsqlBackendIntegrationTest {
         String id = "fffffgggggbbbbbcccccdddddz";
         String admin = "d" + id + "_admin";
         for (String comment : new String[] {null, "floci:dsql:arn:aws:dsql:eu-west-1:111122223333:cluster/other"}) {
-            onServer("CREATE ROLE " + admin + " LOGIN PASSWORD 'theirs'");
+            postgres.execute("CREATE ROLE " + admin + " LOGIN PASSWORD 'theirs'");
             if (comment != null) {
-                onServer("COMMENT ON ROLE " + admin + " IS '" + comment + "'");
+                postgres.execute("COMMENT ON ROLE " + admin + " IS '" + comment + "'");
             }
-            String password = single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '" + admin + "'");
+            String password = postgres.single("SELECT rolpassword FROM pg_authid WHERE rolname = '" + admin + "'");
             try {
                 DsqlCluster cluster = cluster(id);
 
@@ -378,18 +380,18 @@ class ExternalDsqlBackendIntegrationTest {
 
                 assertTrue(refused.getMessage().contains("role \"" + admin + "\" that Floci did not create"),
                         refused.getMessage());
-                assertEquals(password, single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"
+                assertEquals(password, postgres.single("SELECT rolpassword FROM pg_authid WHERE rolname = '"
                         + admin + "'"), "its password is as it was");
-                assertEquals(String.valueOf(comment), String.valueOf(single("postgres", "SELECT shobj_description(oid,"
+                assertEquals(String.valueOf(comment), String.valueOf(postgres.single("SELECT shobj_description(oid,"
                         + " 'pg_authid') FROM pg_roles WHERE rolname = '" + admin + "'")), "so is its comment");
-                assertEquals("false", single("postgres", "SELECT rolcreaterole::text FROM pg_roles WHERE rolname = '"
+                assertEquals("false", postgres.single("SELECT rolcreaterole::text FROM pg_roles WHERE rolname = '"
                         + admin + "'"));
-                assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('dsqlowner_"
+                assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname IN ('dsqlowner_"
                         + id + "', 'dsqlconnect_" + id + "')"), "no owner or connect role was created");
-                assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_"
+                assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_"
                         + id + "'"), "no database was created");
             } finally {
-                onServer("DROP ROLE IF EXISTS " + admin);
+                postgres.execute("DROP ROLE IF EXISTS " + admin);
             }
         }
     }
@@ -398,22 +400,22 @@ class ExternalDsqlBackendIntegrationTest {
     void aForeignConnectRoleFailsTheStartAndIsLeftUntouched() throws Exception {
         String id = "jjjjjkkkkklllllmmmmmnnnnno";
         String connect = "dsqlconnect_" + id;
-        onServer("CREATE ROLE " + connect + " NOLOGIN");
-        onServer("COMMENT ON ROLE " + connect + " IS 'someone else''s'");
+        postgres.execute("CREATE ROLE " + connect + " NOLOGIN");
+        postgres.execute("COMMENT ON ROLE " + connect + " IS 'someone else''s'");
         try {
             SQLException refused = assertThrows(SQLException.class, () ->
                     new ExternalDsqlBackend(config()).start(cluster(id)));
 
             assertTrue(refused.getMessage().contains("role \"" + connect + "\" that Floci did not create"),
                     refused.getMessage());
-            assertEquals("someone else's", single("postgres", "SELECT shobj_description(oid, 'pg_authid')"
+            assertEquals("someone else's", postgres.single("SELECT shobj_description(oid, 'pg_authid')"
                     + " FROM pg_roles WHERE rolname = '" + connect + "'"));
-            assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
+            assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
                     + "_admin', 'dsqlowner_" + id + "')"), "no other role was created");
-            assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_"
+            assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_"
                     + id + "'"), "nor the database");
         } finally {
-            onServer("DROP ROLE IF EXISTS " + connect);
+            postgres.execute("DROP ROLE IF EXISTS " + connect);
         }
     }
 
@@ -423,9 +425,9 @@ class ExternalDsqlBackendIntegrationTest {
         String database = "dsql_" + id;
         String admin = "d" + id + "_admin";
         String owner = "dsqlowner_" + id;
-        onServer("CREATE ROLE " + owner + " NOLOGIN");
-        onServer("CREATE ROLE " + admin + " LOGIN");
-        onServer("CREATE DATABASE " + database + " OWNER " + owner);
+        postgres.execute("CREATE ROLE " + owner + " NOLOGIN");
+        postgres.execute("CREATE ROLE " + admin + " LOGIN");
+        postgres.execute("CREATE DATABASE " + database + " OWNER " + owner);
         try {
             ExternalDsqlBackend backend = new ExternalDsqlBackend(config());
             DsqlCluster cluster = cluster(id);
@@ -435,14 +437,14 @@ class ExternalDsqlBackendIntegrationTest {
             backend.stop(cluster, true);
 
             assertEquals(List.of(admin, "dsqlconnect_" + id, owner), roles);
-            assertEquals("1", single("postgres", "SELECT count(*)::text FROM pg_database WHERE datname = '"
+            assertEquals("1", postgres.single("SELECT count(*)::text FROM pg_database WHERE datname = '"
                     + database + "'"), "a database without the marker is left");
-            assertEquals("2", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('" + admin
+            assertEquals("2", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname IN ('" + admin
                     + "', '" + owner + "')"), "so are an admin and owner without it");
         } finally {
-            onServer("DROP DATABASE IF EXISTS " + database);
-            onServer("DROP ROLE IF EXISTS " + admin);
-            onServer("DROP ROLE IF EXISTS " + owner);
+            postgres.execute("DROP DATABASE IF EXISTS " + database);
+            postgres.execute("DROP ROLE IF EXISTS " + admin);
+            postgres.execute("DROP ROLE IF EXISTS " + owner);
         }
     }
 
@@ -455,19 +457,19 @@ class ExternalDsqlBackendIntegrationTest {
         DsqlCluster cluster = cluster(id);
         String marker = ExternalDsqlBackend.marker(cluster);
         // A start that stopped between CREATE DATABASE and its COMMENT.
-        onServer("CREATE ROLE " + owner + " NOLOGIN");
-        onServer("COMMENT ON ROLE " + owner + " IS '" + marker + "'");
-        onServer("CREATE DATABASE " + database + " OWNER " + owner);
+        postgres.execute("CREATE ROLE " + owner + " NOLOGIN");
+        postgres.execute("COMMENT ON ROLE " + owner + " IS '" + marker + "'");
+        postgres.execute("CREATE DATABASE " + database + " OWNER " + owner);
         try {
             backend.start(cluster);
 
-            assertEquals(marker, single("postgres", "SELECT shobj_description(oid, 'pg_database') FROM pg_database"
+            assertEquals(marker, postgres.single("SELECT shobj_description(oid, 'pg_database') FROM pg_database"
                     + " WHERE datname = '" + database + "'"), "the database is stamped");
         } finally {
             cluster.setPendingBackendRoles(backend.rolesToDrop(cluster));
             backend.stop(cluster, true);
         }
-        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_database WHERE datname = '" + database
+        assertEquals("0", postgres.single("SELECT count(*)::text FROM pg_database WHERE datname = '" + database
                 + "'"), "and deleted with the cluster");
     }
 
@@ -477,20 +479,20 @@ class ExternalDsqlBackendIntegrationTest {
         String database = "dsql_" + id;
         String owner = "dsqlowner_" + id;
         DsqlCluster cluster = cluster(id);
-        onServer("CREATE ROLE " + owner + " NOLOGIN");
-        onServer("COMMENT ON ROLE " + owner + " IS '" + ExternalDsqlBackend.marker(cluster) + "'");
-        onServer("CREATE DATABASE " + database + " OWNER " + owner);
-        onServer("COMMENT ON DATABASE " + database + " IS 'someone else''s'");
+        postgres.execute("CREATE ROLE " + owner + " NOLOGIN");
+        postgres.execute("COMMENT ON ROLE " + owner + " IS '" + ExternalDsqlBackend.marker(cluster) + "'");
+        postgres.execute("CREATE DATABASE " + database + " OWNER " + owner);
+        postgres.execute("COMMENT ON DATABASE " + database + " IS 'someone else''s'");
         try {
             SQLException refused = assertThrows(SQLException.class, () ->
                     new ExternalDsqlBackend(config()).start(cluster));
 
             assertTrue(refused.getMessage().contains("database \"" + database + "\""), refused.getMessage());
-            assertEquals("someone else's", single("postgres", "SELECT shobj_description(oid, 'pg_database')"
+            assertEquals("someone else's", postgres.single("SELECT shobj_description(oid, 'pg_database')"
                     + " FROM pg_database WHERE datname = '" + database + "'"));
         } finally {
-            onServer("DROP DATABASE IF EXISTS " + database);
-            onServer("DROP ROLE IF EXISTS " + owner);
+            postgres.execute("DROP DATABASE IF EXISTS " + database);
+            postgres.execute("DROP ROLE IF EXISTS " + owner);
         }
     }
 
@@ -507,9 +509,9 @@ class ExternalDsqlBackendIntegrationTest {
             withoutArn.setPendingBackendRoles(roles);
             backend.stop(withoutArn, true);
 
-            assertEquals("1", single("postgres", "SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_"
+            assertEquals("1", postgres.single("SELECT count(*)::text FROM pg_database WHERE datname = 'dsql_"
                     + id + "'"), "the database is left");
-            assertEquals("3", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
+            assertEquals("3", postgres.single("SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
                     + "_admin', 'dsqlowner_" + id + "', 'dsqlconnect_" + id + "')"), "so are the admin, owner and connect role");
         } finally {
             cluster.setPendingBackendRoles(backend.rolesToDrop(cluster));
@@ -538,12 +540,6 @@ class ExternalDsqlBackendIntegrationTest {
         return cluster;
     }
 
-    private void onServer(String sql) throws SQLException {
-        try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
-            statement.execute(sql);
-        }
-    }
-
     private EmulatorConfig config() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().dsql().external().host()).thenReturn(Optional.of("127.0.0.1"));
@@ -552,17 +548,5 @@ class ExternalDsqlBackendIntegrationTest {
         when(config.services().dsql().external().username()).thenReturn("postgres");
         when(config.services().dsql().external().password()).thenReturn(Optional.of(PASSWORD));
         return config;
-    }
-
-    private String single(String database, String sql) throws SQLException {
-        try (Connection connection = connect(database); Statement statement = connection.createStatement();
-             ResultSet row = statement.executeQuery(sql)) {
-            assertTrue(row.next());
-            return row.getString(1);
-        }
-    }
-
-    private Connection connect(String database) throws SQLException {
-        return DriverManager.getConnection(server.jdbcUrl(database), "postgres", PASSWORD);
     }
 }

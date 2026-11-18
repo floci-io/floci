@@ -12,13 +12,18 @@ import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.TestDockerClients;
 
 import java.io.IOException;
+import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * A throwaway PostgreSQL 16 in Docker for the external DSQL backend's tests, bound to a free port
@@ -33,11 +38,49 @@ public final class ExternalPostgresServer implements AutoCloseable {
     private final DockerClient dockerClient;
     private final String containerId;
     private final int port;
+    private final String password;
 
-    private ExternalPostgresServer(DockerClient dockerClient, String containerId, int port) {
+    private ExternalPostgresServer(DockerClient dockerClient, String containerId, int port, String password) {
         this.dockerClient = dockerClient;
         this.containerId = containerId;
         this.port = port;
+        this.password = password;
+    }
+
+    /**
+     * The superuser {@code postgres} of a test server on 127.0.0.1, for the SQL a test runs on it
+     * directly, outside Floci.
+     */
+    public record Superuser(int port, String password) {
+
+        public String url(String database) {
+            return jdbcUrl(port, database);
+        }
+
+        public Connection connect(String database) throws SQLException {
+            return DriverManager.getConnection(url(database), "postgres", password);
+        }
+
+        /** The first column of the one row {@code sql} returns in {@code database}. */
+        public String single(String database, String sql) throws SQLException {
+            try (Connection connection = connect(database); Statement statement = connection.createStatement();
+                 ResultSet row = statement.executeQuery(sql)) {
+                assertTrue(row.next(), sql);
+                return row.getString(1);
+            }
+        }
+
+        /** The first column of the one row {@code sql} returns in the database {@code postgres}. */
+        public String single(String sql) throws SQLException {
+            return single("postgres", sql);
+        }
+
+        /** Runs {@code sql} in the database {@code postgres}. */
+        public void execute(String sql) throws SQLException {
+            try (Connection connection = connect("postgres"); Statement statement = connection.createStatement()) {
+                statement.execute(sql);
+            }
+        }
     }
 
     /** Docker, or the image, is not there; a test skips rather than fails. Its cause says why. */
@@ -82,7 +125,7 @@ public final class ExternalPostgresServer implements AutoCloseable {
                     inspected.getNetworkSettings().getPorts().getBindings().get(exposed)[0].getHostPortSpec());
             DsqlDatabases.awaitConnection(() -> DriverManager.getConnection(jdbcUrl(port, "postgres"), "postgres",
                     password), READY_TIMEOUT, DsqlDatabases.READY_INTERVAL, false, "The test's PostgreSQL").close();
-            return new ExternalPostgresServer(dockerClient, containerId, port);
+            return new ExternalPostgresServer(dockerClient, containerId, port, password);
         } catch (DockerUnavailableException | SQLException | InterruptedException | RuntimeException e) {
             close(dockerClient, containerId, e);
             throw e;
@@ -95,6 +138,10 @@ public final class ExternalPostgresServer implements AutoCloseable {
 
     public String jdbcUrl(String database) {
         return jdbcUrl(port, database);
+    }
+
+    public Superuser superuser() {
+        return new Superuser(port, password);
     }
 
     private static String jdbcUrl(int port, String database) {
