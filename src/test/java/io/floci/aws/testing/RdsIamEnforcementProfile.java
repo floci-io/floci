@@ -7,7 +7,7 @@ import java.util.Map;
 public class RdsIamEnforcementProfile extends IamEnforcementProfile {
     @Override
     public Map<String, String> getConfigOverrides() {
-        Map<String, String> overrides = new HashMap<>(super.getConfigOverrides());
+        Map<String, String> overrides = new HashMap<>(enforcementOverrides());
         overrides.put("floci.services.rds.mock", "true");
         overrides.put("floci.services.docdb.mock", "true");
         return overrides;
