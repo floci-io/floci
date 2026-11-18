@@ -920,7 +920,9 @@ public class EksClusterManager
                 specBuilder.withEmbeddedDns();
             }
 
-            if (config.services().eks().ecrRegistryMirror() && config.services().ecr().enabled()) {
+            // The IMDS forward resolves Floci's host in the node too (configureLinkLocalMetadataEndpoint).
+            if ((config.services().eks().ecrRegistryMirror() && config.services().ecr().enabled())
+                    || config.services().eks().imds()) {
                 specBuilder.withHostDockerInternalOnLinux();
             }
 

@@ -3807,6 +3807,24 @@ class EksClusterManagerTest {
             return host;
         }
 
+        /**
+         * The IMDS forward resolves Floci's host in the node, which on a Linux host is {@code host.docker.internal}
+         * when Floci runs natively: the node is given that name whenever IMDS is on, as for the ECR mirror and the
+         * token webhook, which are both off here.
+         */
+        @ParameterizedTest
+        @ValueSource(booleans = {true, false})
+        void aNodeWithImdsResolvesFlocisHostOnLinux(boolean imds) {
+            when(eks.imds()).thenReturn(imds);
+            stubDockerHost(16L * 1024 * 1024 * 1024, 8);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("imds-host-cluster");
+            manager.startCluster(cluster);
+
+            verify(builder, imds ? Mockito.times(1) : never()).withHostDockerInternalOnLinux();
+        }
+
         @Test
         void hostTooSmallLeavesClusterUnboundedAndStarting() {
             DockerClient dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);

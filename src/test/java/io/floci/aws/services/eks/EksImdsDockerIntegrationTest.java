@@ -2,6 +2,8 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.ec2.model.Instance;
@@ -27,7 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 /**
  * IMDS answers on a stock {@code rancher/k3s} node, which has {@code iptables} but no {@code socat}, {@code curl} or
  * package manager: the node itself, where a {@code hostNetwork} pod's requests come from, and an ordinary pod both
- * read the node's instance from {@code 169.254.169.254}. The settings come from
+ * read the node's instance from {@code 169.254.169.254}, and with the pod network off the node refuses the pod's
+ * requests rather than send them on. The settings come from
  * {@link CloudFormationSettingsProfile}, which turns on IMDS for the node and its pod network; the node is started
  * through {@link EksClusterManager} directly, which runs a k3s container while EKS is mocked too.
  */
@@ -51,6 +54,9 @@ class EksImdsDockerIntegrationTest {
 
     @Inject
     DockerHostResolver dockerHostResolver;
+
+    @Inject
+    EmulatorConfig config;
 
     private Cluster cluster;
 
@@ -106,5 +112,23 @@ class EksImdsDockerIntegrationTest {
         String iamInfo = node.kubectlOutput("exec", POD, "--", "wget", "-q", "-O", "-", "-T", "3", IMDS + "iam/info");
         assertEquals(instance.getIamInstanceProfileArn(),
                 new ObjectMapper().readTree(iamInfo).path("InstanceProfileArn").asText(), iamInfo);
+
+        // Without the pod network the node refuses a pod's request, which would otherwise leave the node for the
+        // network the Docker host is on and time out here, and still answers its own; with it again, the pod reads
+        // IMDS once more. Each forward ends only once the node's instance id answers through it.
+        String flociHost = dockerHostResolver.resolve();
+        int imdsPort = config.services().ec2().imdsPort();
+        node.execOutput(EksPodNetworkRouting.buildImdsForwardCommand(cluster.getPodCidr(), false, flociHost, imdsPort));
+        ContainerExec.Result refused = node.kubectl("exec", POD, "--", "wget", "-q", "-O", "-", "-T", "3",
+                IMDS + "instance-id");
+        assertEquals(1, refused.exitCode(), refused.summary());
+        assertEquals("wget: can't connect to remote host (169.254.169.254): Connection refused\n"
+                + "command terminated with exit code 1", refused.stderr().trim());
+        assertEquals(instance.getInstanceId(), node.execOutput("wget", "-q", "-O", "-", "-T", "3",
+                IMDS + "instance-id"));
+
+        node.execOutput(EksPodNetworkRouting.buildImdsForwardCommand(cluster.getPodCidr(), true, flociHost, imdsPort));
+        assertEquals(instance.getInstanceId(), node.kubectlOutput("exec", POD, "--", "wget", "-q", "-O", "-",
+                "-T", "3", IMDS + "instance-id"));
     }
 }

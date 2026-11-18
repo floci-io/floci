@@ -9,6 +9,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -26,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EksPodNetworkRoutingTest {
 
-    /** What the stand-in iptables is asked when it lists a rule for the address in each chain. */
+    /** What the stand-in iptables is asked when it lists the rules for the address in each chain, and deletes them. */
     private static final List<String> EARLIER_RULES_REMOVED = List.of(
             "-t nat -S PREROUTING",
             "-t nat -D PREROUTING -s 10.42.0.0/16 -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT"
@@ -35,7 +36,8 @@ class EksPodNetworkRoutingTest {
             "-t nat -D OUTPUT -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:4566",
             "-t nat -S FLOCI-LINK-LOCAL",
             "-t nat -D FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.170.23/32 -p tcp -m tcp --dport 80 -j DNAT"
-                    + " --to-destination 169.254.170.23:80");
+                    + " --to-destination 169.254.170.23:80",
+            "-t filter -S FORWARD");
 
     /** As {@link #EARLIER_RULES_REMOVED}, for IMDS. */
     private static final List<String> EARLIER_IMDS_RULES_REMOVED = List.of(
@@ -46,7 +48,10 @@ class EksPodNetworkRoutingTest {
             "-t nat -D OUTPUT -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:9169",
             "-t nat -S FLOCI-LINK-LOCAL",
             "-t nat -D FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT"
-                    + " --to-destination 169.254.169.254:80");
+                    + " --to-destination 169.254.169.254:80",
+            "-t filter -S FORWARD",
+            "-t filter -D FORWARD -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j REJECT"
+                    + " --reject-with tcp-reset");
 
     /** Where the relay an older Floci ran for the address kept its PID. */
     private static final Path RELAY_PID_FILE = Path.of("/tmp/floci-pod-identity-proxy.pid");
@@ -100,9 +105,10 @@ class EksPodNetworkRoutingTest {
     }
 
     /**
-     * Runs the forward script against stand-ins for a stock k3s node's tools: iptables records what
-     * it is asked and lists the rules an earlier Floci left for the address, nslookup answers as
-     * BusyBox's does, and wget gets Floci's 400 for a request without a pod token. There is no curl.
+     * Runs the forward script against stand-ins for a stock k3s node's tools ({@link #fakeStockNode}):
+     * iptables records what it is asked and lists the rules an earlier Floci left for the address,
+     * nslookup answers as BusyBox's does, and wget gets Floci's 400 for a request without a pod token.
+     * There is no curl.
      * The host is resolved from the hosts file first, through DNS when that has no entry, and an
      * address is used as it is.
      */
@@ -143,7 +149,8 @@ class EksPodNetworkRoutingTest {
 
     /**
      * IMDS goes to Floci's metadata service as the Pod Identity address goes to its credentials endpoint, once the
-     * rules an earlier Floci left for it are gone: from the node always, and from the pod network only when asked.
+     * rules an earlier Floci left for it are gone: from the node always, and from the pod network when asked. When not,
+     * the pod network's requests are refused, rather than sent on toward the network the Docker host is on.
      */
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
@@ -161,6 +168,9 @@ class EksPodNetworkRoutingTest {
         if (podNetwork) {
             expected.add("-t nat -I PREROUTING 1 -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp --dport 80 -j DNAT"
                     + " --to-destination 172.18.0.7:9169");
+        } else {
+            expected.add("-t filter -I FORWARD 1 -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp --dport 80 -j REJECT"
+                    + " --reject-with tcp-reset");
         }
         expected.add("-t nat -I OUTPUT 1 -d 169.254.169.254/32 -p tcp --dport 80 -j DNAT --to-destination"
                 + " 172.18.0.7:9169");
@@ -286,8 +296,8 @@ class EksPodNetworkRoutingTest {
      * Floci answers 400 without a pod token, which still proves the path reaches it. A proxy that
      * answered in its place would look the same to the status check, so the probe must not go
      * through one, whether it asks with curl or, on a stock {@code rancher/k3s} node, which has
-     * BusyBox's {@code wget} and no {@code curl}, with wget, reading the status from the error it
-     * prints.
+     * BusyBox's {@code wget} and no {@code curl}, with wget, reading the status from the status line
+     * {@code -S} prints.
      */
     @ParameterizedTest
     @ValueSource(strings = {"curl", "wget"})
@@ -307,8 +317,8 @@ class EksPodNetworkRoutingTest {
                 exchange.close();
             });
             floci.start();
-            String[] probe = {"sh", "-c",
-                    EksPodNetworkRouting.podIdentityProbeCommand("http://127.0.0.1:" + floci.getAddress().getPort())};
+            String[] probe = probe(
+                    EksPodNetworkRouting.podIdentityProbeCommand("http://127.0.0.1:" + floci.getAddress().getPort()));
             Map<String, String> environment = new HashMap<>(HelperShellFixture.proxyEnvironment(proxy));
             environment.put("PATH", bin.toString());
 
@@ -328,12 +338,50 @@ class EksPodNetworkRoutingTest {
     }
 
     /**
+     * The IMDS forward is ready once the node's instance id answers, or 401 for an instance that requires tokens:
+     * Floci's 404, for a caller it doesn't know by its address, or another server's error leaves it waiting. With
+     * curl, or with wget, whose status line {@code -S} prints: GNU's prints no status in its own message for a 401.
+     */
+    @ParameterizedTest
+    @CsvSource({"curl, 200, 0", "curl, 401, 0", "curl, 404, 1", "curl, 500, 1",
+            "wget, 200, 0", "wget, 401, 0", "wget, 404, 1", "wget, 500, 1"})
+    void imdsProbeIsReadyOnceTheNodesInstanceIdAnswers(String client, int status, int expectedExit, @TempDir Path dir)
+            throws Exception {
+        Path bin = Files.createDirectory(dir.resolve("bin"));
+        HelperShellFixture.linkHostTools(bin, List.of(client, "env", "grep"));
+        List<String> asked = new CopyOnWriteArrayList<>();
+        HttpServer imds = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            imds.createContext("/", exchange -> {
+                asked.add(exchange.getRequestURI().getPath());
+                byte[] body = "i-0123456789abcdef0".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(status, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+            });
+            imds.start();
+
+            int result = HelperShellFixture.run(
+                    probe(EksPodNetworkRouting.imdsProbeCommand("http://127.0.0.1:" + imds.getAddress().getPort())),
+                    dir, Map.of("PATH", bin.toString()));
+
+            assertEquals(expectedExit, result, HelperShellFixture.output(dir));
+            assertEquals(List.of("/latest/meta-data/instance-id"), asked);
+        } finally {
+            imds.stop(0);
+        }
+    }
+
+    /**
      * A bin directory of stand-ins for a stock k3s node's tools, beside the host's awk, sed, grep,
      * env, sleep, cat, tr and rm. iptables records its arguments in {@code iptables-calls} and lists,
      * in {@code PREROUTING} and {@code OUTPUT}, the rules an earlier Floci on 172.18.0.9 left for the
-     * Pod Identity address and for IMDS and one rule of another's, and in {@code FLOCI-LINK-LOCAL} the
-     * rules an older Floci sent each address to its relay with. nslookup records its arguments in
-     * {@code nslookup-calls} and answers as BusyBox's.
+     * Pod Identity address and for IMDS and one rule of another's, in {@code FORWARD} the rule an earlier
+     * Floci refused the pod network's IMDS requests with and one of another's, and in
+     * {@code FLOCI-LINK-LOCAL} the rules an older Floci sent each address to its relay with. nslookup
+     * records its arguments in {@code nslookup-calls} and answers as BusyBox's. wget prints the status
+     * line as BusyBox's does with {@code -S}: a 200 for the node's instance id from IMDS, and Floci's
+     * 400 for anything else, as for a Pod Identity request without a pod token.
      */
     private static Path fakeStockNode(Path dir) throws Exception {
         Path bin = Files.createDirectory(dir.resolve("bin"));
@@ -353,6 +401,12 @@ class EksPodNetworkRoutingTest {
                 + "  echo '-A OUTPUT -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.18.0.9:9169'\n"
                 + "  echo '-A OUTPUT -j KUBE-SERVICES'\n"
                 + "fi\n"
+                + "if [ \"$*\" = '-t filter -S FORWARD' ]; then\n"
+                + "  echo '-P FORWARD ACCEPT'\n"
+                + "  echo '-A FORWARD -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j REJECT"
+                + " --reject-with tcp-reset'\n"
+                + "  echo '-A FORWARD -j KUBE-ROUTER-FORWARD'\n"
+                + "fi\n"
                 + "if [ \"$*\" = '-t nat -S FLOCI-LINK-LOCAL' ]; then\n"
                 + "  echo '-N FLOCI-LINK-LOCAL'\n"
                 + "  echo '-A FLOCI-LINK-LOCAL -s 10.42.0.0/16 -d 169.254.169.254/32 -p tcp -m tcp --dport 80 -j DNAT"
@@ -365,6 +419,9 @@ class EksPodNetworkRoutingTest {
                 + "printf 'Server:\\t\\t127.0.0.11\\nAddress:\\t127.0.0.11:53\\n\\nNon-authoritative answer:\\n"
                 + "Name:\\tfloci-under-test.internal\\nAddress: 172.18.0.2\\n'\n");
         HelperShellFixture.writeTool(bin, "wget", "[ -z \"${http_proxy:-}\" ] || exit 2\n"
+                + "case \"$*\" in *' http://169.254.169.254/latest/meta-data/instance-id')\n"
+                + "  echo '  HTTP/1.1 200 OK' >&2\n  exit 0 ;;\nesac\n"
+                + "echo '  HTTP/1.1 400 Bad Request' >&2\n"
                 + "echo 'wget: server returned error: HTTP/1.1 400 Bad Request' >&2\nexit 1\n");
         return bin;
     }
@@ -381,6 +438,11 @@ class EksPodNetworkRoutingTest {
         }
         return new ProcessBuilder(relay.toString(), "TCP-LISTEN:80,bind=" + bindIp + ",fork,reuseaddr",
                 "TCP:172.18.0.9:4566").start();
+    }
+
+    /** A probe run on its own: it ends the shell once ready, and otherwise the shell fails. */
+    private static String[] probe(String probeCommand) {
+        return new String[]{"sh", "-c", probeCommand + "\nexit 1"};
     }
 
     /** {@code command}, an {@code sh -c} one, run with each command it runs printed to its output ({@code sh -x}). */
