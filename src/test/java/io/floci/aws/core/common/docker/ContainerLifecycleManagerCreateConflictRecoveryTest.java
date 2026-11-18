@@ -133,7 +133,8 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
                 List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null,
                 List.of(), null, null, List.of());
 
-        assertEquals("slowly-created-container", manager().create(spec));
+        AtomicLong now = new AtomicLong();
+        assertEquals("slowly-created-container", manager(now, now::addAndGet).create(spec));
     }
 
     /**
