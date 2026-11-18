@@ -64,7 +64,11 @@
   `ConflictException`. The waiting period is not swept by a timer: the emulator keeps the
   key pending rather than deleting it on a clock. A key that is already pending deletion
   is refused with `ConflictException`, because the deletion is already under way, and the
-  replicas of the key carry its pending state, as they carry the rest of its metadata.
+  replicas of the key carry its pending state and the moment the deletion takes effect, as
+  they carry the rest of its metadata. A replica is read-only, so the deletion is cancelled
+  on the primary: a request that names a replica is refused with `ValidationException`. A
+  restored key is in use again, so the moments of its use are the moments of the restore:
+  the use begins now, and the moment the key stopped before the deletion is gone.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled`, `Tags`,
   `DeriveKeyUsage` and `ReplicationRegions`, and a key created disabled or with tags
   comes back that way. The `KeyUsage` and the

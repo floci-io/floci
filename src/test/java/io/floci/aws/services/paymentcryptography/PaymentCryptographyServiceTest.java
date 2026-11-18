@@ -435,12 +435,80 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aRestoredKeyIsInUseAgain() {
+        // A key that is restored is enabled, so the moments of its use are the moments of
+        // the restore: the use begins now, and the moment it stopped before the deletion is
+        // gone.
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.stopKeyUsage(key);
+        service.deleteKey(key);
+        long before = Instant.now().getEpochSecond();
+
+        PaymentCryptographyKey restored = service.restoreKey(key);
+
+        assertTrue(restored.isEnabled(), "a restored key is disabled");
+        assertEquals(0, restored.getUsageStopTimestamp(),
+                "a restored key still carries the moment it was stopped");
+        assertTrue(restored.getUsageStartTimestamp() >= before,
+                "a restored key carries no moment its use began");
+    }
+
+    @Test
     void aKeyThatIsNotPendingDeletionIsNotRestored() {
         PaymentCryptographyKey key = createKey("us-east-1");
 
         AwsException conflict = assertThrows(AwsException.class,
                 () -> service.restoreKey(key));
         assertEquals("ConflictException", conflict.getErrorCode());
+    }
+
+    @Test
+    void aReplicaCarriesThePendingDeletionOfItsPrimary() {
+        // A replica is a copy of its primary, so a key that is pending deletion is pending
+        // deletion in every region it replicates into, and it says when the deletion takes
+        // effect there as well.
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+
+        PaymentCryptographyKey pending = service.deleteKey(key);
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        assertEquals("DELETE_PENDING", replica.getKeyState());
+        assertEquals(pending.getDeletePendingTimestamp(), replica.getDeletePendingTimestamp(),
+                "a replica that is pending deletion carries no moment the deletion takes effect");
+        assertFalse(replica.isEnabled(), "a replica of a key that is pending deletion is enabled");
+    }
+
+    @Test
+    void aRestoredKeyIsRestoredInEveryRegionItReplicatesInto() {
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+        service.deleteKey(key);
+
+        service.restoreKey(key);
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+        assertEquals("CREATE_COMPLETE", replica.getKeyState());
+        assertEquals(0, replica.getDeletePendingTimestamp(),
+                "a replica of a restored key is still pending deletion");
+        assertTrue(replica.isEnabled(), "a replica of a restored key is disabled");
+    }
+
+    @Test
+    void aReplicaIsNotRestoredApartFromItsPrimary() {
+        // A replica is read-only, so the deletion is cancelled on the primary: a replica
+        // that was restored on its own would be usable while the key it is a copy of is
+        // still pending deletion.
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+        service.deleteKey(key);
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.restoreKey(replica));
+        assertEquals("ValidationException", refused.getErrorCode());
+
+        assertEquals("DELETE_PENDING", replica.getKeyState(),
+                "a replica that was refused is no longer pending deletion");
+        assertEquals("DELETE_PENDING",
+                service.findKey("us-east-1", key.getKeyId()).getKeyState());
     }
 
     @Test

@@ -405,9 +405,14 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * <p>Only a key in the state {@code DELETE_PENDING} can be restored; one that is not
      * pending deletion is refused with {@code ConflictException}, as the reference refuses
      * it. A restored key is enabled again and carries no deletion timestamp.
+     *
+     * <p>A replica is read-only, so the deletion is cancelled on the primary: a replica
+     * that was restored on its own would be usable while the key it is a copy of is still
+     * pending deletion.
      */
     public synchronized PaymentCryptographyKey restoreKey(PaymentCryptographyKey key) {
         PaymentCryptographyKey current = liveKey(key);
+        requireNotReplica(current, "only the primary may be restored");
         if (!"DELETE_PENDING".equals(current.getKeyState())) {
             throw new AwsException("ConflictException",
                     "Key " + current.getArn() + " is not pending deletion", 400);
@@ -416,6 +421,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         current.setEnabled(true);
         current.setDeletePendingTimestamp(0);
         current.setDeleteTimestamp(0);
+        // The key is in use again, so the moments of its use are the moments of the restore:
+        // the use begins now, and the moment it stopped before the deletion is gone.
+        current.setUsageStartTimestamp(clock.instant().getEpochSecond());
+        current.setUsageStopTimestamp(0);
         storeKey(current);
         // The replicas of a key carry the state of their primary, so a key that is restored
         // is restored in every region it replicates into.
@@ -679,6 +688,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             replica.setEnabled(primary.isEnabled());
             replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
             replica.setUsageStopTimestamp(primary.getUsageStopTimestamp());
+            replica.setDeletePendingTimestamp(primary.getDeletePendingTimestamp());
+            replica.setDeleteTimestamp(primary.getDeleteTimestamp());
             replica.setUsingDefaultReplicationRegions(primary.isUsingDefaultReplicationRegions());
             replica.setPrimaryRegion(primary.getPrimaryRegion());
             replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
@@ -1721,6 +1732,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         replica.setCreateTimestamp(primary.getCreateTimestamp());
         replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
         replica.setUsageStopTimestamp(primary.getUsageStopTimestamp());
+        replica.setDeletePendingTimestamp(primary.getDeletePendingTimestamp());
+        replica.setDeleteTimestamp(primary.getDeleteTimestamp());
         replica.setPrimaryRegion(primary.getPrimaryRegion());
         replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
         replica.setMultiRegionKeyType("REPLICA");

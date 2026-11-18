@@ -1122,8 +1122,9 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void theKeysAreListedByTheirState() {
         String arn = keyArn();
-        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
-                .then().statusCode(200));
+        // The key this test deletes is not cleaned up again: a deletion of a key that is
+        // already pending deletion is refused, and the key stays pending until the waiting
+        // period ends.
         String secondArn = keyArn();
         cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + secondArn + "\"}")
                 .then().statusCode(200));
