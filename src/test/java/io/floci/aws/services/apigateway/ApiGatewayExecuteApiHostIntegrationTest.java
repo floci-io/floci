@@ -143,7 +143,8 @@ class ApiGatewayExecuteApiHostIntegrationTest {
     @Order(6)
     void invokesRegionBearingConfiguredHost() {
         given()
-                .header("Host", apiId + ".execute-api." + REGION + ".floci:4566")
+                .header("Host", apiId + ".execute-api." + REGION + "." + ConfiguredHostnameProfile.HOSTNAME
+                        + ":4566")
                 .when().get("/accounts")
                 .then()
                 .statusCode(200)
