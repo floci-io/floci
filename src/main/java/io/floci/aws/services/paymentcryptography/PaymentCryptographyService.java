@@ -13,6 +13,7 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.DukptCrypto;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
@@ -21,6 +22,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.security.KeyPair;
+import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -484,6 +487,52 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             refreshReplicas(current, current.getReplicationRegions());
         }
         return current;
+    }
+
+    // ---- certificate signing requests ----------------------------------------
+
+    /**
+     * The certificate signing request a key pair signs.
+     *
+     * <p>The request carries the subject and the public half of the key, and it is signed by
+     * the private half, so the key has to be a key pair the service holds the private half
+     * of: a key that is not a key pair has no public half to certify, and a key pair the
+     * service holds no private half of has nothing to sign with. A key that is disabled does
+     * no work.
+     *
+     * <p>The usage and the mode of use of the key are not narrowed. The reference publishes
+     * no table of the keys this operation takes, and its own flows are two: one signs with a
+     * key pair of the digital signature usage whose mode of use is {@code Sign}, the other
+     * with a key pair of the TR-34 usage whose modes of use are {@code Unwrap} and
+     * {@code Decrypt}. Both are served here.
+     *
+     * <p>The answer is the PEM of the request, base64 encoded, which is what the reference's
+     * own answer carries, so a caller that decodes it holds the file the markers are in.
+     *
+     * @param key the key pair that signs
+     * @param digest the digest the request names
+     * @param subject the subject's members
+     * @return the request, base64 encoded
+     */
+    public synchronized String certificateSigningRequest(PaymentCryptographyKey key, String digest,
+                                                         Map<String, String> subject) {
+        PaymentCryptographyKey current = liveKey(key);
+        PaymentCryptographyKeyRules.requireEnabled(current);
+        if (!ASYMMETRIC_CLASS.equals(current.getKeyClass())) {
+            throw new AwsException("ValidationException",
+                    "the key " + current.getArn() + " is not a key pair, and a key pair is what "
+                            + "signs a certificate signing request", 400);
+        }
+        PublicKey publicKey = PaymentCryptographyKeyExchange.publicKeyOf(current);
+        PrivateKey privateKey = PaymentCryptographyKeyExchange.privateKeyOf(current);
+        if (publicKey == null || privateKey == null) {
+            throw new AwsException("ValidationException",
+                    "the key " + current.getArn() + " has no key pair to sign a certificate "
+                            + "signing request with", 400);
+        }
+        return Certificates.pemBase64(PaymentCryptographyCertificateRequest.pem(
+                PaymentCryptographyCertificateRequest.subject(subject), publicKey, privateKey,
+                digest, isRsa(current)));
     }
 
     // ---- aliases ------------------------------------------------------------
@@ -1181,6 +1230,19 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         throw new AwsException("ValidationException",
                 "the usage " + usageName + " cannot leave the service: a key block carries one of "
                         + USAGE_NAMES.keySet(), 400);
+    }
+
+    /**
+     * Whether a key is an RSA key rather than an elliptic curve one.
+     *
+     * <p>The key record knows its algorithm, so the family is read from there and not guessed
+     * from the length of the material, because the two key pairs are of different lengths and
+     * the algorithm is what a certificate names.
+     */
+    static boolean isRsa(PaymentCryptographyKey key) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        return algorithm != null && algorithm.rsa;
     }
 
     /**

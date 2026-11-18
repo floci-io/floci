@@ -12,7 +12,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -34,6 +36,7 @@ import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class PaymentCryptographyIntegrationTest {
@@ -611,6 +614,99 @@ class PaymentCryptographyIntegrationTest {
                     .body("message", containsString("ReplicationRegions"));
     }
 
+
+    @Test
+    void aKeyPairSignsACertificateSigningRequest() {
+        String arn = call("CreateKey", CREATE_KEY_PAIR)
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        // The answer is the PEM of the request, base64 encoded, as the reference's own
+        // answer carries it.
+        String answer = call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA256",
+                 "CertificateSubject":{"CommonName":"floci payment cryptography",
+                 "Organization":"Floci"}}""".formatted(arn))
+                .then().statusCode(200)
+                .extract().path("CertificateSigningRequest");
+
+        String pem = new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII);
+        assertTrue(pem.startsWith("-----BEGIN CERTIFICATE REQUEST-----"), pem);
+        assertTrue(pem.trim().endsWith("-----END CERTIFICATE REQUEST-----"), pem);
+    }
+
+    @Test
+    void aKeyPairOfTheTr34UsageSignsACertificateSigningRequest() {
+        // The reference's own import flow signs the request with a key pair of the TR-34
+        // usage, whose modes of use are unwrapping and decrypting, so the mode of use of
+        // the key does not narrow the operation.
+        String arn = call("CreateKey", """
+                {"KeyAttributes":{"KeyAlgorithm":"RSA_2048","KeyClass":"ASYMMETRIC_KEY_PAIR",
+                 "KeyUsage":"TR31_K2_TR34_ASYMMETRIC_KEY",
+                 "KeyModesOfUse":{"Unwrap":true,"Decrypt":true}},
+                 "Exportable":true}""")
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA512",
+                 "CertificateSubject":{"CommonName":"MyImportKRDCertAWSUSEAST"}}""".formatted(arn))
+                .then().statusCode(200)
+                .body("CertificateSigningRequest", notNullValue());
+    }
+
+    @Test
+    void aKeyThatIsNotThereSignsNoRequest() {
+        call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"arn:aws:payment-cryptography:us-east-1:000000000000:key/abcdefghijklmnop",
+                 "SigningAlgorithm":"SHA256",
+                 "CertificateSubject":{"CommonName":"floci"}}""")
+                .then().statusCode(400)
+                    .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aKeyThatIsPendingDeletionSignsNoRequest() {
+        // The deletion disables the key, and a disabled key does no work.
+        String arn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}").then().statusCode(200);
+
+        call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA256",
+                 "CertificateSubject":{"CommonName":"floci"}}""".formatted(arn))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void theModelCheckRefusesASigningAlgorithmTheModelDoesNotName() {
+        // The model names the digests, so the service does not check them again.
+        String arn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        Response answer = call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA1",
+                 "CertificateSubject":{"CommonName":"floci"}}""".formatted(arn));
+
+        assertTheModelRefused(answer, "SigningAlgorithm");
+    }
+
+    @Test
+    void theModelCheckRefusesASubjectWithoutACommonName() {
+        // The model requires the common name of the subject.
+        String arn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        Response answer = call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA256",
+                 "CertificateSubject":{"Organization":"Floci"}}""".formatted(arn));
+
+        assertTheModelRefused(answer, "CommonName");
+    }
+
     @Test
     void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
         // The team's ARN is kept as the request names it: the emulator has no Multi-Party
@@ -1039,21 +1135,6 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void anUnsupportedOperationIsRefused() {
         call("EncryptKey", "{}")
-                .then().statusCode(400)
-                    .body("__type", containsString("UnknownOperationException"));
-    }
-
-    @Test
-    void anOperationTheServiceDoesNotServeIsRefusedWhateverItsBodySays() {
-        // The model names the operation and the service does not serve it, so it is refused
-        // as the unknown operation it is. The body it carries does not change that: a body
-        // that breaks the model's rules is not the answer to an operation that is not
-        // served at all.
-        call("GetCertificateSigningRequest", "{}")
-                .then().statusCode(400)
-                    .body("__type", containsString("UnknownOperationException"));
-        call("GetCertificateSigningRequest", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:"
-                + "us-east-1:000000000000:key/abcdefghijklmnop\"}")
                 .then().statusCode(400)
                     .body("__type", containsString("UnknownOperationException"));
     }

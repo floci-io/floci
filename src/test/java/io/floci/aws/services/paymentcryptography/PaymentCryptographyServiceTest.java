@@ -9,16 +9,25 @@ import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyMpaTeamAssociation;
 import io.floci.aws.testing.ManualClock;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.x500.RDN;
+import org.bouncycastle.asn1.x500.style.BCStyle;
+import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
+import java.security.Signature;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +40,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -1819,6 +1829,215 @@ class PaymentCryptographyServiceTest {
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.mpaTeamAssociation("us-west-2", MPA_OPERATION));
         assertEquals("ResourceNotFoundException", refused.getErrorCode());
+    }
+
+    /** The subject of a certificate signing request, for the tests that need one. */
+    private static final Map<String, String> CSR_SUBJECT = Map.of(
+            "CommonName", "floci payment cryptography",
+            "Organization", "Floci",
+            "Country", "IE");
+
+    @Test
+    void aKeyPairSignsACertificateSigningRequest() {
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA256", CSR_SUBJECT);
+
+        // The answer is the PEM of the request, base64 encoded, as the reference's own
+        // answer carries it.
+        String pem = pemOf(answer);
+        assertTrue(pem.startsWith("-----BEGIN CERTIFICATE REQUEST-----"), pem);
+        assertTrue(pem.trim().endsWith("-----END CERTIFICATE REQUEST-----"), pem);
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA256");
+    }
+
+    @Test
+    void aKeyPairSignsACertificateSigningRequestWithSha224() {
+        // The model names four digests, and each of them signs.
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA224", CSR_SUBJECT);
+
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA224");
+    }
+
+    @Test
+    void aKeyPairOfTheTr34UsageSignsACertificateSigningRequest() {
+        // The reference's own import flow signs the request with a key pair of the TR-34
+        // usage, whose modes of use are unwrapping and decrypting, so the mode of use of
+        // the key does not narrow the operation.
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048", "TR31_K2_TR34_ASYMMETRIC_KEY",
+                Map.of("Unwrap", Boolean.TRUE, "Decrypt", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA512", CSR_SUBJECT);
+
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA512");
+    }
+
+    @Test
+    void anEllipticCurveKeyPairSignsACertificateSigningRequest() {
+        PaymentCryptographyKey pair = signingKeyPair("ECC_NIST_P256",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA384", CSR_SUBJECT);
+
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA384");
+    }
+
+    @Test
+    void theSubjectIsWrittenInTheOrderTheReferenceWritesIt() {
+        // The reference's own request reads C=US, ST=Virginia, L=Arlington, O=Amazon,
+        // OU=PaymentCryptography, CN=MyCertificateAWSUSEAST, so the members of the subject
+        // are written most general one first.
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA256", Map.of(
+                "CommonName", "MyCertificateAWSUSEAST",
+                "Organization", "Amazon",
+                "OrganizationUnit", "PaymentCryptography",
+                "Country", "US",
+                "StateOrProvince", "Virginia",
+                "City", "Arlington"));
+
+        List<ASN1ObjectIdentifier> types = subjectTypesOf(answer);
+        assertEquals(List.of(BCStyle.C, BCStyle.ST, BCStyle.L, BCStyle.O, BCStyle.OU, BCStyle.CN),
+                types);
+    }
+
+    @Test
+    void theEmailAddressIsWrittenAsTheCallerNamedIt() {
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA256", Map.of(
+                "CommonName", "floci payment cryptography",
+                "EmailAddress", "team@example.com"));
+
+        String subject = requestOf(answer).getSubject().toString();
+        assertTrue(subject.contains("team@example.com"), subject);
+    }
+
+    @Test
+    void anEmailAddressTheAttributeCannotHoldIsRefused() {
+        // The email address is written as an IA5String, which holds ASCII alone, so an
+        // address outside ASCII is refused rather than signed with a narrowed character:
+        // the request would otherwise carry an address the caller never named.
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.certificateSigningRequest(pair, "SHA256", Map.of(
+                        "CommonName", "floci payment cryptography",
+                        "EmailAddress", "a\u2019b@example.com")));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aKeyThatIsNotAKeyPairSignsNoRequest() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.certificateSigningRequest(key, "SHA256", CSR_SUBJECT));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aDisabledKeySignsNoRequest() {
+        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+        service.stopKeyUsage(pair);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.certificateSigningRequest(pair, "SHA256", CSR_SUBJECT));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    /**
+     * The request a key pair signed, read back and checked.
+     *
+     * <p>The subject is the one the request named, the request carries the public half of
+     * the key that signed it, and the signature verifies under that half, so the request is
+     * the one the key signed and a certificate authority can verify it against the key it
+     * carries.
+     */
+    private static void assertCertificateSigningRequestVerifies(String answer,
+                                                                 PaymentCryptographyKey pair,
+                                                                 String digest) {
+        try {
+            PKCS10CertificationRequest request = requestOf(answer);
+            assertTrue(request.getSubject().toString().contains("Floci"),
+                    request.getSubject().toString());
+            assertArrayEquals(PaymentCryptographyKeyExchange.publicKeyOf(pair).getEncoded(),
+                    request.getSubjectPublicKeyInfo().getEncoded(),
+                    "the request carries a public key that is not the key that signed it");
+            String algorithm = digest + (pair.getKeyAlgorithm().startsWith("ECC")
+                    ? "withECDSA" : "withRSA");
+            Signature verifier = Signature.getInstance(algorithm);
+            verifier.initVerify(PaymentCryptographyKeyExchange.publicKeyOf(pair));
+            verifier.update(request.toASN1Structure().getCertificationRequestInfo().getEncoded());
+            assertTrue(verifier.verify(request.getSignature()),
+                    "the signature of the request does not verify");
+        } catch (GeneralSecurityException | IOException e) {
+            throw new AssertionError("the certificate signing request does not parse", e);
+        }
+    }
+
+    /**
+     * The attributes of the subject of a request, in the order they are written in.
+     *
+     * @param answer the base64 encoded request
+     * @return the attribute of every member of the subject
+     */
+    private static List<ASN1ObjectIdentifier> subjectTypesOf(String answer) {
+        List<ASN1ObjectIdentifier> types = new ArrayList<>();
+        for (RDN rdn : requestOf(answer).getSubject().getRDNs()) {
+            types.add(rdn.getFirst().getType());
+        }
+        return types;
+    }
+
+    /**
+     * The request a PEM holds, read back.
+     *
+     * <p>The PEM is the answer the service gives, base64 encoded, so it is decoded and the
+     * markers are taken off before the request itself is read.
+     *
+     * @param pem the request, in PEM
+     * @return the request
+     */
+    private static PKCS10CertificationRequest requestOf(String answer) {
+        byte[] der = Base64.getMimeDecoder().decode(pemOf(answer).replaceAll("-----[A-Z ]+-----", ""));
+        try {
+            return new PKCS10CertificationRequest(der);
+        } catch (IOException e) {
+            throw new AssertionError("the certificate signing request does not parse", e);
+        }
+    }
+
+    /**
+     * The PEM the answer carries, decoded.
+     *
+     * @param answer the base64 encoded request
+     * @return the request, in PEM
+     */
+    private static String pemOf(String answer) {
+        return new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * A key pair that may sign, for the request's tests.
+     *
+     * @param algorithm the key pair's algorithm
+     * @param usage the key pair's usage
+     * @param modes the key pair's modes of use
+     * @return the key pair
+     */
+    private PaymentCryptographyKey signingKeyPair(String algorithm, String usage,
+                                                   Map<String, Boolean> modes) {
+        return createKey("us-east-1", algorithm, "ASYMMETRIC_KEY_PAIR", usage, modes);
     }
 
     /** The attributes of a key with that algorithm and usage. */

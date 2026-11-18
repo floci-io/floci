@@ -84,6 +84,7 @@ public class PaymentCryptographyJsonHandler {
             case "GetDefaultKeyReplicationRegions" -> () -> getDefaultKeyReplicationRegions(request, region);
             case "EnableDefaultKeyReplicationRegions" -> () -> enableDefaultKeyReplicationRegions(request, region);
             case "DisableDefaultKeyReplicationRegions" -> () -> disableDefaultKeyReplicationRegions(request, region);
+            case "GetCertificateSigningRequest" -> () -> getCertificateSigningRequest(request, region);
             case "TagResource" -> () -> tagResource(request, region);
             case "UntagResource" -> () -> untagResource(request, region);
             case "ListTagsForResource" -> () -> listTagsForResource(request, region);
@@ -542,6 +543,35 @@ public class PaymentCryptographyJsonHandler {
             }
         }
         return tags;
+    }
+
+    // ---- certificate signing requests ----------------------------------------
+
+    /**
+     * The certificate signing request a key pair signs.
+     *
+     * <p>The subject is the metadata the request names, and the digest is the one the request
+     * names, so the request is the one the caller asked for. The answer carries the PEM of
+     * the request, base64 encoded, as the reference's own answer carries it.
+     */
+    private Map<String, Object> getCertificateSigningRequest(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
+        String signingRequest = service.certificateSigningRequest(key,
+                request.path("SigningAlgorithm").asText(),
+                subjectOf(request.path("CertificateSubject")));
+        return Map.of("CertificateSigningRequest", signingRequest);
+    }
+
+    /** The subject of a request, as the members the model names. */
+    private static Map<String, String> subjectOf(JsonNode subject) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        for (String member : PaymentCryptographyCertificateRequest.subjectMembers()) {
+            JsonNode value = subject.get(member);
+            if (value != null && !value.isNull()) {
+                fields.put(member, value.asText());
+            }
+        }
+        return fields;
     }
 
     // ---- helpers ------------------------------------------------------------
