@@ -9,6 +9,7 @@ import com.github.dockerjava.api.model.PortBinding;
 import com.github.dockerjava.api.model.Ports;
 import io.floci.aws.services.dsql.dataplane.DsqlDatabases;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.floci.aws.testing.TestDockerClients;
 import org.jboss.logging.Logger;
 
@@ -21,6 +22,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -29,7 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * A throwaway PostgreSQL 16 in Docker for the external DSQL backend's tests, bound to a free port
  * on 127.0.0.1, whose superuser is {@code postgres}. {@link #close()} removes the container and
- * always closes the Docker client.
+ * always closes the Docker client. The container carries this run's
+ * {@link SidecarContainersProfile#namespace() sidecar namespace}, so the next run on the host
+ * removes it when this one is killed before it could.
  */
 public final class ExternalPostgresServer implements AutoCloseable {
 
@@ -86,7 +90,10 @@ public final class ExternalPostgresServer implements AutoCloseable {
         }
     }
 
-    /** Docker, or the image, is not there; a test skips rather than fails. Its cause says why. */
+    /**
+     * Docker is not there, or, outside CI, the image; a test skips rather than fails. Its cause
+     * says why.
+     */
     public static final class DockerUnavailableException extends Exception {
         DockerUnavailableException(String message, Throwable cause) {
             super(message, cause);
@@ -110,6 +117,10 @@ public final class ExternalPostgresServer implements AutoCloseable {
             try {
                 dockerClient.pullImageCmd(IMAGE).start().awaitCompletion(120, TimeUnit.SECONDS);
             } catch (RuntimeException e) {
+                if ("true".equals(System.getenv("CI"))) {
+                    // In CI a missing image fails, as a sidecar's does, so a vanished tag cannot pass silently.
+                    throw e;
+                }
                 throw new DockerUnavailableException("Docker or " + IMAGE + " is not available: " + e.getMessage(), e);
             }
             List<String> environment = new ArrayList<>(List.of("POSTGRES_USER=postgres"));
@@ -117,6 +128,7 @@ public final class ExternalPostgresServer implements AutoCloseable {
             ExposedPort exposed = ExposedPort.tcp(5432);
             containerId = dockerClient.createContainerCmd(IMAGE)
                     .withName(name + "-" + UUID.randomUUID())
+                    .withLabels(Map.of("floci_namespace", SidecarContainersProfile.namespace()))
                     .withEnv(environment)
                     .withExposedPorts(exposed)
                     .withHostConfig(HostConfig.newHostConfig()
