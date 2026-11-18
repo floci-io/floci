@@ -60,6 +60,9 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     /** Where a {@link Location} names an authorizer, in place of the HTTP method. */
     private static final String AUTHORIZER_KIND = "AUTHORIZER";
     private static final String AUTHORIZER_SNAPSHOT_ATTR = CfnRollback.APIGW_AUTHORIZER_UPDATE_SNAPSHOT_ATTR;
+    /** Where a {@link Location} names a stage: the stage name in place of the resource id. */
+    private static final String STAGE_KIND = "STAGE";
+    private static final String STAGE_SNAPSHOT_ATTR = CfnRollback.APIGW_STAGE_UPDATE_SNAPSHOT_ATTR;
     private static final String VPC_ENDPOINT_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
 
     private final ApiGatewayService apiGatewayService;
@@ -94,8 +97,8 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * A Resource or Method can sit on an API outside the stack, where no RestApi delete cascades to
-     * it, so each removes its own entity, found through the location recorded for it. Deployment
-     * and Stage have no delete of their own yet. An Authorizer is deleted at the API recorded for it; one
+     * it, so each removes its own entity, found through the location recorded for it. A Deployment
+     * has no delete of its own yet. An Authorizer or Stage is deleted at the API recorded for it; one
      * created before its location was recorded is not deleted.
      */
     @Override
@@ -133,7 +136,10 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void deleteLocation(String physicalId, Location location, String region) {
-        if (location.authorizer()) {
+        if (location.stage()) {
+            CfnDeletes.safeDelete("API stage", physicalId, () -> apiGatewayService.deleteStage(
+                    region, location.restApiId(), location.resourceId()), "NotFoundException");
+        } else if (location.authorizer()) {
             CfnDeletes.safeDelete("API authorizer", physicalId, () -> apiGatewayService.deleteAuthorizer(
                     region, location.restApiId(), location.resourceId()), "NotFoundException");
         } else if (location.httpMethod() == null) {
@@ -177,14 +183,20 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         resource.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
-        return ReplacementCleanup.complete(resource,
+        UpdateCleanupResult movedStage = deleteStageMovedByUpdate(resource);
+        if (movedStage == null) {
+            resource.getAttributes().remove(STAGE_SNAPSHOT_ATTR);
+        }
+        UpdateCleanupResult displaced = ReplacementCleanup.complete(resource,
                 (type, physicalId, region) -> deleteEntity(resource, physicalId, region));
+        return movedStage != null && (!displaced.applicable() || displaced.complete()) ? movedStage : displaced;
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
         resource.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(STAGE_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
@@ -204,9 +216,10 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts a replaced RestApi, Resource, Method or Authorizer back when a later resource fails the
+     * Puts a replaced RestApi, Resource, Method, Authorizer or Stage back when a later resource fails the
      * update, a RestApi patched in place back to its snapshot, and an Authorizer patched in place, or
-     * created because the prior was gone, back through its own snapshot. Without a replacement, a Resource update
+     * created because the prior was gone, back through its own snapshot, and the same for a Stage.
+     * Without a replacement, a Resource update
      * changed nothing, since all its properties are createOnly, so there is nothing to undo. A
      * Method the update kept was written in place, with no snapshot to put back.
      */
@@ -216,6 +229,11 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
                 ? CfnRollback.updateSnapshot(resource, AUTHORIZER_SNAPSHOT_ATTR) : null;
         if (authorizerSnapshot != null) {
             return rollbackAuthorizerUpdate(resource, authorizerSnapshot);
+        }
+        JsonNode stageSnapshot = STAGE.equals(resource.getResourceType())
+                ? CfnRollback.updateSnapshot(resource, STAGE_SNAPSHOT_ATTR) : null;
+        if (stageSnapshot != null) {
+            return rollbackStageUpdate(resource, stageSnapshot);
         }
         if (ReplacementCleanup.rollback(resource,
                 (type, physicalId, region) -> deleteEntity(resource, physicalId, region))) {
@@ -255,6 +273,11 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         /** An authorizer, recorded with {@link #AUTHORIZER_KIND} where a method would name its verb. */
         boolean authorizer() {
             return AUTHORIZER_KIND.equals(httpMethod);
+        }
+
+        /** A stage, recorded with {@link #STAGE_KIND} and its name as the resource id. */
+        boolean stage() {
+            return STAGE_KIND.equals(httpMethod);
         }
     }
 
@@ -803,18 +826,174 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * RestApiId and StageName are create-only: a change to either replaces the stage. Any other
+     * change patches it in place, keeping the settings the template does not model. A change to
+     * RestApiId that keeps the name leaves the physical id as it was, so the stage on the old API
+     * is recorded and deleted once the update commits, unless {@code UpdateReplacePolicy: Retain}
+     * keeps it ({@link ReplacementCleanup} lists one entity per physical id, so it cannot hold this
+     * one). A new stage is refused when its name is already taken on the API, so a rollback never
+     * deletes a stage the update did not create. A stage provisioned before its location was
+     * recorded is not deleted, and is not deleted as the old stage of a move either.
+     */
     private void provisionStage(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(STAGE_SNAPSHOT_ATTR);
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        String region = ctx.region();
         String apiId = ctx.resolveOptional(props, "RestApiId");
         String stageName = ctx.resolveOptional(props, "StageName");
-        String deploymentId = ctx.resolveOptional(props, "DeploymentId");
-
+        PropertyChanges changes = ctx.isUpdate() ? ctx.changes(STAGE, props) : null;
+        boolean replaces = changes != null && changes.requiresReplacement();
+        Stage live = ctx.isUpdate() && !replaces
+                ? findPrior("API stage", ctx.priorPhysicalId(),
+                        () -> apiGatewayService.getStage(region, apiId, ctx.priorPhysicalId()))
+                : null;
+        if (live != null) {
+            updateStageInPlace(r, props, ctx, apiId, live);
+            return;
+        }
+        Location prior = ctx.isUpdate() ? locations(r).get(ctx.priorPhysicalId()) : null;
+        if (ctx.isUpdate()) {
+            requireStageNameFree(region, apiId, stageName);
+        }
         Map<String, Object> req = new HashMap<>();
         req.put("stageName", stageName);
-        req.put("deploymentId", deploymentId);
+        req.put("deploymentId", ctx.resolveOptional(props, "DeploymentId"));
         req.put("description", ctx.resolveOptional(props, "Description"));
 
-        apiGatewayService.createStage(ctx.region(), apiId, req);
+        apiGatewayService.createStage(region, apiId, req);
         r.setPhysicalId(stageName);
+        recordLocation(r, ctx, new Location(apiId, stageName, STAGE_KIND));
+        if (ctx.isUpdate() && !replaces) {
+            // The stage the update started from is gone, so this one is the update's to undo.
+            CfnRollback.recordCreatedByUpdate(r, ctx, STAGE_SNAPSHOT_ATTR);
+        } else if (replaces && stageName.equals(ctx.priorPhysicalId()) && prior != null
+                && prior.stage() && !apiId.equals(prior.restApiId())) {
+            ObjectNode moved = objectMapper.createObjectNode();
+            moved.put("region", region);
+            moved.put("apiId", apiId);
+            moved.put("stageName", stageName);
+            moved.put("movedFromApiId", prior.restApiId());
+            r.getAttributes().put(STAGE_SNAPSHOT_ATTR, moved.toString());
+        }
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.record(r, ctx, attributesBefore, replaces);
+        }
+    }
+
+    /**
+     * Patches the stage to the template: a declared DeploymentId or Description is set, a dropped
+     * Description is cleared (the patch has no remove, so an empty value, which the service reads as
+     * cleared) and a dropped DeploymentId is kept, since the patch has no remove for
+     * it. Stage variables, method settings and the other fields are not touched.
+     */
+    private void updateStageInPlace(StackResource r, JsonNode props, ProvisionContext ctx, String apiId,
+                                    Stage live) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("region", ctx.region());
+        snapshot.put("apiId", apiId);
+        snapshot.put("stageName", live.getStageName());
+        snapshot.put("deploymentId", live.getDeploymentId());
+        snapshot.put("description", live.getDescription());
+        r.getAttributes().put(STAGE_SNAPSHOT_ATTR, snapshot.toString());
+
+        String deploymentId = ctx.resolveOptional(props, "DeploymentId");
+        String description = ctx.resolveOptional(props, "Description");
+        String desiredDescription = description != null ? description
+                : ctx.droppedProperties(props).contains("Description") ? null : live.getDescription();
+        List<Map<String, String>> ops = new ArrayList<>();
+        if (deploymentId != null && !deploymentId.equals(live.getDeploymentId())) {
+            ops.add(replacePatchOp("/deploymentId", deploymentId));
+        }
+        if (!Objects.equals(live.getDescription(), desiredDescription)) {
+            ops.add(replacePatchOp("/description", desiredDescription == null ? "" : desiredDescription));
+        }
+        if (!ops.isEmpty()) {
+            apiGatewayService.updateStage(ctx.region(), apiId, live.getStageName(), ops);
+        }
+        r.setPhysicalId(live.getStageName());
+        recordLocation(r, ctx, new Location(apiId, live.getStageName(), STAGE_KIND));
+    }
+
+    /**
+     * CreateStage here overwrites a stage of the same name, which would make a rollback delete one
+     * the update did not create, so an update refuses a name already on the API.
+     */
+    private void requireStageNameFree(String region, String apiId, String stageName) {
+        if (stageName != null && findPrior("API stage", stageName,
+                () -> apiGatewayService.getStage(region, apiId, stageName)) != null) {
+            throw new AwsException("ConflictException", "Stage already exists: " + stageName, 409);
+        }
+    }
+
+    /**
+     * Deletes the stage a RestApiId change left on the old API, once the update has committed;
+     * {@code UpdateReplacePolicy: Retain} keeps it, as it keeps any displaced entity. A failed delete
+     * is reported the way {@link ReplacementCleanup#complete} reports one, as a result the engine
+     * retries up to three attempts, with the count kept on the snapshot; null when nothing is left to
+     * retry; after the last failed attempt the old stage stays on the old API. {@link ReplacementCleanup}
+     * cannot hold this stage, which shares its physical id with the live one.
+     */
+    private UpdateCleanupResult deleteStageMovedByUpdate(StackResource resource) {
+        if ("Retain".equals(resource.getUpdateReplacePolicy())) {
+            return null;
+        }
+        JsonNode snapshot = STAGE.equals(resource.getResourceType())
+                ? CfnRollback.updateSnapshot(resource, STAGE_SNAPSHOT_ATTR) : null;
+        String movedFrom = snapshot == null ? null : CfnRollback.snapshotText(snapshot, "movedFromApiId");
+        if (movedFrom == null) {
+            return null;
+        }
+        int attempts = snapshot.path("cleanupAttempts").asInt(0);
+        if (attempts >= ReplacementCleanup.MAX_ATTEMPTS) {
+            return null;
+        }
+        String stageName = snapshot.path("stageName").asText();
+        try {
+            deleteLocation(stageName, new Location(movedFrom, stageName, STAGE_KIND),
+                    snapshot.path("region").asText());
+        } catch (RuntimeException deleteFailure) {
+            ObjectNode failed = ((ObjectNode) snapshot).put("cleanupAttempts", attempts + 1);
+            resource.getAttributes().put(STAGE_SNAPSHOT_ATTR, failed.toString());
+            return new UpdateCleanupResult(true, false, stageName, attempts + 1, deleteFailure.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Puts the stage back after a failed stack update: deletes the one the update created because
+     * the prior was gone, or the one a RestApiId change made on the new API (the stage on the old API
+     * was never touched), or writes the snapshot of a patched stage back whole. Spent only once it
+     * succeeded, so a failure can be retried.
+     */
+    private boolean rollbackStageUpdate(StackResource resource, JsonNode snapshot) {
+        if (CfnRollback.undoCreatedByUpdate(resource, snapshot, STAGE_SNAPSHOT_ATTR, null,
+                (createdId, region) -> deleteEntity(resource, createdId, region))) {
+            return true;
+        }
+        String region = snapshot.path("region").asText();
+        String apiId = snapshot.path("apiId").asText();
+        String stageName = snapshot.path("stageName").asText();
+        String movedFrom = CfnRollback.snapshotText(snapshot, "movedFromApiId");
+        if (movedFrom != null) {
+            deleteLocation(stageName, new Location(apiId, stageName, STAGE_KIND), region);
+            ObjectNode recorded = objectMapper.createObjectNode();
+            recorded.set(stageName, locationNode(new Location(movedFrom, stageName, STAGE_KIND)));
+            resource.getAttributes().put(LOCATIONS_ATTR, recorded.toString());
+            ReplacementCleanup.rollback(resource, (type, physicalId, regionName) -> { });
+        } else {
+            Stage prior = new Stage();
+            prior.setStageName(stageName);
+            prior.setDeploymentId(CfnRollback.snapshotText(snapshot, "deploymentId"));
+            prior.setDescription(CfnRollback.snapshotText(snapshot, "description"));
+            apiGatewayService.restoreStage(region, apiId, prior);
+        }
+        resource.getAttributes().remove(STAGE_SNAPSHOT_ATTR);
+        return true;
     }
 
     /** Resolves an optional property, falling back to {@code defaultValue} when absent or blank. */
