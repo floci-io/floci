@@ -55,9 +55,10 @@ import java.util.Optional;
  * Serverless, for the tags of an application, a job run or a session; EMR on EKS, for the tags of a virtual cluster, a
  * job run, a managed endpoint, a job template or a security configuration; Cost Explorer, for the tags of an anomaly
  * monitor or subscription; Security Hub, for the tags of a hub or a configuration policy; Control Tower, for the tags
- * of a landing zone or an enabled control); looked up lazily by {@code ResourceArnBuilder} and
- * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
- * ARN is of, so IAM never depends on that service directly.</p>
+ * of a landing zone or an enabled control; GuardDuty, for the tags of a detector or a Malware Protection plan); looked
+ * up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through
+ * {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on that
+ * service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone
