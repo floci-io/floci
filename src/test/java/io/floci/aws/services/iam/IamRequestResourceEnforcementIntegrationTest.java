@@ -1516,14 +1516,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     void aTrailIsCheckedOnTheArnItsNameGives() {
         String name = "res-trail-" + suffix();
         String other = name + "-other";
-        for (String trail : List.of(name, other)) {
-            adminJson("cloudtrail", "CloudTrail_20131101.CreateTrail")
-                    .body("{\"Name\":\"" + trail + "\",\"S3BucketName\":\"res-trail-logs\"}").post("/").then()
-                    .statusCode(200);
-            cleanup.register(() -> adminJson("cloudtrail", "CloudTrail_20131101.DeleteTrail")
-                    .body("{\"Name\":\"" + trail + "\"}").post("/"));
-        }
-        String arn = "arn:aws:cloudtrail:" + REGION + ":" + ACCOUNT + ":trail/" + name;
+        String arn = trail(name, null);
+        trail(other, null);
 
         User user = user("res-trail");
         user.policy(allowOn("cloudtrail:GetTrailStatus", arn) + "," + allowOn("cloudtrail:AddTags", arn));
@@ -1538,6 +1532,41 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .statusCode(200);
         refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.AddTags", "1.1",
                 "{\"ResourceId\":\"" + arn + "-other" + tags), "cloudtrail:AddTags");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags CloudTrail holds on the trail a request names, as AddTags
+     * leaves them, so an allow on one team's tag lets the caller read that team's trail status and not another's.
+     */
+    @Test
+    void aCloudTrailResourceTagConditionReadsTheTagsOfTheTrail() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = "res-trail-tagged-" + suffix();
+        String other = "res-trail-untagged-" + suffix();
+        String taggedArn = trail(tagged, web);
+        trail(other, web);
+        adminJson("cloudtrail", "CloudTrail_20131101.AddTags")
+                .body("{\"ResourceId\":\"" + taggedArn + "\",\"TagsList\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-trail-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"cloudtrail:GetTrailStatus\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "cloudtrail", "CloudTrail_20131101.GetTrailStatus", "1.1", "{\"Name\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.GetTrailStatus", "1.1",
+                "{\"Name\":\"" + other + "\"}"), "cloudtrail:GetTrailStatus");
+    }
+
+    /** The ARN of the trail {@code name} an administrator creates, with the {@code tags} list if any, deleted after. */
+    private String trail(String name, String tags) {
+        adminJson("cloudtrail", "CloudTrail_20131101.CreateTrail")
+                .body("{\"Name\":\"" + name + "\",\"S3BucketName\":\"res-trail-logs\""
+                        + (tags == null ? "" : ",\"TagsList\":" + tags) + "}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("cloudtrail", "CloudTrail_20131101.DeleteTrail")
+                .body("{\"Name\":\"" + name + "\"}").post("/"));
+        return "arn:aws:cloudtrail:" + REGION + ":" + ACCOUNT + ":trail/" + name;
     }
 
     /** A CloudTrail dashboard is checked on the one its {@code DashboardId}, a name or an ARN, names. */
