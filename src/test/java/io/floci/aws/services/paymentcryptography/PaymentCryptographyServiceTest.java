@@ -1853,6 +1853,19 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyPairSignsACertificateSigningRequestWithSha224() {
+        // The model names four digests, and each of them signs.
+        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA224", CSR_SUBJECT);
+
+        assertCertificateSigningRequestVerifies(
+                new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII),
+                pair, "SHA224");
+    }
+
+    @Test
     void aKeyPairOfTheTr34UsageSignsACertificateSigningRequest() {
         // The reference's own import flow signs the request with a key pair of the TR-34
         // usage, whose modes of use are unwrapping and decrypting, so the mode of use of

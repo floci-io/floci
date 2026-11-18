@@ -662,6 +662,56 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aKeyThatIsNotThereSignsNoRequest() {
+        call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"arn:aws:payment-cryptography:us-east-1:000000000000:key/abcdefghijklmnop",
+                 "SigningAlgorithm":"SHA256",
+                 "CertificateSubject":{"CommonName":"floci"}}""")
+                .then().statusCode(400)
+                    .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aKeyThatIsPendingDeletionSignsNoRequest() {
+        // The deletion disables the key, and a disabled key does no work.
+        String arn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}").then().statusCode(200);
+
+        call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA256",
+                 "CertificateSubject":{"CommonName":"floci"}}""".formatted(arn))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void theModelCheckRefusesASigningAlgorithmTheModelDoesNotName() {
+        // The model names the digests, so the service does not check them again.
+        String arn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        Response answer = call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA1",
+                 "CertificateSubject":{"CommonName":"floci"}}""".formatted(arn));
+
+        assertTheModelRefused(answer, "SigningAlgorithm");
+    }
+
+    @Test
+    void theModelCheckRefusesASubjectWithoutACommonName() {
+        // The model requires the common name of the subject.
+        String arn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        Response answer = call("GetCertificateSigningRequest", """
+                {"KeyIdentifier":"%s","SigningAlgorithm":"SHA256",
+                 "CertificateSubject":{"Organization":"Floci"}}""".formatted(arn));
+
+        assertTheModelRefused(answer, "CommonName");
+    }
+
+    @Test
     void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
         // The team's ARN is kept as the request names it: the emulator has no Multi-Party
         // Approval service to check it against.

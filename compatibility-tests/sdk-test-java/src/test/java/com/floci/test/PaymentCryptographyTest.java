@@ -466,6 +466,17 @@ class PaymentCryptographyTest {
     }
 
     @Test
+    void aKeyThatIsNotAKeyPairSignsNoRequest() {
+        // A key that is not a key pair has no public half to certify.
+        Key key = createAesKey();
+
+        assertRefusedWithValidationException(() -> client.getCertificateSigningRequest(r -> r
+                .keyIdentifier(key.keyArn())
+                .signingAlgorithm(SigningAlgorithmType.SHA256)
+                .certificateSubject(s -> s.commonName("floci"))), "not a key pair");
+    }
+
+    @Test
     void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
         // The team's ARN is kept as the request names it: the emulator has no Multi-Party
         // Approval service to check it against.

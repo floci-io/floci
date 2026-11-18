@@ -308,7 +308,10 @@
   country, the state or province, the city, the organization, the organization unit, the
   common name and the email address. The email address is written as an IA5String, which
   holds ASCII alone, so an address with a character outside ASCII is refused with
-  `ValidationException` rather than signed with that character narrowed to a byte.
+  `ValidationException` rather than signed with that character narrowed to a byte. The
+  model settles what the request may name: the digest is one of the four it names and the
+  subject carries a common name, so a request that names another digest or leaves the
+  common name out is refused with `ValidationException` by the model's own check.
 
 ## Configuration
 
