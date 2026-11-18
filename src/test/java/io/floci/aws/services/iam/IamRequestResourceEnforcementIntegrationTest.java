@@ -2039,10 +2039,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     /** A DataSync agent is checked on its ARN, which ends in the id DataSync gave it, to describe it or to tag it. */
     @Test
     void aDataSyncAgentIsCheckedOnItsArn() {
-        String arn = adminJson("datasync", "FmrsService.CreateAgent").body("{\"ActivationKey\":\"RES-ACTIVATION\"}")
-                .post("/").then().statusCode(200).extract().path("AgentArn");
-        cleanup.register(() -> adminJson("datasync", "FmrsService.DeleteAgent")
-                .body("{\"AgentArn\":\"" + arn + "\"}").post("/"));
+        String arn = dataSyncAgent(null);
         String agents = "arn:aws:datasync:" + REGION + ":" + ACCOUNT + ":agent/";
         assertTrue(arn.startsWith(agents + "agent-"), arn);
         String other = agents + "agent-0123456789abcdef0";
@@ -2054,6 +2051,36 @@ class IamRequestResourceEnforcementIntegrationTest {
         String tags = "\",\"Tags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}";
         dataSync(user, "TagResource", "{\"ResourceArn\":\"" + arn + tags).statusCode(200);
         refusedJson(dataSync(user, "TagResource", "{\"ResourceArn\":\"" + other + tags), "datasync:TagResource");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags DataSync holds on the agent a request names, as TagResource
+     * leaves them, so an allow on one team's tag lets the caller describe that team's agent and not another's.
+     */
+    @Test
+    void aDataSyncResourceTagConditionReadsTheTagsOfTheAgent() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = dataSyncAgent(web);
+        String other = dataSyncAgent(web);
+        adminJson("datasync", "FmrsService.TagResource")
+                .body("{\"ResourceArn\":\"" + tagged + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-agent-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"datasync:DescribeAgent\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        dataSync(user, "DescribeAgent", "{\"AgentArn\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(dataSync(user, "DescribeAgent", "{\"AgentArn\":\"" + other + "\"}"), "datasync:DescribeAgent");
+    }
+
+    /** The ARN of an agent an administrator creates, with the {@code tags} list if any, deleted afterwards. */
+    private String dataSyncAgent(String tags) {
+        String arn = adminJson("datasync", "FmrsService.CreateAgent")
+                .body("{\"ActivationKey\":\"RES-ACTIVATION\"" + (tags == null ? "" : ",\"Tags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("AgentArn");
+        cleanup.register(() -> adminJson("datasync", "FmrsService.DeleteAgent")
+                .body("{\"AgentArn\":\"" + arn + "\"}").post("/"));
+        return arn;
     }
 
     /**
