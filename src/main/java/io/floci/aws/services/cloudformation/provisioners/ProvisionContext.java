@@ -2,9 +2,11 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.QueryConstraintCheck;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackEvent;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -204,15 +206,41 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * apart from {@code AWS::NoValue} here, so it stays null as well.
      */
     public Integer resolveOptionalInt(JsonNode props, String name) {
-        String value = resolveOptional(props, name);
-        if (value == null || (value.isBlank() && !props.get(name).isTextual())) {
+        String value = resolveOptionalNumber(props, name);
+        if (value == null) {
             return null;
         }
         try {
             return Integer.valueOf(value.trim());
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
+            throw notAnInteger(name);
         }
+    }
+
+    /**
+     * Like {@link #resolveOptionalInt}, for an integer of any size: a value beyond an {@code int} is
+     * the service's to answer, not the reader's. What counts as absent and the refusal of a value that
+     * is no integer are the same.
+     */
+    public BigInteger resolveOptionalBigInteger(JsonNode props, String name) {
+        String value = resolveOptionalNumber(props, name);
+        if (value == null) {
+            return null;
+        }
+        if (!QueryConstraintCheck.isInteger(value)) {
+            throw notAnInteger(name);
+        }
+        return new BigInteger(value.trim());
+    }
+
+    /** The text of an optional numeric property, or null when it counts as absent. */
+    private String resolveOptionalNumber(JsonNode props, String name) {
+        String value = resolveOptional(props, name);
+        return value == null || (value.isBlank() && !props.get(name).isTextual()) ? null : value;
+    }
+
+    private static AwsException notAnInteger(String name) {
+        return new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
     }
 
     /**

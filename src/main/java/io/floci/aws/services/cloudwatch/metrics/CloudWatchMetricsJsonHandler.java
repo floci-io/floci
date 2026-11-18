@@ -28,6 +28,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -350,8 +351,20 @@ public class CloudWatchMetricsJsonHandler {
         alarm.setTreatMissingData(request.path("TreatMissingData").asText(null));
         alarm.setDimensions(parseDimensionsJson(request.path("Dimensions")));
 
-        metricsService.putMetricAlarm(alarm, region);
+        metricsService.putMetricAlarm(alarm, region, evaluationInterval(request));
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** The EvaluationInterval of a PutMetricAlarm request: null when absent or null, an integer otherwise. */
+    private static BigInteger evaluationInterval(JsonNode request) {
+        JsonNode node = request.get("EvaluationInterval");
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
+            throw new AwsException("SerializationException", "EvaluationInterval must be an integer", 400);
+        }
+        return node.bigIntegerValue();
     }
 
     private Response handlePutCompositeAlarm(JsonNode request, String region) {
