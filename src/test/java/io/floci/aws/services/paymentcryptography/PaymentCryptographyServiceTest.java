@@ -24,6 +24,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1712,6 +1718,68 @@ class PaymentCryptographyServiceTest {
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.mpaTeamAssociation("us-east-1", MPA_OPERATION));
         assertEquals("ResourceNotFoundException", refused.getErrorCode());
+    }
+
+    @Test
+    void theRemovalDoesNotChangeTheAssociationALookupHolds() {
+        // The state DELETE_PENDING belongs to the answer of the removal alone: the store
+        // holds the association, and what a lookup holds is a snapshot of it, so the
+        // removal does not reach what an earlier lookup was given.
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
+
+        PaymentCryptographyMpaTeamAssociation read =
+                service.mpaTeamAssociation("us-east-1", MPA_OPERATION);
+        service.disassociateMpaTeam("us-east-1", MPA_OPERATION);
+
+        assertEquals("ACTIVE", read.getAssociationState(),
+                "the removal changed the association a lookup holds");
+    }
+
+    @Test
+    void aLookupThatOverlapsTheRemovalNeverSeesTheRemovalPending() throws Exception {
+        // A lookup that overlaps the removal answers with the association that is there or
+        // with the resource the reference cannot find, and never with the state the removal
+        // answers with.
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 200; round++) {
+                service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
+                CountDownLatch start = new CountDownLatch(1);
+                List<String> seen = new CopyOnWriteArrayList<>();
+
+                Future<?> removal = pool.submit(() -> {
+                    awaitQuietly(start);
+                    service.disassociateMpaTeam("us-east-1", MPA_OPERATION);
+                });
+                Future<?> lookup = pool.submit(() -> {
+                    awaitQuietly(start);
+                    try {
+                        seen.add(service.mpaTeamAssociation("us-east-1", MPA_OPERATION)
+                                .getAssociationState());
+                    } catch (AwsException refused) {
+                        seen.add(refused.getErrorCode());
+                    }
+                });
+
+                start.countDown();
+                removal.get(10, TimeUnit.SECONDS);
+                lookup.get(10, TimeUnit.SECONDS);
+
+                assertFalse(seen.contains("DELETE_PENDING"),
+                        "a lookup saw the removal pending: " + seen);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /** Waits for the latch, and lets an interruption end the wait. */
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Test

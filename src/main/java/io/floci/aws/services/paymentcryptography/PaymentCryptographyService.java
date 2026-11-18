@@ -852,38 +852,68 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * <p>An operation has one association, so a second one replaces the first. The team's
      * ARN is stored as the request names it: there is no MPA service here to check it
      * against, and an ARN the model accepts names a team the emulator cannot see.
+     *
+     * <p>The store holds the association, and the caller gets a copy of it, so what the
+     * caller holds is a snapshot that a later change of the stored association does not
+     * reach.
      */
     public synchronized PaymentCryptographyMpaTeamAssociation associateMpaTeam(
             String region, String action, String mpaTeamArn) {
         PaymentCryptographyMpaTeamAssociation association =
                 new PaymentCryptographyMpaTeamAssociation(action, region, mpaTeamArn, "ACTIVE");
         mpaTeamStore.put(storageKey(region, action), association);
-        return association;
+        return copyOf(association);
     }
 
-    /** The MPA team associated with a protected operation. */
-    public PaymentCryptographyMpaTeamAssociation mpaTeamAssociation(String region, String action) {
+    /**
+     * The MPA team associated with a protected operation.
+     *
+     * <p>The store holds the association and the object it holds is mutable, so the read
+     * takes a copy of it while it holds the lock: what the caller holds is a snapshot, and
+     * a removal that runs after the read does not change it.
+     */
+    public synchronized PaymentCryptographyMpaTeamAssociation mpaTeamAssociation(
+            String region, String action) {
         PaymentCryptographyMpaTeamAssociation association =
                 mpaTeamStore.get(storageKey(region, action)).orElse(null);
         if (association == null) {
             throw new AwsException("ResourceNotFoundException",
                     "No MPA team is associated with " + action, 400);
         }
-        return association;
+        return copyOf(association);
     }
 
     /**
      * Removes the association between an MPA team and a protected operation.
      *
      * <p>The answer carries the association as it was, its state now {@code DELETE_PENDING},
-     * and the association is gone from the store.
+     * and the association is gone from the store. The state belongs to that answer alone:
+     * the stored association is not changed, so a lookup that overlaps the removal answers
+     * with the association that is there or with the resource the reference cannot find.
      */
     public synchronized PaymentCryptographyMpaTeamAssociation disassociateMpaTeam(
             String region, String action) {
         PaymentCryptographyMpaTeamAssociation association = mpaTeamAssociation(region, action);
-        association.setAssociationState("DELETE_PENDING");
         mpaTeamStore.delete(storageKey(region, action));
-        return association;
+        return new PaymentCryptographyMpaTeamAssociation(association.getAction(),
+                association.getRegion(), association.getMpaTeamArn(), "DELETE_PENDING");
+    }
+
+    /**
+     * A copy of an association.
+     *
+     * <p>The store holds the association and the object it holds is mutable, so what a
+     * caller gets is a copy: what the caller holds is a snapshot, and a change of the
+     * stored association does not reach it.
+     *
+     * @param association the association to copy
+     * @return the copy
+     */
+    private static PaymentCryptographyMpaTeamAssociation copyOf(
+            PaymentCryptographyMpaTeamAssociation association) {
+        return new PaymentCryptographyMpaTeamAssociation(association.getAction(),
+                association.getRegion(), association.getMpaTeamArn(),
+                association.getAssociationState());
     }
 
     // ---- the key exchange ----------------------------------------------------
