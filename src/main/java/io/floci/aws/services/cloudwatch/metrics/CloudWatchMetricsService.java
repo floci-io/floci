@@ -32,6 +32,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -422,11 +423,45 @@ public class CloudWatchMetricsService {
      * a child changes state.
      */
     public synchronized void putMetricAlarm(MetricAlarm alarm, String region) {
+        putMetricAlarm(alarm, region, null);
+    }
+
+    /**
+     * Creates or updates a metric alarm. An {@code evaluationInterval}, an integer of any size, is checked after
+     * the alarm name and against its range of 10 to 3600, then against the alarm: the PutMetricAlarm reference
+     * says it "cannot be specified" for an alarm configured with MetricName or Metrics.
+     */
+    public synchronized void putMetricAlarm(MetricAlarm alarm, String region, BigInteger evaluationInterval) {
+        if (evaluationInterval != null) {
+            rejectEvaluationInterval(alarm, evaluationInterval);
+        }
         boolean created = alarmStore.get(region + "::" + alarm.getAlarmName()).isEmpty();
         putAlarm(alarm, region);
         if (created) {
             evaluateComposites(region, Set.of(alarm.getAlarmName()));
         }
+    }
+
+    private static void rejectEvaluationInterval(MetricAlarm alarm, BigInteger interval) {
+        List<String> violations = Stream.of(alarmNameViolation(alarm.getAlarmName()), rangeViolation(interval))
+                .filter(Objects::nonNull).toList();
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+        if (alarm.getMetricName() != null || !alarm.getMetrics().isEmpty()) {
+            throw CloudWatchMetricsException.invalidParameterCombination(
+                    "EvaluationInterval cannot be specified for alarms configured with MetricName or Metrics.");
+        }
+    }
+
+    private static String rangeViolation(BigInteger interval) {
+        if (interval.compareTo(BigInteger.valueOf(10)) < 0) {
+            return SmithyValidationErrors.valueTooSmall("evaluationInterval", interval.toString(), 10);
+        }
+        if (interval.compareTo(BigInteger.valueOf(3600)) > 0) {
+            return SmithyValidationErrors.valueTooLarge("evaluationInterval", interval.toString(), 3600);
+        }
+        return null;
     }
 
     public void putCompositeAlarm(CompositeAlarm alarm, String region) {
@@ -469,13 +504,19 @@ public class CloudWatchMetricsService {
                 .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    private void putAlarm(Alarm alarm, String region) {
-        String name = alarm.getAlarmName();
+    /** The violation of the alarm name's constraints, or null for a name that meets them. */
+    private static String alarmNameViolation(String name) {
         String violation = name == null ? SmithyValidationErrors.notNull("alarmName")
                 : SmithyValidationErrors.lengthOutOfRange("alarmName", name, 1, 255);
         if (violation == null && name.isBlank()) {
             violation = SmithyValidationErrors.lengthTooShort("alarmName", name, 1);
         }
+        return violation;
+    }
+
+    private void putAlarm(Alarm alarm, String region) {
+        String name = alarm.getAlarmName();
+        String violation = alarmNameViolation(name);
         if (violation != null) {
             throw SmithyValidationErrors.validationError(violation);
         }

@@ -1,12 +1,15 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.QueryConstraintCheck;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -77,10 +80,22 @@ public class CloudWatchCfnProvisioner implements CfnResourceProvisioner {
         addAlarmActions(props, "OKActions", ctx, alarm.getOkActions());
         addAlarmActions(props, "InsufficientDataActions", ctx, alarm.getInsufficientDataActions());
 
-        cloudWatchMetricsService.putMetricAlarm(alarm, ctx.region());
+        cloudWatchMetricsService.putMetricAlarm(alarm, ctx.region(), evaluationInterval(props, ctx));
         // Ref returns the alarm name; Fn::GetAtt Arn returns the alarm ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", alarm.getAlarmArn());
+    }
+
+    /** Read like {@code resolveOptionalInt}, but an integer of any size: the service gives it the range error. */
+    private static BigInteger evaluationInterval(JsonNode props, ProvisionContext ctx) {
+        String value = ctx.resolveOptional(props, "EvaluationInterval");
+        if (value == null || (value.isBlank() && !props.get("EvaluationInterval").isTextual())) {
+            return null;
+        }
+        if (!QueryConstraintCheck.isInteger(value)) {
+            throw new AwsException("ValidationError", "Value of property EvaluationInterval must be an integer.", 400);
+        }
+        return new BigInteger(value.trim());
     }
 
     private void addAlarmActions(JsonNode props, String field, ProvisionContext ctx, List<String> target) {

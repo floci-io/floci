@@ -144,7 +144,6 @@ AWS::CloudTrail::Trail	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ActionConfiguration	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluateLowSampleCountPercentile	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationCriteria	accepted and ignored
-AWS::CloudWatch::Alarm	EvaluationInterval	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationWindow	accepted and ignored
 AWS::CloudWatch::Alarm	ExtendedStatistic	accepted and ignored
 AWS::CloudWatch::Alarm	Metrics	accepted and ignored
