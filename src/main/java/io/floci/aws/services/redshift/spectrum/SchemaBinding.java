@@ -9,4 +9,9 @@ interface SchemaBinding {
     String databaseName();
 
     String schemaName();
+
+    /** The name the registry keys the binding by; a binding of something inside a schema names it too. */
+    default String bindingName() {
+        return schemaName();
+    }
 }

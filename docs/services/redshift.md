@@ -1043,8 +1043,8 @@ lifecycle operations.
 ### External schemas over Kinesis Data Streams
 
 Streaming ingestion from Kinesis Data Streams starts with an external schema that maps to the streaming
-source. This part adds that schema; the streaming materialized view and `REFRESH` that read from it are
-not implemented yet.
+source. A streaming materialized view over a stream of that schema, and `REFRESH`, read it; see
+[Streaming materialized views](#streaming-materialized-views).
 
 ```sql
 CREATE EXTERNAL SCHEMA [IF NOT EXISTS] kds
@@ -1060,8 +1060,7 @@ schema, its metadata row and its registration; `RESTRICT` is the default, so a s
 kept, as in Redshift.
 
 - `IAM_ROLE DEFAULT` is not supported. Name the role ARN in a single-quoted literal.
-- The role is not checked when the schema is created. Nothing reads the stream yet, so no Kinesis permission
-  is evaluated.
+- The role is not checked when the schema is created. It is checked when a view over the schema is refreshed.
 - A statement that names a relation of the schema as a source (`SELECT * FROM kds.my_stream`,
   `INSERT INTO kds.t`, `UPDATE kds.t`) is refused with SQLSTATE `0A000`. Redshift reads a stream through a
   streaming materialized view, and keeps no user tables in such a schema.
@@ -1069,6 +1068,47 @@ kept, as in Redshift.
   with `25001`, because the schema registration is not part of the PostgreSQL transaction.
 - `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
 - Schemas over Amazon MSK or Kafka are not supported.
+- `DROP SCHEMA ... CASCADE` also drops the streaming views that read the schema.
+
+### Streaming materialized views
+
+A streaming materialized view reads one stream of a Kinesis external schema, and `REFRESH` loads what the
+stream holds since the last refresh.
+
+```sql
+CREATE MATERIALIZED VIEW my_view [AUTO REFRESH NO] AS
+SELECT approximate_arrival_timestamp, partition_key, shard_id, sequence_number, refresh_time,
+       JSON_PARSE(FROM_VARBYTE(kinesis_data, 'utf-8')) AS doc
+FROM kds.my_stream;
+
+REFRESH MATERIALIZED VIEW my_view;
+DROP MATERIALIZED VIEW [IF EXISTS] my_view [CASCADE | RESTRICT];
+```
+
+The stream's relation has the columns Redshift documents: `approximate_arrival_timestamp`, `partition_key`,
+`shard_id`, `sequence_number`, `refresh_time` and `kinesis_data` (`varbyte`). The view is a PostgreSQL table
+that `SELECT` fills; an unqualified name is created in `public`. Records are read through Floci's own Kinesis
+service, never through Firehose or S3.
+
+- **Refresh:** the first refresh reads each shard from its trim horizon. Every later one starts after the
+  last record of the shard that a refresh loaded. A batch is loaded, run through the view's `SELECT` and
+  committed as one statement, and the shard's position is saved only after that commit, so it never runs ahead
+  of the data. A crash between the commit and the save re-reads that last batch. `TRUNCATE` or `DELETE` on the
+  view does not move the position, as on Redshift.
+- **Errors:** a failure in the view's own expressions (a cast, a calculation) fails the refresh and leaves the
+  position where it was, as on Redshift.
+- **IAM:** each refresh checks the schema's role against `kinesis:DescribeStreamSummary`,
+  `GetShardIterator`, `GetRecords`, `ListShards` and `DescribeStream` on the stream and `kinesis:ListStreams`,
+  with trust for `redshift.amazonaws.com`, when IAM enforcement is on. `CREATE MATERIALIZED VIEW` fails with
+  `42P01` when the stream does not exist.
+- **Not supported:** `AUTO REFRESH YES` is refused with `0A000`; refresh the view yourself. Shard splits and
+  merges, `ALTER MATERIALIZED VIEW`, and PartiQL navigation into `SUPER` values are not implemented.
+  A `JOIN` in the view is refused with `0A000`, as on Redshift; a comma join (`FROM a, b`) is not detected.
+- `CREATE MATERIALIZED VIEW` over a stream fails with `0A000` inside a transaction block, and `DROP MATERIALIZED VIEW`
+  and `REFRESH MATERIALIZED VIEW` of a streaming view with `25001`.
+- Floci keeps a staging table named after the stream in the external schema. Do not query it. It is dropped with
+  the last view that reads the stream, so `DROP SCHEMA` without `CASCADE` works once every view is dropped.
+- Refreshes of the views over one stream run one at a time.
 
 ### COPY from S3
 
