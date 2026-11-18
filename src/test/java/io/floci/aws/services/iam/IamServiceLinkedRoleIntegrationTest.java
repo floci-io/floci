@@ -644,6 +644,32 @@ class IamServiceLinkedRoleIntegrationTest {
             .statusCode(404);
     }
 
+    /**
+     * The sentence AWS was recorded answering for the one change this package guards on
+     * {@code UpdateRole}, with the role's own name and the rest fixed. The other actions guarded
+     * here carry no recording of their own and keep this emulator's sentence, which is why only
+     * this one is held to a message.
+     */
+    @Test
+    @Order(35)
+    void theDurationRefusalCarriesTheRecordedSentence() {
+        createServiceLinkedRole("wordingprobe.amazonaws.com");
+        String roleName = "AWSServiceRoleForWordingprobe";
+
+        given()
+            .formParam("Action", "UpdateRole")
+            .formParam("RoleName", roleName)
+            .formParam("MaxSessionDuration", "7200")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("UnmodifiableEntity"))
+            .body("ErrorResponse.Error.Message", equalTo(roleName
+                    + " is an AWS service linked role, max session duration cannot be changed."));
+    }
+
     private static void refusedAsUnmodifiable(String action, String... formParams) {
         RequestSpecification request = given().header("Authorization", AUTH_HEADER).formParam("Action", action);
         for (int i = 0; i < formParams.length; i += 2) {
