@@ -21,7 +21,7 @@ public class DataSyncLocation implements DataSyncTaggable {
     private String region;
     private JsonNode configuration;
     private Instant creationTime;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public String getLocationArn() {
         return locationArn;
