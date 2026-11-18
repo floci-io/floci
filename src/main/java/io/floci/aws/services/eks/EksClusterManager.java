@@ -13,6 +13,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.dns.DnsAnswer;
 import io.floci.aws.core.common.dns.DnsClientVpcSource;
 import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
@@ -193,9 +194,14 @@ public class EksClusterManager
     @Inject
     jakarta.enterprise.inject.Instance<Ec2Service> ec2ServiceInstance;
     private Ec2Service ec2Service;
+    /** Looked up on use, as {@link #ec2ServiceInstance} is, since the add-ons are read only then. */
+    @Inject
+    jakarta.enterprise.inject.Instance<EksAddonService> addonServiceInstance;
+    private EksAddonService addonService;
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
+    private final StripedLocks podIdentityForwardLocks = new StripedLocks(256);
     private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
@@ -307,6 +313,20 @@ public class EksClusterManager
         if (lease != null && ec2 != null) {
             ec2.releaseVpcPrivateIp(lease.accountId(), lease.region(), lease.subnetId(), lease.address());
         }
+    }
+
+    void setAddonService(EksAddonService addonService) {
+        this.addonService = addonService;
+    }
+
+    private EksAddonService addonService() {
+        if (addonService != null) {
+            return addonService;
+        }
+        if (addonServiceInstance != null && !addonServiceInstance.isUnsatisfied()) {
+            return addonServiceInstance.get();
+        }
+        return null;
     }
 
     public void addNodeRegistrationListener(Consumer<Instance> listener) {
@@ -1006,7 +1026,7 @@ public class EksClusterManager
         applyEndpoints(cluster, containerName, hostPort, info, endpointHost);
         registerClusterNodeInstance(cluster, containerId);
         configureLinkLocalMetadataEndpoint(cluster, containerId);
-        configurePodIdentityRelay(cluster, containerId);
+        configurePodIdentityForward(cluster, containerId);
         activeClusters.put(clusterResourceName(cluster), cluster);
         configureVpcRoutes(cluster, containerId);
         attachClusterLogs(cluster);
@@ -1115,7 +1135,7 @@ public class EksClusterManager
         }
         registerClusterNodeInstance(cluster, info.containerId());
         configureLinkLocalMetadataEndpoint(cluster, info.containerId());
-        configurePodIdentityRelay(cluster, info.containerId());
+        configurePodIdentityForward(cluster, info.containerId());
         activeClusters.put(clusterResourceName(cluster), cluster);
         configureVpcRoutes(cluster, info.containerId());
         attachClusterLogsFromNow(cluster);
@@ -2778,35 +2798,100 @@ public class EksClusterManager
         }
     }
 
-    void configurePodIdentityRelay(Cluster cluster, String containerId) {
-        if (!config.services().eks().podIdentityWebhook() || !config.tls().enabled()) {
-            return;
+    /**
+     * Makes the EKS Pod Identity address, {@code 169.254.170.23:80}, answer in the node while the
+     * {@code eks-pod-identity-agent} add-on is stored, as the agent's DaemonSet answers it on EKS
+     * while the add-on is installed, and removes the forward otherwise, including one an earlier
+     * Floci left. Runs whenever the node starts or is adopted, so a restart forwards only while the
+     * add-on is stored: one deleted with {@code preserve}, whose agent EKS would leave running,
+     * keeps its forward until then.
+     *
+     * <p>NAT rules send pod and node requests for the address straight to Floci's credentials
+     * endpoint (see {@link EksPodNetworkRouting#buildPodIdentityForwardCommand}). No relay process
+     * runs in the node, so nothing has to be installed there, which a stock {@code rancher/k3s}
+     * image could not do.
+     */
+    void configurePodIdentityForward(Cluster cluster, String containerId) {
+        if (podIdentityForwardEnabled()) {
+            reconcilePodIdentityForward(cluster, containerId);
         }
+    }
+
+    /**
+     * CreateAddon stored, or DeleteAddon without {@code preserve} removed, the
+     * {@code eks-pod-identity-agent} add-on of {@code cluster}: its node answers on the Pod Identity
+     * address while the add-on is stored. A cluster without a node, as when EKS is mocked, is left
+     * alone.
+     */
+    public void podIdentityAgentChanged(Cluster cluster) {
+        if (podIdentityForwardEnabled() && cluster.getContainerId() != null) {
+            reconcilePodIdentityForward(cluster, cluster.getContainerId());
+        }
+    }
+
+    /**
+     * Forwards the address while the add-on is stored and removes the forward otherwise, reading the
+     * store under the cluster's lock: of a CreateAddon and a DeleteAddon racing, or of either and a
+     * restart's adoption, the later waits for the earlier's exec and then reads the store, so the node
+     * ends as the store does. A store that can't be read leaves the node as it is.
+     */
+    private void reconcilePodIdentityForward(Cluster cluster, String containerId) {
+        synchronized (podIdentityForwardLocks.lockFor(clusterResourceName(cluster))) {
+            boolean installed;
+            try {
+                installed = podIdentityAgentInstalled(cluster);
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not read the {0} add-on of EKS cluster {1}, leaving its Pod Identity address as it is: {2}",
+                        EksPodIdentityWebhook.POD_IDENTITY_ADDON, cluster.getName(), e.getMessage());
+                return;
+            }
+            if (installed) {
+                forwardPodIdentityAddress(cluster, containerId);
+            } else {
+                removePodIdentityForward(cluster, containerId);
+            }
+        }
+    }
+
+    /** Pods only get the Pod Identity credentials URL through the webhook, which needs TLS. */
+    private boolean podIdentityForwardEnabled() {
+        return config.services().eks().podIdentityWebhook() && config.tls().enabled();
+    }
+
+    private boolean podIdentityAgentInstalled(Cluster cluster) {
+        EksAddonService addons = addonService();
+        return addons != null && addons.isInstalled(cluster, EksPodIdentityWebhook.POD_IDENTITY_ADDON);
+    }
+
+    private void forwardPodIdentityAddress(Cluster cluster, String containerId) {
         try {
-            ContainerExec.Result install = execInContainerForResult(containerId,
-                    Ec2MetadataProxy.installCommand(), 180);
-            if (install.exitCode() != 0) {
-                LOG.warnv("Could not install Pod Identity relay dependencies for EKS cluster {0}: {1}",
-                        cluster.getName(), install.summary());
+            ContainerExec.Result forward = execInContainerForResult(containerId,
+                    EksPodNetworkRouting.buildPodIdentityForwardCommand(cluster.getPodCidr(),
+                            dockerHostResolver.resolve(), config.port()), 30);
+            if (forward.exitCode() != 0) {
+                LOG.warnv("Could not forward the Pod Identity address for EKS cluster {0} to Floci: {1}",
+                        cluster.getName(), forward.summary());
                 return;
             }
-
-            String flociHost = dockerHostResolver.resolve();
-            int flociPort = config.port();
-
-            ContainerExec.Result start = execInContainerForResult(containerId,
-                    Ec2MetadataProxy.podIdentityStartCommand(flociHost, flociPort), 30);
-            if (start.exitCode() != 0) {
-                LOG.warnv("Could not start link-local Pod Identity relay for EKS cluster {0}: {1}",
-                        cluster.getName(), start.summary());
-                return;
-            }
-
-            configurePodNetworkRouting(cluster, containerId, List.of(EksPodNetworkRouting.POD_IDENTITY_ENDPOINT));
-
-            LOG.infov("Configured link-local Pod Identity relay for EKS cluster {0}", cluster.getName());
+            LOG.infov("Forwarding the Pod Identity address {0}:{1,number,#} to Floci for EKS cluster {2}",
+                    EksPodNetworkRouting.POD_IDENTITY_ENDPOINT.ip(), EksPodNetworkRouting.POD_IDENTITY_ENDPOINT.port(),
+                    cluster.getName());
         } catch (Exception e) {
-            LOG.warnv("Could not configure link-local Pod Identity relay for EKS cluster {0}: {1}",
+            LOG.warnv("Could not forward the Pod Identity address for EKS cluster {0} to Floci: {1}",
+                    cluster.getName(), e.getMessage());
+        }
+    }
+
+    private void removePodIdentityForward(Cluster cluster, String containerId) {
+        try {
+            ContainerExec.Result removal = execInContainerForResult(containerId,
+                    EksPodNetworkRouting.buildPodIdentityRemoveCommand(), 15);
+            if (removal.exitCode() != 0) {
+                LOG.warnv("Could not remove the Pod Identity forward for EKS cluster {0}: {1}",
+                        cluster.getName(), removal.summary());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not remove the Pod Identity forward for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
         }
     }

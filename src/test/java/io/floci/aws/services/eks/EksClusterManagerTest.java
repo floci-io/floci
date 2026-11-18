@@ -59,6 +59,7 @@ import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.testing.ThreadStates;
 import io.floci.aws.testutil.LogCapture;
 import jakarta.ws.rs.core.Response;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -94,13 +95,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -707,6 +712,21 @@ class EksClusterManagerTest {
             // The port Docker already holds must not be handed out to another cluster.
             verify(portAllocator).markReserved(6512);
             verify(lifecycleManager, never()).create(any());
+        }
+
+        /** A Floci restart sets the Pod Identity forward up again on the adopted node, as it was before. */
+        @Test
+        void adoptingASurvivorSetsUpItsPodIdentityForwardAgain() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
+            EksClusterManager spyManager = Mockito.spy(manager);
+
+            Cluster cluster = cluster();
+            spyManager.restoreCluster(cluster);
+
+            verify(spyManager).configurePodIdentityForward(cluster, "cid-1");
         }
 
         @Test
@@ -2483,7 +2503,7 @@ class EksClusterManagerTest {
     }
 
     @Nested
-    class ConfigurePodIdentityRelay {
+    class ConfigurePodIdentityForward {
 
         private EmulatorConfig config;
         private EmulatorConfig.EksServiceConfig eks;
@@ -2491,6 +2511,7 @@ class EksClusterManagerTest {
         private ContainerLifecycleManager lifecycleManager;
         private DockerClient dockerClient;
         private DockerHostResolver dockerHostResolver;
+        private EksAddonService addons;
         private EksClusterManager manager;
         private List<String[]> capturedCmds;
 
@@ -2544,67 +2565,192 @@ class EksClusterManagerTest {
             when(inspectExec.exec()).thenReturn(inspectResponse);
             when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
 
+            addons = Mockito.mock(EksAddonService.class);
+            when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(true);
+
             manager = new EksClusterManager(
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, Mockito.mock(EcrRegistryManager.class),
                     config, Mockito.mock(RegionResolver.class), null);
+            manager.setAddonService(addons);
         }
 
-        @Test
-        void configuresRelayWhenPodIdentityEnabled() {
+        private Cluster cluster() {
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
-
-            manager.configurePodIdentityRelay(cluster, "cid-1");
-
-            assertEquals(3, capturedCmds.size());
-            assertTrue(capturedCmds.get(0)[2].contains("command -v socat"));
-            assertTrue(capturedCmds.get(1)[2].contains("169.254.170.23"));
-            assertTrue(capturedCmds.get(1)[2].contains("TCP:floci-host:4566"));
-            assertTrue(capturedCmds.get(1)[2].contains("floci-pod-identity-proxy.pid"));
-            assertTrue(capturedCmds.get(2)[2].contains("FLOCI-LINK-LOCAL"));
-            assertTrue(capturedCmds.get(2)[2].contains("169.254.170.23"));
-            assertFalse(capturedCmds.get(2)[2].contains("169.254.169.254"),
-                    "Pod identity relay must not route IMDS traffic");
+            return cluster;
         }
 
         @Test
-        void skipsRelayWhenPodIdentityDisabled() {
+        void forwardsThePodIdentityAddressToFlociWhileTheAgentIsInstalled() {
+            manager.configurePodIdentityForward(cluster(), "cid-1");
+
+            assertEquals(1, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityForwardCommand(null, "floci-host", 4566),
+                    capturedCmds.get(0));
+            String script = capturedCmds.get(0)[2];
+            assertFalse(script.contains("install"), "nothing is installed in the node");
+            assertFalse(script.contains("nohup socat"), "no relay is started in the node");
+            assertFalse(script.contains("169.254.169.254"), "pod identity forwarding must not route IMDS traffic");
+        }
+
+        @Test
+        void forwardsTheClustersOwnPodNetwork() {
+            Cluster cluster = cluster();
+            cluster.setPodCidr("10.244.0.0/16");
+
+            manager.configurePodIdentityForward(cluster, "cid-1");
+
+            assertEquals(1, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityForwardCommand("10.244.0.0/16", "floci-host", 4566),
+                    capturedCmds.get(0));
+        }
+
+        /** A node that starts or is adopted without the agent answers nothing, whatever an earlier Floci left. */
+        @Test
+        void removesTheForwardWhenTheAgentIsNotInstalled() {
+            when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(false);
+
+            manager.configurePodIdentityForward(cluster(), "cid-1");
+
+            assertEquals(1, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityRemoveCommand(), capturedCmds.get(0));
+        }
+
+        @Test
+        void creatingTheAgentForwardsAndDeletingItRemovesTheForward() {
+            Cluster cluster = cluster();
+            cluster.setContainerId("cid-1");
+            when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(true, false);
+
+            manager.podIdentityAgentChanged(cluster);
+            manager.podIdentityAgentChanged(cluster);
+
+            assertEquals(2, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityForwardCommand(null, "floci-host", 4566),
+                    capturedCmds.get(0));
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityRemoveCommand(), capturedCmds.get(1));
+            verify(dockerClient, Mockito.times(2)).execCreateCmd("cid-1");
+        }
+
+        /**
+         * A DeleteAddon arriving while a CreateAddon's forward runs in the node waits for it, then
+         * reads the store, which no longer holds the agent, and removes the forward: the node ends as
+         * the store does. Without the lock, the removal runs first and the forward stays.
+         */
+        @Test
+        void aChangeWaitsForTheExecInFlightAndLeavesTheNodeAsTheStoreEnds() throws Exception {
+            Cluster cluster = cluster();
+            cluster.setContainerId("cid-1");
+            when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON))).thenReturn(true, false);
+            CountDownLatch forwarding = new CountDownLatch(1);
+            CountDownLatch release = new CountDownLatch(1);
+            ExecStartCmd parkedFirst = Mockito.mock(ExecStartCmd.class);
+            when(parkedFirst.exec(any())).thenAnswer(inv -> {
+                if (forwarding.getCount() > 0) {
+                    forwarding.countDown();
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                }
+                ResultCallback<Frame> cb = inv.getArgument(0);
+                cb.onComplete();
+                return cb;
+            });
+            when(dockerClient.execStartCmd(anyString())).thenReturn(parkedFirst);
+            ExecutorService pool = Executors.newFixedThreadPool(2);
+            try {
+                Future<?> create = pool.submit(() -> manager.podIdentityAgentChanged(cluster));
+                assertTrue(forwarding.await(10, TimeUnit.SECONDS));
+                AtomicReference<Thread> deleting = new AtomicReference<>();
+                Future<?> delete = pool.submit(() -> {
+                    deleting.set(Thread.currentThread());
+                    manager.podIdentityAgentChanged(cluster);
+                });
+
+                ThreadStates.awaitBlockedOrDone(deleting, delete);
+                assertEquals(Thread.State.BLOCKED, deleting.get().getState());
+                assertEquals(1, capturedCmds.size());
+
+                release.countDown();
+                create.get(10, TimeUnit.SECONDS);
+                delete.get(10, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+                pool.shutdownNow();
+            }
+
+            assertEquals(2, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityForwardCommand(null, "floci-host", 4566),
+                    capturedCmds.get(0));
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityRemoveCommand(), capturedCmds.get(1));
+        }
+
+        /** As the relay's setup was, the forward is best effort: an add-on store that can't be read fails no start. */
+        @Test
+        void anAddonStoreThatCannotBeReadLeavesTheNodeAndDoesNotThrow() {
+            when(addons.isInstalled(any(), eq(EksPodIdentityWebhook.POD_IDENTITY_ADDON)))
+                    .thenThrow(new IllegalStateException("store unavailable"));
+
+            List<LogRecord> records = LogCapture.capture(EksClusterManager.class,
+                    () -> manager.configurePodIdentityForward(cluster(), "cid-1"));
+
+            assertTrue(capturedCmds.isEmpty());
+            List<LogRecord> warnings = records.stream()
+                    .filter(record -> record.getLevel().intValue() == Level.WARNING.intValue()).toList();
+            assertEquals(1, warnings.size());
+            assertEquals(List.of(EksPodIdentityWebhook.POD_IDENTITY_ADDON, "test-cluster", "store unavailable"),
+                    Arrays.asList(warnings.getFirst().getParameters()));
+        }
+
+        /** A mocked cluster has no node, so there is nothing to change. */
+        @Test
+        void theAgentOfAClusterWithoutANodeChangesNothing() {
+            manager.podIdentityAgentChanged(cluster());
+
+            assertTrue(capturedCmds.isEmpty());
+        }
+
+        @Test
+        void skipsTheForwardWhenPodIdentityIsDisabled() {
             when(eks.podIdentityWebhook()).thenReturn(false);
+            Cluster cluster = cluster();
+            cluster.setContainerId("cid-1");
 
-            Cluster cluster = new Cluster();
-            cluster.setName("test-cluster");
-
-            manager.configurePodIdentityRelay(cluster, "cid-1");
+            manager.configurePodIdentityForward(cluster, "cid-1");
+            manager.podIdentityAgentChanged(cluster);
 
             assertTrue(capturedCmds.isEmpty());
         }
 
         @Test
-        void skipsRelayWhenTlsDisabled() {
+        void skipsTheForwardWhenTlsIsDisabled() {
             when(tls.enabled()).thenReturn(false);
+            Cluster cluster = cluster();
+            cluster.setContainerId("cid-1");
 
-            Cluster cluster = new Cluster();
-            cluster.setName("test-cluster");
-
-            manager.configurePodIdentityRelay(cluster, "cid-1");
+            manager.configurePodIdentityForward(cluster, "cid-1");
+            manager.podIdentityAgentChanged(cluster);
 
             assertTrue(capturedCmds.isEmpty());
         }
 
         @Test
-        void failsGracefullyWhenExecFails() {
+        void aForwardThatFailsIsLoggedAndDoesNotThrow() {
             InspectExecCmd inspectExec = Mockito.mock(InspectExecCmd.class);
             InspectExecResponse inspectResponse = Mockito.mock(InspectExecResponse.class);
             when(inspectResponse.getExitCodeLong()).thenReturn(1L);
             when(inspectExec.exec()).thenReturn(inspectResponse);
             when(dockerClient.inspectExecCmd(anyString())).thenReturn(inspectExec);
 
-            Cluster cluster = new Cluster();
-            cluster.setName("test-cluster");
+            List<LogRecord> records = LogCapture.capture(EksClusterManager.class,
+                    () -> manager.configurePodIdentityForward(cluster(), "cid-1"));
 
-            assertDoesNotThrow(() -> manager.configurePodIdentityRelay(cluster, "cid-1"));
+            List<LogRecord> warnings = records.stream()
+                    .filter(record -> record.getLevel().intValue() == Level.WARNING.intValue()).toList();
+            assertEquals(1, warnings.size());
+            assertEquals("Could not forward the Pod Identity address for EKS cluster {0} to Floci: {1}",
+                    warnings.getFirst().getMessage());
+            assertEquals(List.of("test-cluster", "(no output)"), Arrays.asList(warnings.getFirst().getParameters()));
         }
     }
 
@@ -5142,7 +5288,8 @@ class EksClusterManagerTest {
                     Mockito.mock(EksAccessEntryService.class),
                     Mockito.mock(EksPodIdentityAssociationService.class),
                     Mockito.mock(EksAddonService.class),
-                    mapper);
+                    mapper,
+                    Mockito.mock(EksClusterManager.class));
 
             for (Response response : List.of(
                     controller.createCluster(mapper.createObjectNode()),
