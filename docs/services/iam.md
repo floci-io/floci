@@ -898,6 +898,42 @@ with `UpdateUser` carries all of them to the new name, along with its login prof
 group membership. Unlike AWS, Floci does not rewrite policy documents that name the user's ARN, so a
 resource or trust policy that referred to the old name still refers to it after a rename.
 
+### What a session's token costs, and when it is refused
+
+AWS holds a session token to one limit: STS "has replaced the packed policy size and the overall
+session token size limits with a single token size limit of 4,096 bytes", so "the assembled session
+token must fit within 4,096 bytes" and "the separate packed policy limit, which made failures hard
+to predict, has been removed". A request whose token will not fit is refused with
+`PackedPolicyTooLarge` 400, whose "error message reports the session token size and the maximum
+allowed size, both in bytes": `Serialized token too large for session. Token size of <N> bytes
+exceeds the maximum allowed limit of 4096 bytes.` What a session that does fit consumed is
+published as a percentage. `SessionTokenUtilization` is "the percentage of the 4,096-byte limit
+consumed", and `PackedPolicySize` "now reports the same value as SessionTokenUtilization", kept
+"for backward compatibility" where the API reference marks it deprecated.
+
+This emulator refused nothing and published that member as a flat zero on every session, so a
+caller could neither see what its session cost nor be told it was over. Both are answered now, on
+the four operations that carry state into the token they mint: `AssumeRole`, `AssumeRoleWithSAML`,
+`AssumeRoleWithWebIdentity` and `GetFederationToken`. The refusal is read before anything is
+minted, which is where AWS answers it. A token asked through `MinimumSessionTokenSize` to be the
+limit itself therefore leaves nothing to carry a policy or a tag on top of it, and a request that
+asks for both is refused. `GetDelegatedAccessToken` carries no such state, and the member stays out
+of its response as the model deprecates it there. `SessionTokenSize` and `SessionTokenUtilization`,
+the two members the model now carries beside `PackedPolicySize`, are not published yet.
+
+The measure is this emulator's own and the number will differ from AWS's. It is the token this
+emulator will mint for the request, whose length `MinimumSessionTokenSize` can ask to be raised,
+plus the state the request asks to carry into it in UTF-8 bytes: the inline document, every policy
+ARN, and every tag key and value. AWS assembles the real thing instead, and its size follows the
+input in neither direction. STS "serializes and compresses your session policies and tags when
+assembling the token", where "compression results vary based on the actual content, not just its
+length" and "two sets of tags with identical character counts can produce different token sizes",
+so a repetitive set can assemble smaller than the bytes it was written in. The one size recorded
+here ran larger than its input: for a request of 50 tags with 124-character keys and 256-character
+values, every field inside its own limit, AWS reported 26092 bytes against the limit of 4096, where
+those fields are about 19000 bytes of input. A recording of a second size would let the measure be
+calibrated, and that is the only thing this reading waits on.
+
 ### Policy Simulation
 
 | Action | Description |
