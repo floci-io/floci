@@ -2156,6 +2156,40 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "elasticmapreduce:DescribeCluster");
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR holds on the session a request names, those it started
+     * with, so an allow on one team's tag lets the caller read that team's session and not another's.
+     */
+    @Test
+    void anEmrResourceTagConditionReadsTheTagsOfTheSession() {
+        String clusterId = adminJson("elasticmapreduce", "ElasticMapReduce.RunJobFlow")
+                .body("{\"Name\":\"res-emr-sessions\",\"ReleaseLabel\":\"emr-spark-8.0.0\",\"Applications\":[{\"Name\":"
+                        + "\"Spark\"}],\"SessionEnabled\":true,\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                        + "\"InstanceGroups\":[{\"Name\":\"primary\",\"InstanceRole\":\"MASTER\",\"InstanceType\":"
+                        + "\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .post("/").then().statusCode(200).extract().path("JobFlowId");
+        cleanup.register(() -> adminJson("elasticmapreduce", "ElasticMapReduce.TerminateJobFlows")
+                .body("{\"JobFlowIds\":[\"" + clusterId + "\"]}").post("/"));
+        String tagged = emrSession(clusterId, "data");
+        String other = emrSession(clusterId, "web");
+
+        User user = user("res-emr-session-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"elasticmapreduce:GetSession\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        emr(user, "GetSession", "{\"ClusterId\":\"" + clusterId + "\",\"SessionId\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(emr(user, "GetSession", "{\"ClusterId\":\"" + clusterId + "\",\"SessionId\":\"" + other + "\"}"),
+                "elasticmapreduce:GetSession");
+    }
+
+    /** The id of a session an administrator starts on the cluster, tagged with the team. */
+    private static String emrSession(String clusterId, String team) {
+        return adminJson("elasticmapreduce", "ElasticMapReduce.StartSession")
+                .body("{\"ClusterId\":\"" + clusterId + "\",\"Name\":\"res-" + team + "\",\"Tags\":[{\"Key\":\"team\","
+                        + "\"Value\":\"" + team + "\"}]}")
+                .post("/").then().statusCode(200).extract().path("Id");
+    }
+
     /** The id of the cluster {@code arn} names, tagged with the team by an administrator. */
     private static String emrClusterId(String arn, String team) {
         String id = arn.substring(arn.lastIndexOf('/') + 1);

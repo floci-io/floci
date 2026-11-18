@@ -3468,10 +3468,10 @@ floci populates:
   workgroups and snapshots, DynamoDB for its tables and their indexes (the table's tags), ECR for its
   repositories, Redshift for its clusters, snapshots, parameter groups, subnet groups, snapshot copy grants,
   snapshot schedules, event subscriptions and integrations, SSM for its parameters, documents and associations,
-  EMR for its clusters, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its instances,
-  permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource shares,
-  Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for its
-  scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
+  EMR for its clusters and sessions, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its
+  instances, permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource
+  shares, Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for
+  its scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
   instances, ACM for its certificates, Firehose for its delivery streams, Cognito for its user pools and identity
   pools, OpenSearch for its domains, Signer for its signing profiles, Access Analyzer for its analyzers, Managed Service
   for Apache Flink for its applications, S3 Vectors for its vector buckets and indexes, Timestream for InfluxDB for its

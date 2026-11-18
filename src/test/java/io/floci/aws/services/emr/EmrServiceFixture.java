@@ -311,6 +311,11 @@ final class EmrServiceFixture {
                 startupDelaySeconds, stepDurationSeconds, terminationDelaySeconds);
     }
 
+    /** The service as configured by default, every duration 0, on {@code storage}, so a test can seed its stores. */
+    static EmrServiceFixture on(InMemoryStorageFactory storage) {
+        return new EmrServiceFixture(storage, new MutableClock(), null, null, null, null, null, null, 0, 0, 0);
+    }
+
     /** The service in the {@code docker} runner mode, every duration 0, its steps run by {@code runner}. */
     static EmrServiceFixture docker(SparkJobRunner runner, IamService iam) {
         return docker(runner, null, iam);

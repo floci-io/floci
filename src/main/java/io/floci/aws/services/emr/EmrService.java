@@ -135,6 +135,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final String SERVICE = "emr";
     // The resource of a cluster's ARN, before its id.
     static final String CLUSTER_RESOURCE = "cluster/";
+    /** What follows a cluster's ARN in the ARN of one of its sessions, the session's id following. */
+    static final String SESSION_SEGMENT = "/session/";
     // The reason of a cluster a failed bootstrap action ended, as Terraform reported a real one's
     // (hashicorp/terraform-provider-aws#4378) and the Management Guide's VPC errors page quotes it.
     private static final String BOOTSTRAP_ACTION_FAILED =
@@ -777,7 +779,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             long sequence = sessions.stream().mapToLong(EmrSession::getSequence).max().orElse(0) + 1;
             EmrSession session = EmrSessions.start(cluster, request, id,
                     regionResolver.buildArn("elasticmapreduce", regionOf(cluster),
-                            "cluster/" + cluster.getId() + "/session/" + id),
+                            CLUSTER_RESOURCE + cluster.getId() + SESSION_SEGMENT + id),
                     regionResolver.getAccountId(), now(), sequence, parameters);
             session.setContainerSession(runsSessionServers());
             sessionStore.put(id, session);
@@ -1833,10 +1835,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * The tags held on the cluster, Studio or notebook execution stored under {@code arn}, in the account it names,
-     * read in place: the cluster of that id in the ARN's Region, or one recorded with no Region, as the tag handlers
-     * find it, or the Studio or execution of that id in the ARN's Region; empty for an ARN naming nothing stored or
-     * naming anything else.
+     * The tags held on the cluster, session, Studio or notebook execution stored under {@code arn}, in the account it
+     * names, read in place: the cluster of that id in the ARN's Region, or one recorded with no Region, as the tag
+     * handlers find it, the session of that id recording that ARN, the tags it started with, or the Studio or execution
+     * of that id in the ARN's Region; empty for an ARN naming nothing stored or naming anything else.
      */
     @Override
     public Map<String, String> storedTags(String arn) {
@@ -1850,6 +1852,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
         if (resource.startsWith(EmrNotebookExecutionService.EXECUTION_RESOURCE)) {
             return notebookExecutions != null ? notebookExecutions.get().storedTags(arn) : Map.of();
+        }
+        int session = resource.startsWith(CLUSTER_RESOURCE) ? resource.indexOf(SESSION_SEGMENT) : -1;
+        if (session > 0) {
+            return AccountAwareStorageBackend.readInAccount(sessionStore, parsed.accountId(),
+                            resource.substring(session + SESSION_SEGMENT.length()))
+                    .filter(stored -> arn.equals(stored.getArn()))
+                    .map(stored -> heldTags(stored.getTags()))
+                    .orElse(Map.of());
         }
         String clusterId = resourceIdOf(parsed, CLUSTER_RESOURCE);
         if (clusterId == null || !arn.equals(AwsArnUtils.Arn.of("elasticmapreduce", parsed.region(),
