@@ -20,6 +20,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.net.URI;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
@@ -40,7 +41,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * opens it, as the JobHistory server's link does; after a Spark step, whose event logs are in the cluster's HDFS, the
  * ResourceManager's answer links to the application on the Spark History Server's own host, which lists and opens it,
  * as the Spark History Server's link does; after a Hive step, its Tez DAG is in the YARN timeline server, and the Tez
- * UI's page names the timeline server and the ResourceManager on their own hosts, which answer its page's requests.
+ * UI's page names the timeline server and the ResourceManager on their own hosts, which answer its page's requests. A
+ * persistent application UI opens the Spark History Server while the cluster runs, and, once it has ended and its
+ * storage has gone, its kept history: the Spark application, the DAG and the Tez UI's page.
  *
  * <p>A nightly check: the cluster's image, its HDFS and YARN, and a MapReduce job and a Spark one take minutes and
  * gigabytes.
@@ -74,6 +77,9 @@ class EmrAppUiNightlyIntegrationTest {
 
     @Inject
     EmrService emrService;
+
+    @Inject
+    EmrClusterStorage clusterStorage;
 
     @BeforeAll
     static void configure() {
@@ -206,6 +212,51 @@ class EmrAppUiNightlyIntegrationTest {
         assertEquals(200, crossOrigin.statusCode(), crossOrigin.asString());
         String allowed = crossOrigin.getHeader("Access-Control-Allow-Origin");
         assertTrue(tezOrigin.equals(allowed) || "*".equals(allowed), String.valueOf(allowed));
+
+        // A persistent application UI: the cluster's own while it runs.
+        String appUi = emr("CreatePersistentAppUI", "{\"TargetResourceArn\":\"arn:aws:elasticmapreduce:us-east-1:"
+                + "000000000000:cluster/" + clusterId + "\"}").then().statusCode(200).extract().jsonPath()
+                .getString("PersistentAppUIId");
+        JsonPath live = persistentLink(appUi, "SHS");
+        assertTrue(live.getBoolean("PresignedURLReady"), live.prettify());
+        assertEquals(200, open(live.getString("PresignedURL")).statusCode());
+        // Once the cluster has ended and its storage has gone, its kept history, served by a container of its own.
+        cleanup.register(() -> clusterStorage.removeHistoriesBut(Set.of()));
+        terminateClusterAndAwaitCleanup(clusterId, emrService);
+        String keptHistory = readyPersistentLink(appUi, "SHS");
+        await(() -> open(keptHistory.replaceFirst("/$", "") + "/api/v1/applications").asString().contains(sparkId),
+                Duration.ofMinutes(2));
+        URI keptTimeline = URI.create(readyPersistentLink(appUi, "YTS"));
+        Response keptDags = open(keptTimeline.getScheme() + "://" + keptTimeline.getRawAuthority()
+                + "/ws/v1/timeline/TEZ_DAG_ID");
+        assertFalse(keptDags.jsonPath().getList("entities").isEmpty(), keptDags.asString());
+        URI keptTez = URI.create(readyPersistentLink(appUi, "TEZ"));
+        assertTrue(open(keptTez.toString()).asString().contains("<title>Tez UI</title>"));
+        String keptConfig = open(keptTez.getScheme() + "://" + keptTez.getRawAuthority()
+                + "/tez-ui/config/configs.js").asString();
+        String keptTimelineHost = "http://" + keptTez.getHost().substring(0, 26) + "-8188.emrappui.localhost:" + PORT;
+        assertTrue(keptConfig.contains(keptTimelineHost), keptConfig);
+        // With no ResourceManager there, the Tez UI asks the timeline server in its place, which answers, rather than
+        // the primary node that has gone.
+        assertFalse(keptConfig.contains("8088"), keptConfig);
+        Response keptRm = open(keptTimelineHost + "/ws/v1/cluster/apps");
+        assertTrue(keptRm.statusCode() < 500, keptRm.statusCode() + " " + keptRm.asString());
+    }
+
+    private static JsonPath persistentLink(String appUi, String type) {
+        return emr("GetPersistentAppUIPresignedURL", "{\"PersistentAppUIId\":\"" + appUi
+                + "\",\"PersistentAppUIType\":\"" + type + "\"}").then().statusCode(200).extract().jsonPath();
+    }
+
+    // The link once it is ready: the history's container starts first.
+    private static String readyPersistentLink(String appUi, String type) {
+        String[] url = new String[1];
+        await(() -> {
+            JsonPath answer = persistentLink(appUi, type);
+            url[0] = answer.getString("PresignedURL");
+            return answer.getBoolean("PresignedURLReady");
+        }, Duration.ofMinutes(10));
+        return url[0];
     }
 
     // A browser's request to the link, following the redirects it is sent, each to a link's host.

@@ -45,7 +45,7 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `ListNotebookExecutions` | Lists notebook executions, newest first, by editor, status, time and cluster |
 | `CreatePersistentAppUI` | Makes a cluster's persistent application UIs; see [Application UIs](#application-uis) |
 | `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
-| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
+| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
 | `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
 | `GetClusterSessionCredentials` | Returns temporary basic credentials for a runtime role enabled cluster; see [Application UIs](#application-uis) |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
@@ -373,12 +373,11 @@ not Jupyter:
 
 ## Application UIs
 
-Floci keeps a cluster's persistent application UIs, but serves none of them: a presigned URL to one opens a page Floci
-serves at `/_aws/emr/app-ui` on its own address
-(`base-url`, or `hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for, and so does
-one to an on-cluster UI in the `immediate` mode. The link is signed with a key Floci makes as it starts and lasts an
-hour, as no source gives AWS's; one changed, past its hour or given before Floci restarted opens a `403` page, and one
-whose cluster has gone a `404`.
+In the `immediate` mode, and for an interface the cluster does not run, a presigned URL opens a page Floci serves at
+`/_aws/emr/app-ui` on its own address (`base-url`, or `hostname`), with the cluster as `DescribeCluster` gives it and
+the interface asked for. The link is signed with a key Floci makes as it starts and lasts an hour, as no source gives
+AWS's; one changed, past its hour or given before Floci restarted opens a `403` page, and one whose cluster has gone a
+`404`.
 
 In the `docker` mode, an on-cluster UI that runs on the cluster's primary node opens for real: the `ResourceManager`
 ("YARN ResourceManager | http://master-public-dns-name:8088/"), an `ApplicationMaster` through the ResourceManager's
@@ -424,7 +423,20 @@ arrives, and an interface that sends nothing for a minute has the request given 
   any source gives. A tag without its `Key`, "the minimum required information for a valid tag", is refused, as it is
   for sessions, Studios and notebook executions.
 * **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
-  refused, and the URL is `PresignedURLReady` at once. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI,
+  refused. In the `docker` mode it opens the interface for real, `SHS` the Spark History Server, `YTS` the YARN
+  timeline server and `TEZ` the Tez UI, on a host of its own as an on-cluster UI does: while the cluster runs, its
+  primary node's; once it has ended, as "You can access application history and relevant log files for active and
+  terminated clusters", its kept history's, for the 30 days for which "The logs are available ... after the
+  application ends". Floci keeps it in a volume of the primary node's of its own, which holds the timeline server's
+  store (its entities kept 30 days rather than Hadoop's default 7) and, copied out of the cluster's HDFS as the cluster's
+  storage goes, its Spark applications' event logs, and as a reset or a shutdown removes a node still running; the
+  cluster's other storage goes as before, though a copy that fails keeps it, the event logs in it, for a later try or
+  a restart to remove. The URL is not `PresignedURLReady` while the cluster is ending or its storage
+  is going. Then a container of the image the cluster ran serves it, on a network of its own that no step's container
+  is on, started by the first link, the URL not `PresignedURLReady` until it answers, and stopped once no link to it is
+  valid, a later link starting it again. The kept history goes once its 30 days have passed, whether or not a link
+  asked for it. A restart keeps the histories of the clusters that ended within 30 days, and a reset removes every
+  one. Elsewhere the URL opens Floci's page, ready at once. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI,
   the `ResourceManager` by default, while the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. With an
   `ApplicationId`, the ResourceManager's link lands on the application's page, an application master's on its UI
   through the web proxy, the JobHistory server's on the job of that id (`job_` in place of `application_`), the Spark

@@ -13,8 +13,10 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrPersistentAppUi;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -32,6 +34,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -42,9 +47,9 @@ import java.util.regex.Pattern;
  * application master through it, its MapReduce JobHistory server, the NodeManager of a primary node that works, the
  * Spark History Server of a cluster with Spark, or the YARN timeline server and the Tez UI of one with Hadoop and Tez,
  * opens for real through {@link EmrAppUiProxy}, on a host of its own under {@link #UI_HOST}, as AWS's are under
- * "emrappui-prod.us-east-1.amazonaws.com" (Management Guide, "View Amazon EMR application history"). Floci keeps a
- * persistent application UI's record, but serves no persistent UI: a link to one, and to any on-cluster UI elsewhere,
- * opens a page of Floci's own about the cluster
+ * "emrappui-prod.us-east-1.amazonaws.com" (Management Guide, "View Amazon EMR application history"). A persistent
+ * application UI opens the same interfaces while its cluster runs, and, for the 30 days after it ends, its kept
+ * history's, served by a container of its own. Any other link opens a page of Floci's own about the cluster
  * ({@link EmrAppUiController}). Either link is valid for {@link #VALIDITY}: the page's is signed with a key of this
  * process, and a proxied interface's host holds a secret this process gave it.
  */
@@ -62,7 +67,7 @@ public class EmrAppUiService {
     // "For each AWS account, the default limit for active application UIs is 200."
     static final int MAX_PERSISTENT_APP_UIS = 200;
     // "The logs are available for 30 days after the application ends."
-    static final Duration LOGS_KEPT = Duration.ofDays(30);
+    static final Duration LOGS_KEPT = EmrService.HISTORY_KEPT;
     // No source gives AWS's status values; Floci reports this one for every persistent application UI.
     static final String ACTIVE = "ACTIVE";
     /** The label under Floci's host name an on-cluster UI's own host is in. */
@@ -84,6 +89,12 @@ public class EmrAppUiService {
     private static final Duration ENDPOINT_RECHECK = Duration.ofSeconds(10);
     static final String NOT_READY = "The cluster's primary node is not running yet: it starts once a step runs, or a"
             + " link to one of its interfaces is asked for. Try again in a moment.";
+    static final String HISTORY_NOT_READY = "The cluster's kept history is starting. Try again in a moment.";
+    static final String HISTORY_GONE = "The history of cluster %s is no longer kept: it is kept for 30 days after the"
+            + " cluster ends.";
+    // How long after its last link has expired the container serving a cluster's kept history is checked.
+    private static final Duration REAP_MARGIN = Duration.ofMinutes(1);
+    private static final Logger LOG = Logger.getLogger(EmrAppUiService.class);
     private static final Pattern APPLICATION_ID = Pattern.compile("application_(\\d+_\\d+)");
 
     private final AccountAwareStorageBackend<EmrPersistentAppUi> store;
@@ -95,6 +106,8 @@ public class EmrAppUiService {
     // The links to proxied interfaces this process has given, by their secret, until they expire.
     private final Map<String, Grant> grants = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
+    // Checks, as links to kept histories expire, whether the containers serving them may stop; made on first use.
+    private ScheduledExecutorService reaper;
 
     @Inject
     public EmrAppUiService(StorageFactory storageFactory, EmrService clusters, RegionResolver regionResolver,
@@ -201,10 +214,13 @@ public class EmrAppUiService {
     }
 
     /**
-     * A presigned URL to one of the persistent UI's types, by default its first, for the application asked for. It is
-     * ready at once, as Floci's page has nothing to prepare.
+     * A presigned URL to one of the persistent UI's types, by default its first, for the application asked for. In the
+     * docker runner mode the interface opens for real: on a cluster still running or waiting, its primary node's, as
+     * its on-cluster UI does; on one that has ended, for the 30 days its history is kept, the history's, served by a
+     * container of its own, which starts where it is not running, the URL not ready until it answers. Elsewhere it
+     * opens Floci's own page, ready at once, as that has nothing to prepare.
      */
-    public synchronized String persistentUrl(String appUiId, String type, String applicationId) {
+    public synchronized Presigned persistentUrl(String appUiId, String type, String applicationId) {
         List<String> violations = new ArrayList<>();
         EmrService.checkEnum(violations, "persistentAppUIType", type, PERSISTENT_TYPES);
         if (!violations.isEmpty()) {
@@ -214,7 +230,37 @@ public class EmrAppUiService {
         if (type != null && !appUi.getTypes().contains(type)) {
             throw EmrService.invalid("Persistent application UI " + appUiId + " has no " + type + " interface.");
         }
-        return url(appUi.getClusterId(), type != null ? type : appUi.getTypes().get(0), applicationId);
+        String asked = type != null ? type : appUi.getTypes().get(0);
+        // The on-cluster interface each persistent one is, which a link lands on as its own does.
+        String interfaceType = switch (asked) {
+            case "TEZ" -> TEZ_UI;
+            case "YTS" -> YARN_TIMELINE_SERVICE;
+            default -> SPARK_HISTORY_SERVER;
+        };
+        EmrCluster cluster = clusters.findDescribedCluster(appUi.getClusterId()).orElse(null);
+        if (cluster != null && (EmrClusterLifecycle.RUNNING.equals(cluster.getState())
+                || EmrClusterLifecycle.WAITING.equals(cluster.getState()))) {
+            Optional<EmrService.WebInterfaces> served = clusters.webInterfaces(cluster);
+            Integer port = served.map(interfaces -> portOf(interfaceType, interfaces)).orElse(null);
+            if (port != null) {
+                return link(cluster, served.get(), port, landing(interfaceType, applicationId), false);
+            }
+        } else if (cluster != null) {
+            boolean kept = clusters.historyKept(cluster);
+            if (kept || clusters.historyComing(cluster)) {
+                EmrService.WebInterfaces history = clusters.historyInterfaces(cluster);
+                Integer port = portOf(interfaceType, history);
+                if (port != null && kept) {
+                    return link(cluster, history, port, landing(interfaceType, applicationId), true);
+                }
+                if (port != null) {
+                    // Not ready until its storage has gone: its primary node may still hold the timeline server's
+                    // store, and its event logs are copied as the storage goes.
+                    return new Presigned(url(appUi.getClusterId(), asked, applicationId), false);
+                }
+            }
+        }
+        return new Presigned(url(appUi.getClusterId(), asked, applicationId), true);
     }
 
     /** A presigned URL, and whether what it opens is ready: none for a dry run. */
@@ -251,18 +297,73 @@ public class EmrAppUiService {
         if (port == null) {
             return new Presigned(url(clusterId, asked, applicationId), true);
         }
+        return link(cluster, served.get(), port, landing(asked, applicationId), false);
+    }
+
+    /**
+     * A link to the cluster's interface on {@code port}, landing on {@code landing}: its primary node's, ready once
+     * the node is, which starts where it is not running; or, for {@code history}, its kept history's, ready once the
+     * container serving it answers, which starts where it is not running, and stops once no link to it is valid.
+     */
+    private Presigned link(EmrCluster cluster, EmrService.WebInterfaces interfaces, int port, String landing,
+                           boolean history) {
         Instant now = clock.instant();
         grants.values().removeIf(grant -> !now.isBefore(grant.expires()));
         String secret = secret();
-        grants.put(secret, new Grant(regionResolver.getAccountId(), regionResolver.getRegion(), clusterId,
-                served.get().primaryHost(), served.get().ports(), now.plus(VALIDITY), new ConcurrentHashMap<>()));
-        boolean ready = clusters.webInterface(clusterId, port).isPresent();
-        if (!ready) {
-            clusters.startPrimaryNode(clusterId);
+        Grant grant = new Grant(regionResolver.getAccountId(), regionResolver.getRegion(), cluster.getId(),
+                interfaces.primaryHost(), interfaces.ports(), now.plus(VALIDITY), new ConcurrentHashMap<>(), history);
+        grants.put(secret, grant);
+        boolean ready;
+        if (history) {
+            ready = clusters.historyInterface(cluster, port).isPresent();
+            reapLater(grant);
+        } else {
+            ready = clusters.webInterface(cluster.getId(), port).isPresent();
+            if (!ready) {
+                clusters.startPrimaryNode(cluster.getId());
+            }
         }
         URI base = URI.create(baseUrl);
         return new Presigned(base.getScheme() + "://" + secret + "-" + port + "." + UI_HOST + "."
-                + base.getRawAuthority() + landing(asked, applicationId), ready);
+                + base.getRawAuthority() + landing, ready);
+    }
+
+    // Checks, once the link has expired, whether the container serving the cluster's kept history may stop.
+    private synchronized void reapLater(Grant grant) {
+        if (reaper == null) {
+            reaper = Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofPlatform().daemon().name("emr-app-ui-history").factory());
+        }
+        long delay = Duration.between(clock.instant(), grant.expires()).plus(REAP_MARGIN).toMillis();
+        reaper.schedule(() -> reapHistory(grant.accountId(), grant.region(), grant.clusterId()), delay,
+                TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Stops the container serving a cluster's kept history once no link to it is valid, and removes the kept
+     * histories that have passed their 30 days; under the service's lock, as a new link is given, so one given while
+     * this looks does not lose the container it opens.
+     */
+    synchronized void reapHistory(String accountId, String region, String clusterId) {
+        Instant now = clock.instant();
+        boolean linked = grants.values().stream().anyMatch(grant -> grant.history()
+                && grant.clusterId().equals(clusterId) && grant.accountId().equals(accountId)
+                && now.isBefore(grant.expires()));
+        try {
+            if (!linked) {
+                RequestScopes.runAs(accountId, region, () -> clusters.stopHistory(clusterId));
+            }
+            clusters.removeExpiredHistories();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not stop the history of EMR cluster {0}: {1}", clusterId, e.getMessage());
+        }
+    }
+
+    @PreDestroy
+    synchronized void close() {
+        if (reaper != null) {
+            reaper.shutdownNow();
+        }
     }
 
     // The interface's port on the primary node, where Floci serves it: an application master's UI through the
@@ -314,7 +415,7 @@ public class EmrAppUiService {
      * interfaces' ports; when it expires; and where Floci reaches each port, once found.
      */
     private record Grant(String accountId, String region, String clusterId, String primaryHost, Set<Integer> ports,
-                         Instant expires, Map<Integer, Found> endpoints) {
+                         Instant expires, Map<Integer, Found> endpoints, boolean history) {
     }
 
     // Where Floci found a port of the cluster's own primary node's container, and when, which is asked again once
@@ -360,22 +461,28 @@ public class EmrAppUiService {
         if (!grant.ports().contains(port)) {
             return UiRoute.refused(404, NO_SUCH_INTERFACE);
         }
-        // The interface is there only while its cluster runs or waits: once it ends, its node's ports are no longer
-        // its own.
+        // A live interface is there only while its cluster runs or waits, and its kept history only once it has ended,
+        // for its 30 days: outside them, the port found for it is no longer the cluster's own.
         EmrCluster cluster = RequestScopes.callAs(grant.accountId(), grant.region(),
                 () -> clusters.findDescribedCluster(grant.clusterId()).orElse(null));
-        if (cluster == null || !EmrClusterLifecycle.RUNNING.equals(cluster.getState())
-                && !EmrClusterLifecycle.WAITING.equals(cluster.getState())) {
+        Instant now = clock.instant();
+        boolean up = cluster != null && (EmrClusterLifecycle.RUNNING.equals(cluster.getState())
+                || EmrClusterLifecycle.WAITING.equals(cluster.getState()));
+        if (!grant.history() && !up) {
             return UiRoute.refused(404, String.format(CLUSTER_ENDED, grant.clusterId()));
         }
-        Instant now = clock.instant();
+        if (grant.history() && (cluster == null || up || cluster.getEndDateTime() == null
+                || !now.isBefore(cluster.getEndDateTime().plus(EmrService.HISTORY_KEPT)))) {
+            return UiRoute.refused(404, String.format(HISTORY_GONE, grant.clusterId()));
+        }
         Found found = grant.endpoints().get(port);
         if (found == null || !now.isBefore(found.at().plus(ENDPOINT_RECHECK))) {
             ContainerLifecycleManager.EndpointInfo endpoint = RequestScopes.callAs(grant.accountId(), grant.region(),
-                    () -> clusters.webInterface(grant.clusterId(), port)).orElse(null);
+                    () -> grant.history() ? clusters.historyInterface(cluster, port)
+                            : clusters.webInterface(grant.clusterId(), port)).orElse(null);
             if (endpoint == null) {
                 grant.endpoints().remove(port);
-                return UiRoute.refused(503, NOT_READY);
+                return UiRoute.refused(503, grant.history() ? HISTORY_NOT_READY : NOT_READY);
             }
             found = new Found(endpoint, now);
             grant.endpoints().put(port, found);

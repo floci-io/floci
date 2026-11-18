@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -184,8 +185,47 @@ public interface ClusterStorage {
     }
 
     /**
+     * Keeps what a cluster's history interfaces show once it has ended, before its storage goes: the Spark
+     * applications' event logs, copied out of its HDFS into the volume of its primary node that already holds the
+     * YARN timeline server's store, which outlives the cluster's other storage until {@link #removeHistoriesBut} lets
+     * it go: true once they are kept, or where there is nothing it can keep, the node not running or keeping no
+     * history; false where the copy failed, so the caller keeps the storage, which holds them, and tries again.
+     */
+    default boolean keepHistory(String clusterId) {
+        return true;
+    }
+
+    /** Whether a cluster's history is kept. */
+    default boolean historyKept(String clusterId) {
+        return false;
+    }
+
+    /**
+     * Where Floci reaches {@code port} of the container that serves a cluster's kept history: its Spark History
+     * Server, YARN timeline server and Tez UI, as {@code yarn} had its primary node run them, their links naming
+     * {@code primaryHost}, as the node's did. Started, as {@code accountId} in {@code region}, in the image
+     * {@code image} gives, {@code released} told once the container is made, where it is not running; empty until it
+     * answers.
+     */
+    default Optional<ContainerLifecycleManager.EndpointInfo> historyInterface(String clusterId, String accountId,
+                                                                              String region, Supplier<String> image,
+                                                                              Consumer<String> released,
+                                                                              String primaryHost, Yarn yarn,
+                                                                              int port) {
+        return Optional.empty();
+    }
+
+    /** Stops the container serving a cluster's kept history, which a later link starts again. */
+    default void stopHistory(String clusterId) {
+    }
+
+    /** Removes the kept history of every cluster but those in {@code kept}, and the container serving it. */
+    default void removeHistoriesBut(Set<String> kept) {
+    }
+
+    /**
      * Removes {@code clusterId}'s HDFS and the volumes of its storage once it no longer needs them: true when the
-     * volumes are gone, false when Docker refused, so the caller can try again.
+     * volumes are gone, false when Docker refused, so the caller can try again. Its kept history stays.
      */
     boolean remove(String clusterId);
 

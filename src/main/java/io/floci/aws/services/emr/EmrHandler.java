@@ -898,8 +898,8 @@ public class EmrHandler {
     private Response handleGetPersistentAppUiPresignedUrl(JsonNode request) {
         bool(request, "AuthProxyCall");
         string(request, "ExecutionRoleArn");
-        return presignedUrl(new EmrAppUiService.Presigned(appUis.persistentUrl(string(request, "PersistentAppUIId"),
-                string(request, "PersistentAppUIType"), string(request, "ApplicationId")), true));
+        return presignedUrl(appUis.persistentUrl(string(request, "PersistentAppUIId"),
+                string(request, "PersistentAppUIType"), string(request, "ApplicationId")));
     }
 
     private Response handleGetOnClusterAppUiPresignedUrl(JsonNode request) {

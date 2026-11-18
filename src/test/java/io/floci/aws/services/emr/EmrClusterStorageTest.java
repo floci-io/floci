@@ -6,6 +6,7 @@ import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectNetworkCmd;
+import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.ListNetworksCmd;
@@ -131,6 +132,7 @@ class EmrClusterStorageTest {
     private final EmrClusterStorage storage = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
             roleCredentials, currentContainer, config, s3, Duration.ofSeconds(120), System::nanoTime);
     private final String hdfsName = ContainerStorageHelper.dockerName(config, "emr-j-1-hdfs");
+    private final String historyName = ContainerStorageHelper.dockerName(config, "emr-j-1-history");
     private final String coreName = ContainerStorageHelper.dockerName(config, "emr-j-1-node-1-1");
     private final String taskName = ContainerStorageHelper.dockerName(config, "emr-j-1-node-2-1");
 
@@ -1400,8 +1402,9 @@ class EmrClusterStorageTest {
             // interface and the ResourceManager's open to the Tez UI's page on its own host.
             return script.contains("timeline=; [ -z \"$FLOCI_YARN_TIMELINE\" ] || timeline=\"<property><name>"
                     + "yarn.timeline-service.enabled</name><value>true</value></property>")
+                    && script.contains("timeline_store=/mnt/yarn/timeline\n")
                     && script.contains("<property><name>yarn.timeline-service.leveldb-timeline-store.path</name>"
-                            + "<value>/mnt/yarn/timeline</value></property>")
+                            + "<value>$timeline_store</value></property>")
                     && script.contains("<property><name>yarn.timeline-service.http-cross-origin.enabled</name>"
                             + "<value>true</value></property>")
                     && script.contains(" \"$timeline\" '</configuration>' > /tmp/floci-hdfs-conf/yarn-site.xml")
@@ -1424,6 +1427,198 @@ class EmrClusterStorageTest {
                     && script.indexOf("http://$(cat /tmp/floci-hdfs-bind):8080/tez-ui/")
                             < script.indexOf("touch /tmp/floci-hdfs-ready");
         }));
+    }
+
+    @Test
+    void aPrimaryNodeThatRunsAHistoryInterfaceKeepsItsTimelineStoreInAVolumeThatOutlivesTheCluster() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
+        when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-7", hdfsName)).thenReturn("172.18.0.8");
+        ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                () -> new ClusterStorage.Yarn(4096, 4).withSparkHistory(true).withHistories(true, false),
+                NOT_STOPPED);
+
+        verify(lifecycle).ensureVolume(eq(historyName), argThat(labels -> "emr-history".equals(
+                labels.get(ContainerStorageHelper.COMPONENT_LABEL))
+                && "j-1".equals(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))));
+        verify(spec).withNamedVolume(historyName, EmrClusterStorage.HISTORY_PATH);
+        verify(spec).withEnv("FLOCI_HISTORY", "1");
+        // Made the image's user's as root, the timeline server's store in it, kept as long as the history is.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "if [ -n \"$FLOCI_HISTORY\" ]; then\n"
+                + "  mkdir -p /var/lib/floci-history/spark-events /var/lib/floci-history/timeline"
+                + " && chown -R hadoop:hadoop /var/lib/floci-history || exit\n"
+                + "  timeline_store=/var/lib/floci-history/timeline\nfi")
+                && entrypoint.get(2).contains("<property><name>yarn.timeline-service.ttl-ms</name>"
+                        + "<value>2592000000</value></property>")));
+        // Removing the cluster's storage leaves it.
+        storage.remove("j-1");
+        verify(lifecycle, never()).removeVolume(historyName);
+    }
+
+    @Test
+    void aClustersSparkEventLogsAreCopiedIntoItsKeptHistoryWhileItsPrimaryNodeStillRuns() {
+        InspectVolumeCmd inspect = mock(InspectVolumeCmd.class);
+        when(docker.inspectVolumeCmd(historyName)).thenReturn(inspect);
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+
+        assertTrue(storage.keepHistory("j-1"));
+
+        assertEquals(1, commands.size(), commands.toString());
+        assertEquals(List.of("setpriv", "--reuid=hadoop", "--regid=hadoop", "--clear-groups", "bash", "-c"),
+                commands.get(0).subList(0, 6));
+        assertTrue(commands.get(0).get(6).endsWith("exec hdfs dfs -get -f '/var/log/spark/apps/*'"
+                + " /var/lib/floci-history/spark-events/"), commands.get(0).get(6));
+        // A cluster that keeps no history has nothing copied.
+        when(inspect.exec()).thenThrow(new NotFoundException("no such volume"));
+        assertTrue(storage.keepHistory("j-1"));
+        assertEquals(1, commands.size());
+    }
+
+    @Test
+    void aFailedCopyOfTheSparkEventLogsIsReportedSoTheStorageStays() {
+        when(docker.inspectVolumeCmd(historyName)).thenReturn(mock(InspectVolumeCmd.class));
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "get: Connection refused");
+
+        assertFalse(storage.keepHistory("j-1"));
+    }
+
+    @Test
+    void aKeptHistoryIsServedByAContainerOfItsOwnStartedOnItsFirstLink() {
+        String historyUi = ContainerStorageHelper.dockerName(config, "emr-j-1-history-ui");
+        when(lifecycle.probeContainer(historyUi)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(docker.inspectVolumeCmd(historyName)).thenReturn(mock(InspectVolumeCmd.class));
+        List<String> released = new ArrayList<>();
+        ClusterStorage.Yarn yarn = new ClusterStorage.Yarn(4096, 4).withSparkHistory(true).withHistories(true, true);
+
+        Optional<ContainerLifecycleManager.EndpointInfo> starting = storage.historyInterface("j-1", "123456789012",
+                "us-east-1", () -> IMAGE, released::add, HOST, yarn, EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT);
+
+        assertTrue(starting.isEmpty());
+        verify(spec).withName(historyUi);
+        verify(spec).withNamedVolume(historyName, EmrClusterStorage.HISTORY_PATH);
+        // On a network of its own, so no step's container reaches it.
+        verify(lifecycle).ensureNetwork(eq(historyName), argThat(labels -> "emr-history".equals(
+                labels.get(ContainerStorageHelper.COMPONENT_LABEL))));
+        verify(spec).withDockerNetwork(Optional.of(historyName));
+        verify(spec).withEnv("FLOCI_HDFS_HOST", HOST);
+        verify(spec).withEnv("FLOCI_SPARK_HISTORY", "1");
+        verify(spec).withEnv("FLOCI_YARN_TIMELINE", "1");
+        verify(spec).withEnv("FLOCI_TEZ_UI", "1");
+        verify(spec).withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+        verify(spec).withLoopbackPortBinding(EmrClusterStorage.TIMELINE_WEB_PORT, 0);
+        verify(spec).withLoopbackPortBinding(EmrClusterStorage.TEZ_UI_PORT, 0);
+        verify(spec).withLabels(argThat(labels -> "emr-history".equals(
+                labels.get(ContainerStorageHelper.COMPONENT_LABEL))));
+        // The event logs from the history, the timeline server on its store, as the cluster's ran them.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "-Dspark.history.fs.logDirectory=file:///var/lib/floci-history/spark-events")
+                && entrypoint.get(2).contains("<property><name>yarn.timeline-service.leveldb-timeline-store.path"
+                        + "</name><value>/var/lib/floci-history/timeline</value></property>")
+                // With no ResourceManager there, the Tez UI asks the timeline server in its place.
+                && entrypoint.get(2).contains("\"    rm: 'http://$FLOCI_HDFS_HOST:8188',\"")));
+        verify(lifecycle).createAndStart(any());
+        assertEquals(List.of(IMAGE), released);
+
+        ContainerLifecycleManager.EndpointInfo published = new ContainerLifecycleManager.EndpointInfo("localhost",
+                32804);
+        when(lifecycle.probeContainer(historyUi)).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveEndpoint(historyUi, EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, historyName))
+                .thenReturn(published);
+        ContainerExecStubs.completeEveryExec(docker, historyUi, 0L, "", "");
+        assertEquals(Optional.of(published), storage.historyInterface("j-1", "123456789012", "us-east-1",
+                () -> IMAGE, released::add, HOST, yarn, EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT));
+    }
+
+    @Test
+    void aHistoryContainerStartedThroughATeardownIsRemovedAndNoneStartsOnceTheHistoryHasGone() {
+        String historyUi = ContainerStorageHelper.dockerName(config, "emr-j-1-history-ui");
+        when(lifecycle.probeContainer(historyUi)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        InspectVolumeCmd inspect = mock(InspectVolumeCmd.class);
+        when(docker.inspectVolumeCmd(historyName)).thenReturn(inspect);
+        ClusterStorage.Yarn yarn = new ClusterStorage.Yarn(4096, 4).withSparkHistory(true);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("h-1", Map.of()));
+        // A teardown runs as it starts, before its name is known, so the teardown misses it.
+        doAnswer(network -> {
+            storage.stopManagedContainers();
+            return null;
+        }).when(lifecycle).ensureNetwork(eq(historyName), any());
+
+        storage.historyInterface("j-1", "123456789012", "us-east-1", () -> IMAGE, image -> { }, HOST, yarn,
+                EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT);
+
+        // Once in place of any left before it, and once as it started through the teardown.
+        verify(lifecycle, times(2)).removeIfExistsStrict(historyUi);
+        // Its history gone, as its 30 days passed: no container makes its volume again, empty.
+        when(inspect.exec()).thenThrow(new NotFoundException("no such volume"));
+        storage.historyInterface("j-1", "123456789012", "us-east-1", () -> IMAGE, image -> { }, HOST, yarn,
+                EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT);
+        verify(lifecycle, times(1)).createAndStart(any());
+    }
+
+    @Test
+    void aFailureToTellWhetherAHistoryIsKeptIsNotTakenForNone() {
+        InspectVolumeCmd inspect = mock(InspectVolumeCmd.class);
+        when(docker.inspectVolumeCmd(historyName)).thenReturn(inspect);
+        when(inspect.exec()).thenThrow(new IllegalStateException("Docker went away"));
+
+        assertThrows(IllegalStateException.class, () -> storage.historyKept("j-1"));
+    }
+
+    @Test
+    void aRunningPrimaryNodesEventLogsAreKeptBeforeATeardownRemovesIt() {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING, ContainerLiveness.RUNNING);
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
+        when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-7", hdfsName)).thenReturn("172.18.0.8");
+        ContainerExecStubs.completeEveryExec(docker, "c-7", 0L, "", "");
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null,
+                () -> new ClusterStorage.Yarn(4096, 4).withSparkHistory(true), NOT_STOPPED);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+
+        storage.stopManagedContainers();
+
+        assertTrue(commands.stream().anyMatch(command -> command.get(command.size() - 1)
+                .contains("hdfs dfs -get -f '/var/log/spark/apps/*'")), commands.toString());
+        // Once as it was created, in place of any left before it, and once by the teardown.
+        verify(lifecycle, times(2)).removeIfExistsStrict(hdfsName);
+    }
+
+    @Test
+    void theKeptHistoriesOfClustersNotKeptGoTheirContainersFirst() {
+        Container gone = historyContainer("c-gone", "j-1");
+        Container kept = historyContainer("c-kept", "j-2");
+        ListContainersCmd containers = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(docker.listContainersCmd()).thenReturn(containers);
+        when(containers.exec()).thenReturn(List.of(gone, kept));
+        InspectVolumeResponse goneVolume = mock(InspectVolumeResponse.class);
+        when(goneVolume.getName()).thenReturn(historyName);
+        when(goneVolume.getLabels()).thenReturn(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, "j-1"));
+        InspectVolumeResponse keptVolume = mock(InspectVolumeResponse.class);
+        when(keptVolume.getName()).thenReturn("floci-aws-emr-j-2-history");
+        when(keptVolume.getLabels()).thenReturn(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, "j-2"));
+        nodeVolumes(goneVolume, keptVolume);
+
+        storage.removeHistoriesBut(Set.of("j-2"));
+
+        verify(lifecycle).removeIfExistsStrict("c-gone");
+        verify(lifecycle, never()).removeIfExistsStrict("c-kept");
+        verify(lifecycle).removeVolume(historyName);
+        verify(lifecycle).removeNetwork(historyName);
+        verify(lifecycle, never()).removeVolume("floci-aws-emr-j-2-history");
+    }
+
+    private static Container historyContainer(String id, String clusterId) {
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(id);
+        when(container.getLabels()).thenReturn(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, clusterId,
+                ContainerStorageHelper.COMPONENT_LABEL, "emr-history"));
+        return container;
     }
 
     @Test
