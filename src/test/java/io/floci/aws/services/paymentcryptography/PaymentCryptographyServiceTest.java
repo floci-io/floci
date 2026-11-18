@@ -527,18 +527,15 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyHasNoResourcePolicy() {
+    void aKeyPendingDeletionKeepsItsResourcePolicy() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY);
         service.deleteKey(key);
 
-        AwsException gone = assertThrows(AwsException.class,
-                () -> service.resourcePolicy(key));
-        assertEquals("ResourceNotFoundException", gone.getErrorCode());
-
-        AwsException deleted = assertThrows(AwsException.class,
-                () -> service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
-        assertEquals("ResourceNotFoundException", deleted.getErrorCode());
+        // The key is still there while its deletion is pending, so the policy it carries is
+        // still there too.
+        assertEquals(PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY,
+                service.resourcePolicy(key).policy());
     }
 
     @Test
@@ -562,17 +559,19 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyIsNotStartedOrStopped() {
+    void aKeyPendingDeletionIsNotStartedOrStopped() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.deleteKey(key);
 
+        // The deletion is under way, so the use of the key is not the caller's to change:
+        // the reference does not publish the answer, so the service refuses the request.
         AwsException start = assertThrows(AwsException.class,
                 () -> service.startKeyUsage(key));
-        assertEquals("ResourceNotFoundException", start.getErrorCode());
+        assertEquals("ConflictException", start.getErrorCode());
 
         AwsException stop = assertThrows(AwsException.class,
                 () -> service.stopKeyUsage(key));
-        assertEquals("ResourceNotFoundException", stop.getErrorCode());
+        assertEquals("ConflictException", stop.getErrorCode());
     }
 
     @Test

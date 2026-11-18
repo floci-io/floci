@@ -1104,10 +1104,14 @@ class PaymentCryptographyIntegrationTest {
     void aWaitingPeriodOutsideTheServiceRangeIsRefused() {
         String arn = keyArn();
 
-        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":1}")
+        call("DeleteKey", """
+                {"KeyIdentifier":"%s","DeleteKeyInDays":1}
+                """.formatted(arn))
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
-        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":7}")
+        call("DeleteKey", """
+                {"KeyIdentifier":"%s","DeleteKeyInDays":7}
+                """.formatted(arn))
                 .then().statusCode(200);
     }
 
