@@ -259,6 +259,7 @@ floci:
       enabled: true
       mock: true
       port: 0
+      backend: docker
     redshift-data:
       enabled: true
       result-ttl-hours: 24

@@ -638,6 +638,13 @@ floci:
       port: 5432                                  # FLOCI_SERVICES_DSQL_PORT; the port every cluster endpoint is served on
       endpoint-suffix: localhost.floci.io         # FLOCI_SERVICES_DSQL_ENDPOINT_SUFFIX; endpoints are <id>.dsql.<region>.<suffix>
       image: "postgres:16-alpine"                 # FLOCI_SERVICES_DSQL_IMAGE
+      backend: docker                             # FLOCI_SERVICES_DSQL_BACKEND; docker (a container per cluster) or external (a PostgreSQL server that already runs)
+      external:
+        host:                                     # FLOCI_SERVICES_DSQL_EXTERNAL_HOST; required with backend external
+        port: 5432                                # FLOCI_SERVICES_DSQL_EXTERNAL_PORT
+        database: postgres                        # FLOCI_SERVICES_DSQL_EXTERNAL_DATABASE
+        username: postgres                        # FLOCI_SERVICES_DSQL_EXTERNAL_USERNAME
+        # password:                               # FLOCI_SERVICES_DSQL_EXTERNAL_PASSWORD; none by default
     redshift-data:
       enabled: true
       result-ttl-hours: 24

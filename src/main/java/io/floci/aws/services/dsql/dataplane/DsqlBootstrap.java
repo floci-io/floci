@@ -1,5 +1,7 @@
 package io.floci.aws.services.dsql.dataplane;
 
+import io.floci.aws.core.common.PostgresWire;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -34,11 +36,11 @@ final class DsqlBootstrap {
                     + rolePrefix + ", not \"" + connectRole + "\"");
         }
         return template()
-                .replace("{{database}}", identifier(database))
+                .replace("{{database}}", PostgresWire.quoteIdentifier(database))
                 .replace("{{owner_literal}}", literal(owner))
-                .replace("{{owner}}", identifier(owner))
+                .replace("{{owner}}", PostgresWire.quoteIdentifier(owner))
                 .replace("{{admin_literal}}", literal(admin))
-                .replace("{{admin}}", identifier(admin))
+                .replace("{{admin}}", PostgresWire.quoteIdentifier(admin))
                 .replace("{{connect_role_literal}}", literal(connectRole))
                 .replace("{{role_prefix}}", literal(rolePrefix))
                 .replace("{{external}}", Boolean.toString(external));
@@ -53,11 +55,6 @@ final class DsqlBootstrap {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-    }
-
-    /** Always quoted, so no name needs checking against PostgreSQL's reserved words. */
-    private static String identifier(String name) {
-        return '"' + name.replace("\"", "\"\"") + '"';
     }
 
     private static String literal(String value) {
