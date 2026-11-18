@@ -1902,6 +1902,35 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void theEmailAddressIsWrittenAsTheCallerNamedIt() {
+        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        String answer = service.certificateSigningRequest(pair, "SHA256", Map.of(
+                "CommonName", "floci payment cryptography",
+                "EmailAddress", "team@example.com"));
+
+        String subject = requestOf(new String(Base64.getDecoder().decode(answer),
+                StandardCharsets.US_ASCII)).getSubject().toString();
+        assertTrue(subject.contains("team@example.com"), subject);
+    }
+
+    @Test
+    void anEmailAddressTheAttributeCannotHoldIsRefused() {
+        // The email address is written as an IA5String, which holds ASCII alone, so an
+        // address outside ASCII is refused rather than signed with a narrowed character:
+        // the request would otherwise carry an address the caller never named.
+        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.certificateSigningRequest(pair, "SHA256", Map.of(
+                        "CommonName", "floci payment cryptography",
+                        "EmailAddress", "a\u2019b@example.com")));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
     void aKeyThatIsNotAKeyPairSignsNoRequest() {
         PaymentCryptographyKey key = createKey("us-east-1");
 
@@ -1931,8 +1960,7 @@ class PaymentCryptographyServiceTest {
                                                                  PaymentCryptographyKey pair,
                                                                  String digest) {
         try {
-            byte[] der = Base64.getMimeDecoder().decode(pem.replaceAll("-----[A-Z ]+-----", ""));
-            PKCS10CertificationRequest request = new PKCS10CertificationRequest(der);
+            PKCS10CertificationRequest request = requestOf(pem);
             assertTrue(request.getSubject().toString().contains("Floci"),
                     request.getSubject().toString());
             String algorithm = digest + (pair.getKeyAlgorithm().startsWith("ECC")
@@ -1954,16 +1982,27 @@ class PaymentCryptographyServiceTest {
      * @return the attribute of every member of the subject
      */
     private static List<ASN1ObjectIdentifier> subjectTypesOf(String answer) {
-        byte[] pem = Base64.getDecoder().decode(answer);
-        String text = new String(pem, StandardCharsets.US_ASCII);
-        byte[] der = Base64.getMimeDecoder().decode(text.replaceAll("-----[A-Z ]+-----", ""));
+        List<ASN1ObjectIdentifier> types = new ArrayList<>();
+        for (RDN rdn : requestOf(new String(Base64.getDecoder().decode(answer),
+                StandardCharsets.US_ASCII)).getSubject().getRDNs()) {
+            types.add(rdn.getFirst().getType());
+        }
+        return types;
+    }
+
+    /**
+     * The request a PEM holds, read back.
+     *
+     * <p>The PEM is the answer the service gives, base64 encoded, so it is decoded and the
+     * markers are taken off before the request itself is read.
+     *
+     * @param pem the request, in PEM
+     * @return the request
+     */
+    private static PKCS10CertificationRequest requestOf(String pem) {
+        byte[] der = Base64.getMimeDecoder().decode(pem.replaceAll("-----[A-Z ]+-----", ""));
         try {
-            PKCS10CertificationRequest request = new PKCS10CertificationRequest(der);
-            List<ASN1ObjectIdentifier> types = new ArrayList<>();
-            for (RDN rdn : request.getSubject().getRDNs()) {
-                types.add(rdn.getFirst().getType());
-            }
-            return types;
+            return new PKCS10CertificationRequest(der);
         } catch (IOException e) {
             throw new AssertionError("the certificate signing request does not parse", e);
         }

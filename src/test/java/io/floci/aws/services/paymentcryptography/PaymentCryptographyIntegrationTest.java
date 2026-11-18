@@ -624,6 +624,7 @@ class PaymentCryptographyIntegrationTest {
                  "Exportable":true}""")
                 .then().statusCode(200)
                 .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
 
         // The answer is the PEM of the request, base64 encoded, as the reference's own
         // answer carries it.
@@ -651,6 +652,7 @@ class PaymentCryptographyIntegrationTest {
                  "Exportable":true}""")
                 .then().statusCode(200)
                 .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
 
         call("GetCertificateSigningRequest", """
                 {"KeyIdentifier":"%s","SigningAlgorithm":"SHA512",

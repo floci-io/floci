@@ -193,15 +193,14 @@ create_key() {
 }
 
 @test "Payment Cryptography control plane: a key pair signs a certificate signing request" {
-    local arn
-    arn=$(aws_cmd payment-cryptography create-key \
+    PAIR_ARN=$(aws_cmd payment-cryptography create-key \
         --key-attributes 'KeyAlgorithm=RSA_2048,KeyClass=ASYMMETRIC_KEY_PAIR,KeyUsage=TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE,KeyModesOfUse={Sign=true,Verify=true}' \
         --exportable \
         --query 'Key.KeyArn' --output text)
-    [ -n "$arn" ]
+    [ -n "$PAIR_ARN" ]
 
     run aws_cmd payment-cryptography get-certificate-signing-request \
-        --key-identifier "$arn" \
+        --key-identifier "$PAIR_ARN" \
         --signing-algorithm SHA256 \
         --certificate-subject 'CommonName=floci payment cryptography,Organization=Floci'
     assert_success

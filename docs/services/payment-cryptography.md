@@ -306,7 +306,9 @@
   an elliptic curve one with an ECDSA algorithm. The subject's members are written in the
   order the reference's own request writes them, the most general member first: the
   country, the state or province, the city, the organization, the organization unit, the
-  common name and the email address.
+  common name and the email address. The email address is written as an IA5String, which
+  holds ASCII alone, so an address with a character outside ASCII is refused with
+  `ValidationException` rather than signed with that character narrowed to a byte.
 
 ## Configuration
 

@@ -18,6 +18,7 @@ import java.security.PublicKey;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The certificate signing request a key pair signs.
@@ -40,6 +41,15 @@ final class PaymentCryptographyCertificateRequest {
      */
     private static final Map<String, ASN1ObjectIdentifier> SUBJECT_TYPES = subjectTypes();
 
+    /**
+     * The members whose attribute holds an IA5String, which is ASCII alone.
+     *
+     * <p>A value outside ASCII cannot be written as such an attribute, and the encoder would
+     * narrow it to a byte of its own, so the request would carry an address the caller did
+     * not name. A request that names one is refused instead.
+     */
+    private static final Set<String> IA5_MEMBERS = Set.of("EmailAddress");
+
     private PaymentCryptographyCertificateRequest() {
     }
 
@@ -59,7 +69,9 @@ final class PaymentCryptographyCertificateRequest {
      * The subject of the request, as the members the model names.
      *
      * <p>A member the request does not name is not in the subject, and the one it does
-     * require, the common name, is.
+     * require, the common name, is. A member whose attribute cannot hold the value the
+     * request names is refused, because the request would otherwise carry a value the
+     * caller never wrote.
      *
      * @param fields the subject's members
      * @return the subject
@@ -69,10 +81,30 @@ final class PaymentCryptographyCertificateRequest {
         for (Map.Entry<String, ASN1ObjectIdentifier> entry : SUBJECT_TYPES.entrySet()) {
             String value = fields.get(entry.getKey());
             if (value != null && !value.isEmpty()) {
+                requireAscii(entry.getKey(), value);
                 builder.addRDN(entry.getValue(), value);
             }
         }
         return builder.build();
+    }
+
+    /**
+     * The refusal of a value the attribute of a member cannot hold.
+     *
+     * @param member the member of the subject
+     * @param value the value the request names
+     */
+    private static void requireAscii(String member, String value) {
+        if (!IA5_MEMBERS.contains(member)) {
+            return;
+        }
+        for (int index = 0; index < value.length(); index++) {
+            if (value.charAt(index) > 127) {
+                throw new AwsException("ValidationException",
+                        "the " + member + " of the subject holds a character that is not ASCII, "
+                                + "and the attribute it is written as holds ASCII alone", 400);
+            }
+        }
     }
 
     /**
