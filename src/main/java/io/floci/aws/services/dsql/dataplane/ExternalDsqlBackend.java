@@ -9,8 +9,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
@@ -48,7 +46,6 @@ import java.util.concurrent.locks.ReentrantLock;
 public class ExternalDsqlBackend implements DsqlBackend {
 
     private static final Logger LOG = Logger.getLogger(ExternalDsqlBackend.class);
-    private static final String HMAC = "HmacSHA256";
     private static final int SECRET_BYTES = 32;
     /** Before 16, CREATEROLE lets a cluster's admin alter and grant every other cluster's roles. */
     static final int MIN_SERVER_VERSION = 16;
@@ -337,9 +334,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
     /** The password of a backend role: base64url, unpadded, of HMAC-SHA256 keyed by the cluster's secret. */
     static String derive(String secret, String backendRole) {
         try {
-            Mac mac = Mac.getInstance(HMAC);
-            mac.init(new SecretKeySpec(Base64.getDecoder().decode(secret), HMAC));
-            byte[] digest = mac.doFinal(backendRole.getBytes(StandardCharsets.UTF_8));
+            byte[] digest = BackendAuthenticator.hmac(Base64.getDecoder().decode(secret),
+                    backendRole.getBytes(StandardCharsets.UTF_8));
             return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("HMAC-SHA256 is not available", e);
@@ -354,10 +350,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
      */
     static String verifier(String secret, String backendRole) {
         try {
-            Mac mac = Mac.getInstance(HMAC);
-            mac.init(new SecretKeySpec(Base64.getDecoder().decode(secret), HMAC));
-            byte[] salt = Arrays.copyOf(mac.doFinal(("scram-salt:" + backendRole).getBytes(StandardCharsets.UTF_8)),
-                    SCRAM_SALT_BYTES);
+            byte[] salt = Arrays.copyOf(BackendAuthenticator.hmac(Base64.getDecoder().decode(secret),
+                    ("scram-salt:" + backendRole).getBytes(StandardCharsets.UTF_8)), SCRAM_SALT_BYTES);
             byte[] salted = BackendAuthenticator.saltedPassword(derive(secret, backendRole), salt, SCRAM_ITERATIONS);
             byte[] clientKey = BackendAuthenticator.hmac(salted, "Client Key".getBytes(StandardCharsets.UTF_8));
             byte[] storedKey = Digests.sha256(clientKey);
