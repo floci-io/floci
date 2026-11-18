@@ -3,7 +3,7 @@ package io.floci.aws.services.eks;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.services.eks.model.Cluster;
-import io.floci.aws.testing.RealEksProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -26,11 +26,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * no bundled local-path provisioner, and that CoreDNS remains functional.
  *
  * <p>The cluster is started through {@link EksClusterManager} directly, which runs a k3s container
- * whether or not EKS is mocked. The class runs on {@link RealEksProfile} with the other classes
+ * whether or not EKS is mocked. The class runs on {@link RdsMockProfile} with the other classes
  * that run a real cluster.
  */
 @QuarkusTest
-@TestProfile(RealEksProfile.class)
+@TestProfile(RdsMockProfile.class)
 class EksStorageClassDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksStorageClassDockerIntegrationTest.class);

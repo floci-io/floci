@@ -2,6 +2,7 @@ package io.floci.aws.services.elasticache;
 
 import io.floci.aws.services.elasticache.container.ElastiCacheContainerManager;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -42,13 +43,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The shell-less ElastiCache backend ({@code floci.services.elasticache.shell-less-backend}) against
- * a real image with no shell and no CLI, pinned by digest in {@link ShellLessBackendProfile}: server
+ * a real image with no shell and no CLI, pinned by digest in {@link RdsMockProfile}: server
  * flags as container arguments, snapshot export over RESP and the Docker archive API, restore by
  * placing the file before the server starts, authentication and ACLs through the proxy, and cleanup
  * of the containers on delete and on a failed restore.
  */
 @QuarkusTest
-@TestProfile(ShellLessBackendProfile.class)
+@TestProfile(RdsMockProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElastiCacheShellLessBackendIntegrationTest {
 
@@ -251,7 +252,7 @@ class ElastiCacheShellLessBackendIntegrationTest {
         String garbage = Base64.getEncoder().encodeToString("not a snapshot".getBytes(StandardCharsets.UTF_8));
 
         assertThrows(ElastiCacheContainerManager.SnapshotRestoreException.class, () ->
-                manager.start(BAD_SEED_ID, ShellLessBackendProfile.IMAGE, List.of(), "us-east-1", garbage));
+                manager.start(BAD_SEED_ID, RdsMockProfile.ELASTICACHE_SHELL_LESS_IMAGE, List.of(), "us-east-1", garbage));
         // The caller cleans up as the service's rollback does; the failed container is not left behind.
         manager.stopByGroupId(BAD_SEED_ID);
         assertEquals("", containerOf(BAD_SEED_ID));
