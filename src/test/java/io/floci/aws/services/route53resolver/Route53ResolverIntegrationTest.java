@@ -103,6 +103,70 @@ class Route53ResolverIntegrationTest {
             .statusCode(400);
     }
 
+    @Test
+    void updateResolverDnssecConfig_createsVpcConfiguration() {
+        String vpc = ec2Ok("CreateVpc", "CidrBlock", "10.82.0.0/16")
+                .extract().path("CreateVpcResponse.vpc.vpcId");
+        try {
+            String id = dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"ENABLE\"}")
+                .statusCode(200)
+                .body("ResolverDNSSECConfig.ResourceId", equalTo(vpc))
+                .body("ResolverDNSSECConfig.OwnerId", notNullValue())
+                .body("ResolverDNSSECConfig.ValidationStatus", equalTo("ENABLED"))
+                .extract().path("ResolverDNSSECConfig.Id");
+            assertTrue(id.startsWith("rdsc-"));
+
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).body("ResolverDNSSECConfig.Id", equalTo(id));
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"USE_LOCAL_RESOURCE_SETTING\"}")
+                    .statusCode(400).body("__type", equalTo("InvalidParameterException"));
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus", equalTo("ENABLED"));
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"DISABLE\"}")
+                    .statusCode(200)
+                    .body("ResolverDNSSECConfig.Id", equalTo(id))
+                    .body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"));
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"));
+            given().contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "Route53Resolver.GetResolverDnssecConfig")
+                    .header("Authorization", AUTH_HEADER.replace("us-east-1", "us-west-2"))
+                    .body("{\"ResourceId\":\"" + vpc + "\"}")
+                    .when().post("/").then().statusCode(400)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+            given().contentType(CONTENT_TYPE)
+                    .header("X-Amz-Target", "Route53Resolver.GetResolverDnssecConfig")
+                    .header("Authorization", AUTH_HEADER.replace("AKID", "000000000077"))
+                    .body("{\"ResourceId\":\"" + vpc + "\"}")
+                    .when().post("/").then().statusCode(400)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+        } finally {
+            ec2Ok("DeleteVpc", "VpcId", vpc);
+        }
+        dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void updateResolverDnssecConfig_requiresExistingVpcAndValidValidation() {
+        dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"vpc-missing\",\"Validation\":\"ENABLE\"}")
+                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+        dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"vpc-missing\",\"Validation\":\"INVALID\"}")
+                .statusCode(400).body("__type", equalTo("InvalidParameterException"));
+        dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"vpc-missing\"}")
+                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static ValidatableResponse dnssec(String action, String body) {
+        return given().contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "Route53Resolver." + action)
+                .header("Authorization", AUTH_HEADER).body(body)
+                .when().post("/").then();
+    }
+
     // ── CreateResolverEndpoint: the request member is IpAddresses ──────────────
     //
     // AWS names it IpAddresses; its list shape is named IpAddressRequest, which is

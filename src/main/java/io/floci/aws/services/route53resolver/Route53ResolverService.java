@@ -87,6 +87,7 @@ public class Route53ResolverService {
     private final StorageBackend<String, ObjectNode> endpointStore;
     private final StorageBackend<String, ObjectNode> ruleStore;
     private final StorageBackend<String, ObjectNode> ruleAssociationStore;
+    private final StorageBackend<String, ObjectNode> dnssecConfigStore;
     /**
      * The {@code IpAddressRequests} each endpoint was created with, keyed by endpoint id.
      * Kept beside the endpoint rather than on it: the modeled {@code ResolverEndpoint} shape
@@ -117,6 +118,8 @@ public class Route53ResolverService {
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.ruleAssociationStore = storageFactory.create("route53resolver",
                 "route53resolver-rule-associations.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.dnssecConfigStore = storageFactory.create("route53resolver",
+                "route53resolver-dnssec-configs.json", new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointIpRequestStore = storageFactory.create("route53resolver",
                 "route53resolver-endpoint-ip-requests.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
@@ -133,10 +136,12 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> endpointStore,
                            StorageBackend<String, ObjectNode> ruleStore,
                            StorageBackend<String, ObjectNode> ruleAssociationStore,
+                           StorageBackend<String, ObjectNode> dnssecConfigStore,
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
                            StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper) {
-        this(domainListStore, endpointStore, ruleStore, ruleAssociationStore, endpointIpRequestStore, tagStore,
+        this(domainListStore, endpointStore, ruleStore, ruleAssociationStore, dnssecConfigStore,
+                endpointIpRequestStore, tagStore,
                 objectMapper, null);
     }
 
@@ -144,6 +149,7 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> endpointStore,
                            StorageBackend<String, ObjectNode> ruleStore,
                            StorageBackend<String, ObjectNode> ruleAssociationStore,
+                           StorageBackend<String, ObjectNode> dnssecConfigStore,
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
                            StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper, Ec2Service ec2Service) {
@@ -151,6 +157,7 @@ public class Route53ResolverService {
         this.endpointStore = endpointStore;
         this.ruleStore = ruleStore;
         this.ruleAssociationStore = ruleAssociationStore;
+        this.dnssecConfigStore = dnssecConfigStore;
         this.endpointIpRequestStore = endpointIpRequestStore;
         this.tagStore = tagStore;
         this.objectMapper = objectMapper;
@@ -589,6 +596,40 @@ public class Route53ResolverService {
 
     public List<ObjectNode> listResolverRuleAssociations(String region) {
         return recordsIn(ruleAssociationStore, region);
+    }
+
+    // ---------- VPC DNSSEC validation ----------
+
+    public synchronized ObjectNode updateResolverDnssecConfig(JsonNode request, String region, String accountId) {
+        String resourceId = requireText(request, "ResourceId", INVALID_PARAMETER);
+        String validation = requireText(request, "Validation", INVALID_PARAMETER);
+        requireEnum(validation, "Validation", List.of("ENABLE", "DISABLE"), INVALID_PARAMETER);
+        if (ec2Service != null && ec2Service.describeVpcs(region, List.of(resourceId), Map.of()).isEmpty()) {
+            throw new AwsException("ResourceNotFoundException", "VPC not found: " + resourceId, 400);
+        }
+        String key = region + "::" + resourceId;
+        ObjectNode config = dnssecConfigStore.get(key).orElseGet(() -> {
+            ObjectNode created = objectMapper.createObjectNode();
+            created.put("Id", "rdsc-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
+            created.put("OwnerId", accountId);
+            created.put("ResourceId", resourceId);
+            return created;
+        });
+        config.put("ValidationStatus", "ENABLE".equals(validation) ? "ENABLED" : "DISABLED");
+        dnssecConfigStore.put(key, config);
+        return config.deepCopy();
+    }
+
+    public ObjectNode getResolverDnssecConfig(String resourceId, String region) {
+        if (resourceId == null || resourceId.isBlank()) {
+            throw new AwsException(INVALID_PARAMETER, "ResourceId is required", 400);
+        }
+        return dnssecConfigStore.get(region + "::" + resourceId)
+                .filter(config -> ec2Service == null
+                        || !ec2Service.describeVpcs(region, List.of(resourceId), Map.of()).isEmpty())
+                .map(ObjectNode::deepCopy)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "DNSSEC configuration not found for VPC: " + resourceId, 400));
     }
 
     /**
