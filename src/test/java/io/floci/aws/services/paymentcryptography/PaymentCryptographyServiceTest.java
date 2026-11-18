@@ -1839,30 +1839,28 @@ class PaymentCryptographyServiceTest {
 
     @Test
     void aKeyPairSignsACertificateSigningRequest() {
-        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
                 "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
 
         String answer = service.certificateSigningRequest(pair, "SHA256", CSR_SUBJECT);
 
         // The answer is the PEM of the request, base64 encoded, as the reference's own
         // answer carries it.
-        String pem = new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII);
+        String pem = pemOf(answer);
         assertTrue(pem.startsWith("-----BEGIN CERTIFICATE REQUEST-----"), pem);
         assertTrue(pem.trim().endsWith("-----END CERTIFICATE REQUEST-----"), pem);
-        assertCertificateSigningRequestVerifies(pem, pair, "SHA256");
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA256");
     }
 
     @Test
     void aKeyPairSignsACertificateSigningRequestWithSha224() {
         // The model names four digests, and each of them signs.
-        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
                 "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
 
         String answer = service.certificateSigningRequest(pair, "SHA224", CSR_SUBJECT);
 
-        assertCertificateSigningRequestVerifies(
-                new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII),
-                pair, "SHA224");
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA224");
     }
 
     @Test
@@ -1870,28 +1868,22 @@ class PaymentCryptographyServiceTest {
         // The reference's own import flow signs the request with a key pair of the TR-34
         // usage, whose modes of use are unwrapping and decrypting, so the mode of use of
         // the key does not narrow the operation.
-        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
-                "TR31_K2_TR34_ASYMMETRIC_KEY",
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048", "TR31_K2_TR34_ASYMMETRIC_KEY",
                 Map.of("Unwrap", Boolean.TRUE, "Decrypt", Boolean.TRUE));
 
         String answer = service.certificateSigningRequest(pair, "SHA512", CSR_SUBJECT);
 
-        assertCertificateSigningRequestVerifies(
-                new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII),
-                pair, "SHA512");
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA512");
     }
 
     @Test
     void anEllipticCurveKeyPairSignsACertificateSigningRequest() {
-        PaymentCryptographyKey pair = createKey("us-east-1", "ECC_NIST_P256",
-                "ASYMMETRIC_KEY_PAIR", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                Map.of("Sign", Boolean.TRUE));
+        PaymentCryptographyKey pair = signingKeyPair("ECC_NIST_P256",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
 
         String answer = service.certificateSigningRequest(pair, "SHA384", CSR_SUBJECT);
 
-        assertCertificateSigningRequestVerifies(
-                new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII),
-                pair, "SHA384");
+        assertCertificateSigningRequestVerifies(answer, pair, "SHA384");
     }
 
     @Test
@@ -1899,7 +1891,7 @@ class PaymentCryptographyServiceTest {
         // The reference's own request reads C=US, ST=Virginia, L=Arlington, O=Amazon,
         // OU=PaymentCryptography, CN=MyCertificateAWSUSEAST, so the members of the subject
         // are written most general one first.
-        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
                 "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
 
         String answer = service.certificateSigningRequest(pair, "SHA256", Map.of(
@@ -1917,15 +1909,14 @@ class PaymentCryptographyServiceTest {
 
     @Test
     void theEmailAddressIsWrittenAsTheCallerNamedIt() {
-        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
                 "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
 
         String answer = service.certificateSigningRequest(pair, "SHA256", Map.of(
                 "CommonName", "floci payment cryptography",
                 "EmailAddress", "team@example.com"));
 
-        String subject = requestOf(new String(Base64.getDecoder().decode(answer),
-                StandardCharsets.US_ASCII)).getSubject().toString();
+        String subject = requestOf(answer).getSubject().toString();
         assertTrue(subject.contains("team@example.com"), subject);
     }
 
@@ -1934,7 +1925,7 @@ class PaymentCryptographyServiceTest {
         // The email address is written as an IA5String, which holds ASCII alone, so an
         // address outside ASCII is refused rather than signed with a narrowed character:
         // the request would otherwise carry an address the caller never named.
-        PaymentCryptographyKey pair = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+        PaymentCryptographyKey pair = signingKeyPair("RSA_2048",
                 "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE));
 
         AwsException refused = assertThrows(AwsException.class,
@@ -1972,11 +1963,11 @@ class PaymentCryptographyServiceTest {
      * the one the key signed and a certificate authority can verify it against the key it
      * carries.
      */
-    private static void assertCertificateSigningRequestVerifies(String pem,
+    private static void assertCertificateSigningRequestVerifies(String answer,
                                                                  PaymentCryptographyKey pair,
                                                                  String digest) {
         try {
-            PKCS10CertificationRequest request = requestOf(pem);
+            PKCS10CertificationRequest request = requestOf(answer);
             assertTrue(request.getSubject().toString().contains("Floci"),
                     request.getSubject().toString());
             assertArrayEquals(PaymentCryptographyKeyExchange.publicKeyOf(pair).getEncoded(),
@@ -2002,8 +1993,7 @@ class PaymentCryptographyServiceTest {
      */
     private static List<ASN1ObjectIdentifier> subjectTypesOf(String answer) {
         List<ASN1ObjectIdentifier> types = new ArrayList<>();
-        for (RDN rdn : requestOf(new String(Base64.getDecoder().decode(answer),
-                StandardCharsets.US_ASCII)).getSubject().getRDNs()) {
+        for (RDN rdn : requestOf(answer).getSubject().getRDNs()) {
             types.add(rdn.getFirst().getType());
         }
         return types;
@@ -2018,13 +2008,36 @@ class PaymentCryptographyServiceTest {
      * @param pem the request, in PEM
      * @return the request
      */
-    private static PKCS10CertificationRequest requestOf(String pem) {
-        byte[] der = Base64.getMimeDecoder().decode(pem.replaceAll("-----[A-Z ]+-----", ""));
+    private static PKCS10CertificationRequest requestOf(String answer) {
+        byte[] der = Base64.getMimeDecoder().decode(pemOf(answer).replaceAll("-----[A-Z ]+-----", ""));
         try {
             return new PKCS10CertificationRequest(der);
         } catch (IOException e) {
             throw new AssertionError("the certificate signing request does not parse", e);
         }
+    }
+
+    /**
+     * The PEM the answer carries, decoded.
+     *
+     * @param answer the base64 encoded request
+     * @return the request, in PEM
+     */
+    private static String pemOf(String answer) {
+        return new String(Base64.getDecoder().decode(answer), StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * A key pair that may sign, for the request's tests.
+     *
+     * @param algorithm the key pair's algorithm
+     * @param usage the key pair's usage
+     * @param modes the key pair's modes of use
+     * @return the key pair
+     */
+    private PaymentCryptographyKey signingKeyPair(String algorithm, String usage,
+                                                   Map<String, Boolean> modes) {
+        return createKey("us-east-1", algorithm, "ASYMMETRIC_KEY_PAIR", usage, modes);
     }
 
     /** The attributes of a key with that algorithm and usage. */

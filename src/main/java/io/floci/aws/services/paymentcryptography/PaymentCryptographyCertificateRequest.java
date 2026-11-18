@@ -1,23 +1,22 @@
 package io.floci.aws.services.paymentcryptography;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x500.X500NameBuilder;
 import org.bouncycastle.asn1.x500.style.BCStyle;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
-import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
-import org.bouncycastle.util.io.pem.PemObject;
 
 import java.io.IOException;
-import java.io.StringWriter;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -129,7 +128,7 @@ final class PaymentCryptographyCertificateRequest {
                     SubjectPublicKeyInfo.getInstance(publicKey.getEncoded());
             byte[] encoded = new PKCS10CertificationRequestBuilder(subject, publicKeyInfo)
                     .build(signer).getEncoded();
-            return pemOf(encoded);
+            return Certificates.toPem("CERTIFICATE REQUEST", encoded);
         } catch (OperatorCreationException | IOException e) {
             throw new AwsException("ValidationException",
                     "the certificate signing request could not be signed: " + e.getMessage(), 400);
@@ -137,23 +136,12 @@ final class PaymentCryptographyCertificateRequest {
     }
 
     /**
-     * A request, in PEM.
+     * The members of the subject, as the model names them.
      *
-     * <p>The writer is the one the rest of the emulator writes its PEM with, so a request
-     * this service writes is one the emulator's own reader reads.
-     *
-     * @param der the request, in DER
-     * @return the request, in PEM
+     * @return the members, in the order the subject is written in
      */
-    private static String pemOf(byte[] der) {
-        StringWriter writer = new StringWriter();
-        try (JcaPEMWriter pemWriter = new JcaPEMWriter(writer)) {
-            pemWriter.writeObject(new PemObject("CERTIFICATE REQUEST", der));
-        } catch (IOException e) {
-            throw new AwsException("ValidationException",
-                    "the certificate signing request could not be written: " + e.getMessage(), 400);
-        }
-        return writer.toString();
+    static List<String> subjectMembers() {
+        return List.copyOf(SUBJECT_TYPES.keySet());
     }
 
     /**

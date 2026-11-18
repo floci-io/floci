@@ -565,8 +565,7 @@ public class PaymentCryptographyJsonHandler {
     /** The subject of a request, as the members the model names. */
     private static Map<String, String> subjectOf(JsonNode subject) {
         Map<String, String> fields = new LinkedHashMap<>();
-        for (String member : List.of("CommonName", "Organization", "OrganizationUnit", "City",
-                "StateOrProvince", "Country", "EmailAddress")) {
+        for (String member : PaymentCryptographyCertificateRequest.subjectMembers()) {
             JsonNode value = subject.get(member);
             if (value != null && !value.isNull()) {
                 fields.put(member, value.asText());

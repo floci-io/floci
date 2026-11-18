@@ -617,11 +617,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aKeyPairSignsACertificateSigningRequest() {
-        String arn = call("CreateKey", """
-                {"KeyAttributes":{"KeyAlgorithm":"RSA_2048","KeyClass":"ASYMMETRIC_KEY_PAIR",
-                 "KeyUsage":"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                 "KeyModesOfUse":{"Sign":true,"Verify":true}},
-                 "Exportable":true}""")
+        String arn = call("CreateKey", CREATE_KEY_PAIR)
                 .then().statusCode(200)
                 .extract().path("Key.KeyArn");
         cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
