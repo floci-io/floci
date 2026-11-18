@@ -115,6 +115,43 @@ class RdsDataServiceTest {
         assertEquals(0, harness.connectionsOpened.get());
     }
 
+    // Catches: a name of only spaces read as "no database", skipping the check and running against the
+    // resource's database, even at a length the model refuses.
+    @Test
+    void aDatabaseNameOfSpacesIsCheckedRatherThanReadAsAbsent() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
+        ObjectNode spaces = harness.request("select 1");
+        spaces.put("database", "   ");
+        ObjectNode tooLong = harness.request("select 1");
+        tooLong.put("database", " ".repeat(65));
+
+        AwsException spacesError = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(spaces, REGION));
+        AwsException lengthError = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(tooLong, REGION));
+
+        assertEquals("BadRequestException", spacesError.getErrorCode());
+        assertEquals("database must be at most 64 characters.", lengthError.getMessage());
+        assertEquals(0, harness.connectionsOpened.get());
+    }
+
+    // Catches: a database name stored on the RDS resource (which RDS does not check at create) that
+    // would change the JDBC URL surfacing as a server error instead of a bad request.
+    @Test
+    void aStoredDatabaseNameThatWouldChangeTheUrlIsABadRequest() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
+        when(harness.resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(new RdsDataResourceResolver.DatabaseTarget(
+                RESOURCE_ARN, RESOURCE_ARN, DatabaseEngine.MYSQL, "sa", "", "app?allowLoadLocalInfile=true"));
+        ObjectNode request = harness.request("select 1");
+        request.remove("database");
+
+        AwsException error = assertThrows(AwsException.class, () -> harness.service.executeStatement(request, REGION));
+
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(0, harness.connectionsOpened.get());
+    }
+
     @Test
     void anOrdinaryDatabaseNameWithAHyphenStillConnects() throws Exception {
         TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);

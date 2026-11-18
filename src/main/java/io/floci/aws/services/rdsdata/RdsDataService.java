@@ -702,11 +702,20 @@ public class RdsDataService implements Resettable {
 
     private String databaseName(JsonNode request, RdsDataResourceResolver.DatabaseTarget target) {
         String database = textOrNull(request, "database");
-        if (database != null && !database.isBlank()) {
+        if (database != null && !database.isEmpty()) {
             return database;
         }
-        if (target.databaseName() != null && !target.databaseName().isBlank()) {
-            return target.databaseName();
+        String stored = target.databaseName();
+        if (stored != null && !stored.isBlank()) {
+            // RDS takes a name at create that AWS would refuse; one that would change the JDBC URL is
+            // answered as a bad request rather than reaching the URL builder.
+            Character unsafe = RdsDataConnectionFactory.urlUnsafeCharacter(stored);
+            if (unsafe != null) {
+                throw new AwsException("BadRequestException", String.format(
+                        "The resource's database name has a character a database name cannot have here: U+%04X. "
+                                + "Name the database in the request.", (int) unsafe), 400);
+            }
+            return stored;
         }
         throw new AwsException("BadRequestException", "database is required.", 400);
     }
@@ -718,7 +727,8 @@ public class RdsDataService implements Resettable {
      */
     private static void validateRequestDatabase(JsonNode request) {
         String database = textOrNull(request, "database");
-        if (database == null || database.isBlank()) {
+        // Only an absent or empty name means "the resource's"; one of spaces is checked like any other.
+        if (database == null || database.isEmpty()) {
             return;
         }
         if (database.length() > RdsDataConnectionFactory.MAX_DATABASE_NAME_LENGTH) {
