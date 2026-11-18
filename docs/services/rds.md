@@ -232,6 +232,19 @@ checked against the instance's other window. Modifications apply immediately —
     one moment; as with `mysqldump --single-transaction` elsewhere, a MyISAM or other
     non-transactional table written to during the snapshot may not be.
 
+## Cluster settings read-back
+
+`CreateDBCluster` and `ModifyDBCluster` retain `CopyTagsToSnapshot` and the enabled
+CloudWatch log export types. Modify uses `CloudwatchLogsExportConfiguration` enable
+and disable deltas; omitted fields preserve their values, including an explicit
+false snapshot-copy flag. Create, modify and describe return the stored settings.
+
+Aurora member instances retain `PromotionTier` from create and modify, defaulting
+to 1 and accepting 0 through 15. Both the instance response and the cluster member
+list report that value. Invalid tiers are rejected before other requested changes
+are applied. These additions cover configuration read-back; log shipping, snapshot
+tag-copy execution, restore settings and failover target selection are unchanged.
+
 ## Cluster parameter groups
 
 `DescribeDBClusterParameterGroups` includes `DBClusterParameterGroupArn` for managed `default.*`

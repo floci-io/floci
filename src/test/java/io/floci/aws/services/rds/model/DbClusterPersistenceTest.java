@@ -19,6 +19,53 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DbClusterPersistenceTest {
 
     @Test
+    void snapshotLogAndPromotionSettingsPersistAcrossInstances(@TempDir Path directory) {
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("settings-cluster");
+        cluster.setCopyTagsToSnapshot(true);
+        cluster.setEnabledCloudwatchLogsExports(List.of("postgresql", "iam-db-auth-error"));
+        DbInstance instance = new DbInstance();
+        instance.setDbInstanceIdentifier("settings-member");
+        instance.setPromotionTier(0);
+
+        Path clusters = directory.resolve("rds-clusters.json");
+        new PersistentStorage<String, DbCluster>(clusters, new TypeReference<Map<String, DbCluster>>() {})
+                .put(cluster.getDbClusterIdentifier(), cluster);
+        Path instances = directory.resolve("rds-instances.json");
+        new PersistentStorage<String, DbInstance>(instances, new TypeReference<Map<String, DbInstance>>() {})
+                .put(instance.getDbInstanceIdentifier(), instance);
+
+        PersistentStorage<String, DbCluster> clusterReader = new PersistentStorage<>(
+                clusters, new TypeReference<Map<String, DbCluster>>() {});
+        clusterReader.load();
+        DbCluster restored = clusterReader.get("settings-cluster").orElseThrow();
+        assertTrue(restored.isCopyTagsToSnapshot());
+        assertEquals(List.of("postgresql", "iam-db-auth-error"), restored.getEnabledCloudwatchLogsExports());
+        PersistentStorage<String, DbInstance> instanceReader = new PersistentStorage<>(
+                instances, new TypeReference<Map<String, DbInstance>>() {});
+        instanceReader.load();
+        assertEquals(0, instanceReader.get("settings-member").orElseThrow().getPromotionTier());
+    }
+
+    @Test
+    void stateSavedBeforeSettingsLoadsWithDefaults(@TempDir Path directory) throws Exception {
+        Path clusters = directory.resolve("rds-clusters.json");
+        Files.writeString(clusters, "{\"legacy\":{\"dbClusterIdentifier\":\"legacy\"}}");
+        Path instances = directory.resolve("rds-instances.json");
+        Files.writeString(instances, "{\"legacy\":{\"dbInstanceIdentifier\":\"legacy\"}}");
+        PersistentStorage<String, DbCluster> clusterReader = new PersistentStorage<>(
+                clusters, new TypeReference<Map<String, DbCluster>>() {});
+        clusterReader.load();
+        DbCluster restored = clusterReader.get("legacy").orElseThrow();
+        assertFalse(restored.isCopyTagsToSnapshot());
+        assertTrue(restored.getEnabledCloudwatchLogsExports().isEmpty());
+        PersistentStorage<String, DbInstance> instanceReader = new PersistentStorage<>(
+                instances, new TypeReference<Map<String, DbInstance>>() {});
+        instanceReader.load();
+        assertEquals(1, instanceReader.get("legacy").orElseThrow().getPromotionTier());
+    }
+
+    @Test
     void serverlessV2ScalingConfigurationPersistsAcrossInstances(@TempDir Path directory) {
         Path file = directory.resolve("rds-clusters.json");
         DbCluster cluster = new DbCluster();

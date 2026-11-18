@@ -52,6 +52,7 @@ public class DbInstance {
     private String preferredBackupWindow;
     private String preferredMaintenanceWindow;
     private boolean copyTagsToSnapshot;
+    private int promotionTier = 1;
     private boolean deletionProtection;
     private boolean publiclyAccessible;
     /** MonitoringInterval documents 0 as its default. */
@@ -357,4 +358,7 @@ public class DbInstance {
     public void setMaxAllocatedStorage(Integer maxAllocatedStorage) {
         this.maxAllocatedStorage = maxAllocatedStorage;
     }
+    public int getPromotionTier() { return promotionTier; }
+    public void setPromotionTier(int value) { promotionTier = value; }
+
 }
