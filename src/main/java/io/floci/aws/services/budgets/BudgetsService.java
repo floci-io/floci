@@ -9,7 +9,9 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -26,12 +28,13 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class BudgetsService implements Resettable {
+public class BudgetsService implements Resettable, StoredResourceArns {
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final Pattern IAM_POLICY_ARN = Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::(?:\\d{12}|aws):policy/.+$");
     private static final Pattern SCP_POLICY_ID = Pattern.compile("^p-[0-9a-zA-Z_]{8,128}$");
@@ -51,24 +54,78 @@ public class BudgetsService implements Resettable {
     private static final int MAX_NOTIFICATIONS = 10;
     private static final int MAX_EMAIL_SUBSCRIBERS = 10;
 
+    /** What a budget's ARN resource starts with, its name following. */
+    private static final String BUDGET_RESOURCE = "budget/";
+    /** What follows a budget's ARN in the ARN of one of its actions, the action's id following. */
+    private static final String ACTION_SEGMENT = "/action/";
+
     private final AccountAwareStorageBackend<BudgetRecord> budgets;
     private final AccountAwareStorageBackend<BudgetActionRecord> actions;
     private final ObjectMapper objectMapper;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public BudgetsService(StorageFactory storageFactory, ObjectMapper objectMapper) {
+    public BudgetsService(StorageFactory storageFactory, ObjectMapper objectMapper, RegionResolver regionResolver) {
         this(
                 storageFactory.create("budgets", "budgets.json", new TypeReference<Map<String, BudgetRecord>>() {}),
                 storageFactory.create("budget-actions", "budget-actions.json", new TypeReference<Map<String, BudgetActionRecord>>() {}),
-                objectMapper);
+                objectMapper, regionResolver);
     }
 
     BudgetsService(AccountAwareStorageBackend<BudgetRecord> budgets,
                    AccountAwareStorageBackend<BudgetActionRecord> actions,
-                   ObjectMapper objectMapper) {
+                   ObjectMapper objectMapper, RegionResolver regionResolver) {
         this.budgets = budgets;
         this.actions = actions;
         this.objectMapper = objectMapper;
+        this.regionResolver = regionResolver;
+    }
+
+    @Override
+    public String namespace() {
+        return "budgets";
+    }
+
+    /** A request names a budget by its account and name, and an action by its id, all in its ARN: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the budget or the budget action whose ARN is {@code arn}, in the request's account, where the
+     * handlers read: an ARN of another account names none. A budget records no ARN, so the ARN must be the one its
+     * account and name give in the request's partition, an action's adding {@code /action/<id>}; the record is then
+     * read in place under the key the handlers read it by, one stored before storage was account-aware included. Tag
+     * calls run one at a time and give the record a new tag list, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "budgets")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = budgets.accountId();
+        if (!parsed.accountId().equals(account) || !parsed.resource().startsWith(BUDGET_RESOURCE)
+                || !arn.equals(regionResolver.buildGlobalArn("budgets", account, parsed.resource()))) {
+            return Map.of();
+        }
+        String value = parsed.resource().substring(BUDGET_RESOURCE.length());
+        int action = value.indexOf(ACTION_SEGMENT);
+        Optional<JsonNode> tags = action < 0
+                ? AccountAwareStorageBackend.readInAccount(budgets, account, key(account, value))
+                        .map(BudgetRecord::getResourceTags)
+                : AccountAwareStorageBackend.readInAccount(actions, account, actionKey(value.substring(0, action),
+                                value.substring(action + ACTION_SEGMENT.length())))
+                        .map(BudgetActionRecord::getResourceTags);
+        Map<String, String> held = new LinkedHashMap<>();
+        tags.filter(JsonNode::isArray).ifPresent(list -> list.forEach(tag -> {
+            String key = text(tag, "Key");
+            if (key != null) {
+                held.put(key, tag.path("Value").asText(""));
+            }
+        }));
+        return held;
     }
 
 
@@ -824,16 +881,16 @@ public class BudgetsService implements Resettable {
         }
         String account = arn.substring(resourceStart, separator);
         String resource = arn.substring(separator + 1);
-        if (!ACCOUNT_ID.matcher(account).matches() || !resource.startsWith("budget/")) {
+        if (!ACCOUNT_ID.matcher(account).matches() || !resource.startsWith(BUDGET_RESOURCE)) {
             throw invalid("ResourceARN is not a valid Budgets ARN.");
         }
-        String value = resource.substring("budget/".length());
-        int actionMarker = value.indexOf("/action/");
+        String value = resource.substring(BUDGET_RESOURCE.length());
+        int actionMarker = value.indexOf(ACTION_SEGMENT);
         if (actionMarker < 0) {
             return new ResourceRef(account, requireBudgetNameValue(value), null);
         }
         String budgetName = requireBudgetNameValue(value.substring(0, actionMarker));
-        String actionId = value.substring(actionMarker + "/action/".length());
+        String actionId = value.substring(actionMarker + ACTION_SEGMENT.length());
         if (!UuidShapes.matchesEitherCase(actionId)) {
             throw invalid("ResourceARN contains an invalid action ID.");
         }
