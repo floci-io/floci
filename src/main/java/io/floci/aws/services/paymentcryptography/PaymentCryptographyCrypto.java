@@ -1,6 +1,7 @@
 package io.floci.aws.services.paymentcryptography;
 
 
+import io.floci.aws.services.paymentcryptography.crypto.BlockMode;
 import io.floci.aws.services.paymentcryptography.crypto.Bytes;
 import io.floci.aws.services.paymentcryptography.crypto.Ciphers;
 
@@ -70,22 +71,37 @@ final class PaymentCryptographyCrypto {
      */
     static String checkValue(String keyHex, PaymentCryptographyKeyAlgorithm algorithm) {
         byte[] key = fromHex(keyHex);
-        byte[] mac = algorithm.aes
-                ? cmac(key, ZERO_BLOCK)
-                : tdesEcbEncrypt(new byte[8], key);
+        return HEX_UPPER.formatHex(checkValueBytes(key, algorithm));
+    }
+
+    /**
+     * The check value of a key of that algorithm, from the key's bytes.
+     *
+     * <p>The value is the leftmost three bytes of the mac of sixteen zero bytes under the
+     * key: the CMAC of them under an AES key, the ANSI X9.24 value under a Triple DES one,
+     * and the keyed hash of them under a keyed hash key, whose kind of check value the
+     * reference's model names as the hash.
+     */
+    static byte[] checkValueBytes(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
+        byte[] mac = macOfZeroes(key, algorithm);
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
-        return HEX_UPPER.formatHex(value);
+        return value;
+    }
+
+    /** The mac of sixteen zero bytes under a key, in the algorithm's own mac. */
+    private static byte[] macOfZeroes(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
+        if (algorithm.hmac()) {
+            return Ciphers.hmac(key, ZERO_BLOCK, Ciphers.digestOf(algorithm.hash));
+        }
+        return algorithm.aes
+                ? cmac(key, ZERO_BLOCK)
+                : tdesEcbEncrypt(new byte[8], key);
     }
 
     /** The check value of a key of that algorithm, from the key's bytes. */
     static String checkValue(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
-        byte[] mac = algorithm.aes
-                ? cmac(key, ZERO_BLOCK)
-                : tdesEcbEncrypt(new byte[8], key);
-        byte[] value = new byte[3];
-        System.arraycopy(mac, 0, value, 0, 3);
-        return HEX_UPPER.formatHex(value);
+        return HEX_UPPER.formatHex(checkValueBytes(key, algorithm));
     }
 
     /** The check value of an AES key: the leftmost three bytes of the CMAC of sixteen zero bytes. */
@@ -187,6 +203,55 @@ final class PaymentCryptographyCrypto {
     }
 
     /**
+     * The ciphertext of a plaintext under a key, in the chaining mode.
+     *
+     * @param key the key
+     * @param plaintext the bytes to encrypt
+     * @param initializationVector the vector to encrypt under, or null for the zero vector
+     * @return the encrypted bytes
+     */
+    static byte[] encryptCbc(byte[] key, byte[] plaintext, byte[] initializationVector) {
+        return encrypt(key, plaintext, initializationVector, BlockMode.CBC);
+    }
+
+    /**
+     * The plaintext of a ciphertext the service encrypted, in the chaining mode.
+     *
+     * @param key the key
+     * @param ciphertext the encrypted bytes
+     * @param initializationVector the vector to decrypt under, or null for the zero vector
+     * @return the plaintext
+     */
+    static byte[] decryptCbc(byte[] key, byte[] ciphertext, byte[] initializationVector) {
+        return decrypt(key, ciphertext, initializationVector, BlockMode.CBC);
+    }
+
+    /**
+     * The ciphertext of a plaintext under a Triple DES key, in the chaining mode.
+     *
+     * @param key the key
+     * @param plaintext the bytes to encrypt
+     * @param initializationVector the vector to encrypt under, or null for the zero vector
+     * @return the encrypted bytes
+     */
+    static byte[] tdesCbcEncrypt(byte[] key, byte[] plaintext, byte[] initializationVector) {
+        return tdesEncrypt(key, plaintext, initializationVector, BlockMode.CBC);
+    }
+
+    /**
+     * The plaintext of a ciphertext the service encrypted under a Triple DES key, in the
+     * chaining mode.
+     *
+     * @param key the key
+     * @param ciphertext the encrypted bytes
+     * @param initializationVector the vector to decrypt under, or null for the zero vector
+     * @return the plaintext
+     */
+    static byte[] tdesCbcDecrypt(byte[] key, byte[] ciphertext, byte[] initializationVector) {
+        return tdesDecrypt(key, ciphertext, initializationVector, BlockMode.CBC);
+    }
+
+    /**
      * The ciphertext of a plaintext under a key, with the initialization vector the request
      * names.
      *
@@ -197,10 +262,13 @@ final class PaymentCryptographyCrypto {
      * @param key the key
      * @param plaintext the bytes to encrypt
      * @param initializationVector the vector to encrypt under, or null for the zero vector
+     * @param mode the block cipher mode the request names
      * @return the encrypted bytes
      */
-    static byte[] encryptCbc(byte[] key, byte[] plaintext, byte[] initializationVector) {
-        return aesCbcEncrypt(key, vector(initializationVector, IV_LENGTH), plaintext);
+    static byte[] encrypt(byte[] key, byte[] plaintext, byte[] initializationVector,
+                          BlockMode mode) {
+        return Ciphers.aesEncrypt(plaintext, key,
+                vector(initializationVector, IV_LENGTH, mode), mode);
     }
 
     /**
@@ -213,10 +281,13 @@ final class PaymentCryptographyCrypto {
      * @param key the key
      * @param ciphertext the encrypted bytes
      * @param initializationVector the vector to decrypt under, or null for the zero vector
+     * @param mode the block cipher mode the request names
      * @return the plaintext
      */
-    static byte[] decryptCbc(byte[] key, byte[] ciphertext, byte[] initializationVector) {
-        return aesCbcDecrypt(key, vector(initializationVector, IV_LENGTH), ciphertext);
+    static byte[] decrypt(byte[] key, byte[] ciphertext, byte[] initializationVector,
+                          BlockMode mode) {
+        return Ciphers.aesDecrypt(ciphertext, key,
+                vector(initializationVector, IV_LENGTH, mode), mode);
     }
 
     /**
@@ -230,10 +301,13 @@ final class PaymentCryptographyCrypto {
      * @param key the key
      * @param plaintext the bytes to encrypt
      * @param initializationVector the vector to encrypt under, or null for the zero vector
+     * @param mode the block cipher mode the request names
      * @return the encrypted bytes
      */
-    static byte[] tdesCbcEncrypt(byte[] key, byte[] plaintext, byte[] initializationVector) {
-        return Ciphers.tdesCbcEncrypt(plaintext, key, vector(initializationVector, TDES_IV_LENGTH));
+    static byte[] tdesEncrypt(byte[] key, byte[] plaintext, byte[] initializationVector,
+                              BlockMode mode) {
+        return Ciphers.tdesEncrypt(plaintext, key,
+                vector(initializationVector, TDES_IV_LENGTH, mode), mode);
     }
 
     /**
@@ -242,14 +316,38 @@ final class PaymentCryptographyCrypto {
      * @param key the key
      * @param ciphertext the encrypted bytes
      * @param initializationVector the vector to decrypt under, or null for the zero vector
+     * @param mode the block cipher mode the request names
      * @return the plaintext
      */
-    static byte[] tdesCbcDecrypt(byte[] key, byte[] ciphertext, byte[] initializationVector) {
-        return Ciphers.tdesCbcDecrypt(ciphertext, key, vector(initializationVector, TDES_IV_LENGTH));
+    static byte[] tdesDecrypt(byte[] key, byte[] ciphertext, byte[] initializationVector,
+                              BlockMode mode) {
+        return Ciphers.tdesDecrypt(ciphertext, key,
+                vector(initializationVector, TDES_IV_LENGTH, mode), mode);
+    }
+
+    /**
+     * The AES encryption of data under a key and an initialization vector, without
+     * padding: the vector is the length of the data's block size already.
+     */
+    static byte[] aesCbcEncrypt(byte[] key, byte[] iv, byte[] data) {
+        return Ciphers.aesCbcEncrypt(data, key, iv);
+    }
+
+    /** The AES-CBC decryption of data under a key and an initialization vector, without padding. */
+    static byte[] aesCbcDecrypt(byte[] key, byte[] iv, byte[] data) {
+        try {
+            return Ciphers.aesCbcDecrypt(data, key, iv);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("the data did not decrypt under the key", e);
+        }
     }
 
     /** The vector a cipher starts from, the zero vector when the request names none. */
-    private static byte[] vector(byte[] initializationVector, int length) {
+    private static byte[] vector(byte[] initializationVector, int length, BlockMode mode) {
+        if (!mode.takesVector()) {
+            // The mode enciphers every block on its own, so it has no vector to start from.
+            return null;
+        }
         if (initializationVector == null) {
             return new byte[length];
         }
@@ -258,6 +356,11 @@ final class PaymentCryptographyCrypto {
                     + initializationVector.length + " bytes; it is " + length);
         }
         return initializationVector.clone();
+    }
+
+    /** The vector a cipher starts from, the zero vector when the request names none. */
+    private static byte[] vector(byte[] initializationVector, int length) {
+        return vector(initializationVector, length, BlockMode.CBC);
     }
 
     /**
@@ -328,23 +431,6 @@ final class PaymentCryptographyCrypto {
             out[i] = Arrays.copyOfRange(bytes, i * size, (i + 1) * size);
         }
         return out;
-    }
-
-    /**
-     * The AES-CBC encryption of data under a key and an initialization vector, without
-     * padding: the vector is the length of the data's block size already.
-     */
-    static byte[] aesCbcEncrypt(byte[] key, byte[] iv, byte[] data) {
-        return Ciphers.aesCbcEncrypt(data, key, iv);
-    }
-
-    /** The AES-CBC decryption of data under a key and an initialization vector, without padding. */
-    static byte[] aesCbcDecrypt(byte[] key, byte[] iv, byte[] data) {
-        try {
-            return Ciphers.aesCbcDecrypt(data, key, iv);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("the data did not decrypt under the key", e);
-        }
     }
 
     /** One block of AES in ECB mode. */

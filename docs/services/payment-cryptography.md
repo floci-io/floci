@@ -83,13 +83,14 @@
   value is a CMAC under an AES key and the ANSI X9.24 value under a Triple DES one, and a
   request that names another one is refused.
 - **The key attributes this service makes.** The algorithms are the Triple DES, the AES,
-  the RSA and the ECC ones, so the HMAC algorithms the reference's model names, which fix
-  the hash of the key at its creation, are refused. The SHA-1 check value the reference's
-  model also names is refused as well. The classes are the symmetric key, the asymmetric
-  key pair and the public key, so the private key class the reference's model also names is
-  refused. The usage says what the key is for and the algorithm has to serve it, so a key
-  of a MAC usage may not be made of an AES key, and the asymmetric usages take the key
-  pairs the reference's table gives them.
+  the RSA, the ECC and the keyed hash ones, so the hash a key carries is fixed at its
+  creation, as the reference's guide says. The keyed hash algorithms are for the
+  `TR31_M7_HMAC_KEY` usage alone, and the SHA-1 check value the reference's model also
+  names is refused. The classes are the symmetric key, the asymmetric key pair and the
+  public key, so the private key class the reference's model also names is refused. The
+  usage says what the key is for and the algorithm has to serve it, so a key of a MAC
+  usage may not be made of an AES key, and the asymmetric usages take the key pairs the
+  reference's table gives them.
 - **The usage is not checked against the reference's list.** The reference's page for the key
   attributes lists the usages a key may have and says that it prevents the creation of a key
   that is not valid. This service requires a usage and checks that the algorithm serves it, but

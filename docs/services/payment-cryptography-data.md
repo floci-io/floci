@@ -29,19 +29,22 @@ client that talks to the control plane does not reach it by accident.
 
 ## Emulation Behavior
 
-- **The encryption is AES or Triple DES in CBC mode without padding**, so the caller supplies
-  whole blocks: sixteen bytes under an AES key and eight under a Triple DES one, as the reference
+- **The encryption is AES or Triple DES without padding**, so the caller supplies whole
+  blocks: sixteen bytes under an AES key and eight under a Triple DES one, as the reference
   says. A plaintext that does not fill them is refused. A key of another family is refused rather
   than read as a key of one of these. The ciphertext is the encrypted bytes alone and is as long as
   the plaintext it holds: the initialization vector travels in the request's attributes, and a
   request that names none gets a zero vector. The blobs of the data plane are hexadecimal, which is
   what the reference says they are.
-- **Only the CBC mode is made.** The reference's model names eight block cipher modes for the
-  symmetric encryption, and the reference's page for the attributes names them as the valid
-  values. This service makes the CBC one, so a request that names the ECB, the CFB, the CFB1, the
-  CFB8, the CFB64, the CFB128 or the OFB mode is refused with `ValidationException` rather than
-  answered with a cipher of another kind. The padding of the symmetric attributes belongs to the
-  RSA cipher, so a request that names one is refused as well.
+- **Every mode the reference names is made.** The model names eight block cipher modes for the
+  symmetric encryption, and the page for the attributes names them as the valid values: the
+  ECB, the CBC, the CFB, the CFB1, the CFB8, the CFB64, the CFB128 and the OFB. The CFB with
+  no number is the one whose feedback is the cipher's own block, so it is the CFB128 under an
+  AES key and the CFB64 under a Triple DES one. A mode whose feedback is wider than the
+  cipher's own block is not one that cipher takes, so a Triple DES key is refused for the
+  CFB128. The electronic code book mode takes no vector, so the vector of a request that
+  names one is not read. The padding of the symmetric attributes belongs to the RSA cipher,
+  so a request that names one is refused as well.
 - **The symmetric cipher is the only shape of the attributes that is made.** The reference's
   model names four shapes of the encryption attributes: the symmetric one, the asymmetric one,
   the DUKPT one and the EMV one. This service makes the symmetric one, so a request that names
@@ -50,25 +53,31 @@ client that talks to the control plane does not reach it by accident.
   SHA-1, OAEP SHA-256 and OAEP SHA-512, are therefore never reached, and neither are the DUKPT
   encryption mode or the EMV encryption mode, which the model names as ECB and CBC.
 - **The MAC is the one the request asks for.** The ISO 9797-1 algorithms 1 and 3 are the ones
-  defined over Triple DES, and the CMAC is the AES-CMAC of RFC 4493, which is a whole block
-  wide, so it is cut to a length the caller asks for. The service fails the request when the
+  defined over Triple DES, the CMAC is the AES-CMAC of RFC 4493, which is a whole block
+  wide, and the keyed hash is the hash of RFC 2104. The service fails the request when the
   MAC is not the one over the message, because the answer of a verification has no verdict in
   it.
-- **The MAC algorithms this service makes are the three the model names beside the DUKPT ones.**
-  The ISO 9797-1 algorithms 1 and 3, the CMAC, and the DUKPT derivations of the two ISO 9797
-  algorithms are made. The HMAC family, the EMV MAC, the DUKPT CMAC and the AS 2805 4.1 MAC
-  are not, so a request that names one of them is refused with `ValidationException`. The
-  reference makes them, and the reference's page for the operation says a HMAC can be asked
-  for, so this is a deviation and not a rule of the model.
+- **The keyed hash takes the hash the key carries.** The reference's guide settles the two
+  forms the request takes: a key whose algorithm is one of the `HMAC_SHA` ones carries its
+  hash, and the request names the family, so the key sets the hash; and a key of the
+  `TR31_M7_HMAC_KEY` usage that is a Triple DES or an AES key is asked for by the hash the
+  request names, so the request carries the hash of SHA-224, SHA-256, SHA-384 or SHA-512. A
+  request that names a hash the key does not carry is refused.
+- **The MAC algorithms this service does not make are refused.** The EMV MAC, the DUKPT CMAC
+  and the AS 2805 4.1 MAC are not made, so a request that names one of them is refused with
+  `ValidationException` rather than answered with a mac of another kind.
+- **The length of a MAC is a number of hexadecimal characters.** The reference counts it that
+  way: "a length of 8 refers to 8 hex characters (4 bytes)". The lengths the reference names
+  for each algorithm are the ones this service takes: eight or sixteen characters for the
+  Triple DES macs, and eight, sixteen or thirty-two for the CMAC of an AES key. A length that
+  is not a whole number of bytes, or one the algorithm cannot give, is refused. The keyed
+  hash ignores the length: "The mac-length parameter has no effect for HMAC. The output MAC
+  is always the full hash output", so the mac of a keyed hash is the whole hash.
 - **The MAC attributes are the algorithm or a DUKPT derivation.** The reference's model names
   five shapes for them: the algorithm, the EMV MAC, and the DUKPT derivations of the ISO 9797-1
   algorithm 1, of the algorithm 3 and of the CMAC. This service makes the algorithm and the two
   DUKPT derivations of the ISO 9797-1 algorithms, so a request that names the EMV MAC or the
   DUKPT CMAC is refused with `ValidationException`.
-- **The length of a MAC is the one the algorithm gives.** The model states the range of four to
-  thirty-two bytes, and the length a request asks for is refused when the algorithm gives a
-  shorter one. The reference names the lengths that hold for each algorithm, and this service
-  takes any length the algorithm can give.
 - **The modes of use of a key decide what it may be used for.** A key without the `Encrypt`
   mode is refused for an encryption, and a key with `NoRestrictions` is refused for nothing.
 - **The usage of a key decides what it may be used for.** The modes say whether a key may be
