@@ -11,8 +11,7 @@ With IAM enforcement enabled, `CreateCluster` evaluates `eks:authenticationMode`
 `eks:bootstrapClusterCreatorAdminPermissions`, `eks:endpointPrivateAccess`, and
 `eks:endpointPublicAccess` from the request's `accessConfig` and `resourcesVpcConfig`.
 The generated metadata also maps those keys for `UpdateClusterConfig`, except the
-create-only bootstrap flag; this does not implement the currently unsupported
-update API. Its extraction is covered by resolver tests, not an SDK update lifecycle.
+create-only bootstrap flag. Its extraction is covered by resolver tests, not an SDK update lifecycle.
 The action-to-key mappings come from AWS's Service Reference and the request paths from
 botocore. Omitted attributes remain absent from the IAM context; stored cluster settings
 and service defaults do not supply missing request conditions. Generic request-tag
@@ -341,6 +340,7 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 
 - **Supported log types**: The valid EKS log types are `api`, `audit`, `authenticator`, `controllerManager`, and `scheduler`. Specifying an unrecognized type causes `InvalidParameterException` (HTTP 400).
 - **Response normalization**: AWS EKS always returns the status of all five log types. Enabled types are returned first (`enabled: true`), followed by disabled types (`enabled: false`).
+- **Changing logging later**: A logging change made through `UpdateClusterConfig` is stored and returned by `DescribeCluster`; it is read when a cluster's container is started or adopted, when the control plane log stream and audit follower are attached and the audit flags are given to the API server, so it does not change what a running cluster exports.
 - **Default logging**: When omitted or empty at creation time, Floci returns all five log types disabled in a single entry (`enabled: false`).
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **CloudWatch Logs delivery**:
@@ -1217,7 +1217,8 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 
 The following EKS features are not yet supported:
 
-- `UpdateClusterConfig` / `UpdateClusterVersion`
+- `UpdateClusterVersion`
+- `UpdateClusterConfig` members other than `resourcesVpcConfig` endpoint access and `publicAccessCidrs`, `logging` and `accessConfig.authenticationMode`; a different `subnetIds` or `securityGroupIds` list is refused
 - `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs

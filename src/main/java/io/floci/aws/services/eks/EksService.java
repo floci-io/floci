@@ -1,6 +1,8 @@
 package io.floci.aws.services.eks;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -52,6 +54,9 @@ import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.eks.model.StorageConfig;
+import io.floci.aws.services.eks.model.Update;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
+import io.floci.aws.services.eks.model.UpdateParam;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -89,10 +94,11 @@ import java.util.stream.Collectors;
 public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaunchListener {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
 
-    private static final List<String> ALL_LOG_TYPES = List.of(
+    public static final List<String> ALL_LOG_TYPES = List.of(
             "api", "audit", "authenticator", "controllerManager", "scheduler"
     );
 
@@ -796,7 +802,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         AccessConfig requestedAccess = request.getAccessConfig();
         String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
                 ? "CONFIG_MAP" : requestedAccess.authenticationMode();
-        if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(authenticationMode)) {
+        if (!AUTHENTICATION_MODE_RANK.containsKey(authenticationMode)) {
             throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
         }
         validateAutoMode(request.getComputeConfig(), request.getStorageConfig(), request.getKubernetesNetworkConfig());
@@ -1025,6 +1031,189 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         } catch (AwsException expected) {
             // The handler answers this lookup with the same error, so the route names no resource to act on.
             return Optional.empty();
+        }
+    }
+
+    private static final Map<String, Integer> AUTHENTICATION_MODE_RANK =
+            Map.of("CONFIG_MAP", 0, "API_AND_CONFIG_MAP", 1, "API", 2);
+
+    /**
+     * UpdateClusterConfig for {@code resourcesVpcConfig} endpoint access, {@code logging} and
+     * {@code accessConfig.authenticationMode}. AWS accepts more members and lets the subnets and security
+     * groups change; floci applies these three families and refuses a different subnet or security group list.
+     * Each family the request names is stored as its own {@link Update} and all are returned in order. The
+     * REST endpoint refuses a request naming more than one family, as EKS does, so it returns the only one. The
+     * request is kept with the first update, and a repeat of its {@code clientRequestToken} returns that update.
+     * The cluster is written through the delete-safe writer, so a concurrent delete is not undone.
+     */
+    public synchronized List<Update> updateClusterConfig(String name, UpdateClusterConfigRequest request) {
+        Cluster cluster = requireClusterInRequestRegion(name);
+        EksAddonService.requireActiveCluster(cluster);
+        if (request == null || (request.resourcesVpcConfig() == null && request.logging() == null
+                && request.accessConfig() == null)) {
+            throw new AwsException("InvalidParameterException",
+                    "UpdateClusterConfig supports resourcesVpcConfig, logging and accessConfig only", 400);
+        }
+        String token = request.clientRequestToken();
+        if (token != null && !token.isBlank()) {
+            Optional<EksAddonService.StoredUpdate> previous = addons.findConfigUpdateByToken(cluster, token);
+            if (previous.isPresent()) {
+                if (updateParametersMatch(previous.get().request(), request)) {
+                    return List.of(previous.get().update());
+                }
+                throw new AwsException("InvalidParameterException",
+                        "clientRequestToken was already used with different parameters", 400);
+            }
+        }
+        // Validated whole before anything is written, so a refused request changes nothing.
+        ResourcesVpcConfig vpc = cluster.getResourcesVpcConfig();
+        ResourcesVpcConfig requestedVpc = request.resourcesVpcConfig();
+        Boolean publicAccess = vpc == null ? null : vpc.getEndpointPublicAccess();
+        Boolean privateAccess = vpc == null ? null : vpc.getEndpointPrivateAccess();
+        List<String> cidrs = vpc == null ? null : vpc.getPublicAccessCidrs();
+        if (requestedVpc != null) {
+            requireSameMembers("subnetIds", requestedVpc.getSubnetIds(), vpc == null ? null : vpc.getSubnetIds());
+            requireSameMembers("securityGroupIds", requestedVpc.getSecurityGroupIds(),
+                    vpc == null ? null : vpc.getSecurityGroupIds());
+            publicAccess = requestedVpc.getEndpointPublicAccess() != null
+                    ? requestedVpc.getEndpointPublicAccess() : publicAccess;
+            privateAccess = requestedVpc.getEndpointPrivateAccess() != null
+                    ? requestedVpc.getEndpointPrivateAccess() : privateAccess;
+            // The stored cluster's ipFamily, as CreateCluster checks the same list against the requested one.
+            KubernetesNetworkConfig stored = cluster.getKubernetesNetworkConfig();
+            requireValidPublicAccessCidrs(requestedVpc.getPublicAccessCidrs(),
+                    stored == null || stored.getIpFamily() == null ? "ipv4" : stored.getIpFamily());
+            cidrs = requestedVpc.getPublicAccessCidrs() != null ? requestedVpc.getPublicAccessCidrs() : cidrs;
+        }
+        Logging logging = request.logging() == null || request.logging().getClusterLogging() == null
+                ? null : buildLogging(mergedLogging(cluster.getLogging(), request.logging()));
+        String mode = cluster.getAccessConfig() == null ? null : cluster.getAccessConfig().authenticationMode();
+        String requestedMode = request.accessConfig() == null ? null : request.accessConfig().authenticationMode();
+        if (requestedMode != null) {
+            requireForwardAuthenticationMode(mode, requestedMode);
+        }
+
+        Boolean finalPublicAccess = publicAccess;
+        Boolean finalPrivateAccess = privateAccess;
+        List<String> finalCidrs = cidrs;
+        List<Update> updates = new ArrayList<>();
+        String accountId = regionResolver.getAccountId();
+        boolean[] saved = {false};
+        saveClusterIfNotDeleting(accountId, clusterKey(cluster), current -> {
+            saved[0] = true;
+            ResourcesVpcConfig currentVpc = current.getResourcesVpcConfig();
+            if (requestedVpc != null && currentVpc != null) {
+                currentVpc.setEndpointPublicAccess(finalPublicAccess);
+                currentVpc.setEndpointPrivateAccess(finalPrivateAccess);
+                currentVpc.setPublicAccessCidrs(finalCidrs);
+                List<UpdateParam> params = new ArrayList<>();
+                params.add(new UpdateParam("EndpointPublicAccess", String.valueOf(finalPublicAccess)));
+                params.add(new UpdateParam("EndpointPrivateAccess", String.valueOf(finalPrivateAccess)));
+                if (requestedVpc.getPublicAccessCidrs() != null) {
+                    params.add(new UpdateParam("PublicAccessCidrs", String.join(",", finalCidrs)));
+                }
+                updates.add(addons.recordUpdate(current, "EndpointAccessUpdate", params, null, updates.isEmpty() ? request : null));
+            }
+            if (logging != null) {
+                current.setLogging(logging);
+                updates.add(addons.recordUpdate(current, "LoggingUpdate",
+                        List.of(new UpdateParam("ClusterLogging", loggingJson(logging))), null,
+                        updates.isEmpty() ? request : null));
+            }
+            if (requestedMode != null) {
+                current.setAccessConfig(new AccessConfig(requestedMode,
+                        current.getAccessConfig() == null ? null : current.getAccessConfig().bootstrapClusterCreatorAdminPermissions()));
+                updates.add(addons.recordUpdate(current, "AccessConfigUpdate",
+                        List.of(new UpdateParam("AuthenticationMode", requestedMode)), null,
+                        updates.isEmpty() ? request : null));
+            }
+        });
+        if (!saved[0]) {
+            throw new AwsException("ResourceNotFoundException", "No cluster found for name: " + name, 404);
+        }
+        if (updates.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "UpdateClusterConfig supports resourcesVpcConfig, logging and accessConfig.authenticationMode only", 400);
+        }
+        LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
+                updates.stream().map(Update::type).toList());
+        return updates;
+    }
+
+    private static boolean updateParametersMatch(UpdateClusterConfigRequest existing, UpdateClusterConfigRequest request) {
+        if (existing == null) {
+            return false;
+        }
+        ResourcesVpcConfig a = existing.resourcesVpcConfig();
+        ResourcesVpcConfig b = request.resourcesVpcConfig();
+        boolean sameVpc = a == null || b == null ? a == b
+                : Objects.equals(a.getSubnetIds(), b.getSubnetIds())
+                        && Objects.equals(a.getSecurityGroupIds(), b.getSecurityGroupIds())
+                        && Objects.equals(a.getEndpointPublicAccess(), b.getEndpointPublicAccess())
+                        && Objects.equals(a.getEndpointPrivateAccess(), b.getEndpointPrivateAccess())
+                        && Objects.equals(a.getPublicAccessCidrs(), b.getPublicAccessCidrs());
+        return sameVpc && Objects.equals(existing.logging(), request.logging())
+                && Objects.equals(existing.accessConfig(), request.accessConfig());
+    }
+
+    /**
+     * Puts back values an update changed, with no AWS rules applied: a stack rollback may move the
+     * authentication mode backwards, which UpdateClusterConfig refuses.
+     */
+    public synchronized void restoreClusterConfig(String name, ResourcesVpcConfig endpoint, Logging logging,
+                                                  String authenticationMode) {
+        Cluster cluster = requireClusterInRequestRegion(name);
+        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster), current -> {
+            if (endpoint != null && current.getResourcesVpcConfig() != null) {
+                current.getResourcesVpcConfig().setEndpointPublicAccess(endpoint.getEndpointPublicAccess());
+                current.getResourcesVpcConfig().setEndpointPrivateAccess(endpoint.getEndpointPrivateAccess());
+                current.getResourcesVpcConfig().setPublicAccessCidrs(endpoint.getPublicAccessCidrs());
+            }
+            if (logging != null) {
+                current.setLogging(logging);
+            }
+            if (authenticationMode != null && current.getAccessConfig() != null) {
+                current.setAccessConfig(new AccessConfig(authenticationMode,
+                        current.getAccessConfig().bootstrapClusterCreatorAdminPermissions()));
+            }
+        });
+    }
+
+    /** The cluster's current settings with the request applied on top, in the shape createCluster validates. */
+    private static Logging mergedLogging(Logging current, Logging requested) {
+        List<LogSetup> merged = new ArrayList<>();
+        if (current != null && current.getClusterLogging() != null) {
+            merged.addAll(current.getClusterLogging());
+        }
+        merged.addAll(requested.getClusterLogging());
+        return new Logging(merged);
+    }
+
+    private static String loggingJson(Logging logging) {
+        try {
+            return MAPPER.writeValueAsString(logging);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InternalFailure", "Could not serialize the logging setting", 500);
+        }
+    }
+
+    private static void requireSameMembers(String member, List<String> requested, List<String> current) {
+        if (requested != null && !new HashSet<>(requested).equals(new HashSet<>(current == null ? List.of() : current))) {
+            throw new AwsException("InvalidParameterException",
+                    "Floci does not support changing " + member + " through UpdateClusterConfig", 400);
+        }
+    }
+
+    private static void requireForwardAuthenticationMode(String current, String requested) {
+        Integer to = AUTHENTICATION_MODE_RANK.get(requested);
+        if (to == null) {
+            throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
+        }
+        Integer from = current == null ? null : AUTHENTICATION_MODE_RANK.get(current);
+        // The user guide: "you can't change the authentication mode back to a mode that removes the EKS API".
+        if (to == 0 && from != null && from > 0) {
+            throw new AwsException("InvalidParameterException",
+                    "Floci does not support moving the authentication mode from " + current + " back to " + requested, 400);
         }
     }
 
@@ -1741,6 +1930,25 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return vpcId;
     }
 
+    /** The public access CIDR checks CreateCluster and UpdateClusterConfig share. */
+    private static void requireValidPublicAccessCidrs(List<String> cidrs, String ipFamily) {
+        if (cidrs == null) {
+            return;
+        }
+        for (String cidr : cidrs) {
+            if (!SecurityGroupPolicy.validCidr(cidr)) {
+                throw new AwsException("InvalidParameterException",
+                        "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                + cidr, 400);
+            }
+            if (cidr.contains(":") && !"ipv6".equals(ipFamily)) {
+                throw new AwsException("InvalidParameterException",
+                        "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                + cidr + ". IPv6 blocks cannot be added to IPv4 clusters.", 400);
+            }
+        }
+    }
+
     private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId,
                                                       String ipFamily) {
         ResourcesVpcConfig response = new ResourcesVpcConfig();
@@ -1757,20 +1965,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     request.getEndpointPublicAccess() != null ? request.getEndpointPublicAccess() : Boolean.TRUE);
             response.setEndpointPrivateAccess(
                     request.getEndpointPrivateAccess() != null ? request.getEndpointPrivateAccess() : Boolean.FALSE);
-            if (request.getPublicAccessCidrs() != null) {
-                for (String cidr : request.getPublicAccessCidrs()) {
-                    if (!SecurityGroupPolicy.validCidr(cidr)) {
-                        throw new AwsException("InvalidParameterException",
-                                "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
-                                        + cidr, 400);
-                    }
-                    if (cidr.contains(":") && !"ipv6".equals(ipFamily)) {
-                        throw new AwsException("InvalidParameterException",
-                                "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
-                                        + cidr + ". IPv6 blocks cannot be added to IPv4 clusters.", 400);
-                    }
-                }
-            }
+            requireValidPublicAccessCidrs(request.getPublicAccessCidrs(), ipFamily);
             response.setPublicAccessCidrs(
                     request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : List.of("0.0.0.0/0"));
         } else {
