@@ -270,10 +270,93 @@ class CfnPropertyTypesTest {
                         "#/EventDestination: required key [MatchingEventTypes] not found"),
                 Arguments.of("null nested ARN",
                         "{\"ConfigurationSetName\":\"set\",\"EventDestination\":{\"MatchingEventTypes\":[\"SEND\"],\"SnsDestination\":{\"TopicARN\":null}}}",
-                        "#/EventDestination/SnsDestination: required key [TopicARN] not found"),
-                Arguments.of("blank nested ARN",
-                        "{\"ConfigurationSetName\":\"set\",\"EventDestination\":{\"MatchingEventTypes\":[\"SEND\"],\"SnsDestination\":{\"TopicARN\":\"  \"}}}",
                         "#/EventDestination/SnsDestination: required key [TopicARN] not found"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidSesArnValues")
+    void handlerReaderRejectsArnValuesOutsideSchemaConstraints(String caseName, String destination,
+            String member, String arn, String violation) {
+        String properties = """
+                {"ConfigurationSetName":"set","EventDestination":{
+                  "MatchingEventTypes":["SEND"],"%s":{"%s":"%s"}}}
+                """.formatted(destination, member, arn);
+
+        assertHandlerReaderFailure("AWS::SES::ConfigurationSetEventDestination", properties,
+                "Model validation failed (#/EventDestination/" + destination + "/" + member + ": "
+                        + violation + ")");
+    }
+
+    static Stream<Arguments> invalidSesArnValues() {
+        String snsPrefix = "arn:aws:sns:us-east-1:000000000000:";
+        return Stream.of(
+                Arguments.of("SNS ARN has wrong service", "SnsDestination", "TopicARN",
+                        "arn:aws:sqs:us-east-1:000000000000:topic-name",
+                        "failed validation constraint for keyword [pattern]"),
+                Arguments.of("SNS ARN is below schema minimum", "SnsDestination", "TopicARN",
+                        "arn:aws:sns:a:000000000000:x", "expected minLength: 36, actual: 28"),
+                Arguments.of("SNS ARN is blank", "SnsDestination", "TopicARN", "",
+                        "expected minLength: 36, actual: 0"),
+                Arguments.of("SNS ARN exceeds schema maximum", "SnsDestination", "TopicARN",
+                        snsPrefix + "x".repeat(1100 - snsPrefix.length()),
+                        "expected maxLength: 1024, actual: 1100"),
+                Arguments.of("EventBridge ARN has wrong service", "EventBridgeDestination", "EventBusArn",
+                        "arn:aws:sns:us-east-1:000000000000:event-bus/topic-name",
+                        "failed validation constraint for keyword [pattern]"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("invalidSesDestinationStrings")
+    void handlerReaderChecksEveryConstrainedSesString(String caseName, String properties,
+            String expectedMessage) {
+        assertHandlerReaderFailure("AWS::SES::ConfigurationSetEventDestination", properties,
+                "Model validation failed (" + expectedMessage + ")");
+    }
+
+    static Stream<Arguments> invalidSesDestinationStrings() {
+        String dimensions = """
+                {"ConfigurationSetName":"set","EventDestination":{"MatchingEventTypes":["SEND"],
+                "CloudWatchDestination":{"DimensionConfigurations":[{"DimensionValueSource":"emailHeader",
+                "DimensionName":"%s","DefaultDimensionValue":"%s"}]}}}
+                """;
+        return Stream.of(
+                Arguments.of("event destination name pattern", """
+                        {"ConfigurationSetName":"set","EventDestination":{
+                        "MatchingEventTypes":["SEND"],"Name":"bad name"}}
+                        """, "#/EventDestination/Name: failed validation constraint for keyword [pattern]"),
+                Arguments.of("dimension name minimum", dimensions.formatted("", "value"),
+                        "#/EventDestination/CloudWatchDestination/DimensionConfigurations/0/DimensionName: "
+                                + "expected minLength: 1, actual: 0"),
+                Arguments.of("default dimension value maximum", dimensions.formatted("name", "x".repeat(257)),
+                        "#/EventDestination/CloudWatchDestination/DimensionConfigurations/0/DefaultDimensionValue: "
+                                + "expected maxLength: 256, actual: 257"));
+    }
+
+    @Test
+    void handlerReaderAcceptsValidSesArnsAndUnconstrainedRequiredStrings() {
+        JsonNode properties = json("""
+                {"ConfigurationSetName":"x","EventDestination":{
+                  "Name":"","MatchingEventTypes":["SEND"],
+                  "SnsDestination":{"TopicARN":"arn:aws:sns:us-east-1:000000000000:topic-name"},
+                  "EventBridgeDestination":{"EventBusArn":"arn:aws:events:us-east-1:000000000000:event-bus/topic-name"},
+                  "KinesisFirehoseDestination":{"IAMRoleARN":"role","DeliveryStreamARN":"stream"}}}
+                """);
+
+        assertEquals(properties, new CfnPropertyTypes.HandlerReader(engine())
+                .read("AWS::SES::ConfigurationSetEventDestination", properties));
+    }
+
+    @Test
+    void handlerReaderAcceptsSesArnAtSchemaMaximumLength() {
+        String prefix = "arn:aws:sns:us-east-1:000000000000:";
+        String arn = prefix + "x".repeat(1024 - prefix.length());
+        JsonNode properties = json("""
+                {"ConfigurationSetName":"set","EventDestination":{
+                  "MatchingEventTypes":["SEND"],"SnsDestination":{"TopicARN":"%s"}}}
+                """.formatted(arn));
+
+        assertEquals(properties, new CfnPropertyTypes.HandlerReader(engine())
+                .read("AWS::SES::ConfigurationSetEventDestination", properties));
     }
 
     @ParameterizedTest(name = "{0}")
@@ -289,7 +372,7 @@ class CfnPropertyTypesTest {
                         "{\"ConfigurationSetName\":\"set\",\"EventDestination\":{\"MatchingEventTypes\":[\"SEND\"]},\"Extra\":true}",
                         "#: extraneous key [Extra] is not permitted"),
                 Arguments.of("nested member",
-                        "{\"ConfigurationSetName\":\"set\",\"EventDestination\":{\"MatchingEventTypes\":[\"SEND\"],\"SnsDestination\":{\"TopicARN\":\"arn\",\"Extra\":true}}}",
+                        "{\"ConfigurationSetName\":\"set\",\"EventDestination\":{\"MatchingEventTypes\":[\"SEND\"],\"SnsDestination\":{\"TopicARN\":\"arn:aws:sns:us-east-1:000000000000:topic-name\",\"Extra\":true}}}",
                         "#/EventDestination/SnsDestination: extraneous key [Extra] is not permitted"));
     }
 
@@ -357,15 +440,11 @@ class CfnPropertyTypesTest {
 
     @Test
     void handlerReaderReportsKnownMembersBeforeExtraneousMembers() {
-        AwsException failure = assertThrows(AwsException.class,
-                () -> new CfnPropertyTypes.HandlerReader(engine())
-                        .read("AWS::SES::ConfigurationSetEventDestination", json("""
-                                {"ConfigurationSetName":"set","EventDestination":{
-                                  "Extra":true,"MatchingEventTypes":["SEND"],"Enabled":"bogus"}}
-                                """)));
-
-        assertEquals("Model validation failed (#/EventDestination/Enabled: expected type: Boolean, found: String\n"
-                + "#/EventDestination: extraneous key [Extra] is not permitted)", failure.getMessage());
+        assertHandlerReaderFailure("AWS::SES::ConfigurationSetEventDestination", """
+                {"ConfigurationSetName":"set","EventDestination":{
+                  "Extra":true,"MatchingEventTypes":["SEND"],"Enabled":"bogus"}}
+                """, "Model validation failed (#/EventDestination/Enabled: expected type: Boolean, found: String\n"
+                        + "#/EventDestination: extraneous key [Extra] is not permitted)");
     }
 
     @Test
