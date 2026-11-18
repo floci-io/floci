@@ -11169,7 +11169,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private Map<String, String> relayEngineParameters(String arn, String resource) {
         String accountId = accountIdFromArn(arn);
-        String region = effectiveRegion(regionFromArn(arn));
+        String region = effectiveRegion(regionResolver.regionOf(arn));
         DbCluster cluster;
         if (resource.startsWith("cluster:")) {
             cluster = findClusterByArn(accountId, arn);
