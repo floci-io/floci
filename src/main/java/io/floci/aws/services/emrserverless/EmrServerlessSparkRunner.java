@@ -635,6 +635,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
             if (servesDriverUi(job)) {
                 container.withLoopbackPortBinding(SparkExecutors.DRIVER_UI_PORT, 0);
+                if (job.keepsEventLogs()) {
+                    // Its event logs, where the release's image writes them, in a volume of its own that its Spark
+                    // History Server reads once it has ended; Docker fills a new volume with the image's folder, its
+                    // owner the image's user.
+                    String volume = EmrServerlessHistories.volume(config, job.runId());
+                    lifecycleManager.ensureVolume(volume, EmrServerlessHistories.labels(config, job.runId(),
+                            job.accountId(), job.region(), EmrServerlessHistories.VOLUME_COMPONENT));
+                    container.withNamedVolume(volume, EmrServerlessHistories.EVENT_LOGS);
+                }
             }
             ContainerSpec spec = container
                     .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))

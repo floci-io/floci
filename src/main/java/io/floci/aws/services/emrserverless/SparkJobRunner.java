@@ -132,7 +132,9 @@ public interface SparkJobRunner {
      * its containers run, as its application's architecture names it with {@code honour-architectures} on,
      * {@code linux/amd64} or {@code linux/arm64} (null for the Docker host's own); and the port in its driver's
      * container that something there listens on for Floci, which Floci reaches through the Docker host's loopback
-     * interface only, as {@link Progress#listening} tells (0 for none).
+     * interface only, as {@link Progress#listening} tells (0 for none); and whether an EMR Serverless Spark run's or
+     * session's driver keeps its Spark event logs, in a Docker volume of its own, for its Spark History Server once it
+     * has ended ({@link EmrServerlessHistories}).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel, Engine engine,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
@@ -140,7 +142,8 @@ public interface SparkJobRunner {
                String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,
                List<String> archives, Storage storage, Map<String, String> coreSite,
                Map<String, String> sparkLog4j2, Map<String, String> mapredSite, Map<String, String> hadoopLog4j,
-               Map<String, String> hadoopEnvironment, Executors executors, String platform, int listenPort) {
+               Map<String, String> hadoopEnvironment, Executors executors, String platform, int listenPort,
+               boolean keepsEventLogs) {
 
         /** A job whose driver listens on no port for Floci. */
         public Job(String service, String runId, String accountId, String region, String releaseLabel, Engine engine,
@@ -154,7 +157,7 @@ public interface SparkJobRunner {
             this(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage, dockerNetwork,
                     executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs,
                     environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment, executors, platform, 0);
+                    hadoopEnvironment, executors, platform, 0, false);
         }
 
         /** A job on the Docker host's own platform. */
@@ -176,7 +179,7 @@ public interface SparkJobRunner {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment, executors, platform, listenPort);
+                    hadoopEnvironment, executors, platform, listenPort, keepsEventLogs);
         }
 
         /** This job, run in {@code image}. */
@@ -184,7 +187,7 @@ public interface SparkJobRunner {
             return new Job(service, runId, accountId, region, releaseLabel, engine, image, customImage, dockerNetwork,
                     executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs, environment,
                     archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment, executors,
-                    platform, listenPort);
+                    platform, listenPort, keepsEventLogs);
         }
 
         /** This job, its executors where {@code executors} has them. */
@@ -192,7 +195,7 @@ public interface SparkJobRunner {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment, executors, platform, listenPort);
+                    hadoopEnvironment, executors, platform, listenPort, keepsEventLogs);
         }
 
         /** This job, its driver listening on {@code port} for Floci (0 for none). */
@@ -200,7 +203,7 @@ public interface SparkJobRunner {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment, executors, platform, port);
+                    hadoopEnvironment, executors, platform, port, keepsEventLogs);
         }
 
         /** This job, its containers on {@code network} (null for the global default). */
@@ -208,7 +211,15 @@ public interface SparkJobRunner {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     network, executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs,
                     environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment,
-                    executors, platform, listenPort);
+                    executors, platform, listenPort, keepsEventLogs);
+        }
+
+        /** This job, its Spark event logs kept for its Spark History Server once it ends. */
+        public Job keepingEventLogs() {
+            return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
+                    dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
+                    cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
+                    hadoopEnvironment, executors, platform, listenPort, true);
         }
 
         /** This job, its containers run for {@code platform} (null for the Docker host's own). */
@@ -216,7 +227,7 @@ public interface SparkJobRunner {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment, executors, platform, listenPort);
+                    hadoopEnvironment, executors, platform, listenPort, keepsEventLogs);
         }
     }
 
