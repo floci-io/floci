@@ -13,6 +13,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.BoundedMaps;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.FileTrees;
 import io.floci.aws.core.common.IamConditionContextResolver;
@@ -263,24 +264,12 @@ public class S3Service implements Resettable, ResourceProvider {
     private record MultipartPosition(String bucket, String key, String ownerAccountId, Instant initiated) {}
 
     private static final int REMOVED_MULTIPART_POSITION_LIMIT = 1000;
-    private final Map<String, MultipartPosition> removedMultipartPositions = Collections.synchronizedMap(
-            new LinkedHashMap<>(64, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, MultipartPosition> eldest) {
-                    return size() > REMOVED_MULTIPART_POSITION_LIMIT;
-                }
-            });
+    private final Map<String, MultipartPosition> removedMultipartPositions = BoundedMaps.leastRecentlyUsed(REMOVED_MULTIPART_POSITION_LIMIT);
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
     // Permanently deleted versions by versionedKey, so a ListObjectVersions marker naming one still
     // resumes where that version stood.
     private static final int REMOVED_VERSION_POSITION_LIMIT = 1000;
-    private final Map<String, S3Object> removedVersionPositions = Collections.synchronizedMap(
-            new LinkedHashMap<>(64, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, S3Object> eldest) {
-                    return size() > REMOVED_VERSION_POSITION_LIMIT;
-                }
-            });
+    private final Map<String, S3Object> removedVersionPositions = BoundedMaps.leastRecentlyUsed(REMOVED_VERSION_POSITION_LIMIT);
     // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
     // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
     // security control that LZA applies once per governed account, so it is StorageFactory-backed
