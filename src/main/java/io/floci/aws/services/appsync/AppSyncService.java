@@ -302,7 +302,9 @@ public class AppSyncService {
 
     public Page<Api> listApis(Integer maxResults, String nextToken) {
         return paginate(eventApiStore.scan(k -> true).stream()
-                .filter(api -> regionResolver.inRequestRegion(api.getApiArn())).toList(), nextToken, maxResults);
+                .filter(api -> regionResolver.inRequestRegion(api.getApiArn()))
+                .sorted(Comparator.comparing(Api::getApiId))
+                .toList(), nextToken, maxResults);
     }
 
     public synchronized Api updateApi(String apiId, Map<String, Object> request) {
@@ -447,9 +449,12 @@ public class AppSyncService {
     }
 
     private Map<String, String> parseTags(Object value) {
+        if (value == null) {
+            return null;
+        }
         Map<String, Object> tags = castMap(value);
         if (tags == null) {
-            return null;
+            throw new AwsException("BadRequestException", "The tags must be a map of tag keys to values", 400);
         }
         Map<String, String> tagMap = new HashMap<>();
         tags.forEach((k, v) -> tagMap.put(k, v != null ? String.valueOf(v) : ""));
@@ -1156,7 +1161,7 @@ public class AppSyncService {
 
     public synchronized ApiAssociation associateApi(String domainName, String apiId) {
         getDomainName(domainName);
-        getGraphqlApi(apiId);
+        requireApi(apiId);
         if (associationStore.get(domainName).isPresent()) {
             throw new AwsException("BadRequestException",
                     "The domain name %s is already associated with API %s.".formatted(domainName, apiId), 400);

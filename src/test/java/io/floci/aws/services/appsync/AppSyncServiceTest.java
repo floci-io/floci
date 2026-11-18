@@ -1,5 +1,6 @@
 package io.floci.aws.services.appsync;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.appsync.graphql.SchemaRegistry;
@@ -24,6 +25,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +35,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -960,6 +964,82 @@ class AppSyncServiceTest {
         service.untagResource(api.getApiArn(), List.of("team"));
 
         assertEquals(Map.of("env", "local"), service.getTags(api.getApiArn()));
+    }
+
+    @Test
+    void createRefusesTagsThatAreNotAMap() {
+        Api api = createEventsApi("tag-shape");
+
+        AwsException onApi = assertThrows(AwsException.class, () -> service.createApi(Map.of("name", "bad-tags",
+                "eventConfig", eventConfig(List.of("AWS_IAM"), "AWS_IAM", "AWS_IAM", "AWS_IAM"),
+                "tags", List.of("env")), "us-east-1"));
+        AwsException onNamespace = assertThrows(AwsException.class, () -> service.createChannelNamespace(
+                api.getApiId(), Map.of("name", "ns", "tags", "env=local")));
+
+        assertEquals("BadRequestException", onApi.getErrorCode());
+        assertEquals("BadRequestException", onNamespace.getErrorCode());
+        assertEquals(1, service.listApis(null, null).items().size());
+    }
+
+    @Test
+    void listApisPagesInApiIdOrder() {
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ids.add(createEventsApi("paged-" + i).getApiId());
+        }
+        Collections.sort(ids);
+
+        AppSyncService.Page<Api> first = service.listApis(2, null);
+        AppSyncService.Page<Api> second = service.listApis(2, first.nextToken());
+        AppSyncService.Page<Api> third = service.listApis(2, second.nextToken());
+
+        List<String> paged = new ArrayList<>();
+        for (AppSyncService.Page<Api> page : List.of(first, second, third)) {
+            page.items().forEach(api -> paged.add(api.getApiId()));
+        }
+        assertEquals(ids, paged);
+        assertNull(third.nextToken());
+    }
+
+    @Test
+    void anEventsApiOfAnotherRegionIsNotFoundOrListed() {
+        Api api = service.createApi(Map.of("name", "elsewhere",
+                "eventConfig", eventConfig(List.of("AWS_IAM"), "AWS_IAM", "AWS_IAM", "AWS_IAM")), "eu-west-1");
+
+        assertEquals(404, assertThrows(AwsException.class, () -> service.getApi(api.getApiId())).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.updateApi(api.getApiId(), Map.of("name", "moved"))).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteApi(api.getApiId())).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.createChannelNamespace(api.getApiId(), Map.of("name", "ns"))).getHttpStatus());
+        assertTrue(service.listApis(null, null).items().isEmpty());
+    }
+
+    @Test
+    void anEventsApiTakesACustomDomainThatDeleteApiReleases() {
+        Api api = createEventsApi("custom-domain");
+        service.createDomainName(Map.of("domainName", "events.example.com"));
+
+        service.associateApi("events.example.com", api.getApiId());
+        assertEquals(api.getApiId(), service.getApiAssociation("events.example.com").getApiId());
+
+        service.deleteApi(api.getApiId());
+        assertThrows(AwsException.class, () -> service.getApiAssociation("events.example.com"));
+    }
+
+    /** Namespaces persisted before timestamps moved to epoch seconds hold epoch milliseconds. */
+    @Test
+    void channelNamespaceReadsLegacyMillisecondTimestampsAsSeconds() throws Exception {
+        ChannelNamespace legacy = new ObjectMapper().readValue(
+                "{\"name\":\"ns\",\"created\":1767225600000,\"lastModified\":1767225601500}",
+                ChannelNamespace.class);
+        ChannelNamespace current = new ObjectMapper().readValue(
+                "{\"name\":\"ns\",\"created\":1767225600.25}", ChannelNamespace.class);
+
+        assertEquals(1767225600.0, legacy.getCreated());
+        assertEquals(1767225601.5, legacy.getLastModified());
+        assertEquals(1767225600.25, current.getCreated());
     }
 
     @Test

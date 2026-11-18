@@ -1,6 +1,8 @@
 package io.floci.aws.services.appsync;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -21,7 +23,6 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.io.IOException;
 import java.util.Map;
 
 /**
@@ -47,7 +48,7 @@ public class AppSyncApiController {
     }
 
     @POST
-    public Response createApi(@Context HttpHeaders headers, String body) throws IOException {
+    public Response createApi(@Context HttpHeaders headers, String body) {
         Api api = service.createApi(readRequest(body), regionResolver.resolveRegion(headers));
         return Response.ok(wrap(api)).build();
     }
@@ -75,7 +76,7 @@ public class AppSyncApiController {
 
     @POST
     @Path("/{apiId}")
-    public Response updateApi(@PathParam("apiId") String apiId, String body) throws IOException {
+    public Response updateApi(@PathParam("apiId") String apiId, String body) {
         return Response.ok(wrap(service.updateApi(apiId, readRequest(body)))).build();
     }
 
@@ -92,14 +93,19 @@ public class AppSyncApiController {
         return root;
     }
 
-    private Map<String, Object> readRequest(String body) throws IOException {
+    private Map<String, Object> readRequest(String body) {
         if (body == null || body.isBlank()) {
             return Map.of();
         }
-        Map<String, Object> request = objectMapper.readValue(body, new TypeReference<Map<String, Object>>() {});
-        if (request == null) {
+        JsonNode tree;
+        try {
+            tree = objectMapper.readTree(body);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("BadRequestException", "The request body is not valid JSON", 400);
+        }
+        if (tree == null || !tree.isObject()) {
             throw new AwsException("BadRequestException", "The request body must be a JSON object", 400);
         }
-        return request;
+        return objectMapper.convertValue(tree, new TypeReference<Map<String, Object>>() {});
     }
 }
