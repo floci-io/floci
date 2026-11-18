@@ -178,25 +178,43 @@ public class ElastiCacheQueryHandler {
                 boolParam(params, "TransitEncryptionEnabled"));
     }
 
+    private static final List<String> LOG_TYPES = List.of("slow-log", "engine-log");
+    private static final List<String> LOG_DESTINATION_TYPES = List.of("cloudwatch-logs", "kinesis-firehose");
+    private static final List<String> LOG_FORMATS = List.of("text", "json");
+
     private static List<LogDeliveryConfiguration> parseLogDeliveryConfigurations(
             MultivaluedMap<String, String> params) {
         List<LogDeliveryConfiguration> configurations = new ArrayList<>();
         for (String prefix : List.of("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.",
                 "LogDeliveryConfigurations.member.")) {
-            for (int index = 1; params.getFirst(prefix + index + ".LogType") != null; index++) {
+            for (int index = 1; hasMember(params, prefix + index + "."); index++) {
                 String member = prefix + index + ".";
                 if ("false".equalsIgnoreCase(params.getFirst(member + "Enabled"))) {
                     continue;
                 }
                 configurations.add(new LogDeliveryConfiguration(
-                        params.getFirst(member + "LogType"),
-                        params.getFirst(member + "DestinationType"),
+                        oneOf(params, member + "LogType", "LogType", LOG_TYPES),
+                        oneOf(params, member + "DestinationType", "DestinationType", LOG_DESTINATION_TYPES),
                         params.getFirst(member + "DestinationDetails.CloudWatchLogsDetails.LogGroup"),
                         params.getFirst(member + "DestinationDetails.KinesisFirehoseDetails.DeliveryStream"),
-                        params.getFirst(member + "LogFormat")));
+                        oneOf(params, member + "LogFormat", "LogFormat", LOG_FORMATS)));
             }
         }
         return configurations;
+    }
+
+    private static boolean hasMember(MultivaluedMap<String, String> params, String memberPrefix) {
+        return params.keySet().stream().anyMatch(name -> name.startsWith(memberPrefix));
+    }
+
+    private static String oneOf(MultivaluedMap<String, String> params, String param, String field,
+                                List<String> allowed) {
+        String value = params.getFirst(param);
+        if (value == null || !allowed.contains(value)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid " + field + " " + value + ". Valid values are " + String.join(", ", allowed) + ".", 400);
+        }
+        return value;
     }
 
     private static Integer optionalInt(String value) {
