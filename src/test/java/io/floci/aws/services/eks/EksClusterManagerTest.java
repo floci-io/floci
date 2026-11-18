@@ -725,6 +725,7 @@ class EksClusterManagerTest {
 
             Cluster cluster = cluster();
             spyManager.restoreCluster(cluster);
+            spyManager.setUpGuest(cluster);
 
             verify(spyManager).configurePodIdentityForward(cluster, "cid-1");
         }
@@ -4223,6 +4224,8 @@ class EksClusterManagerTest {
 
             manager.startCluster(cluster);
 
+            manager.setUpGuest(cluster);
+
             verify(logStreamer).attachForAccount(
                     eq("000000000000"),
                     eq("container-id-123456789012345678901234567890"),
@@ -4291,6 +4294,7 @@ class EksClusterManagerTest {
             cluster.setName("prod-cluster");
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
             manager.startCluster(cluster);
+            manager.setUpGuest(cluster);
             Mockito.doThrow(new IllegalStateException("Failed to remove container"))
                     .when(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle, 5, true);
 
@@ -4305,6 +4309,7 @@ class EksClusterManagerTest {
             stale.setName("prod-cluster");
             stale.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
             manager.startCluster(stale);
+            manager.setUpGuest(stale);
             Closeable freshHandle = Mockito.mock(Closeable.class);
             when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(freshHandle);
@@ -4313,6 +4318,8 @@ class EksClusterManagerTest {
             recreated.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
 
             manager.startCluster(recreated);
+
+            manager.setUpGuest(recreated);
 
             verify(mockHandle).close();
             assertEquals(freshHandle, manager.getLogHandle(recreated));
@@ -4324,6 +4331,7 @@ class EksClusterManagerTest {
             cluster.setName("prod-cluster");
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
             manager.startCluster(cluster);
+            manager.setUpGuest(cluster);
             Mockito.doThrow(new IllegalStateException("Failed to remove container"))
                     .doNothing()
                     .when(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle, 5, true);
@@ -4358,6 +4366,8 @@ class EksClusterManagerTest {
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
 
             manager.startCluster(cluster);
+
+            manager.setUpGuest(cluster);
             assertEquals(mockHandle, manager.getLogHandle(cluster));
 
             manager.stopCluster(cluster);
@@ -4380,6 +4390,8 @@ class EksClusterManagerTest {
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
 
             manager.startCluster(cluster);
+
+            manager.setUpGuest(cluster);
             manager.stopCluster(cluster);
 
             verify(lifecycleManager).stopAndRemoveStrict("container-id-123456789012345678901234567890", mockHandle, 5, true);
@@ -4393,6 +4405,8 @@ class EksClusterManagerTest {
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
 
             manager.startCluster(cluster);
+
+            manager.setUpGuest(cluster);
             manager.detachCluster(cluster);
 
             verify(mockHandle).close();
@@ -4417,6 +4431,8 @@ class EksClusterManagerTest {
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("api"), true))));
 
             manager.restoreCluster(cluster);
+
+            manager.setUpGuest(cluster);
 
             verify(logStreamer).attachFromNowForAccount(
                     eq("000000000000"),
@@ -4560,6 +4576,8 @@ class EksClusterManagerTest {
             cluster.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
 
             manager.startCluster(cluster);
+
+            manager.setUpGuest(cluster);
             assertEquals(mockAuditHandle, manager.getLogHandle(cluster));
             verify(logStreamer).execLogCallbackForAccount(
                     "000000000000", "/aws/eks/audit-cluster/cluster",

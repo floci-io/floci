@@ -96,8 +96,14 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -205,6 +211,42 @@ public class EksClusterManager
     private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
+    /**
+     * The k3s containers whose guest setup waits for their API server to answer, by container ID. On a cgroup v2
+     * host, k3s moves the root cgroup's processes into {@code /init} and then enables the cgroup controllers, which
+     * the kernel allows only while the root cgroup is empty, and k3s does not retry. A {@code docker exec} landing in
+     * between keeps the root cgroup busy, and kubelet exits with {@code cgroup ["kubepods"] has some missing
+     * controllers}. k3s serves its API only after that step, so nothing is executed in a started container until the
+     * API has answered.
+     */
+    private final Map<String, GuestSetup> pendingGuestSetups = new ConcurrentHashMap<>();
+    /** How long node group user data waits for its node's guest setup before the node group fails. */
+    private Duration guestSetupTimeout = Duration.ofMinutes(10);
+    /**
+     * Runs each node's guest setup off the readiness poller, which checks every cluster from one thread: a node whose
+     * setup is slow must not hold back the others' readiness.
+     */
+    private final ExecutorService guestSetupExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+    /**
+     * The setup a k3s container waits for, run once its API server answers. Its monitor is held for the whole setup,
+     * so a delete abandoning it waits for one already running and then finds everything it attached.
+     */
+    private static final class GuestSetup {
+        private final CompletableFuture<Void> done = new CompletableFuture<>();
+        private final boolean logsFromNow;
+        /** Set once the API server has answered, from when the container may be executed in. */
+        private volatile boolean apiAnswered;
+        /** Whether the setup was handed to {@link #guestSetupExecutor}; guarded by the monitor. */
+        private boolean started;
+
+        private GuestSetup(boolean logsFromNow) {
+            this.logsFromNow = logsFromNow;
+        }
+    }
+
+    /** The container a node runs in once it is set up, or why user data cannot run in it. */
+    record SetUpNode(String containerId, UserDataPipeline.ExecutionResult failure) {}
 
     private Object routeLockFor(String clusterKey) {
         return clusterRouteLocks.computeIfAbsent(clusterKey, k -> new Object());
@@ -996,10 +1038,13 @@ public class EksClusterManager
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
         }
+        // Registered before the container starts, so no readiness check can see it started without its setup.
+        deferGuestSetup(containerId, false);
         ContainerInfo info;
         try {
             info = lifecycleManager.startCreated(containerId, spec);
         } catch (Exception e) {
+            abandonGuestSetup(containerId, "its container could not be started");
             try {
                 lifecycleManager.removeIfExistsStrict(containerName, true);
             } catch (RuntimeException cleanup) {
@@ -1024,12 +1069,9 @@ public class EksClusterManager
         }
 
         applyEndpoints(cluster, containerName, hostPort, info, endpointHost);
-        registerClusterNodeInstance(cluster, containerId);
-        configureLinkLocalMetadataEndpoint(cluster, containerId);
-        configurePodIdentityForward(cluster, containerId);
+        recordClusterNodeInstance(cluster, containerId);
         activeClusters.put(clusterResourceName(cluster), cluster);
-        configureVpcRoutes(cluster, containerId);
-        attachClusterLogs(cluster);
+        attachClusterLogs(cluster, false, true, false);
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
                 containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -1107,11 +1149,14 @@ public class EksClusterManager
             reinjectSigningKeys(containerId, cluster);
         }
 
+        // adopt() starts a container a Docker daemon reboot stopped, which boots k3s again, cgroup step included.
+        deferGuestSetup(containerId, true);
         ContainerInfo info;
         try {
             info = lifecycleManager.adopt(containerId, List.of(K3S_API_SERVER_PORT),
                     containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork()));
         } catch (Exception e) {
+            abandonGuestSetup(containerId, "its container could not be adopted");
             LOG.warnv("Could not adopt surviving k3s container {0} for EKS cluster {1} ({2}); recreating it",
                     cluster.getDockerName(), cluster.getName(), e.getMessage());
             return false;
@@ -1119,6 +1164,7 @@ public class EksClusterManager
 
         var publishedPort = info.publishedHostPort(K3S_API_SERVER_PORT);
         if (publishedPort.isEmpty()) {
+            abandonGuestSetup(containerId, "its container publishes no API server port");
             LOG.warnv("Surviving k3s container {0} publishes no API server port; recreating it",
                     cluster.getDockerName());
             return false;
@@ -1133,12 +1179,9 @@ public class EksClusterManager
         if (cluster.getNodePrivateIp() != null && !cluster.getNodePrivateIp().isBlank()) {
             acquireClusterVpcLease(cluster, resolveClusterAccountId(cluster), clusterRegion(cluster), false);
         }
-        registerClusterNodeInstance(cluster, info.containerId());
-        configureLinkLocalMetadataEndpoint(cluster, info.containerId());
-        configurePodIdentityForward(cluster, info.containerId());
+        recordClusterNodeInstance(cluster, info.containerId());
         activeClusters.put(clusterResourceName(cluster), cluster);
-        configureVpcRoutes(cluster, info.containerId());
-        attachClusterLogsFromNow(cluster);
+        attachClusterLogs(cluster, true, true, false);
 
         LOG.infov("Adopted surviving k3s container {0} for EKS cluster {1} on port {2} (internal: {3})",
                 info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
@@ -1174,6 +1217,7 @@ public class EksClusterManager
             }
             unregisterMetadataEndpoint(cluster);
             closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
+            abandonGuestSetup(oldId, "its container was replaced");
             cluster.setContainerId(null);
             startCluster(cluster, oldPort);
             LOG.infov("Replaced the k3s container of EKS cluster {0}", cluster.getName());
@@ -1252,7 +1296,9 @@ public class EksClusterManager
     }
 
     /**
-     * Checks whether the k3s API server is ready by polling its /readyz endpoint.
+     * Checks whether the k3s API server is ready: it answers on {@code /livez} and k3s has deployed its addons. The
+     * first time the API answers after the container started, this also runs the guest setup the start deferred
+     * (see {@link #pendingGuestSetups}), so a cluster is only reported ready once its node is set up.
      */
     public boolean isReady(Cluster cluster) {
         // Prefer internalEndpoint (IP-based) for connectivity — works on both user-defined
@@ -1260,14 +1306,27 @@ public class EksClusterManager
         String endpoint = cluster.getInternalEndpoint() != null
                 ? cluster.getInternalEndpoint()
                 : cluster.getEndpoint();
-        if (endpoint == null || cluster.getContainerId() == null) {
+        // Read once: a node replaced while the API is probed must not have the old node's answer acted on.
+        String containerId = cluster.getContainerId();
+        if (endpoint == null || containerId == null) {
             return false;
         }
+        // Nothing is executed in the container until its API answers: see pendingGuestSetups.
+        if (!apiAnswers(endpoint)) {
+            return false;
+        }
+        GuestSetup setup = pendingGuestSetups.get(containerId);
+        if (setup != null) {
+            startGuestSetup(cluster, containerId, setup);
+            return false;
+        }
+        return addonsDeployed(containerId);
+    }
 
-        // /livez endpoint on the k3s API server (usually unauthenticated)
-        String livezUrl = endpoint + "/livez";
+    /** Whether the k3s API server answers on {@code /livez}, which is usually unauthenticated. */
+    boolean apiAnswers(String endpoint) {
         try {
-            HttpURLConnection conn = (HttpURLConnection) URI.create(livezUrl).toURL().openConnection();
+            HttpURLConnection conn = (HttpURLConnection) URI.create(endpoint + "/livez").toURL().openConnection();
             conn.setRequestMethod("GET");
             conn.setConnectTimeout(2000);
             conn.setReadTimeout(2000);
@@ -1276,10 +1335,97 @@ public class EksClusterManager
                 disableSslVerification(https);
             }
             int code = conn.getResponseCode();
-            return (code == 200 || code == 401 || code == 403) && addonsDeployed(cluster.getContainerId());
+            return code == 200 || code == 401 || code == 403;
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /** Holds a container's guest setup until its API server answers, which {@link #isReady} checks. */
+    void deferGuestSetup(String containerId, boolean logsFromNow) {
+        GuestSetup previous = pendingGuestSetups.put(containerId, new GuestSetup(logsFromNow));
+        if (previous != null) {
+            abandon(previous, "its container was started again");
+        }
+    }
+
+    void abandonGuestSetup(String containerId, String reason) {
+        GuestSetup setup = containerId == null ? null : pendingGuestSetups.remove(containerId);
+        if (setup != null) {
+            abandon(setup, reason);
+        }
+    }
+
+    /** Waits for a setup already running, so what it attached is there for the caller to release. */
+    private static void abandon(GuestSetup setup, String reason) {
+        synchronized (setup) {
+            setup.done.completeExceptionally(new IllegalStateException(reason));
+        }
+    }
+
+    /** Whether the container may be executed in: its API server has answered since it started. */
+    private boolean guestReachable(String containerId) {
+        GuestSetup setup = pendingGuestSetups.get(containerId);
+        return setup == null || setup.apiAnswered;
+    }
+
+    /** For tests: whether the container's guest setup still waits. */
+    boolean awaitingGuestSetup(String containerId) {
+        return pendingGuestSetups.containsKey(containerId);
+    }
+
+    private void startGuestSetup(Cluster cluster, String containerId, GuestSetup setup) {
+        synchronized (setup) {
+            if (setup.started || setup.done.isDone()) {
+                return;
+            }
+            setup.started = true;
+            setup.apiAnswered = true;
+        }
+        guestSetupExecutor.execute(() -> runGuestSetup(cluster, containerId, setup));
+    }
+
+    /** Runs the node's guest setup on the calling thread, as once its API has answered; for tests. */
+    void setUpGuest(Cluster cluster) {
+        String containerId = cluster.getContainerId();
+        GuestSetup setup = containerId == null ? null : pendingGuestSetups.get(containerId);
+        if (setup != null) {
+            runGuestSetup(cluster, containerId, setup);
+        }
+    }
+
+    /**
+     * Runs the setup a started container waited for, once its API server has answered: the link-local metadata
+     * endpoint, the Pod Identity forward, the VPC routes, the audit log follower, and the node registration listeners
+     * (attaching a volume makes its device node in the container), all of which execute in it.
+     */
+    private void runGuestSetup(Cluster cluster, String containerId, GuestSetup setup) {
+        synchronized (setup) {
+            if (setup.done.isDone()) {
+                return;
+            }
+            setup.apiAnswered = true;
+            try {
+                if (containerId.equals(cluster.getContainerId())) {
+                    configureLinkLocalMetadataEndpoint(cluster, containerId);
+                    configurePodIdentityForward(cluster, containerId);
+                    configureVpcRoutes(cluster, containerId);
+                    attachClusterLogs(cluster, setup.logsFromNow, false, true);
+                    notifyNodeRegistrationListeners(cluster);
+                    LOG.infov("Set up the node of EKS cluster {0} once its API server answered", cluster.getName());
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not set up the node of EKS cluster {0}: {1}", cluster.getName(), e.getMessage());
+            } finally {
+                pendingGuestSetups.remove(containerId, setup);
+                setup.done.complete(null);
+            }
+        }
+    }
+
+    /** For tests: how long node group user data waits for its node's guest setup. */
+    void guestSetupTimeout(Duration timeout) {
+        this.guestSetupTimeout = timeout;
     }
 
     /**
@@ -1358,6 +1504,7 @@ public class EksClusterManager
      */
     public void stopCluster(Cluster cluster) {
         String resourceName = clusterResourceName(cluster);
+        abandonGuestSetup(cluster.getContainerId(), "its cluster was deleted");
         if (cluster.getContainerId() == null) {
             releaseClusterVpcLease(cluster, resourceName);
             unregisterMetadataEndpoint(cluster);
@@ -1561,6 +1708,16 @@ public class EksClusterManager
     }
 
     private void attachClusterLogs(Cluster cluster, boolean fromNow) {
+        attachClusterLogs(cluster, fromNow, true, true);
+    }
+
+    /**
+     * Attaches the control plane log stream, read through Docker's log API, and the audit log follower, a
+     * {@code tail -F} executed in the container, either or both. Attaching the stream replaces whatever was attached;
+     * the follower alone is added to it, as a started node gets its stream at once and its follower once its API has
+     * answered (see {@link #pendingGuestSetups}).
+     */
+    private void attachClusterLogs(Cluster cluster, boolean fromNow, boolean api, boolean audit) {
         if (logStreamer == null || cluster == null || !hasLoggingEnabled(cluster)) {
             return;
         }
@@ -1569,17 +1726,19 @@ public class EksClusterManager
             return;
         }
         String resourceName = clusterResourceName(cluster);
-        // Logs are attached only for a container that was just started or adopted, so a handle
-        // still registered under this name follows an earlier container: close it rather than
-        // leave the new cluster without control-plane logs.
-        closeQuietly(clusterLogHandles.remove(resourceName));
+        if (api) {
+            // Logs are attached only for a container that was just started or adopted, so a handle
+            // still registered under this name follows an earlier container: close it rather than
+            // leave the new cluster without control-plane logs.
+            closeQuietly(clusterLogHandles.remove(resourceName));
+        }
         String logGroup = "/aws/eks/" + cluster.getName() + "/cluster";
         String hash = containerId.length() >= 32 ? containerId.substring(0, 32) : containerId;
         String region = clusterRegion(cluster);
         String accountId = resolveClusterAccountId(cluster);
 
         List<Closeable> handles = new ArrayList<>();
-        if (hasLoggingEnabled(cluster, "api")) {
+        if (api && hasLoggingEnabled(cluster, "api")) {
             try {
                 String logStream = "kube-apiserver-" + hash;
                 Closeable handle = fromNow
@@ -1596,7 +1755,7 @@ public class EksClusterManager
             }
         }
 
-        if (hasLoggingEnabled(cluster, "audit")) {
+        if (audit && hasLoggingEnabled(cluster, "audit")) {
             try {
                 Closeable auditHandle = attachAuditLogFollower(
                         containerId, accountId, logGroup, hash, region, cluster.getName(), fromNow);
@@ -1609,15 +1768,24 @@ public class EksClusterManager
             }
         }
 
-        if (handles.size() == 1) {
-            closeQuietly(clusterLogHandles.put(resourceName, handles.getFirst()));
-        } else if (handles.size() > 1) {
-            closeQuietly(clusterLogHandles.put(resourceName, () -> {
-                for (Closeable h : handles) {
-                    closeQuietly(h);
-                }
-            }));
+        if (handles.isEmpty()) {
+            return;
         }
+        Closeable attached = handles.size() == 1 ? handles.getFirst() : closingAll(handles);
+        if (api) {
+            closeQuietly(clusterLogHandles.put(resourceName, attached));
+        } else {
+            clusterLogHandles.merge(resourceName, attached,
+                    (stream, follower) -> closingAll(List.of(stream, follower)));
+        }
+    }
+
+    private static Closeable closingAll(List<Closeable> handles) {
+        return () -> {
+            for (Closeable h : handles) {
+                closeQuietly(h);
+            }
+        };
     }
 
     private Closeable attachAuditLogFollower(String containerId, String accountId, String logGroup,
@@ -2724,6 +2892,12 @@ public class EksClusterManager
     }
 
     void registerClusterNodeInstance(Cluster cluster, String containerId) {
+        recordClusterNodeInstance(cluster, containerId);
+        notifyNodeRegistrationListeners(cluster);
+    }
+
+    /** Records the cluster's node as an EC2 instance, without telling the listeners, which may execute in it. */
+    private void recordClusterNodeInstance(Cluster cluster, String containerId) {
         try {
             String accountId = resolveClusterAccountId(cluster);
             String region = clusterRegion(cluster);
@@ -2732,17 +2906,24 @@ public class EksClusterManager
             recordNodeContainer(nodeInstance, containerId, containerIps);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
             registerClusterNodeVpc(cluster, accountId, region, containerIps.allIps());
-            for (Consumer<Instance> listener : nodeRegistrationListeners) {
-                try {
-                    listener.accept(nodeInstance);
-                } catch (Exception e) {
-                    LOG.warnv("Node registration listener failed for cluster {0}: {1}",
-                            cluster.getName(), e.getMessage());
-                }
-            }
         } catch (Exception e) {
             LOG.warnv("Could not register cluster node instance for EKS cluster {0}: {1}",
                     cluster.getName(), e.getMessage());
+        }
+    }
+
+    private void notifyNodeRegistrationListeners(Cluster cluster) {
+        ClusterNodeRecord node = clusterNodeInstances.get(clusterResourceName(cluster));
+        if (node == null) {
+            return;
+        }
+        for (Consumer<Instance> listener : nodeRegistrationListeners) {
+            try {
+                listener.accept(node.instance());
+            } catch (Exception e) {
+                LOG.warnv("Node registration listener failed for cluster {0}: {1}",
+                        cluster.getName(), e.getMessage());
+            }
         }
     }
 
@@ -2824,7 +3005,10 @@ public class EksClusterManager
      * alone.
      */
     public void podIdentityAgentChanged(Cluster cluster) {
-        if (podIdentityForwardEnabled() && cluster.getContainerId() != null) {
+        // A node whose API has not answered yet reads the add-on store in its guest setup instead: Terraform sends
+        // this add-on seconds after CreateCluster.
+        if (podIdentityForwardEnabled() && cluster.getContainerId() != null
+                && guestReachable(cluster.getContainerId())) {
             reconcilePodIdentityForward(cluster, cluster.getContainerId());
         }
     }
@@ -3010,9 +3194,11 @@ public class EksClusterManager
             return;
         }
         for (Cluster cluster : activeClusters.values()) {
+            // A node whose API has not answered yet gets every route table's routes from its guest setup.
             if (cluster.getResourcesVpcConfig() != null
                     && routeTable.getVpcId().equals(cluster.getResourcesVpcConfig().getVpcId())
-                    && cluster.getContainerId() != null) {
+                    && cluster.getContainerId() != null
+                    && guestReachable(cluster.getContainerId())) {
                 String clusterAccount = resolveClusterAccountId(cluster);
                 if (routeTable.getOwnerId() != null && clusterAccount != null
                         && !routeTable.getOwnerId().equals(clusterAccount)) {
@@ -3443,7 +3629,8 @@ public class EksClusterManager
         }
 
         String containerId = cluster.getContainerId();
-        if (containerId != null && !containerId.isBlank()) {
+        // A node whose API has not answered yet is registered by finalizeCluster, as one with no container is.
+        if (containerId != null && !containerId.isBlank() && guestReachable(containerId)) {
             try {
                 registerNodeInCluster(cluster, containerId, instance);
             } catch (Exception e) {
@@ -3516,11 +3703,22 @@ public class EksClusterManager
         return false;
     }
 
+    /**
+     * Registers every joined instance as a node. One that fails is dropped from the joined set, so the readiness
+     * poller finds it still to join and joins it again, and the others are registered regardless.
+     */
     void registerAllJoinedNodes(Cluster cluster, String containerId) {
         Map<String, Instance> map = joinedClusterInstances.get(clusterResourceName(cluster));
-        if (map != null) {
-            for (Instance inst : map.values()) {
+        if (map == null) {
+            return;
+        }
+        for (Instance inst : List.copyOf(map.values())) {
+            try {
                 registerNodeInCluster(cluster, containerId, inst);
+            } catch (RuntimeException e) {
+                map.remove(inst.getInstanceId(), inst);
+                LOG.warnv("Could not register joined instance {0} as a node of EKS cluster {1}, "
+                        + "joining it again later: {2}", inst.getInstanceId(), cluster.getName(), e.getMessage());
             }
         }
     }
@@ -3668,9 +3866,13 @@ public class EksClusterManager
             return UserDataPipeline.ExecutionResult.skipped("No Docker daemon reachable");
         }
         String context = "EKS cluster " + cluster.getName() + " (nodegroup " + nodegroupName + ")";
+        SetUpNode node = awaitSetUpNode(cluster);
+        if (node.failure() != null) {
+            return node.failure();
+        }
         return UserDataPipeline.executeUserData(
                 dockerClient,
-                cluster.getContainerId(),
+                node.containerId(),
                 context,
                 userData,
                 Duration.ofMinutes(30),
@@ -3679,6 +3881,47 @@ public class EksClusterManager
         );
     }
 
+
+    /**
+     * Waits for the node's guest setup before its user data runs: user data executes in the container, and it may
+     * read the metadata endpoint the setup configures. A node replaced meanwhile, as a node capacity swap does, is
+     * waited for in turn, so the user data runs in the node that is there once it is set up.
+     */
+    SetUpNode awaitSetUpNode(Cluster cluster) {
+        long deadline = System.nanoTime() + guestSetupTimeout.toNanos();
+        while (true) {
+            String containerId = cluster.getContainerId();
+            if (containerId == null || containerId.isBlank()) {
+                return new SetUpNode(null, UserDataPipeline.ExecutionResult.error("The node of EKS cluster "
+                        + cluster.getName() + " is gone, so the user data did not run"));
+            }
+            GuestSetup setup = pendingGuestSetups.get(containerId);
+            if (setup != null) {
+                try {
+                    setup.done.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+                } catch (TimeoutException e) {
+                    return new SetUpNode(null, UserDataPipeline.ExecutionResult.error("The Kubernetes API server of "
+                            + "EKS cluster " + cluster.getName() + " did not answer within "
+                            + guestSetupTimeout.toMinutes() + " minutes, so its node was not set up and the user data"
+                            + " did not run"));
+                } catch (ExecutionException e) {
+                    // Abandoned for a replacement, or for this container's own restart: wait for that one instead.
+                    if (containerId.equals(cluster.getContainerId()) && !pendingGuestSetups.containsKey(containerId)) {
+                        return new SetUpNode(null, UserDataPipeline.ExecutionResult.error("The node of EKS cluster "
+                                + cluster.getName() + " was not set up because " + e.getCause().getMessage()
+                                + ", so the user data did not run"));
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return new SetUpNode(null, UserDataPipeline.ExecutionResult.error("Interrupted while waiting for "
+                            + "the node of EKS cluster " + cluster.getName() + " to be set up"));
+                }
+            }
+            if (containerId.equals(cluster.getContainerId()) && !pendingGuestSetups.containsKey(containerId)) {
+                return new SetUpNode(containerId, null);
+            }
+        }
+    }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {
         return execInContainerForResult(containerId, cmd, 10).throwIfTimedOut(containerId).stdout();
