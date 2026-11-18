@@ -10,6 +10,7 @@ import com.github.dockerjava.api.model.Ports;
 import io.floci.aws.services.dsql.dataplane.DsqlDatabases;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.TestDockerClients;
+import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.sql.Connection;
@@ -31,6 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * always closes the Docker client.
  */
 public final class ExternalPostgresServer implements AutoCloseable {
+
+    private static final Logger LOG = Logger.getLogger(ExternalPostgresServer.class);
 
     public static final String IMAGE = "postgres:16-alpine";
     private static final Duration READY_TIMEOUT = Duration.ofSeconds(60);
@@ -175,7 +178,7 @@ public final class ExternalPostgresServer implements AutoCloseable {
         if (failure != null) {
             failure.addSuppressed(e);
         } else {
-            System.err.println(what + ": " + e.getMessage());
+            LOG.warnv(e, "{0}", what);
         }
     }
 }

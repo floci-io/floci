@@ -1,6 +1,7 @@
 package io.floci.aws.services.dsql;
 
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager;
+import org.jboss.logging.Logger;
 
 import java.sql.SQLException;
 import java.util.HashMap;
@@ -13,6 +14,8 @@ import java.util.Map;
  * failure to start the server fails the boot, with its cause.
  */
 public final class ExternalPostgresResource implements QuarkusTestResourceLifecycleManager {
+
+    private static final Logger LOG = Logger.getLogger(ExternalPostgresResource.class);
 
     public static final String PASSWORD = "floci-test";
     /** A resource argument: the password Floci is configured with, when it should not be the server's. */
@@ -38,8 +41,7 @@ public final class ExternalPostgresResource implements QuarkusTestResourceLifecy
                     "POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256");
             port = server.port();
         } catch (ExternalPostgresServer.DockerUnavailableException e) {
-            System.err.println("No external PostgreSQL for the DSQL tests; they skip");
-            e.printStackTrace();
+            LOG.warnv(e, "No external PostgreSQL for the DSQL tests; they skip");
             // Nothing listens on port 1; the tests skip before they create a cluster.
             port = 1;
         } catch (SQLException e) {
