@@ -54,8 +54,10 @@ public class SparkConnectProxy {
     // How long a probe waits for the server's answer before it gives up on that call, its stream reset.
     private static final long PROBE_TIMEOUT_MILLIS = 5_000;
     private static final String GRPC_CONTENT_TYPE = "application/grpc";
+    // What the server never gets: the connection's own headers, the token, and the session id AWS's EMR connection
+    // string puts in an authorization parameter for its own proxy.
     private static final Set<String> NOT_FORWARDED = Set.of("host", "connection", "keep-alive", "proxy-connection",
-            "transfer-encoding", "upgrade", "http2-settings", TOKEN_METADATA);
+            "transfer-encoding", "upgrade", "http2-settings", TOKEN_METADATA, "authorization");
     static final String NO_TOKEN = "The call carries no " + TOKEN_METADATA + " authentication token.";
     public static final String UNKNOWN_TOKEN =
             "The authentication token is not valid. Call GetSessionEndpoint for a new one.";

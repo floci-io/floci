@@ -84,14 +84,20 @@ public class AppSyncService {
         this.eventApiStore = storageFactory.create("appsync", "appsync-event-apis.json", new TypeReference<>() {});
         this.schemaStore = schemaStore;
         this.schemaStatusStore = schemaStatusStore;
-        this.dataSourceStore = storageFactory.create("appsync", "appsync-datasources.json", new TypeReference<>() {});
-        this.resolverStore = storageFactory.create("appsync", "appsync-resolvers.json", new TypeReference<>() {});
-        this.functionStore = storageFactory.create("appsync", "appsync-functions.json", new TypeReference<>() {});
-        this.apiKeyStore = storageFactory.create("appsync", "appsync-apikeys.json", new TypeReference<>() {});
-        this.typeStore = storageFactory.create("appsync", "appsync-types.json", new TypeReference<>() {});
+        this.dataSourceStore = apiResources(storageFactory.create("appsync", "appsync-datasources.json",
+                new TypeReference<Map<String, DataSource>>() {}));
+        this.resolverStore = apiResources(storageFactory.create("appsync", "appsync-resolvers.json",
+                new TypeReference<Map<String, Resolver>>() {}));
+        this.functionStore = apiResources(storageFactory.create("appsync", "appsync-functions.json",
+                new TypeReference<Map<String, FunctionConfiguration>>() {}));
+        this.apiKeyStore = apiResources(storageFactory.create("appsync", "appsync-apikeys.json",
+                new TypeReference<Map<String, ApiKey>>() {}));
+        this.typeStore = apiResources(storageFactory.create("appsync", "appsync-types.json",
+                new TypeReference<Map<String, AppSyncType>>() {}));
         this.domainStore = storageFactory.create("appsync", "appsync-domainnames.json", new TypeReference<>() {});
         this.associationStore = storageFactory.create("appsync", "appsync-associations.json", new TypeReference<>() {});
-        this.channelNamespaceStore = storageFactory.create("appsync", "appsync-channelnamespaces.json", new TypeReference<>() {});
+        this.channelNamespaceStore = apiResources(storageFactory.create("appsync", "appsync-channelnamespaces.json",
+                new TypeReference<Map<String, ChannelNamespace>>() {}));
         this.mergedApiAssociationStore = storageFactory.create("appsync", "appsync-merged-api-associations.json", new TypeReference<>() {});
         this.regionResolver = regionResolver;
         this.schemaRegistry = schemaRegistry;
@@ -170,8 +176,10 @@ public class AppSyncService {
         return api;
     }
 
+    /** The request's Region's GraphQL API {@code apiId}: another Region's is not found, as one that doesn't exist. */
     public GraphqlApi getGraphqlApi(String apiId) {
         return apiStore.get(apiId)
+                .filter(api -> regionResolver.inRequestRegion(api.getArn()))
                 .map(this::refreshGraphqlApiUris)
                 .orElseThrow(() -> new AwsException("NotFoundException", "GraphQL API not found: " + apiId, 404));
     }
@@ -179,7 +187,9 @@ public class AppSyncService {
     public Page<GraphqlApi> listGraphqlApis(Integer maxResults, String nextToken) {
         List<GraphqlApi> apis = new ArrayList<>();
         for (GraphqlApi stored : apiStore.scan(k -> true)) {
-            apis.add(refreshGraphqlApiUris(stored));
+            if (regionResolver.inRequestRegion(stored.getArn())) {
+                apis.add(refreshGraphqlApiUris(stored));
+            }
         }
         return paginate(apis, nextToken, maxResults);
     }
@@ -283,13 +293,16 @@ public class AppSyncService {
         return api;
     }
 
+    /** The request's Region's Events API {@code apiId}: another Region's is not found, as one that doesn't exist. */
     public Api getApi(String apiId) {
         return eventApiStore.get(apiId)
+                .filter(api -> regionResolver.inRequestRegion(api.getApiArn()))
                 .orElseThrow(() -> new AwsException("NotFoundException", "API not found: " + apiId, 404));
     }
 
     public Page<Api> listApis(Integer maxResults, String nextToken) {
-        return paginate(eventApiStore.scan(k -> true), nextToken, maxResults);
+        return paginate(eventApiStore.scan(k -> true).stream()
+                .filter(api -> regionResolver.inRequestRegion(api.getApiArn())).toList(), nextToken, maxResults);
     }
 
     public synchronized Api updateApi(String apiId, Map<String, Object> request) {
@@ -451,7 +464,8 @@ public class AppSyncService {
      * kinds share: channel namespaces, API keys and tags.
      */
     private ParentApi requireApi(String apiId) {
-        Optional<Api> events = eventApiStore.get(apiId);
+        Optional<Api> events = eventApiStore.get(apiId)
+                .filter(api -> regionResolver.inRequestRegion(api.getApiArn()));
         if (events.isPresent()) {
             Set<String> types = new HashSet<>();
             EventConfig config = events.get().getEventConfig();
@@ -462,7 +476,8 @@ public class AppSyncService {
             }
             return new ParentApi(events.get().getApiArn(), types);
         }
-        Optional<GraphqlApi> graphql = apiStore.get(apiId);
+        Optional<GraphqlApi> graphql = apiStore.get(apiId)
+                .filter(api -> regionResolver.inRequestRegion(api.getArn()));
         if (graphql.isPresent()) {
             Set<String> types = new HashSet<>();
             if (graphql.get().getAuthenticationType() != null) {
@@ -478,14 +493,6 @@ public class AppSyncService {
             return new ParentApi(graphql.get().getArn(), types);
         }
         throw new AwsException("NotFoundException", "API not found: " + apiId, 404);
-    }
-
-    /** The region of an API's ARN, where its child resources live; the request region if it has none. */
-    private String arnRegion(String arn) {
-        if (arn != null && AwsArnUtils.isArn(arn)) {
-            return AwsArnUtils.parse(arn).region();
-        }
-        return regionResolver.getRegion();
     }
 
     private List<AuthMode> parseNamespaceAuthModes(String member, Object value, ParentApi api) {
@@ -570,7 +577,10 @@ public class AppSyncService {
      * creation is in flight.
      */
     void assertSchemaNotBusy(String apiId) {
-        schemaStatusStore.getForAccount(currentAccountId(), apiId).ifPresent(s -> throwIfProcessing(s.getStatus()));
+        // Another Region's API doesn't exist here: the operation's own lookup answers NotFoundException.
+        schemaStatusStore.getForAccount(currentAccountId(), apiId)
+                .filter(status -> status.getStatus() == SchemaCreationStatusType.PROCESSING && apiInRequestRegion(apiId))
+                .ifPresent(status -> throwIfProcessing(status.getStatus()));
     }
 
     /**
@@ -1001,47 +1011,61 @@ public class AppSyncService {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> getTags(String resourceArn) {
-        String apiId = extractApiIdFromArn(resourceArn);
-        Optional<Api> events = eventApiStore.get(apiId);
+        Optional<Api> events = taggedEventApi(resourceArn);
         if (events.isPresent()) {
             Map<String, String> tags = events.get().getTags();
             return tags != null ? tags : Map.of();
         }
-        return getGraphqlApi(apiId).getTags();
+        return taggedApi(resourceArn).getTags();
     }
 
     public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
-        String apiId = extractApiIdFromArn(resourceArn);
-        Optional<Api> events = eventApiStore.get(apiId);
+        Optional<Api> events = taggedEventApi(resourceArn);
         if (events.isPresent()) {
             Api api = events.get();
             Map<String, String> updated = api.getTags() != null ? new HashMap<>(api.getTags()) : new HashMap<>();
             updated.putAll(tags);
             api.setTags(updated);
-            eventApiStore.put(apiId, api);
+            eventApiStore.put(api.getApiId(), api);
             return;
         }
-        GraphqlApi api = getGraphqlApi(apiId);
+        GraphqlApi api = taggedApi(resourceArn);
         api.getTags().putAll(tags);
-        apiStore.put(apiId, api);
+        apiStore.put(api.getApiId(), api);
     }
 
     public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
-        String apiId = extractApiIdFromArn(resourceArn);
-        Optional<Api> events = eventApiStore.get(apiId);
+        Optional<Api> events = taggedEventApi(resourceArn);
         if (events.isPresent()) {
             Api api = events.get();
             if (api.getTags() != null) {
                 Map<String, String> updated = new HashMap<>(api.getTags());
                 tagKeys.forEach(updated::remove);
                 api.setTags(updated);
-                eventApiStore.put(apiId, api);
+                eventApiStore.put(api.getApiId(), api);
             }
             return;
         }
-        GraphqlApi api = getGraphqlApi(apiId);
+        GraphqlApi api = taggedApi(resourceArn);
         tagKeys.forEach(api.getTags()::remove);
-        apiStore.put(apiId, api);
+        apiStore.put(api.getApiId(), api);
+    }
+
+    /** The request's Region's Events API whose ARN is {@code resourceArn}, if it names one. */
+    private Optional<Api> taggedEventApi(String resourceArn) {
+        return eventApiStore.get(extractApiIdFromArn(resourceArn))
+                .filter(api -> regionResolver.inRequestRegion(api.getApiArn()))
+                .filter(api -> resourceArn.equals(api.getApiArn()));
+    }
+
+    /** The API {@code resourceArn} names: the request's Region's API whose ARN it is, partition, Region and account. */
+    private GraphqlApi taggedApi(String resourceArn) {
+        String apiId = extractApiIdFromArn(resourceArn);
+        GraphqlApi api = getGraphqlApi(apiId);
+        if (!resourceArn.equals(api.getArn())) {
+            throw new AwsException("NotFoundException", "GraphQL API not found: " + apiId, 404);
+        }
+        return api;
     }
 
     // ──────────────────────────── Environment Variables ────────────────────────────
@@ -1103,13 +1127,16 @@ public class AppSyncService {
         dn.setHostedZoneId(edge.hostedZoneId());
     }
 
+    /** The request's Region's domain name: another Region's is not found, as one that doesn't exist. */
     public DomainName getDomainName(String domainName) {
         return domainStore.get(domainName)
+                .filter(dn -> regionResolver.inRequestRegion(dn.getDomainNameArn()))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Domain name not found: " + domainName, 404));
     }
 
     public Page<DomainName> listDomainNames(Integer maxResults, String nextToken) {
-        return paginate(domainStore.scan(k -> true), nextToken, maxResults);
+        return paginate(domainStore.scan(k -> true).stream()
+                .filter(dn -> regionResolver.inRequestRegion(dn.getDomainNameArn())).toList(), nextToken, maxResults);
     }
 
     public synchronized DomainName updateDomainName(String domainName, Map<String, Object> request) {
@@ -1184,7 +1211,7 @@ public class AppSyncService {
         ns.setName(name);
         ns.setApiId(apiId);
         ns.setDescription(coerceString(request.get("description")));
-        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", arnRegion(api.arn()),
+        ns.setChannelNamespaceArn(regionResolver.buildArn("appsync", regionResolver.regionOf(api.arn()),
             "apis/" + apiId + "/channelNamespace/" + name));
         ns.setCodeHandlers(coerceString(request.get("codeHandlers")));
         ns.setPublishAuthModes(parseNamespaceAuthModes("publishAuthModes", request.get("publishAuthModes"), api));
@@ -1300,8 +1327,13 @@ public class AppSyncService {
         return assoc;
     }
 
+    /**
+     * The request's Region's association {@code associationId} of {@code mergedApiIdentifier}. It is the Region its own
+     * ARN names, not the APIs': an association outlives a source API deleted without it, and can still be removed.
+     */
     public SourceApiAssociation getSourceApiAssociation(String mergedApiIdentifier, String associationId) {
         SourceApiAssociation assoc = mergedApiAssociationStore.get(associationId)
+                .filter(a -> regionResolver.inRequestRegion(a.getAssociationArn()))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Source API association not found: " + associationId, 404));
         if (!mergedApiIdentifier.equals(assoc.getMergedApiId())) {
@@ -1337,6 +1369,7 @@ public class AppSyncService {
     public Page<SourceApiAssociationSummary> listSourceApiAssociations(String apiId, Integer maxResults, String nextToken) {
         List<SourceApiAssociationSummary> summaries = mergedApiAssociationStore.scan(k -> true).stream()
                 .filter(a -> apiId.equals(a.getMergedApiId()) || apiId.equals(a.getSourceApiId()))
+                .filter(a -> regionResolver.inRequestRegion(a.getAssociationArn()))
                 .map(this::toSummary)
                 .toList();
         return paginate(summaries, nextToken, maxResults);
@@ -1363,6 +1396,7 @@ public class AppSyncService {
     public synchronized SourceApiAssociation deleteMergedApiAssociation(String sourceApiIdentifier, String associationId) {
         assertSchemaNotBusy(sourceApiIdentifier);
         SourceApiAssociation assoc = mergedApiAssociationStore.get(associationId)
+                .filter(a -> regionResolver.inRequestRegion(a.getAssociationArn()))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Source API association not found: " + associationId, 404));
         if (!sourceApiIdentifier.equals(assoc.getSourceApiId())) {
@@ -1539,6 +1573,31 @@ public class AppSyncService {
 
     private String resolverKey(String apiId, String typeName, String fieldName) {
         return apiId + "::" + typeName + "::" + fieldName;
+    }
+
+    /** The request's Region's view of {@code store}, a store of the APIs' resources ({@link RegionalApiResources}). */
+    private <V> StorageBackend<String, V> apiResources(StorageBackend<String, V> store) {
+        return new RegionalApiResources<>(store, this::apiInRequestRegion);
+    }
+
+    /**
+     * Whether {@code apiId} is a GraphQL or Events API of the request's Region, or of no stored API: the resources of
+     * another Region's are hidden from the request ({@link RegionalApiResources}).
+     */
+    private boolean apiInRequestRegion(String apiId) {
+        Optional<Api> events = eventApiStore.get(apiId);
+        if (events.isPresent()) {
+            return regionResolver.inRequestRegion(events.get().getApiArn());
+        }
+        return apiStore.get(apiId).map(api -> regionResolver.inRequestRegion(api.getArn())).orElse(true);
+    }
+
+    /**
+     * The Region of the GraphQL API {@code apiId}, whatever Region the request is in. The data plane reaches an API by
+     * its own endpoint, which names no Region, and runs in the API's.
+     */
+    public Optional<String> graphqlApiRegion(String apiId) {
+        return apiStore.get(apiId).map(api -> regionResolver.regionOf(api.getArn()));
     }
 
     private String buildApiArn(String apiId, String region) {

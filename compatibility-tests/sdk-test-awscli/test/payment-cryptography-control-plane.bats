@@ -119,6 +119,41 @@ create_key() {
     [[ "$output" == *"ValidationException"* ]]
 }
 
+@test "Payment Cryptography control plane: a key is stopped and started again" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography stop-key-usage --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.Enabled')" = "false" ]
+    [ -n "$(json_get "$output" '.Key.UsageStopTimestamp')" ]
+
+    run aws_cmd payment-cryptography start-key-usage --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.Enabled')" = "true" ]
+    [ -n "$(json_get "$output" '.Key.UsageStartTimestamp')" ]
+}
+
+@test "Payment Cryptography control plane: a deleted key is restored" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography delete-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "DELETE_PENDING" ]
+
+    run aws_cmd payment-cryptography get-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "DELETE_PENDING" ]
+
+    run aws_cmd payment-cryptography restore-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "CREATE_COMPLETE" ]
+    # The reference's own restore example answers with a key that is disabled: it is
+    # start-key-usage that enables a key again.
+    [ "$(json_get "$output" '.Key.Enabled')" = "false" ]
+}
+
 @test "Payment Cryptography control plane: a key pair is created with the usage its derived keys have" {
     # The usage a derived key is for is named when the key pair is made, as the export
     # guide's key agreement flow does.
@@ -132,4 +167,48 @@ create_key() {
     run aws_cmd payment-cryptography get-key --key-identifier "$PAIR_ARN"
     assert_success
     [ "$(json_get "$output" '.Key.DeriveKeyUsage')" = "TR31_K1_KEY_BLOCK_PROTECTION_KEY" ]
+}
+
+@test "Payment Cryptography control plane: a Multi-Party Approval team is associated and removed" {
+    # The team's ARN is kept as the request names it: the emulator has no Multi-Party
+    # Approval service to check it against.
+    local team="arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha"
+
+    run aws_cmd payment-cryptography associate-mpa-team \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE \
+        --mpa-team-arn "$team"
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.MpaTeamArn')" = "$team" ]
+    [ "$(json_get "$output" '.MpaTeamAssociation.AssociationState')" = "ACTIVE" ]
+
+    run aws_cmd payment-cryptography get-mpa-team-association \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.MpaTeamArn')" = "$team" ]
+
+    run aws_cmd payment-cryptography disassociate-mpa-team \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.AssociationState')" = "DELETE_PENDING" ]
+}
+
+@test "Payment Cryptography control plane: a key pair signs a certificate signing request" {
+    PAIR_ARN=$(aws_cmd payment-cryptography create-key \
+        --key-attributes 'KeyAlgorithm=RSA_2048,KeyClass=ASYMMETRIC_KEY_PAIR,KeyUsage=TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE,KeyModesOfUse={Sign=true,Verify=true}' \
+        --exportable \
+        --query 'Key.KeyArn' --output text)
+    [ -n "$PAIR_ARN" ]
+
+    run aws_cmd payment-cryptography get-certificate-signing-request \
+        --key-identifier "$PAIR_ARN" \
+        --signing-algorithm SHA256 \
+        --certificate-subject 'CommonName=floci payment cryptography,Organization=Floci'
+    assert_success
+
+    # The answer is the PEM of the request, base64 encoded, as the reference's own answer
+    # carries it, so it is decoded before it is read.
+    local encoded
+    encoded=$(json_get "$output" '.CertificateSigningRequest')
+    [[ -n "$encoded" ]]
+    [[ "$(printf '%s' "$encoded" | base64 -d)" == *"BEGIN CERTIFICATE REQUEST"* ]]
 }

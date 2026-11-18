@@ -46,6 +46,12 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `ListFunctionUrlConfigs` | List a function's URL configurations across its unpublished version and aliases, with marker pagination |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
+| `PublishLayerVersion` | Publish a layer version from a zip or an S3 object (see Layers below) |
+| `GetLayerVersion` | Get a layer version by name and version number |
+| `GetLayerVersionByArn` | Get a layer version by its ARN |
+| `ListLayerVersions` | List the versions of a layer, optionally by runtime and architecture |
+| `ListLayers` | List layers with their newest version, optionally by runtime and architecture |
+| `DeleteLayerVersion` | Delete a layer version |
 | `ListTags` | List tags on a function or event source mapping |
 | `TagResource` | Tag a function or event source mapping |
 | `UntagResource` | Untag a function or event source mapping |
@@ -142,8 +148,9 @@ part in authorizing calls to the function:
   authorized against the function as its name gives it, as the Service Reference lists the function
   alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
-- `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
-  admits no caller.
+- `aws:PrincipalOrgID` is in the request context for a caller whose account is in an organization,
+  so a grant added with `PrincipalOrgID` admits the callers of that organization and no others. A
+  caller in no organization carries no value for the key, and such a grant then admits none.
 
 ### Qualified reads
 

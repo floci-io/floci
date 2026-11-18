@@ -703,6 +703,20 @@ class DockerClientProducerTest {
     }
 
     @Test
+    void validatePoolGaugeIntervalSeconds_negative_throwsNamingTheSetting() {
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> DockerClientProducer.validatePoolGaugeIntervalSeconds(-1));
+
+        assertThat(e.getMessage(), containsString("floci.docker.pool-gauge-interval-seconds"));
+    }
+
+    @Test
+    void validatePoolGaugeIntervalSeconds_zeroOrPositive_returnsItUnchanged() {
+        assertEquals(0, DockerClientProducer.validatePoolGaugeIntervalSeconds(0));
+        assertEquals(60, DockerClientProducer.validatePoolGaugeIntervalSeconds(60));
+    }
+
+    @Test
     void validateImagePullTimeoutSeconds_positive_returnsItUnchanged() {
         assertEquals(1, DockerClientProducer.validateImagePullTimeoutSeconds(1));
         assertEquals(1800, DockerClientProducer.validateImagePullTimeoutSeconds(1800));

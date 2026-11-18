@@ -110,6 +110,8 @@ class RedpandaManagerTest {
 
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
         lenient().when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+        // A cluster's Region is read from its ARN, as RegionResolver reads it, falling back to the default above.
+        lenient().when(regionResolver.regionOf(any())).thenCallRealMethod();
         lenient().when(regionResolver.getAccountId()).thenReturn("000000000000");
         lenient().when(regionResolver.getDefaultAccountId()).thenReturn("000000000000");
     }

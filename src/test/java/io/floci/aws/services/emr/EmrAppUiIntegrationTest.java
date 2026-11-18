@@ -176,6 +176,17 @@ class EmrAppUiIntegrationTest {
     }
 
     // The page a link opens, asked for on the address this test's Floci listens on, which the link's base URL is not.
+    @Test
+    void aRequestToAnInterfacesHostReachesItsProxyWhateverItsPath() {
+        // The ResourceManager's REST answers are under /ws/, a path API Gateway's WebSocket route takes too.
+        given().header("Host", "a".repeat(26) + "-8088.emrappui.localhost:4566")
+                .when().get("/ws/v1/cluster/apps")
+                .then().statusCode(403).body(containsString(Html.escape(EmrAppUiController.INVALID)));
+        given().header("Host", "a".repeat(26) + "-4040.emr-serverless-ui.localhost:4566")
+                .when().get("/ws/v1/cluster/apps")
+                .then().statusCode(403);
+    }
+
     private static Response page(String url) {
         URI link = URI.create(url);
         return given().urlEncodingEnabled(false).when().get(link.getRawPath() + "?" + link.getRawQuery());

@@ -417,8 +417,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 continue;
             }
             // The cluster's own region, from its ARN: the issuer must match the one create mints there.
-            String issuer = oidcService.newIssuerUrl(
-                    AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion()));
+            String issuer = oidcService.newIssuerUrl(regionResolver.regionOf(cluster.getArn()));
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
             oidcService.ensureKeyForAccount(accountId, clusterKey(cluster), issuer);
             putClusterForAccount(accountId, cluster);
@@ -665,11 +664,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private void migrateLegacyKeys() {
         migrateLegacyEntries(storage, this::clusterKey);
         migrateLegacyEntries(nodeGroupStorage, group -> group.getClusterName() == null ? null
-                : nodeGroupKey(clusterKey(AwsArnUtils.regionOrDefault(group.getNodegroupArn(), config.defaultRegion()),
+                : nodeGroupKey(clusterKey(regionResolver.regionOf(group.getNodegroupArn()),
                         group.getClusterName()), group.getNodegroupName()));
         migrateLegacyEntries(fargateProfileStorage, profile -> profile.getClusterName() == null ? null
-                : fargateProfileKey(clusterKey(AwsArnUtils.regionOrDefault(profile.getFargateProfileArn(),
-                        config.defaultRegion()), profile.getClusterName()), profile.getFargateProfileName()));
+                : fargateProfileKey(clusterKey(regionResolver.regionOf(profile.getFargateProfileArn()),
+                        profile.getClusterName()), profile.getFargateProfileName()));
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
             Cluster cluster = entry.value();
             if (cluster.getName() != null && cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null) {
@@ -815,7 +814,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         cluster.setTags(request.getTags() != null ? ReservedTags.stripReservedTags(request.getTags()) : new HashMap<>());
 
-        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId);
+        // The checks below run before the cluster security group is created, so a request they refuse
+        // leaves no group behind for a stack's VPC rollback to trip over.
+        String ipFamily = resolveIpFamily(request.getKubernetesNetworkConfig());
+        ResourcesVpcConfig vpcConfig = buildVpcConfigResponse(request.getResourcesVpcConfig(), resolvedVpcId, ipFamily);
+        String vpcCidr = resolveClusterVpcCidr(region, vpcConfig.getVpcId());
+        KubernetesNetworkConfig networkConfig = buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr);
+        Logging logging = buildLogging(request.getLogging());
+        List<EncryptionConfig> encryptionConfig = buildEncryptionConfig(request.getEncryptionConfig());
         SecurityGroup clusterSg = null;
         if (ec2Service != null && !vpcConfig.getVpcId().isBlank()) {
             try {
@@ -830,11 +836,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         cluster.setResourcesVpcConfig(vpcConfig);
-        String vpcCidr = resolveClusterVpcCidr(region, vpcConfig.getVpcId());
-        cluster.setKubernetesNetworkConfig(buildNetworkConfig(request.getKubernetesNetworkConfig(), vpcCidr));
+        cluster.setKubernetesNetworkConfig(networkConfig);
         cluster.setPodCidr(EksClusterManager.DEFAULT_POD_CIDR);
-        cluster.setLogging(buildLogging(request.getLogging()));
-        cluster.setEncryptionConfig(buildEncryptionConfig(request.getEncryptionConfig()));
+        cluster.setLogging(logging);
+        cluster.setEncryptionConfig(encryptionConfig);
         cluster.setStatus(ClusterStatus.CREATING);
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
@@ -1682,17 +1687,25 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         String vpcId = null;
         for (String subnetId : vpcConfig.getSubnetIds()) {
+            String subnetVpcId;
             try {
-                vpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
+                subnetVpcId = ec2Service.requireSubnet(region, subnetId).getVpcId();
             } catch (AwsException e) {
                 throw new AwsException("InvalidParameterException",
                         "Subnet ID '" + subnetId + "' does not exist", 400);
             }
+            if (vpcId != null && !vpcId.equals(subnetVpcId)) {
+                throw new AwsException("InvalidParameterException",
+                        "Subnet ID '" + subnetId + "' is in VPC '" + subnetVpcId
+                                + "', not in VPC '" + vpcId + "' of the other subnets", 400);
+            }
+            vpcId = subnetVpcId;
         }
         return vpcId;
     }
 
-    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId) {
+    private ResourcesVpcConfig buildVpcConfigResponse(ResourcesVpcConfig request, String resolvedVpcId,
+                                                      String ipFamily) {
         ResourcesVpcConfig response = new ResourcesVpcConfig();
         if (request != null) {
             response.setSubnetIds(request.getSubnetIds() != null ? request.getSubnetIds() : List.of());
@@ -1707,6 +1720,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     request.getEndpointPublicAccess() != null ? request.getEndpointPublicAccess() : Boolean.TRUE);
             response.setEndpointPrivateAccess(
                     request.getEndpointPrivateAccess() != null ? request.getEndpointPrivateAccess() : Boolean.FALSE);
+            if (request.getPublicAccessCidrs() != null) {
+                for (String cidr : request.getPublicAccessCidrs()) {
+                    if (!SecurityGroupPolicy.validCidr(cidr)) {
+                        throw new AwsException("InvalidParameterException",
+                                "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                        + cidr, 400);
+                    }
+                    if (cidr.contains(":") && !"ipv6".equals(ipFamily)) {
+                        throw new AwsException("InvalidParameterException",
+                                "The specified parameter resourcesVpcConfig.publicAccessCidrs is not valid: "
+                                        + cidr + ". IPv6 blocks cannot be added to IPv4 clusters.", 400);
+                    }
+                }
+            }
             response.setPublicAccessCidrs(
                     request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : List.of("0.0.0.0/0"));
         } else {
@@ -1789,8 +1816,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         config.setServiceIpv4Cidr(resolvedCidr);
-        config.setIpFamily(request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4");
+        config.setIpFamily(resolveIpFamily(request));
         return config;
+    }
+
+    private static String resolveIpFamily(KubernetesNetworkConfig request) {
+        String ipFamily = request != null && request.getIpFamily() != null ? request.getIpFamily() : "ipv4";
+        if (!"ipv4".equals(ipFamily) && !"ipv6".equals(ipFamily)) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid ipFamily '" + ipFamily + "'. Valid values: ipv4 | ipv6", 400);
+        }
+        return ipFamily;
     }
 
     static Logging defaultLogging() {
@@ -1855,8 +1891,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     "Only one encryption configuration is allowed", 400);
         }
         EncryptionConfig config = requestedConfigs.getFirst();
-        if (config == null || config.getResources() == null || config.getResources().isEmpty()
-                || !List.of("secrets").equals(config.getResources())) {
+        // AWS: Resources is optional, "this field no longer affects which resources are encrypted", and
+        // "secrets" is the only supported value.
+        boolean resourcesOmitted = config != null && (config.getResources() == null || config.getResources().isEmpty());
+        if (config == null || !(resourcesOmitted || List.of("secrets").equals(config.getResources()))) {
             throw new AwsException("InvalidParameterException",
                     "Invalid k8s resource and provider for encryption", 400);
         }

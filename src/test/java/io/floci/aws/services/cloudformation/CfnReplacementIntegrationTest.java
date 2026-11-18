@@ -114,6 +114,10 @@ class CfnReplacementIntegrationTest {
             "True", true, "repl-sng-b");
 
     private static final String EKS_CLUSTER = "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks\", ";
+    private static final String EKS_NODEGROUP_CLUSTER = "\"Cluster\": {\"Type\": \"AWS::EKS::Cluster\","
+            + " \"Properties\": {\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks\"}}";
+    private static final String EKS_NODEGROUP = "\"ClusterName\": {\"Ref\": \"Cluster\"},"
+            + " \"Subnets\": [\"subnet-aaaa1111\"], ";
     private static final String SQS_TYPE = "AWS::SQS::Queue";
     private static final String S3_TYPE = "AWS::S3::Bucket";
     private static final String DDB_KEYS = "\"BillingMode\": \"PAY_PER_REQUEST\","
@@ -251,6 +255,16 @@ class CfnReplacementIntegrationTest {
                 createOnlyRow("EKS cluster RoleArn", "", "", "AWS::EKS::Cluster",
                         "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
                         "\"RoleArn\": \"arn:aws:iam::000000000000:role/repl-eks-@V@\"",
+                        "True", false, null),
+                createOnlyRow("EKS nodegroup Tags", EKS_NODEGROUP_CLUSTER, "", "AWS::EKS::Nodegroup",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng\","
+                                + " \"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng\","
+                                + " \"Tags\": [{\"Key\": \"team\", \"Value\": \"@V@\"}]",
+                        "False", false, null),
+                createOnlyRow("EKS nodegroup NodeRole", EKS_NODEGROUP_CLUSTER, "", "AWS::EKS::Nodegroup",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng-@V@\"",
+                        EKS_NODEGROUP + "\"NodeRole\": \"arn:aws:iam::000000000000:role/repl-ng-@V@\"",
                         "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),

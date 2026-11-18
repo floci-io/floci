@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -9,6 +10,8 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
+import io.floci.aws.services.eks.model.LogSetup;
+import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -21,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Supplier;
 
 /**
  * CloudFormation provisioning for the EKS control-plane types. {@code AWS::EKS::Cluster} and
@@ -38,12 +42,17 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     /** Every attribute {@code publish} writes for a cluster. */
     private static final List<String> CLUSTER_ATTRIBUTES =
-            List.of("Arn", "Endpoint", "CertificateAuthorityData", "OpenIdConnectIssuerUrl");
+            List.of("Arn", "Endpoint", "CertificateAuthorityData", "OpenIdConnectIssuerUrl",
+                    "ClusterSecurityGroupId");
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** Every attribute {@code publishNodegroup} writes for a nodegroup. */
+    private static final List<String> NODEGROUP_ATTRIBUTES = List.of("Id", "ClusterName", "NodegroupName", "Arn");
     private static final String SNAPSHOT_ATTR = CfnRollback.EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR;
+    private static final String NODEGROUP_SNAPSHOT_ATTR = CfnRollback.EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR;
     // The tag keys the last deployment resolved, reserved ones included, as Ec2Tags.recordKeys records
     // them, so an update removes only those and keeps a tag added outside the stack.
     private static final String TAG_KEYS_ATTR = "__FlociEksClusterTagKeys";
+    private static final String NODEGROUP_TAG_KEYS_ATTR = "__FlociEksNodegroupTagKeys";
 
     private final EksService eksService;
 
@@ -81,7 +90,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         // Name, RoleArn, EncryptionConfig, BootstrapSelfManagedAddons, OutpostConfig, the network
         // family and CIDR and the bootstrap admin permission are create-only in the registry: a change
         // to one replaces the cluster.
-        boolean replaces = updates && ctx.changes(CLUSTER, props).requiresReplacement();
+        PropertyChanges changes = updates ? ctx.changes(CLUSTER, props) : null;
+        boolean replaces = changes != null && changes.requiresReplacement();
         String name = ctx.resolveOptional(props, "Name");
         if (name == null || name.isBlank()) {
             // The name is the physical id, so an update that replaces nothing keeps it rather than
@@ -94,7 +104,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         }
         Cluster live = updates && !replaces ? liveCluster(ctx.priorPhysicalId()) : null;
         if (live != null) {
-            updateInPlace(r, props, ctx, live);
+            updateInPlace(r, props, ctx, live, changes);
             return;
         }
         CreateClusterRequest request = new CreateClusterRequest();
@@ -104,6 +114,12 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         // Unstripped: createCluster reads the reserved cluster-args tag, then drops it.
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         request.setTags(templateTags);
+        request.setEncryptionConfig(createSetting(props, "EncryptionConfig", ctx, new TypeReference<>() { }));
+        request.setKubernetesNetworkConfig(
+                createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { }));
+        request.setResourcesVpcConfig(createSetting(props, "ResourcesVpcConfig", ctx, new TypeReference<>() { }));
+        request.setAccessConfig(createSetting(props, "AccessConfig", ctx, new TypeReference<>() { }));
+        request.setLogging(logging(props, ctx));
         Cluster created = eksService.createCluster(request);
         // The cluster this resource named before is gone or replaced; publish writes only what the
         // new one has, so its endpoint and certificate must not outlive it.
@@ -121,11 +137,65 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * A property in its API request shape, or null when the template leaves it out. The
+     * template value is read against the type the resource schema declares, so a value of another type
+     * fails the resource with CloudFormation's wording. The request model has no ElasticLoadBalancing
+     * or ServiceIpv6Cidr member of KubernetesNetworkConfig and no ControlPlaneEgressMode member of
+     * ResourcesVpcConfig, so those are not read.
+     */
+    private static <T> T createSetting(JsonNode props, String name, ProvisionContext ctx, TypeReference<T> type) {
+        JsonNode resolved = readSetting(props, name, ctx);
+        if (resolved == null) {
+            return null;
+        }
+        try {
+            return MAPPER.convertValue(CfnApiShapeConverter.convert(resolved, CfnApiShapeConverter.OMIT_NULL_PROPERTIES),
+                    type);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationError", "AWS::EKS::Cluster " + name + " is not valid: "
+                    + e.getMessage(), 400);
+        }
+    }
+
+    private static JsonNode readSetting(JsonNode props, String name, ProvisionContext ctx) {
+        CfnPropertyTypes.Reader types = new CfnPropertyTypes.Reader(ctx.engine());
+        JsonNode resolved = types.readProperty(CLUSTER, props, name);
+        types.finish();
+        return resolved;
+    }
+
+    /**
+     * Logging in the API shape. The template lists the enabled types as
+     * {@code ClusterLogging.EnabledTypes[].Type}; the service disables every type not listed.
+     */
+    private static Logging logging(JsonNode props, ProvisionContext ctx) {
+        JsonNode resolved = readSetting(props, "Logging", ctx);
+        if (resolved == null) {
+            return null;
+        }
+        List<String> enabled = new ArrayList<>();
+        JsonNode types = resolved.path("ClusterLogging").path("EnabledTypes");
+        types.forEach(entry -> {
+            String type = entry.path("Type").asText("");
+            if (type.isBlank()) {
+                throw new AwsException("ValidationError",
+                        "AWS::EKS::Cluster Logging.ClusterLogging.EnabledTypes entry has no Type", 400);
+            }
+            enabled.add(type);
+        });
+        return new Logging(List.of(new LogSetup(enabled, true)));
+    }
+
     private void publish(StackResource r, Cluster cluster) {
         r.setPhysicalId(cluster.getName());
         r.getAttributes().put("Arn", cluster.getArn());
         if (cluster.getEndpoint() != null) {
             r.getAttributes().put("Endpoint", cluster.getEndpoint());
+        }
+        if (cluster.getResourcesVpcConfig() != null
+                && cluster.getResourcesVpcConfig().getClusterSecurityGroupId() != null) {
+            r.getAttributes().put("ClusterSecurityGroupId", cluster.getResourcesVpcConfig().getClusterSecurityGroupId());
         }
         if (cluster.getCertificateAuthority() != null && cluster.getCertificateAuthority().getData() != null) {
             r.getAttributes().put("CertificateAuthorityData", cluster.getCertificateAuthority().getData());
@@ -138,8 +208,13 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     /** The cluster an update starts from, or null when it is gone and the update creates one. */
     private Cluster liveCluster(String name) {
+        return orNullWhenGone(() -> eksService.describeCluster(name));
+    }
+
+    /** What {@code lookup} returns, or null when it reports the entity gone; any other failure is thrown. */
+    private static <T> T orNullWhenGone(Supplier<T> lookup) {
         try {
-            return eksService.describeCluster(name);
+            return lookup.get();
         } catch (AwsException e) {
             if ("ResourceNotFoundException".equals(e.getErrorCode())) {
                 return null;
@@ -151,25 +226,65 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The update AWS makes for the properties it does not replace on: the cluster keeps its name.
      * EksService has no UpdateClusterVersion or UpdateClusterConfig, so the one mutable property
-     * floci honors is Tags, and a changed Version is accepted with a warning and not applied.
+     * floci honors is Tags, and a change to any other property is accepted with a warning.
      */
-    private void updateInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Cluster live) {
-        JsonNode priorProps = ctx.priorProperties();
-        String version = ctx.resolveOptional(props, "Version");
-        String priorVersion = ctx.resolveOptional(priorProps, "Version");
-        boolean versionChanged = version != null && (priorVersion == null || !version.trim().equals(priorVersion.trim()));
-        if (version != null && !version.isBlank() && versionChanged) {
-            LOG.warnv("EKS cluster {0}: in-place modification is not supported, the change to Version is ignored and"
-                    + " the cluster keeps version {1}", live.getName(), live.getVersion());
+    private void updateInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Cluster live,
+                               PropertyChanges changes) {
+        warnIgnoredChanges("cluster", live.getName(), changes);
+        updateTagsInPlace(r, props, ctx, live.getArn(), live.getTags(), live.getName(), TAG_KEYS_ATTR, SNAPSHOT_ATTR,
+                () -> publish(r, live), true);
+    }
+
+    /**
+     * Nothing create-only changed on the in-place path, so every other property the engine reports
+     * as added, changed or dropped is one EksService has no call to apply: it is accepted with a
+     * warning. Tags are applied by {@link #updateTagsInPlace}.
+     */
+    private static void warnIgnoredChanges(String kind, String name, PropertyChanges changes) {
+        List<String> ignored = new ArrayList<>();
+        for (PropertyChanges.PropertyChange change : changes.byName().values()) {
+            if (change.kind() != PropertyChanges.Kind.UNCHANGED && !"Tags".equals(change.name())) {
+                ignored.add(change.name());
+            }
         }
+        if (!ignored.isEmpty()) {
+            LOG.warnv("EKS {0} {1}: in-place modification is not supported, changes to {2} are ignored",
+                    kind, name, String.join(", ", ignored));
+        }
+    }
+
+    /**
+     * The tag half of an in-place update, shared by cluster and nodegroup: drives the tags the stack
+     * owns to the template's, snapshots them for the rollback and publishes the live entity.
+     * {@code warnReserved} reports a reserved tag change that is ignored, for a type that reads one at create.
+     */
+    private void updateTagsInPlace(StackResource r, JsonNode props, ProvisionContext ctx, String arn,
+                                   Map<String, String> currentTags, String name, String keysAttr,
+                                   String snapshotAttr, Runnable publish, boolean warnReserved) {
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         Map<String, String> desired = ReservedTags.stripReservedTags(templateTags);
-        Map<String, String> liveTags = live.getTags() == null ? Map.of() : live.getTags();
+        Map<String, String> liveTags = currentTags == null ? Map.of() : currentTags;
         // The keys the last deployment wrote, as it resolved them: the previous template read with
         // this update's parameters would name the key a parameter has since changed.
-        Set<String> recorded = Ec2Tags.ownedKeys(r, TAG_KEYS_ATTR, ctx);
+        Set<String> recorded = Ec2Tags.ownedKeys(r, keysAttr, ctx);
         Set<String> owned = userKeys(recorded);
-        // Only a reserved key added or removed is seen: the record holds keys, not values.
+        if (warnReserved) {
+            warnReservedTagChanges(name, templateTags, desired, recorded, owned);
+        }
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("arn", arn);
+        Ec2Tags.snapshotOwned(snapshot, owned, desired, liveTags, r.getAttributes().get(keysAttr));
+        publish.run();
+        r.getAttributes().put(snapshotAttr, snapshot.toString());
+        CfnRollback.guarded(r, ctx, false, () -> { }, () -> restore(r, snapshot, keysAttr), () -> {
+            converge(arn, desired, Ec2Tags.touched(owned, desired));
+            Ec2Tags.recordKeys(r, keysAttr, templateTags);
+        });
+    }
+
+    /** Only a reserved key added or removed is seen: the record holds keys, not values. */
+    private static void warnReservedTagChanges(String name, Map<String, String> templateTags,
+                                               Map<String, String> desired, Set<String> recorded, Set<String> owned) {
         Set<String> reservedNow = new TreeSet<>(templateTags.keySet());
         reservedNow.removeAll(desired.keySet());
         Set<String> reservedBefore = new TreeSet<>(recorded);
@@ -179,20 +294,11 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         reservedChanged.removeIf(key -> reservedNow.contains(key) && reservedBefore.contains(key));
         reservedChanged.forEach(key -> LOG.warnv(
                 "EKS cluster {0}: the reserved tag {1} is read at create only, the change on update is ignored",
-                live.getName(), key));
-        ObjectNode snapshot = MAPPER.createObjectNode();
-        snapshot.put("arn", live.getArn());
-        Ec2Tags.snapshotOwned(snapshot, owned, desired, liveTags, r.getAttributes().get(TAG_KEYS_ATTR));
-        publish(r, live);
-        r.getAttributes().put(SNAPSHOT_ATTR, snapshot.toString());
-        CfnRollback.guarded(r, ctx, false, () -> { }, () -> restore(r, snapshot), () -> {
-            converge(live.getArn(), desired, Ec2Tags.touched(owned, desired));
-            Ec2Tags.recordKeys(r, TAG_KEYS_ATTR, templateTags);
-        });
+                name, key));
     }
 
     /**
-     * Drives the cluster's tags to {@code tags}: the one path an update and its rollback take.
+     * Drives the tags of a cluster or nodegroup to {@code tags}: the one path an update and its rollback take.
      */
     private void converge(String arn, Map<String, String> tags, Collection<String> managedKeys) {
         CfnRollback.reconcileTags(managedKeys, tags, dropped -> eksService.untagResource(arn, dropped),
@@ -205,29 +311,35 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         return new TreeSet<>(ReservedTags.stripReservedTags(byKey).keySet());
     }
 
-    private void restore(StackResource r, JsonNode snapshot) {
+    private void restore(StackResource r, JsonNode snapshot, String keysAttr) {
         List<String> touched = new ArrayList<>();
         snapshot.path("touched").forEach(key -> touched.add(key.asText()));
         converge(CfnRollback.snapshotText(snapshot, "arn"), CfnRollback.snapshotTags(snapshot), touched);
-        Ec2Tags.restoreRecord(r, TAG_KEYS_ATTR, snapshot);
+        Ec2Tags.restoreRecord(r, keysAttr, snapshot);
+    }
+
+    private static String snapshotAttr(StackResource resource) {
+        return NODEGROUP.equals(resource.getResourceType()) ? NODEGROUP_SNAPSHOT_ATTR : SNAPSHOT_ATTR;
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        JsonNode snapshot = CfnRollback.updateSnapshot(resource, SNAPSHOT_ATTR);
+        boolean nodegroup = NODEGROUP.equals(resource.getResourceType());
+        String snapshotAttr = snapshotAttr(resource);
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, snapshotAttr);
         if (snapshot == null) {
             return ReplacementCleanup.rollback(resource, this::delete);
         }
-        // A cluster the update created because the prior one was gone is deleted instead.
-        if (CfnRollback.undoCreatedByUpdate(resource, snapshot, SNAPSHOT_ATTR, null,
-                (createdId, region) -> delete(CLUSTER, createdId, region))) {
-            // The prior cluster is gone and these attributes described the one just deleted.
-            CLUSTER_ATTRIBUTES.forEach(resource.getAttributes()::remove);
+        // An entity the update created because the prior one was gone is deleted instead.
+        if (CfnRollback.undoCreatedByUpdate(resource, snapshot, snapshotAttr, null,
+                (createdId, region) -> delete(resource.getResourceType(), createdId, region))) {
+            // The prior entity is gone and these attributes described the one just deleted.
+            (nodegroup ? NODEGROUP_ATTRIBUTES : CLUSTER_ATTRIBUTES).forEach(resource.getAttributes()::remove);
             return true;
         }
         // Spent only once the restore succeeded: one that throws leaves it for the next attempt.
-        restore(resource, snapshot);
-        resource.getAttributes().remove(SNAPSHOT_ATTR);
+        restore(resource, snapshot, nodegroup ? NODEGROUP_TAG_KEYS_ATTR : TAG_KEYS_ATTR);
+        resource.getAttributes().remove(snapshotAttr);
         return true;
     }
 
@@ -243,18 +355,22 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        resource.getAttributes().remove(SNAPSHOT_ATTR);
+        resource.getAttributes().remove(snapshotAttr(resource));
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
-        resource.getAttributes().remove(SNAPSHOT_ATTR);
+        resource.getAttributes().remove(snapshotAttr(resource));
         ReplacementCleanup.clear(resource);
     }
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
+        if (NODEGROUP.equals(resourceType)) {
+            deleteNodegroup(physicalId, Map.of());
+            return;
+        }
         if (!CLUSTER.equals(resourceType)) {
             throw new IllegalArgumentException("Unsupported resource type: " + resourceType);
         }
@@ -263,17 +379,60 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionNodegroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(NODEGROUP_SNAPSHOT_ATTR);
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        boolean updates = ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), r.getAttributes());
+        // CapacityType, NodegroupName, RemoteAccess, NodeRole, ClusterName, InstanceTypes, DiskSize,
+        // AmiType and Subnets are create-only in the registry: a change to one replaces the nodegroup.
+        PropertyChanges changes = updates ? ctx.changes(NODEGROUP, props) : null;
+        boolean replaces = changes != null && changes.requiresReplacement();
         String clusterName = ctx.resolveOptional(props, "ClusterName");
-        Nodegroup request = new Nodegroup();
+        String[] prior = updates ? nodegroupNames(ctx.priorPhysicalId(), r.getAttributes()) : null;
+        if (updates && prior == null) {
+            LOG.warnv("EKS nodegroup {0}: the prior physical id names no nodegroup, treated as gone",
+                    ctx.priorPhysicalId());
+        }
         String nodegroupName = ctx.resolveOptional(props, "NodegroupName");
         if (nodegroupName == null || nodegroupName.isBlank()) {
-            nodegroupName = ctx.generatePhysicalName(r.getLogicalId(), 100, false);
+            // The name is part of the physical id, so an update that replaces nothing keeps it rather
+            // than creating a second nodegroup and orphaning the first.
+            nodegroupName = prior != null && !replaces ? prior[1]
+                    : ctx.generatePhysicalName(r.getLogicalId(), 100, false);
         }
+        if (replaces && ctx.reusesPriorEntity(clusterName + "/" + nodegroupName)) {
+            throw CfnExceptions.customNamedReplacement(nodegroupName);
+        }
+        Nodegroup live = prior != null && !replaces ? liveNodegroup(prior[0], prior[1]) : null;
+        if (live != null) {
+            updateNodegroupInPlace(r, props, ctx, live, changes);
+            return;
+        }
+        Nodegroup request = new Nodegroup();
         request.setNodegroupName(nodegroupName);
         request.setNodeRole(ctx.resolveOptional(props, "NodeRole"));
         request.setSubnets(ctx.resolveStringList(props, "Subnets"));
+        Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
+        request.setTags(ReservedTags.stripReservedTags(templateTags));
 
         Nodegroup nodegroup = eksService.createNodeGroup(clusterName, request);
+        // The nodegroup this resource named before is gone or replaced; its attributes must not outlive it.
+        NODEGROUP_ATTRIBUTES.forEach(r.getAttributes()::remove);
+        publishNodegroup(r, nodegroup);
+        Ec2Tags.recordKeys(r, NODEGROUP_TAG_KEYS_ATTR, templateTags);
+        if (updates && !replaces) {
+            // The nodegroup the update started from is gone, so this one is the update's to undo.
+            CfnRollback.recordCreatedByUpdate(r, ctx, NODEGROUP_SNAPSHOT_ATTR);
+        }
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.record(r, ctx, attributesBefore, replaces);
+        }
+    }
+
+    private void publishNodegroup(StackResource r, Nodegroup nodegroup) {
         // Ref (and the readOnly Id) is the composite the registry primary identifier declares,
         // clusterName/nodegroupName, matching AWS. The plain names stay as their own attributes:
         // ClusterName and NodegroupName back delete() and Fn::GetAtt.
@@ -287,23 +446,56 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * {clusterName, nodegroupName} of a nodegroup: from the composite physical id, or, for a plain
+     * name a stack from before the composite id holds, from the {@code ClusterName} and
+     * {@code NodegroupName} attributes. Null when neither names it.
+     */
+    private static String[] nodegroupNames(String physicalId, Map<String, String> attributes) {
+        int slash = physicalId == null ? -1 : physicalId.indexOf('/');
+        if (slash > 0 && slash < physicalId.length() - 1) {
+            return new String[] {physicalId.substring(0, slash), physicalId.substring(slash + 1)};
+        }
+        String cluster = attributes.get("ClusterName");
+        String nodegroup = attributes.get("NodegroupName");
+        if (cluster != null && !cluster.isBlank() && nodegroup != null && !nodegroup.isBlank()) {
+            return new String[] {cluster, nodegroup};
+        }
+        return null;
+    }
+
+    private void deleteNodegroup(String physicalId, Map<String, String> attributes) {
+        String[] names = nodegroupNames(physicalId, attributes);
+        if (names == null) {
+            LOG.warnv("EKS nodegroup {0}: no cluster and nodegroup name to delete it by, treated as gone", physicalId);
+            return;
+        }
+        CfnDeletes.safeDelete("EKS nodegroup", physicalId, () -> eksService.deleteNodeGroup(names[0], names[1]),
+                "ResourceNotFoundException");
+    }
+
+    /** The nodegroup an update starts from, or null when it or its cluster is gone and the update creates one. */
+    private Nodegroup liveNodegroup(String clusterName, String nodegroupName) {
+        return orNullWhenGone(() -> eksService.describeNodeGroup(clusterName, nodegroupName));
+    }
+
+    /**
+     * The update AWS makes for the properties it does not replace on: the nodegroup keeps its name.
+     * EksService has no UpdateNodegroupConfig or UpdateNodegroupVersion, so the one mutable property
+     * floci honors is Tags; a change to any other updatable property is accepted with a warning.
+     */
+    private void updateNodegroupInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Nodegroup live,
+                                        PropertyChanges changes) {
+        warnIgnoredChanges("nodegroup", live.getNodegroupName(), changes);
+        updateTagsInPlace(r, props, ctx, live.getNodegroupArn(), live.getTags(), live.getNodegroupName(),
+                NODEGROUP_TAG_KEYS_ATTR, NODEGROUP_SNAPSHOT_ATTR, () -> publishNodegroup(r, live), false);
+    }
+
     @Override
     public void delete(StackResource resource, String region) {
         switch (resource.getResourceType()) {
             case CLUSTER -> delete(CLUSTER, resource.getPhysicalId(), region);
-            case NODEGROUP -> {
-                // Deleting a nodegroup needs the cluster name and the nodegroup name, both stored as
-                // create-time attributes; the physical id is now the composite clusterName/nodegroupName,
-                // so it cannot be passed as the nodegroup name.
-                String clusterName = resource.getAttributes().get("ClusterName");
-                String nodegroupName = resource.getAttributes().get("NodegroupName");
-                if (clusterName != null && !clusterName.isBlank()
-                        && nodegroupName != null && !nodegroupName.isBlank()) {
-                    CfnDeletes.safeDelete("EKS nodegroup", resource.getPhysicalId(),
-                            () -> eksService.deleteNodeGroup(clusterName, nodegroupName),
-                            "ResourceNotFoundException");
-                }
-            }
+            case NODEGROUP -> deleteNodegroup(resource.getPhysicalId(), resource.getAttributes());
             default -> {
                 // No other type reaches this provisioner's delete.
             }

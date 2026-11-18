@@ -214,12 +214,12 @@ cross-resource references.
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
-| KMS | `Key`, `Alias` |
+| KMS | `Key` (created with `Description`, `KeyPolicy`, `KeySpec`, `KeyUsage`, `Origin`, `MultiRegion`, `Enabled`, `EnableKeyRotation` and `Tags`; updated in place for `Description`, `KeyPolicy`, `Enabled`, `EnableKeyRotation` and `Tags`, keeping tags added outside the stack; a template that drops `Description`, `Enabled` or `EnableKeyRotation` clears the description, enables the key and turns rotation off, a dropped `KeyPolicy` keeps the current policy, and one the stack never declared keeps the value set outside it; a rotation change on a key that stays disabled fails, as AWS raises `DisabledException`; a change to `KeySpec`, `KeyUsage`, `Origin` or `MultiRegion` fails the update, as on AWS, and the stack rolls back), `Alias` |
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
 | EFS | `FileSystem` (metadata only, there is no NFS data plane), `MountTarget` (`SecurityGroups` update in place, every other property replaces), `AccessPoint` (`AccessPointTags` update in place, every other property replaces) |
-| EKS | `Cluster` (created with `Name`, `Version`, `RoleArn` and `Tags`, a replacement included; `EncryptionConfig` and `KubernetesNetworkConfig` are accepted and ignored on create; updated in place for `Tags`, keeping tags added outside the stack; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version` is accepted with a warning and not applied, as the emulator cannot upgrade a cluster in place), `Nodegroup` |
+| EKS | `Cluster` (created with `Name`, `Version`, `RoleArn`, `Tags`, `EncryptionConfig`, `ResourcesVpcConfig`, `Logging`, `AccessConfig` and `KubernetesNetworkConfig.IpFamily` and `ServiceIpv4Cidr`, a replacement included; a change to `EncryptionConfig`, `IpFamily` or `ServiceIpv4Cidr` replaces the cluster with the new value applied; `ElasticLoadBalancing`, `ServiceIpv6Cidr` and `ResourcesVpcConfig.ControlPlaneEgressMode` are accepted and ignored; updated in place for `Tags`, keeping tags added outside the stack; a change to `Name`, `RoleArn`, `EncryptionConfig`, `BootstrapSelfManagedAddons`, `OutpostConfig`, `AccessConfig.BootstrapClusterCreatorAdminPermissions`, `KubernetesNetworkConfig.IpFamily` or `KubernetesNetworkConfig.ServiceIpv4Cidr` replaces the cluster, as the registry marks them create-only, and deletes the old one once the update commits; a change to `Version`, `ResourcesVpcConfig`, `Logging` or `AccessConfig` is accepted with a warning and not applied, as the emulator has no `UpdateClusterVersion` or `UpdateClusterConfig`), `Nodegroup` (created with `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets` and `Tags`; updated in place for `Tags`, keeping tags added outside the stack; a change to `ClusterName`, `NodegroupName`, `NodeRole`, `Subnets`, `AmiType`, `CapacityType`, `DiskSize`, `InstanceTypes` or `RemoteAccess` replaces the nodegroup, as the registry marks them create-only, and deletes the old one once the update commits; `ScalingConfig`, `Labels`, `Taints`, `UpdateConfig`, `Version`, `ReleaseVersion`, `ForceUpdateEnabled`, `LaunchTemplate`, `NodeRepairConfig` and `WarmPoolConfig` are accepted and not applied, whether changed or dropped, with a warning, as the emulator cannot update a nodegroup in place) |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
 | Aurora DSQL | `Cluster` |
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `ReplicationGroup` (starts a real container; modifying an existing group in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
@@ -231,7 +231,7 @@ cross-resource references.
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
 | Route 53 | `HostedZone`, `RecordSet`, `RecordSetGroup` (written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group's hosted zone), `HealthCheck` |
 | Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
-| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
+| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer` (created with `Name`, `Type`, `AuthorizerUri`, `IdentitySource`, `AuthorizerResultTtlInSeconds` and `ProviderARNs`; updated in place for those, keeping the id; a template that drops `AuthorizerResultTtlInSeconds`, `IdentitySource` or `ProviderARNs` restores the TTL of 300 and clears the identity source and the pools, a dropped `AuthorizerUri` keeps the current one, and dropping `IdentitySource` from a `TOKEN` or `COGNITO_USER_POOLS` authorizer fails the resource, as AWS requires it there; a change to `RestApiId` replaces the authorizer, as the registry marks it create-only, and deletes the old one once the update commits; `AuthorizerCredentials`, `AuthType` and `IdentityValidationExpression` are not stored), `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
 | API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `DomainName`, `ApiMapping`, `VpcLink` |
 | AppSync | `GraphQLApi`, `GraphQLSchema`, `DataSource`, `FunctionConfiguration`, `Resolver`, `ApiKey`. `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS. |
 | AppConfig | `Application`, `Environment` (`Tags` and `DeletionProtectionCheck` are accepted and not stored), `ConfigurationProfile` (`Tags`, `KmsKeyIdentifier`, `RetrievalRoleArn`, `Validators` and `DeletionProtectionCheck` are accepted and not stored), `DeploymentStrategy` (`Tags` are accepted and not stored; `ReplicateTo: SSM_DOCUMENT` writes no SSM document). `Ref` returns the AppConfig ID of each. See [AppConfig](appconfig.md#cloudformation) for updates and replacement. |
@@ -256,6 +256,7 @@ cross-resource references.
 | CloudWatch Logs | `LogGroup`, `LogStream`, `MetricFilter` |
 | WAFv2 | `IPSet`, `LoggingConfiguration`, `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
+| Amazon Bedrock | `ApplicationInferenceProfile` (Ref returns the profile id; InferenceProfileArn and InferenceProfileId are available through GetAtt) |
 | Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN; Tags are accepted and not stored), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
 | CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `StackSet`, `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CloudTrail | `Trail` |
@@ -345,6 +346,18 @@ its tag keys keeps a key an older template dropped. When a later resource fails 
 tags the bus had before it are put back. Changing `Description` or `Policy` during `UpdateStack` is
 rejected until transactional resource rollback is available; this prevents a failed stack update
 from leaving the live bus in the rejected configuration.
+
+## EventBridge rules
+
+`AWS::Events::Rule` reports a rule on the default event bus by its name, and a rule on a custom event
+bus as `<event bus name>|<rule name>`, in `Ref` and in `DescribeStackResources`, as AWS's resource
+provider for the type does. A bus given by ARN counts by its name when it is in the stack's account,
+and keeps its ARN, `<event bus ARN>|<rule name>`, when it is in another account. EventBridge's own
+operations take the rule name and the bus separately, so split the value at the `|` before calling
+`DescribeRule` or `DeleteRule`. `Fn::GetAtt` still gives `RuleName` and `Arn`. A rule saved by an
+earlier Floci keeps its bare name as its id until an update changes the rule. An update that moves a
+rule to another bus, or renames it, creates the rule on that bus or under that name and leaves the
+old rule where it was.
 
 ## EventBridge archives
 
@@ -879,8 +892,8 @@ A property the previous template declared and the new template drops is cleared 
 goes back to its create default, or is kept, on the AppSync resources, the EC2 networking types
 (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`), an
 `AWS::ApiGatewayV2::Stage`, `Route` and `Authorizer`, an `AWS::EC2::Instance`, an `AWS::ECS::Service`, an
-`AWS::Lambda::Alias`, an `AWS::SecretsManager::Secret`, an `AWS::Cognito::UserPoolGroup` and an
-`AWS::CloudTrail::Trail`. Kept: required members (`AuthenticationType`, `Type`, a function's
+`AWS::Lambda::Alias`, an `AWS::SecretsManager::Secret`, an `AWS::Cognito::UserPoolGroup`, an
+`AWS::CloudTrail::Trail` and an `AWS::KMS::Key`. Kept: required members (`AuthenticationType`, `Type`, a function's
 `DataSourceName`, a `Route`'s `RouteKey`, an authorizer's `Name` and `AuthorizerType`), a data source's
 and a function's `Name`,
 an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
@@ -900,8 +913,9 @@ dropped `Target` and `AuthorizerId`, and an `Authorizer`'s dropped `AuthorizerUr
 while the route's authorization type stays `JWT` or `CUSTOM`. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An `Alias`'s, a `Secret`'s and a `UserPoolGroup`'s dropped `Description` and a `Trail`'s dropped
-`S3KeyPrefix` are cleared. A dropped `RoutingConfig` removes the alias weights. The other members of
-those four types are kept or create-only when dropped, as the drop policy table lists them, except a
+`S3KeyPrefix` are cleared. A dropped `RoutingConfig` removes the alias weights. A key's dropped `Description` is cleared, its dropped `Enabled` enables it and its dropped
+`EnableKeyRotation` turns rotation off; a dropped `KeyPolicy` keeps the policy. The other members of
+those five types are kept or create-only when dropped, as the drop policy table lists them, except a
 `Secret`'s `Tags`, which every update drives to the template.
 An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName`, or a `Route`'s or
 `Authorizer`'s `ApiId`, fails. Create-only members are not cleared either.

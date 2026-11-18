@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.globalaccelerator.model.Accelerator;
 import io.floci.aws.services.globalaccelerator.model.AcceleratorAttributes;
@@ -12,12 +13,14 @@ import io.floci.aws.services.globalaccelerator.model.EndpointGroup;
 import io.floci.aws.services.globalaccelerator.model.Listener;
 import io.floci.aws.services.globalaccelerator.model.PortOverride;
 import io.floci.aws.services.globalaccelerator.model.PortRange;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -49,6 +52,49 @@ class GlobalAcceleratorServiceTest {
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory(ACCOUNT));
 
         service = new GlobalAcceleratorService(storageFactory, regionResolver);
+    }
+
+    /**
+     * IAM's lookup reads the tags of the accelerator or the listener the ARN names, as the tag calls leave them, and
+     * nothing for a deleted accelerator, another account's or an unknown ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheResourceTheArnNames() {
+        Accelerator accelerator = service.createAccelerator("edge", null, null, false, Map.of("team", "web"));
+        String arn = accelerator.getAcceleratorArn();
+        service.tagResource(arn, Map.of("team", "data", "env", "dev"));
+        service.untagResource(arn, List.of("env"));
+        Listener listener = service.createListener(arn, portRange(80, 80), "TCP", null);
+        service.tagResource(listener.getListenerArn(), Map.of("team", "ops"));
+        Accelerator deleted = service.createAccelerator("gone", null, null, false, Map.of("team", "data"));
+        service.deleteAccelerator(deleted.getAcceleratorArn());
+
+        assertEquals("globalaccelerator", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Map.of("team", "ops"), service.storedTags(listener.getListenerArn()));
+        assertTrue(service.storedTags(deleted.getAcceleratorArn()).isEmpty());
+        assertTrue(service.storedTags(arn.replace(ACCOUNT, "111122223333")).isEmpty());
+        assertTrue(service.storedTags(arn + "0").isEmpty());
+        assertTrue(service.storedTags("arn:aws:s3:::edge").isEmpty());
+    }
+
+    /** An accelerator stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareAcceleratorInPlace() {
+        InMemoryStorage<String, Accelerator> rawAccelerators = new InMemoryStorage<>();
+        InMemoryStorage<String, Map<String, String>> rawTags = new InMemoryStorage<>();
+        GlobalAcceleratorService legacyState = new GlobalAcceleratorService(new InMemoryStorageFactory(ACCOUNT)
+                .withStore("globalaccelerator-accelerators.json", rawAccelerators)
+                .withStore("globalaccelerator-tags.json", rawTags), new RegionResolver("us-east-1", ACCOUNT));
+        String arn = "arn:aws:globalaccelerator::" + ACCOUNT + ":accelerator/legacy";
+        Accelerator legacy = new Accelerator();
+        legacy.setAcceleratorArn(arn);
+        rawAccelerators.put(arn, legacy);
+        rawTags.put(arn, Map.of("team", "data"));
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(arn));
+        assertEquals(Set.of(arn), rawAccelerators.keys());
+        assertEquals(Set.of(arn), rawTags.keys());
     }
 
     @Test

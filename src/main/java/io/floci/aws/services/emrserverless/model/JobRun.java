@@ -27,7 +27,7 @@ public class JobRun {
     private String releaseLabel;
     private Map<String, Object> configurationOverrides;
     private JobDriver jobDriver;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private NetworkConfiguration networkConfiguration;
     private Integer totalExecutionDurationSeconds;
     private Long executionTimeoutMinutes;

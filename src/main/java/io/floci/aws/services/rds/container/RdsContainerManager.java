@@ -219,7 +219,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). RDS metadata operations "
-                        + "keep working and DB instances still reach 'available', but they have no "
+                        + "keep working and DB instances still reach ''available'', but they have no "
                         + "backing database container until a daemon becomes reachable.",
                         e.getMessage());
             }
@@ -935,6 +935,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam') THEN
                         CREATE ROLE rds_iam;
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication') THEN
+                        CREATE ROLE rds_replication;
+                    END IF;
                 END
                 $$;
                 """;
@@ -1554,7 +1557,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
                 # Replay the dump connected to postgres
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -f /tmp/dump.sql
-                """;
+
+                # A dump taken before Floci created a predefined role does not recreate it
+                psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres <<'SQL'
+                """ + postgresIamRoleInitSql() + "SQL\n";
     }
 
     private static void addTarEntry(

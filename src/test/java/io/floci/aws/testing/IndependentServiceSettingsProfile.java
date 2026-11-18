@@ -61,6 +61,22 @@ import java.util.Map;
  *   {@code floci.services.bedrock-runtime.proxy.passthrough=true} passes the model id through
  *   unmapped, so a call gets as far as that URL.
  *   {@code BedrockProxyInvalidUrlIntegrationTest} relies on all three.</li>
+ *   <li>{@code floci.services.elasticache.shell-less-backend=true} runs the ElastiCache backend the
+ *   way an image with no shell and no CLI needs, here with the default Valkey image.
+ *   {@code ElastiCacheShellLessClusterIntegrationTest} relies on it.</li>
+ *   <li>{@code floci.protocols.strict-claiming=true} rejects an RPC-signaled request that no
+ *   supported wire protocol claims, and leaves REST and well-formed RPC traffic untouched.
+ *   {@code StrictProtocolClaimingIntegrationTest} and {@code SwfLegacyProtocolIntegrationTest} rely
+ *   on it.</li>
+ *   <li>{@code floci.services.servicequotas.standard-on-demand-vcpus=7} is what GetServiceQuota
+ *   reports as the applied value of the standard On-Demand vCPU quota.
+ *   {@code ServiceQuotasAppliedValueIntegrationTest} relies on it. EC2 only enforces that quota
+ *   when {@code floci.services.ec2.enforce-vcpu-quotas} is on, which it is not here, so
+ *   {@code Ec2VolumeBlockDeviceDockerIntegrationTest}'s instances never meet it.</li>
+ *   <li>{@code floci.services.elbv2.mock=false} runs the real ELBv2 data plane, so a listener
+ *   forwards to its targets, and {@code floci.services.elbv2.backend-keep-alive=false} opens a
+ *   fresh connection to the target for every request it forwards.
+ *   {@code ElbV2BackendNoKeepAliveIntegrationTest} relies on both.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes. Each one is read by a single service: the
@@ -68,9 +84,12 @@ import java.util.Map;
  * Neptune cluster creation, Route53 VPC association and authorization, CloudFront origin fetches,
  * Cognito app client validation, the Scheduler dispatcher, the RDS Data API and Aurora auto-pause,
  * Firehose delivery, the Lambda runtime image resolver, the IoT MQTT broker, EC2, SageMaker
- * training jobs and Bedrock Runtime. Each class is the only one here that calls its service, so no
- * override reaches another class. Route53 and RDS do look VPCs and subnets up in EC2, but only
- * read what EC2 has stored, which does not change with EC2 mocked or not.
+ * training jobs, Bedrock Runtime, ElastiCache, Service Quotas and the ELBv2 data plane, which
+ * only acts once a class creates a listener or registers a target. Each class is the only one here
+ * that calls its service, so no override reaches another class. Strict claiming is read for every
+ * request, but only changes the answer to an RPC-signaled request no protocol claims, which only
+ * the two protocol classes send. Route53, RDS and ELBv2 do look VPCs and subnets up in EC2, but
+ * only read what EC2 has stored, which does not change with EC2 mocked or not.
  *
  * <p>Each class also deletes what it creates, so a class that joins later finds nothing left
  * behind. The one exception is the training jobs {@code SageMakerGpuIntegrationTest} starts:
@@ -110,7 +129,12 @@ public class IndependentServiceSettingsProfile implements QuarkusTestProfile {
                 Map.entry("floci.services.sagemaker.gpu.enabled", "true"),
                 Map.entry("floci.services.bedrock-runtime.backend", "proxy"),
                 Map.entry("floci.services.bedrock-runtime.proxy.url", "not a valid url"),
-                Map.entry("floci.services.bedrock-runtime.proxy.passthrough", "true")));
+                Map.entry("floci.services.bedrock-runtime.proxy.passthrough", "true"),
+                Map.entry("floci.services.elasticache.shell-less-backend", "true"),
+                Map.entry("floci.protocols.strict-claiming", "true"),
+                Map.entry("floci.services.servicequotas.standard-on-demand-vcpus", "7"),
+                Map.entry("floci.services.elbv2.mock", "false"),
+                Map.entry("floci.services.elbv2.backend-keep-alive", "false")));
         overrides.putAll(new YamlConfigSource("runtime-images", """
                 floci:
                   services:

@@ -93,7 +93,7 @@ public class ElastiCacheMemcachedContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "
-                        + "operations keep working and cache clusters still reach 'available', but "
+                        + "operations keep working and cache clusters still reach ''available'', but "
                         + "they have no backing Memcached container until a daemon becomes "
                         + "reachable.", e.getMessage());
             }

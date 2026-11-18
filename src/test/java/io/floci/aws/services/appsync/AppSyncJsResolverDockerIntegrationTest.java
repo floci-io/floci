@@ -1,6 +1,7 @@
 package io.floci.aws.services.appsync;
 
 import com.fasterxml.jackson.core.io.JsonStringEncoder;
+import io.floci.aws.testing.AppSyncRequests;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -10,11 +11,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -484,7 +483,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         apiId = createApi("js-" + UUID.randomUUID().toString().substring(0, 8));
         apiKey = createApiKey(apiId);
         startSchema(apiId, SCHEMA);
-        awaitSchemaSuccess(apiId);
+        AppSyncRequests.awaitSchemaSuccess(apiId, AUTH);
         createNoneDataSource(apiId, "local");
 
         String functionId = createFunction(apiId, "Query_getMessages_0", "local", PIPELINE_FUNCTION);
@@ -1005,13 +1004,6 @@ class AppSyncJsResolverDockerIntegrationTest {
             .post("/v1/apis/" + apiId + "/schemacreation")
         .then()
             .statusCode(200);
-    }
-
-    private static void awaitSchemaSuccess(String apiId) {
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(25)).until(() ->
-                "SUCCESS".equals(given().header("Authorization", AUTH)
-                    .when().get("/v1/apis/" + apiId + "/schemacreation")
-                    .then().statusCode(200).extract().path("status")));
     }
 
     private static void createNoneDataSource(String apiId, String name) {

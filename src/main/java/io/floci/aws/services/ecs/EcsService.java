@@ -2905,7 +2905,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * @param defaultPageSize the page size when the request names none, which is not the same for
-     *                        every listing: ListServices answers with ten, the rest with a hundred.
+     *                        every listing: ListServices and ListServicesByNamespace answer with ten,
+     *                        the rest with a hundred.
      */
     private static ListPage paginate(List<String> arns, Integer maxResults, String nextToken,
                                       int defaultPageSize) {
@@ -2926,11 +2927,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (nextToken == null || nextToken.isBlank()) {
             return 0;
         }
+        int offset;
         try {
-            return Integer.parseInt(Base64Url.decode(nextToken));
+            offset = Integer.parseInt(Base64Url.decode(nextToken));
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
         }
+        if (offset < 0) {
+            throw new AwsException("InvalidParameterException", "The nextToken is not valid.", 400);
+        }
+        return offset;
     }
 
     // ── Task Protection ───────────────────────────────────────────────────────
@@ -3127,6 +3133,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             svc.setAvailabilityZoneRebalancing(request.getAvailabilityZoneRebalancing() != null
                     ? request.getAvailabilityZoneRebalancing() : DEFAULT_AZ_REBALANCING_ON_CREATE);
             svc.setServiceConnectConfiguration(request.getServiceConnectConfiguration());
+            svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc, cluster, region));
             svc.setDeploymentConfiguration(request.getDeploymentConfiguration());
             svc.setEnableExecuteCommand(request.isEnableExecuteCommand());
             svc.setEnableECSManagedTags(request.isEnableECSManagedTags());
@@ -3319,6 +3326,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         && !serviceConnectConfiguration.equals(svc.getServiceConnectConfiguration());
                 if (serviceConnectConfiguration != null) {
                     svc.setServiceConnectConfiguration(serviceConnectConfiguration);
+                    svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc, cluster, region));
                 }
                 boolean taskDefChanged = false;
                 String platformVersionBefore = resolvePlatformVersion(svc.getPlatformVersion());
@@ -3615,12 +3623,57 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
     }
 
-    public List<String> listServicesByNamespace(String namespace, String region) {
-        return services.values().stream()
-                .filter(s -> namespace.equals(s.getNamespace()))
-                .filter(s -> !"INACTIVE".equals(s.getStatus()))
+    /**
+     * Lists the Region's services whose Service Connect configuration joined the namespace a name or ARN gives, its
+     * own or, when it names none, its cluster's default. Pages ten at a time when the request names no
+     * {@code maxResults}, as ListServices does.
+     */
+    public ListPage listServicesByNamespace(String namespace, Integer maxResults, String nextToken, String region) {
+        if (namespace == null || namespace.isBlank()) {
+            throw new AwsException("InvalidParameterException", "namespace can not be blank.", 400);
+        }
+        if (AwsArnUtils.looksLikeArn(namespace) && !isNamespaceArn(namespace)) {
+            throw new AwsException("InvalidParameterException", "Namespace is not a valid namespace ARN.", 400);
+        }
+        String namespaceArn = discoveryRegistrar == null ? null : discoveryRegistrar.namespaceArn(namespace, region);
+        if (namespaceArn == null) {
+            throw new AwsException("NamespaceNotFoundException", "Failed to retrieve namespace for " + namespace, 400);
+        }
+        List<String> arns = services.entrySet().stream()
+                .filter(e -> e.getKey().startsWith(region + "::"))
+                .map(Map.Entry::getValue)
+                .filter(svc -> !"INACTIVE".equals(svc.getStatus()))
+                .filter(svc -> namespaceArn.equals(svc.getServiceConnectNamespaceArn()))
                 .map(EcsServiceModel::getServiceArn)
                 .toList();
+        return paginate(arns, maxResults, nextToken, DEFAULT_SERVICE_PAGE_SIZE);
+    }
+
+    private static boolean isNamespaceArn(String value) {
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
+            return "servicediscovery".equals(arn.service()) && arn.resource().startsWith("namespace/");
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The ARN of the namespace the service's enabled Service Connect configuration joins, its own or its cluster's
+     * default; null when it joins none.
+     */
+    private String serviceConnectNamespaceArn(EcsServiceModel svc, EcsCluster cluster, String region) {
+        Map<String, Object> config = svc.getServiceConnectConfiguration();
+        if (discoveryRegistrar == null || config == null || !Boolean.TRUE.equals(config.get("enabled"))) {
+            return null;
+        }
+        Object namespace = config.get("namespace");
+        if (namespace == null || namespace.toString().isBlank()) {
+            Map<String, Object> defaults = cluster == null ? null : cluster.getServiceConnectDefaults();
+            namespace = defaults == null ? null : defaults.get("namespace");
+        }
+        return namespace == null || namespace.toString().isBlank()
+                ? null : discoveryRegistrar.namespaceArn(namespace.toString(), region);
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
@@ -5332,6 +5385,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setServiceRegistries(revision.getServiceRegistries());
         svc.setNetworkConfiguration(revision.getNetworkConfiguration());
         svc.setServiceConnectConfiguration(revision.getServiceConnectConfiguration());
+        svc.setServiceConnectNamespaceArn(serviceConnectNamespaceArn(svc, resolveClusterByArn(svc.getClusterArn()),
+                serviceRegion(svc)));
         svc.setDeploymentId("ecs-svc/" + taskSetId);
         svc.setLastDeploymentAt(revision.getCreatedAt());
         svc.setLastCompletedDeploymentId(null);
@@ -6576,7 +6631,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * task does ({@link #taskRegion}): it breaks no lookup, and it is seen in one region rather than all.
      */
     private String regionOf(TaskDefinition td) {
-        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(td.getTaskDefinitionArn());
     }
 
     /**

@@ -38,6 +38,9 @@ public class EmrNotebookExecution {
     private String lastStateChangeReason;
     private String region;
     private long sequence;
+    // Where its run wrote the notebook as run, and whether Floci runs it on its cluster, as in the docker runner mode.
+    private String outputNotebookUri;
+    private boolean containerExecution;
 
     public EmrNotebookExecution() {}
 
@@ -103,4 +106,8 @@ public class EmrNotebookExecution {
     public void setRegion(String region) { this.region = region; }
     public long getSequence() { return sequence; }
     public void setSequence(long sequence) { this.sequence = sequence; }
+    public String getOutputNotebookUri() { return outputNotebookUri; }
+    public void setOutputNotebookUri(String outputNotebookUri) { this.outputNotebookUri = outputNotebookUri; }
+    public boolean isContainerExecution() { return containerExecution; }
+    public void setContainerExecution(boolean containerExecution) { this.containerExecution = containerExecution; }
 }

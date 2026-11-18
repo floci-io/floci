@@ -2,9 +2,9 @@ package io.floci.aws.services.sagemaker;
 
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -16,8 +16,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
@@ -56,35 +54,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 // The training job may poll for up to 300 s plus the image pull, past the suite's 2-minute default.
 @Timeout(value = 10, unit = TimeUnit.MINUTES)
-@TestProfile(SageMakerGpuDockerIntegrationTest.GpuHardwareProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class SageMakerGpuDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(SageMakerGpuDockerIntegrationTest.class);
 
     private static final String ENABLED_PROPERTY = "gpu.integration.enabled";
-    private static final String CDI_DEVICE_PROPERTY = "gpu.integration.cdi-device";
+    private static final String CDI_DEVICE_PROPERTY = CloudFormationSettingsProfile.SAGEMAKER_GPU_CDI_DEVICE_PROPERTY;
     private static final String IMAGE_PROPERTY = "gpu.integration.image";
     private static final String DEFAULT_IMAGE = "docker.io/nvidia/cuda:12.8.1-base-ubuntu24.04";
-
-    /**
-     * Mirrors the deployment-side configuration the feature documents. A named device selects
-     * {@code cdi} mode and the allowlist; with none, {@code count} lets the daemon choose.
-     */
-    public static class GpuHardwareProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            Map<String, String> overrides = new HashMap<>();
-            overrides.put("floci.services.sagemaker.gpu.enabled", "true");
-            String device = System.getProperty(CDI_DEVICE_PROPERTY);
-            if (device != null && !device.isBlank()) {
-                overrides.put("floci.services.sagemaker.gpu.mode", "cdi");
-                overrides.put("floci.services.sagemaker.gpu.devices", device);
-            } else {
-                overrides.put("floci.services.sagemaker.gpu.mode", "count");
-            }
-            return overrides;
-        }
-    }
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/sagemaker/aws4_request";

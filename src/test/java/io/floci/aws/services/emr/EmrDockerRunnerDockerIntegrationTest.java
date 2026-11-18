@@ -10,7 +10,7 @@ import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
@@ -63,7 +63,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * CI pulls it (3.5 GB) the first time.
  */
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EmrDockerRunnerDockerIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();

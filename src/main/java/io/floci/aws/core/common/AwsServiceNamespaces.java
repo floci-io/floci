@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Every IAM service namespace, read once from the vendored {@code aws/iam-service-namespaces.json}.
@@ -34,6 +35,7 @@ public final class AwsServiceNamespaces {
 
     private static final class Holder {
         static final List<String> NAMESPACES = load();
+        static final Set<String> LOOKUP = Set.copyOf(NAMESPACES);
     }
 
     private AwsServiceNamespaces() {
@@ -48,6 +50,15 @@ public final class AwsServiceNamespaces {
      */
     public static List<String> all() {
         return Holder.NAMESPACES;
+    }
+
+    /**
+     * Whether AWS publishes {@code namespace} as a service namespace, for an operation that takes
+     * one from a caller and has to refuse what names no service. The test lives here rather than
+     * in the caller so the catalog is read in one place and nothing hand-maintains a second list.
+     */
+    public static boolean isPublished(String namespace) {
+        return namespace != null && Holder.LOOKUP.contains(namespace);
     }
 
     private static List<String> load() {

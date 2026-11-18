@@ -1206,7 +1206,7 @@ public class FirehoseService implements ResourceProvider, StoredResourceArns {
             // stream's Glue table would be missed and its objects would land in the wrong
             // partition. The sidecar follows the same context, so both sides stay together.
             RequestScopes.runAs(stream.getAccountId(),
-                    AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion()),
+                    regionResolver.regionOf(stream.getDeliveryStreamARN()),
                     () -> deliverBuffer(streamName, stream, toFlush, since, checkpoint));
         }
     }
@@ -1414,8 +1414,7 @@ public class FirehoseService implements ResourceProvider, StoredResourceArns {
         }
         Instant attemptStart = now;
         try {
-            String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
-                    regionResolver.getDefaultRegion());
+            String region = regionResolver.regionOf(stream.getDeliveryStreamARN());
             redshiftDelivery.requireLoadAccess(stream.getAccountId(), stream.getDeliveryStreamARN(), redshift,
                     pending.bucket, pending.key);
             redshiftDelivery.copy(stream.getAccountId(), region, redshift, pending.bucket, pending.key);
@@ -1548,7 +1547,7 @@ public class FirehoseService implements ResourceProvider, StoredResourceArns {
         S3Destination s3 = stream.s3Destination();
         boolean ownDestination = s3 != null && s3.bucketName() != null;
         String region = ownDestination
-                ? AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion())
+                ? regionResolver.regionOf(stream.getDeliveryStreamARN())
                 : regionResolver.getDefaultRegion();
         try {
             if (ownDestination) {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.lambda.durable.DurableFunctionInvoker.DurableInvocationResult;
 import io.floci.aws.services.lambda.durable.ScriptedDurableFunctionInvoker.Invocation;
+import io.floci.aws.testing.S3EnforceAuthProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
@@ -34,9 +35,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Plays the Durable Execution SDK over the REST API while a scripted stand-in holds the function
  * invocation open, so the checkpoint protocol is exercised end to end without a container.
+ * {@link S3EnforceAuthProfile} swaps that stand-in in.
  */
 @QuarkusTest
-@TestProfile(LambdaDurableScriptedProfile.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class LambdaDurableProtocolIntegrationTest {
 
     private static final String LAMBDA = "/2015-03-31";

@@ -274,7 +274,8 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
         return new SecretTargetConnection(
                 instance.getEngine().name().toLowerCase(Locale.ROOT),
                 instance.getEndpoint().address(),
-                instance.getEndpoint().port(),
+                // Where clients connect, which differs from the endpoint while it advertises the requested Port.
+                rdsService.connectablePort(instance),
                 instance.getDbName(),
                 "dbInstanceIdentifier",
                 instance.getDbInstanceIdentifier());
@@ -293,7 +294,7 @@ public class SecretTargetAttachmentCfnProvisioner implements CfnResourceProvisio
         return new SecretTargetConnection(
                 cluster.getEngine().name().toLowerCase(Locale.ROOT),
                 cluster.getEndpoint().address(),
-                cluster.getEndpoint().port(),
+                rdsService.connectablePort(cluster),
                 cluster.getDatabaseName(),
                 "dbClusterIdentifier",
                 cluster.getDbClusterIdentifier());

@@ -10,7 +10,8 @@ import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.AccessKey;
 import software.amazon.awssdk.services.iam.model.IamException;
 
-import java.util.ArrayList;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,23 +31,24 @@ class IamPolicyArnConditionTest {
     void policyArnConditionsControlAttachmentsAndPreserveDeniedState(String kind) {
         String target = TestFixtures.uniqueName("sdk-policy-target");
         String caller = TestFixtures.uniqueName("sdk-policy-caller");
-        List<Runnable> cleanup = new ArrayList<>();
+        Deque<Runnable> cleanup = new ArrayDeque<>();
+        Throwable failure = null;
         try (IamClient root = TestFixtures.iamClient()) {
             try {
                 String policy = root.createPolicy(b -> b.policyName(TestFixtures.uniqueName("sdk-policy"))
                         .policyDocument(DOCUMENT)).policy().arn();
-                cleanup.add(() -> root.deletePolicy(b -> b.policyArn(policy)));
+                cleanup.push(() -> root.deletePolicy(b -> b.policyArn(policy)));
                 String resource = createTarget(root, kind, target);
-                cleanup.add(() -> {
+                cleanup.push(() -> {
                     for (String arn : attached(root, kind, target)) {
                         change(root, kind, target, arn, false);
                     }
                     deleteTarget(root, kind, target);
                 });
                 root.createUser(b -> b.userName(caller));
-                cleanup.add(() -> root.deleteUser(b -> b.userName(caller)));
+                cleanup.push(() -> root.deleteUser(b -> b.userName(caller)));
                 AccessKey key = root.createAccessKey(b -> b.userName(caller)).accessKey();
-                cleanup.add(() -> root.deleteAccessKey(b -> b.userName(caller).accessKeyId(key.accessKeyId())));
+                cleanup.push(() -> root.deleteAccessKey(b -> b.userName(caller).accessKeyId(key.accessKeyId())));
                 try (IamClient client = IamClient.builder().endpointOverride(TestFixtures.endpoint())
                         .region(Region.US_EAST_1).credentialsProvider(StaticCredentialsProvider.create(
                                 AwsBasicCredentials.create(key.accessKeyId(), key.secretAccessKey()))).build()) {
@@ -62,7 +64,7 @@ class IamPolicyArnConditionTest {
                     Assumptions.assumeTrue(enforcement, "IAM enforcement must be enabled");
                     String allowed = statement("Allow", kind, resource, policy);
                     root.putUserPolicy(b -> b.userName(caller).policyName("condition").policyDocument(document(allowed)));
-                    cleanup.add(() -> root.deleteUserPolicy(b -> b.userName(caller).policyName("condition")));
+                    cleanup.push(() -> root.deleteUserPolicy(b -> b.userName(caller).policyName("condition")));
                     change(client, kind, target, policy, true);
                     assertThat(attached(root, kind, target)).containsExactly(policy);
                     change(client, kind, target, policy, false);
@@ -77,22 +79,11 @@ class IamPolicyArnConditionTest {
                     assertDenied(() -> change(client, kind, target, policy, false));
                     assertThat(attached(root, kind, target)).containsExactly(policy);
                 }
+            } catch (Throwable t) {
+                failure = t;
+                throw t;
             } finally {
-                RuntimeException cleanupFailure = null;
-                for (int i = cleanup.size() - 1; i >= 0; i--) {
-                    try {
-                        cleanup.get(i).run();
-                    } catch (RuntimeException failure) {
-                        if (cleanupFailure == null) {
-                            cleanupFailure = failure;
-                        } else {
-                            cleanupFailure.addSuppressed(failure);
-                        }
-                    }
-                }
-                if (cleanupFailure != null) {
-                    throw cleanupFailure;
-                }
+                FixtureCleanup.run(cleanup, failure);
             }
         }
     }

@@ -393,6 +393,10 @@ floci:
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
     reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
+  request-log:
+    enabled: false                     # FLOCI_REQUEST_LOG_ENABLED: write every request and response as one JSON line (holds bodies, secrets included)
+    # file: ./floci-requests.jsonl     # FLOCI_REQUEST_LOG_FILE
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
@@ -423,6 +427,11 @@ floci:
     # Keep in step with the @WithDefault on EmulatorConfig.DockerConfig.imagePullTimeoutSeconds: a value
     # set here WINS over the annotation.
     image-pull-timeout-seconds: 300
+    # FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS: seconds between the log lines that report each Docker
+    # pool's leased, available and pending connections, its open streams by kind and the stream
+    # threads, written only while a pool is in use; 0 turns them off. Keep in step with the
+    # @WithDefault on EmulatorConfig.DockerConfig.poolGaugeIntervalSeconds: a value set here WINS over the annotation.
+    pool-gauge-interval-seconds: 60
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -604,6 +613,7 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # advertise-requested-port: false         # FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT; true = Describe* reports the requested Port, not the proxy port
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.
@@ -628,6 +638,13 @@ floci:
       port: 5432                                  # FLOCI_SERVICES_DSQL_PORT; the port every cluster endpoint is served on
       endpoint-suffix: localhost.floci.io         # FLOCI_SERVICES_DSQL_ENDPOINT_SUFFIX; endpoints are <id>.dsql.<region>.<suffix>
       image: "postgres:16-alpine"                 # FLOCI_SERVICES_DSQL_IMAGE
+      backend: docker                             # FLOCI_SERVICES_DSQL_BACKEND; docker (a container per cluster) or external (a PostgreSQL server that already runs)
+      external:
+        host:                                     # FLOCI_SERVICES_DSQL_EXTERNAL_HOST; required with backend external
+        port: 5432                                # FLOCI_SERVICES_DSQL_EXTERNAL_PORT
+        database: postgres                        # FLOCI_SERVICES_DSQL_EXTERNAL_DATABASE
+        username: postgres                        # FLOCI_SERVICES_DSQL_EXTERNAL_USERNAME
+        # password:                               # FLOCI_SERVICES_DSQL_EXTERNAL_PASSWORD; none by default
     redshift-data:
       enabled: true
       result-ttl-hours: 24
@@ -660,7 +677,7 @@ floci:
       cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
       step-duration-seconds: 0              # 0 = a step completes as soon as it starts
       cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
-      runner-mode: immediate                # docker = run bootstrap actions and steps in containers
+      runner-mode: immediate                # docker = run bootstrap actions, steps, sessions' servers and notebooks in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
@@ -989,6 +1006,7 @@ floci:
       job-completion-delay-seconds: 3
     fis:
       enabled: true
+      inject-api-any-service: false  # Let the aws:fis:inject-api-* actions target any service, not only ec2 and kinesis
     route53:
       enabled: true
       vpc-association-control-plane-delay-ms: 0

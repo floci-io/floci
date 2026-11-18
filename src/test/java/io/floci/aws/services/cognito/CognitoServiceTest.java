@@ -1869,6 +1869,26 @@ class CognitoServiceTest {
         assertEquals(Map.of("env", "test", "team", "platform"), service.listTagsForResource(pool.getArn()));
     }
 
+    /**
+     * IAM's tag lookup reads the tags of the user pool whose ARN it is given, as tag calls leave them; nothing for an
+     * ARN of another account or Region, or of no pool.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheUserPoolTheArnNames() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TaggedPool", "UserPoolTags", Map.of("env", "dev")),
+                "us-east-1"
+        );
+        service.tagResource(pool.getArn(), Map.of("team", "data"));
+        service.untagResource(pool.getArn(), List.of("env"));
+
+        assertEquals(Map.of("team", "data"), service.storedTags(pool.getArn()));
+        assertEquals(Map.of(), service.storedTags(pool.getArn().replace(":000000000000:", ":111122223333:")));
+        assertEquals(Map.of(), service.storedTags(pool.getArn().replace(":us-east-1:", ":eu-west-1:")));
+        assertEquals(Map.of(), service.storedTags(pool.getArn() + "x"));
+        assertEquals(Map.of(), service.storedTags("arn:aws:s3:::pool"));
+    }
+
     @Test
     void tagResourceRejectsReservedKey() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "TaggedPool"), "us-east-1");

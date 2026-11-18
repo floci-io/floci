@@ -125,7 +125,7 @@ public class EksPodIdentityAssociationService {
 
         String associationId = generateAssociationId();
         // The association lives in the cluster's region and account, which its ARN names.
-        String region = AwsArnUtils.regionOrDefault(cluster.getArn(), regionResolver.getDefaultRegion());
+        String region = regionResolver.regionOf(cluster.getArn());
         String accountId = AwsArnUtils.accountOrDefault(cluster.getArn(),
                 cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getDefaultAccountId());
         String associationArn = AwsArnUtils.Arn.of("eks", region, accountId,

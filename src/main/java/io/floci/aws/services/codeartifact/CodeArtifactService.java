@@ -5413,7 +5413,7 @@ public class CodeArtifactService implements Resettable {
         if (!isValidPackageToken(packageName) || !isValidPackageToken(version)
                 || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'' version ''{3}'': the namespace, name, "
-                    + "or version contains a character ('#', '/', or whitespace) a real CodeArtifact package "
+                    + "or version contains a character (''#'', ''/'', or whitespace) a real CodeArtifact package "
                     + "coordinate cannot have.", domain, repository, packageName, version);
             return;
         }
@@ -6219,7 +6219,7 @@ public class CodeArtifactService implements Resettable {
             long packageFenceSnapshot) {
         if (!isValidPackageToken(packageName) || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Skipping container-backed asset byte accounting for {0}/{1} package ''{2}'': namespace or "
-                    + "package name contains a character ('#', '/', or whitespace) a real CodeArtifact package "
+                    + "package name contains a character (''#'', ''/'', or whitespace) a real CodeArtifact package "
                     + "coordinate cannot have.", domain, repository, packageName);
             return;
         }
@@ -6289,7 +6289,7 @@ public class CodeArtifactService implements Resettable {
             String repository, String repositoryContainerId, String format, String namespace, String packageName) {
         if (!isValidPackageToken(packageName) || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Ignoring a native unpublish of {0}/{1} package ''{2}'': namespace or package name contains "
-                    + "a character ('#', '/', or whitespace) a real CodeArtifact package coordinate cannot have.",
+                    + "a character (''#'', ''/'', or whitespace) a real CodeArtifact package coordinate cannot have.",
                     domain, repository, packageName);
             return;
         }

@@ -34,6 +34,7 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.security.interfaces.RSAPublicKey;
 import java.time.Clock;
@@ -46,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -142,6 +144,15 @@ public class StsQueryHandler {
     public Response handle(String action, MultivaluedMap<String, String> params) {
         LOG.debugv("STS action: {0}", action);
 
+        // A session whose token will not fit is refused before anything is minted, on every
+        // operation that carries state into the token it mints.
+        if (PACKED_SESSION_OPERATIONS.contains(action)) {
+            AssembledSession session = assembledSession(params);
+            if (session.tooLarge()) {
+                return session.refusal();
+            }
+        }
+
         return switch (action) {
             case "AssumeRole"                  -> handleAssumeRole(params);
             case "GetCallerIdentity"           -> handleGetCallerIdentity(params);
@@ -224,9 +235,92 @@ public class StsQueryHandler {
                   .elem("Arn", assumedRoleArn)
                   .elem("AssumedRoleId", assumedRoleId)
                 .end("AssumedRoleUser")
-                .elem("PackedPolicySize", "0")
+                .elem("PackedPolicySize", assembledSession(params).utilization())
                 .build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRole", AwsNamespaces.STS, result)).build();
+    }
+
+    /**
+     * The one limit AWS enforces on a session token, which its refusal names as well. AWS "has
+     * replaced the packed policy size and the overall session token size limits with a single
+     * token size limit of 4,096 bytes": "the assembled session token must fit within 4,096 bytes",
+     * and "the separate packed policy limit, which made failures hard to predict, has been
+     * removed".
+     */
+    private static final int SESSION_TOKEN_LIMIT = 4096;
+
+    /** The operations that carry state into the token they mint and model the refusal for it. */
+    private static final Set<String> PACKED_SESSION_OPERATIONS = Set.of(
+            "AssumeRole", "AssumeRoleWithSAML", "AssumeRoleWithWebIdentity", "GetFederationToken");
+
+    /**
+     * What a request's session token comes to, and what that costs against the limit it is held
+     * to.
+     *
+     * <p>AWS "serializes and compresses your session policies and tags when assembling the token",
+     * refuses a token that will not fit with {@code PackedPolicyTooLarge} 400, whose "error
+     * message reports the session token size and the maximum allowed size, both in bytes", and
+     * reports what a session that does fit consumed: {@code SessionTokenUtilization} is "the
+     * percentage of the 4,096-byte limit consumed", and {@code PackedPolicySize} "now reports the
+     * same value as SessionTokenUtilization", kept "for backward compatibility" where the API
+     * reference calls it deprecated. This emulator refused nothing and published that member as a
+     * flat zero on every session, so a caller could neither see what its session cost nor be told
+     * it was over.
+     *
+     * <p>The measure is this emulator's own: the token it will mint for the request, whose length
+     * {@code MinimumSessionTokenSize} can ask to be raised, plus the state the request asks to
+     * carry into it, in UTF-8 bytes. AWS's assembly is unpublished and its size does not read off
+     * the input in either direction, since "compression results vary based on the actual content,
+     * not just its length" and "two sets of tags with identical character counts can produce
+     * different token sizes", while the one size recorded here ran larger than the bytes going in,
+     * 26092 for a request carrying about 19000. So this number will differ from AWS's, and
+     * {@code docs/services/iam.md} records the figure that was recorded so a later one can
+     * calibrate the reading.
+     */
+    private record AssembledSession(int bytes) {
+
+        boolean tooLarge() {
+            return bytes > SESSION_TOKEN_LIMIT;
+        }
+
+        /**
+         * The member's own unit, truncated as AWS's own recorded pair reports it: a token of 2532
+         * bytes is published as 61.
+         */
+        String utilization() {
+            return Integer.toString(bytes * 100 / SESSION_TOKEN_LIMIT);
+        }
+
+        Response refusal() {
+            return AwsQueryResponse.error("PackedPolicyTooLarge",
+                    "Serialized token too large for session. Token size of " + bytes
+                            + " bytes exceeds the maximum allowed limit of "
+                            + SESSION_TOKEN_LIMIT + " bytes.", AwsNamespaces.STS, 400);
+        }
+    }
+
+    /**
+     * What the request's token comes to: the length this emulator will mint for it, and the state
+     * it asks to carry, which is the inline document, every policy ARN, and every tag key and
+     * value. {@code TransitiveTagKeys} names tags already counted, so it adds nothing of its own,
+     * which is what AWS says of its own packing as well: "the transitive status of a session tag
+     * does not impact its packed binary size".
+     */
+    private AssembledSession assembledSession(MultivaluedMap<String, String> params) {
+        StringBuilder state = new StringBuilder();
+        String document = params.getFirst("Policy");
+        if (document != null) {
+            state.append(document);
+        }
+        for (AwsQueryLists.IndexedMember arn : AwsQueryLists.members(params, "PolicyArns", null)) {
+            String value = params.getFirst(arn.prefix() + ".arn");
+            if (value != null) {
+                state.append(value);
+            }
+        }
+        tagClaims(params).forEach((key, value) -> state.append(key).append(value));
+        return new AssembledSession(sessionTokenLength(params)
+                + state.toString().getBytes(StandardCharsets.UTF_8).length);
     }
 
     /**
@@ -242,8 +336,9 @@ public class StsQueryHandler {
      * GetSessionToken include MFA information, you can check for MFA in individual API operations
      * made by the credentials". A call that names either member is a claim of MFA and has to make
      * it good; what answers a claim that fails is the access denied AWS documents for the case,
-     * "an incorrect MFA code causes the API to return an access denied error", carrying the
-     * sentence the IAM actions already write for a code that does not match.
+     * "an incorrect MFA code causes the API to return an access denied error", in the two
+     * sentences {@link #mfaRefusal} carries, one for a serial that is not the caller's and one for
+     * a code that does not match the device it names.
      *
      * <p>The claim is read through the request's own holder rather than taken here, because the
      * policy for this call was evaluated before the operation ran and had to see the same device,
@@ -259,9 +354,27 @@ public class StsQueryHandler {
                 iamService.requestMfaClaim(requestContext, callerAccessKeyId(), serialNumber, tokenCode);
         if (claim.failed()) {
             return new MfaOutcome(null, AwsQueryResponse.error("AccessDenied",
-                    "Invalid MFA one time pass code.", AwsNamespaces.STS, 403));
+                    mfaRefusal(claim.failure()), AwsNamespaces.STS, 403));
         }
         return new MfaOutcome(claim.authenticatedAt(), null);
+    }
+
+    /**
+     * The sentence a failed MFA claim earns, which AWS words by which half of the claim failed.
+     * Both are 403 {@code AccessDenied} with a sender fault, both are wholly fixed text, and
+     * neither echoes the serial or the code: a caller is told which half to look at and nothing
+     * about the values it sent. Recorded on {@code GetSessionToken} against a real account, the
+     * serial half on 2026-10-29 and the code half on 2026-11-13, and each carries whitespace AWS
+     * itself emits, two spaces inside the first and a trailing space on the second.
+     *
+     * <p>{@code AssumeRole} takes the same pair through this seam and carries no recording of its
+     * own, so it answers the same two sentences, which is a reading rather than a measurement.
+     */
+    private static String mfaRefusal(RequestMfaClaim.Failure failure) {
+        return failure == RequestMfaClaim.Failure.SERIAL
+                ? "MultiFactorAuthentication failed, unable to validate MFA code.  "
+                        + "Please verify your MFA serial number is valid and associated with this user."
+                : "MultiFactorAuthentication failed with invalid MFA one time pass code. ";
     }
 
     /** The MFA a call authenticated, or the refusal it earned. */
@@ -306,7 +419,8 @@ public class StsQueryHandler {
         String callerAccount = regionResolver.getAccountId();
         IamService.CallerArns caller = iamService.resolveCallerArns(callerAccessKeyId())
                 .orElseGet(() -> IamService.CallerArns.accountRoot(
-                        regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount));
+                                regionResolver.buildGlobalArn("iam", callerAccount, "root"), callerAccount)
+                        .withOrganization(iamService.organizationContextOf(callerAccount).orElse(null)));
         if (mfa.authenticatedAt() != null) {
             // A device this call presented is this request's own authentication, which is how a
             // long-term key reaches a role whose trust policy "includes a condition that tests for
@@ -412,7 +526,7 @@ public class StsQueryHandler {
 
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {
         if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
-            return AwsQueryResponse.error("AccessDenied", "Cannot call GetSessionToken with session credentials",
+            return AwsQueryResponse.error("AccessDenied", IamService.sessionCredentialRefusal("GetSessionToken"),
                     AwsNamespaces.STS, 403);
         }
         Response integerMembers =
@@ -508,7 +622,7 @@ public class StsQueryHandler {
                   .elem("Arn", assumedRoleArn)
                   .elem("AssumedRoleId", assumedRoleId)
                 .end("AssumedRoleUser")
-                .elem("PackedPolicySize", "0")
+                .elem("PackedPolicySize", assembledSession(params).utilization())
                 .elem("Provider", provider)
                 .elem("Audience", audience)
                 .elem("SubjectFromWebIdentityToken", subject)
@@ -706,7 +820,7 @@ public class StsQueryHandler {
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
                 .start("AssumedRoleUser").elem("Arn", assumedRoleArn).elem("AssumedRoleId", assumedRoleId).end("AssumedRoleUser")
-                .elem("PackedPolicySize", "0").elem("Issuer", verified.issuer()).elem("Audience", "urn:amazon:webservices")
+                .elem("PackedPolicySize", assembledSession(params).utilization()).elem("Issuer", verified.issuer()).elem("Audience", "urn:amazon:webservices")
                 .elem("NameQualifier", verified.nameQualifier()).elem("SubjectType", verified.subjectType()).elem("Subject", verified.subject()).build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRoleWithSAML", AwsNamespaces.STS, result)).build();
     }
@@ -762,7 +876,7 @@ public class StsQueryHandler {
                   .elem("FederatedUserId", federatedUserId)
                   .elem("Arn", federatedUserArn)
                 .end("FederatedUser")
-                .elem("PackedPolicySize", "0")
+                .elem("PackedPolicySize", assembledSession(params).utilization())
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GetFederationToken", AwsNamespaces.STS, result)).build();
     }
@@ -1213,15 +1327,22 @@ public class StsQueryHandler {
     }
 
     /**
-     * The session token for a request: the length its {@code MinimumSessionTokenSize} asks for,
-     * never under the 200 characters this emulator mints by default. Every operation that models
-     * the member answers it from here, so the floor is written once, and the model holds the value
-     * to the 0 to 4096 it declares ahead of this. A request asking for less than the floor is
-     * answered with the floor, which is what "minimum" asks for.
+     * The session token for a request, the length {@link #sessionTokenLength} gives it. Every
+     * operation that models the member answers it from here, so the floor is written once.
      */
     private String sessionToken(MultivaluedMap<String, String> params) {
-        return randomSecret(Math.max(SESSION_TOKEN_LENGTH,
-                getIntParam(params, "MinimumSessionTokenSize", 0)));
+        return randomSecret(sessionTokenLength(params));
+    }
+
+    /**
+     * How long the token for a request will be: the length its {@code MinimumSessionTokenSize}
+     * asks for, never under the 200 characters this emulator mints by default, which is what a
+     * minimum asks for, and never over the limit a token is held to, so a value outside the 0 to
+     * 4096 the model declares is answered by the shape rather than read as a size here.
+     */
+    private int sessionTokenLength(MultivaluedMap<String, String> params) {
+        return Math.max(SESSION_TOKEN_LENGTH,
+                Math.min(getIntParam(params, "MinimumSessionTokenSize", 0), SESSION_TOKEN_LIMIT));
     }
 
     private String randomSecret(int length) {

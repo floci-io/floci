@@ -66,6 +66,7 @@ public class PaymentCryptographyKey {
     private String keyCertificatePem;
     private long createTimestamp;
     private long usageStartTimestamp;
+    private long usageStopTimestamp;
     private long deletePendingTimestamp;
     private long deleteTimestamp;
     private volatile Map<String, String> tags = new HashMap<>();
@@ -160,6 +161,12 @@ public class PaymentCryptographyKey {
     public long getUsageStartTimestamp() { return usageStartTimestamp; }
     public void setUsageStartTimestamp(long usageStartTimestamp) {
         this.usageStartTimestamp = usageStartTimestamp;
+    }
+
+    /** When the key was last stopped, zero while it has not been stopped. */
+    public long getUsageStopTimestamp() { return usageStopTimestamp; }
+    public void setUsageStopTimestamp(long usageStopTimestamp) {
+        this.usageStopTimestamp = usageStopTimestamp;
     }
 
     /** When the key is deleted, zero while it is not scheduled for deletion. */

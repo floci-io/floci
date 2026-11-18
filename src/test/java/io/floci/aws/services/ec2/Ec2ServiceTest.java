@@ -696,9 +696,12 @@ class Ec2ServiceTest {
         // CreateNetworkInterface now refuses an out-of-subnet primary, so the record is persisted
         // the way an older build left it.
         NetworkInterface legacy = service.createNetworkInterface(region, small.getSubnetId(), "legacy-addresses",
-                null, List.of("10.97.0.0", "10.97.0.15"), List.of(), List.of());
+                null, List.of("10.97.0.4", "10.97.0.5"), List.of(), List.of());
         legacy.setPrivateIpAddress("10.98.0.4");
-        legacy.getPrivateIpAddresses().getFirst().setPrivateIpAddress("10.98.0.4");
+        for (int index = 0; index < legacy.getPrivateIpAddresses().size(); index++) {
+            legacy.getPrivateIpAddresses().get(index).setPrivateIpAddress(
+                    index % 2 == 0 ? "10.97.0.0" : "10.97.0.15");
+        }
         interfaceStore.put(region + "::" + legacy.getNetworkInterfaceId(), legacy);
         assertEquals(11, service.describeSubnets(region, List.of(small.getSubnetId()), Map.of())
                 .getFirst().getAvailableIpAddressCount());
@@ -5013,6 +5016,21 @@ class Ec2ServiceTest {
         for (String unassignable : List.of("10.50.2.10", "10.50.1.1", "10.50.1.255", "not-an-ip")) {
             AwsException error = assertThrows(AwsException.class, () -> service.createNetworkInterface(
                     "us-east-1", subnetId, "bad", unassignable, List.of(), List.of(), List.of()));
+            assertEquals("InvalidParameterValue", error.getErrorCode(), unassignable);
+        }
+    }
+
+    @Test
+    void createNetworkInterfaceRefusesAnExplicitSecondaryTheSubnetCannotAssign() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+
+        for (String unassignable : List.of("10.50.2.10", "10.50.1.1", "10.50.1.255", "not-an-ip")) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createNetworkInterface(
+                    "us-east-1", subnetId, "bad-secondary", "10.50.1.70", List.of(unassignable),
+                    List.of(), List.of()));
             assertEquals("InvalidParameterValue", error.getErrorCode(), unassignable);
         }
     }

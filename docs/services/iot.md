@@ -172,6 +172,25 @@ Current limitations:
 - `connectivity.sessionExpiry` and the socket information of `filter.connectivity.includeSocketInformation` are not reported.
 - `managedFields` and `customFields` sent in the thing group configuration are checked (the custom fields for their types only) but not stored: `GetIndexingConfiguration` reports the managed fields the mode selects and no custom fields.
 
+## IoT Data API {#iot-data}
+
+The IoT Data plane answers on the same endpoint as the control plane. The notes under
+MVP 1 and MVP 2 above describe how each call behaves.
+
+| Action | Description |
+|---|---|
+| `GetThingShadow` | Read a thing's classic shadow, or a named one with `name` |
+| `UpdateThingShadow` | Update a thing's classic or named shadow |
+| `DeleteThingShadow` | Delete a thing's classic or named shadow |
+| `ListNamedShadowsForThing` | List a thing's named shadows |
+| `Publish` | Publish a message to an MQTT topic, retained with `retain=true` |
+| `GetRetainedMessage` | Read the retained message of a topic |
+| `ListRetainedMessages` | List retained messages, paginated |
+| `GetConnection` | Read a live MQTT client session |
+| `DeleteConnection` | Close a live MQTT client session |
+| `ListSubscriptions` | List the topic subscriptions of a live MQTT client session |
+| `SendDirectMessage` | Send a message to a connected client's topic, delivered to that topic's subscribers |
+
 ## MQTT Broker
 
 Status: complete.

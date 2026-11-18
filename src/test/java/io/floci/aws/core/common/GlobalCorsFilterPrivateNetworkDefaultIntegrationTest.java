@@ -1,6 +1,6 @@
 package io.floci.aws.core.common;
 
-import io.floci.aws.testing.ExtraCorsOriginProfile;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -16,7 +16,7 @@ import static org.hamcrest.Matchers.nullValue;
  * {@code cors-allow-private-network} stays at its off default.
  */
 @QuarkusTest
-@TestProfile(ExtraCorsOriginProfile.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class GlobalCorsFilterPrivateNetworkDefaultIntegrationTest {
 
     @BeforeAll
@@ -27,14 +27,14 @@ class GlobalCorsFilterPrivateNetworkDefaultIntegrationTest {
     @Test
     void privateNetworkAccessNotGrantedByDefault() {
         given()
-            .header("Origin", ExtraCorsOriginProfile.ORIGIN)
+            .header("Origin", ContainerBackedEc2Profile.EXTRA_CORS_ORIGIN)
             .header("Access-Control-Request-Method", "POST")
             .header("Access-Control-Request-Private-Network", "true")
         .when()
             .options("/")
         .then()
             .statusCode(204)
-            .header("Access-Control-Allow-Origin", equalTo(ExtraCorsOriginProfile.ORIGIN))
+            .header("Access-Control-Allow-Origin", equalTo(ContainerBackedEc2Profile.EXTRA_CORS_ORIGIN))
             .header("Access-Control-Allow-Private-Network", nullValue());
     }
 }

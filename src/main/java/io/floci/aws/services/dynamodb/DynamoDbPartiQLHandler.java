@@ -101,11 +101,11 @@ class DynamoDbPartiQLHandler {
         Optional<List<Cond.Leaf>> sortKeyReads = routing.partition() == null
                 ? Optional.empty()
                 : keys.sortKeyReads(descending);
+        if (!stmt.orderBy().isEmpty()) {
+            requireOrderByShape(stmt, accessPath, keys.readsWholeTable());
+        }
         Page page;
         if (sortKeyReads.isPresent()) {
-            if (!stmt.orderBy().isEmpty()) {
-                requireOrderByShape(stmt, accessPath);
-            }
             page = readSortKeyReads(stmt, table, accessPath, routing.partition(), sortKeyReads.get(), descending,
                     startKey.get(), ctx.limit(), region);
         } else if (stmt.orderBy().isEmpty()) {
@@ -149,9 +149,7 @@ class DynamoDbPartiQLHandler {
     private static DynamoDbWriteCapacity.Cost readCapacity(Stmt.Select stmt, TableDefinition table,
                                                            DynamoDbAccessPath accessPath, Page page,
                                                            boolean consistentRead) {
-        double units = page.readBytes().stream()
-                .mapToDouble(bytes -> NativeDynamoDbJsonHandler.readCapacityUnits(bytes, consistentRead))
-                .sum();
+        double units = NativeDynamoDbJsonHandler.readCapacityUnits(page.readBytes(), consistentRead);
         if (!accessPath.isIndex()) {
             return new DynamoDbWriteCapacity.Cost(units, Map.of(), Map.of());
         }
@@ -243,8 +241,7 @@ class DynamoDbPartiQLHandler {
             List<JsonNode> matching = partialProjection
                     ? matchingIndexView(result.items(), scanFilters, accessPath, table)
                     : result.items();
-            return new Page(matching, result.lastEvaluatedKey(), List.of(result.scannedBytes()),
-                    result.scannedItems());
+            return new Page(matching, result.lastEvaluatedKey(), result.readBytes(), result.scannedItems());
         }
         if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
                 && skCond == null && filterConds.isEmpty()) {
@@ -361,16 +358,15 @@ class DynamoDbPartiQLHandler {
 
     private Page readOrdered(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                              Routing routing, JsonNode after, Integer limit, String region) {
-        requireOrderByShape(stmt, accessPath);
         List<JsonNode> rows = new ArrayList<>();
-        long scannedBytes = 0;
+        List<Long> readBytes = new ArrayList<>();
         List<JsonNode> scannedItems = new ArrayList<>();
         JsonNode lastKey = null;
         do {
             JsonNode from = lastKey;
             Page page = readPage(stmt, table, accessPath, routing, () -> from, null, region);
             rows.addAll(page.items());
-            scannedBytes += page.readBytes().stream().mapToLong(Long::longValue).sum();
+            readBytes.addAll(page.readBytes());
             scannedItems.addAll(page.scannedItems());
             lastKey = page.lastEvaluatedKey();
         } while (lastKey != null);
@@ -385,10 +381,11 @@ class DynamoDbPartiQLHandler {
         }
         int end = limit == null ? rows.size() : start + Math.min(rows.size() - start, limit);
         JsonNode resumeAfter = start < end && end < rows.size() ? orderingKey(rows.get(end - 1), accessPath, table) : null;
-        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, List.of(scannedBytes), scannedItems);
+        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, readBytes, scannedItems);
     }
 
-    private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath) {
+    private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath,
+                                            boolean readsWholeTable) {
         if (stmt.where().isEmpty()) {
             throw new AwsException("ValidationException",
                     "Must have WHERE clause in the statement when using ORDER BY clause.", 400);
@@ -401,7 +398,9 @@ class DynamoDbPartiQLHandler {
             }
         }
         String pkName = accessPath.partitionKeyName();
-        int hashKeyConditions = stmt.where().stream().mapToInt(c -> hashKeyConditionCount(c, pkName)).sum();
+        int hashKeyConditions = readsWholeTable
+                ? 0
+                : stmt.where().stream().mapToInt(c -> hashKeyConditionCount(c, pkName)).sum();
         if (hashKeyConditions == 0) {
             throw new AwsException("ValidationException",
                     "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause.",

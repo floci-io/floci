@@ -204,7 +204,7 @@ public class RedpandaManager {
                 : info.containerId();
         String logGroup = "/aws/msk/cluster/" + cluster.getClusterName();
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion());
+        String region = regionResolver.regionOf(cluster.getClusterArn());
 
         String account = AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getDefaultAccountId());
         Closeable logHandle = logStreamer.attachForAccount(
@@ -247,7 +247,7 @@ public class RedpandaManager {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "msk", cluster.getClusterName(),
                         AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getAccountId()),
-                        AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion())));
+                        regionResolver.regionOf(cluster.getClusterArn())));
 
         if (!inContainer) {
             specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);
@@ -366,7 +366,7 @@ public class RedpandaManager {
 
     private String clusterStorageId(MskCluster cluster) {
         String account = AwsArnUtils.accountOrDefault(cluster.getClusterArn(), regionResolver.getDefaultAccountId());
-        String region = AwsArnUtils.regionOrDefault(cluster.getClusterArn(), regionResolver.getDefaultRegion());
+        String region = regionResolver.regionOf(cluster.getClusterArn());
         return ContainerStorageHelper.dockerName(config,
                 "msk-" + account + "-" + region + "-" + cluster.getClusterName());
     }

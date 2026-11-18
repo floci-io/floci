@@ -37,15 +37,11 @@ final class IamManagedPolicyDeletes {
     static List<String> roleTargets(IamService iamService, StackResource resource) {
         String policyArn = resource.getPhysicalId();
         String targets = resource.getAttributes().get("ManagedPolicyRoleTargets");
-        String ids = resource.getAttributes().get("ManagedPolicyRoleTargetIds");
         if (targets != null) {
-            List<String> recordedNames = splitTargets(targets);
-            if (recordedNames.isEmpty() || ids == null || ids.isBlank()) {
-                return recordedNames;
-            }
-            return recordedTargets(targets, ids,
-                    iamService.listRoles("/"), IamRole::getRoleId, IamRole::getRoleName);
+            return principalTargets(resource, "ManagedPolicyRoleTargets", "ManagedPolicyRoleTargetIds",
+                    () -> iamService.listRoles("/"), IamRole::getRoleId, IamRole::getRoleName);
         }
+        String ids = resource.getAttributes().get("ManagedPolicyRoleTargetIds");
         // Stacks persisted before target metadata was introduced still need to be deletable.
         // The policy is stack-owned, so discover only roles that currently reference this ARN.
         List<IamRole> attachedRoles = iamService.listRoles("/");

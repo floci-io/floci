@@ -60,6 +60,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1794,6 +1795,58 @@ class EksServiceTest {
                 .anyMatch(p -> "-1".equals(p.getIpProtocol())
                         && p.getUserIdGroupPairs().stream().anyMatch(u -> sgId.equals(u.getGroupId())));
         assertTrue(hasSelfEgress, "Security group should have self-referencing outbound egress rule for EFA");
+
+        String otherVpc = ec2Service.createVpc("us-east-1", "10.50.0.0/16", false).getVpcId();
+        String otherSubnet = ec2Service.createSubnet("us-east-1", otherVpc, "10.50.1.0/24", "us-east-1b").getSubnetId();
+        Map<String, Consumer<CreateClusterRequest>> rejected = new LinkedHashMap<>();
+        rejected.put("ipFamily ipv5", r -> r.setKubernetesNetworkConfig(network("ipv5", null)));
+        rejected.put("service CIDR 8.8.8.0/24", r -> r.setKubernetesNetworkConfig(network("ipv4", "8.8.8.0/24")));
+        rejected.put("unknown log type", r -> r.setLogging(new Logging(List.of(new LogSetup(List.of("bogus"), true)))));
+        rejected.put("subnets in two VPCs", r -> vpcConfig.setSubnetIds(List.of(subnetId, otherSubnet)));
+        rejected.put("public CIDR /33", r -> vpcConfig.setPublicAccessCidrs(List.of("10.0.0.0/33")));
+        rejected.put("IPv6 public CIDR on ipv4", r -> vpcConfig.setPublicAccessCidrs(List.of("::/0")));
+        int row = 0;
+        List<String> failed = new ArrayList<>();
+        for (Map.Entry<String, Consumer<CreateClusterRequest>> entry : rejected.entrySet()) {
+            vpcConfig.setSubnetIds(List.of(subnetId));
+            vpcConfig.setPublicAccessCidrs(null);
+            CreateClusterRequest bad = new CreateClusterRequest();
+            bad.setName("cluster-sg-bad-" + row++);
+            bad.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+            bad.setResourcesVpcConfig(vpcConfig);
+            entry.getValue().accept(bad);
+            int groupsBefore = ec2Service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).size();
+            try {
+                service.createCluster(bad);
+                failed.add(entry.getKey() + ": accepted");
+            } catch (AwsException e) {
+                boolean clean = groupsBefore
+                        == ec2Service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).size();
+                if (!"InvalidParameterException".equals(e.getErrorCode()) || !clean) {
+                    failed.add(entry.getKey() + ": " + e.getErrorCode() + (clean ? "" : ", security group left"));
+                }
+            }
+        }
+        vpcConfig.setSubnetIds(List.of(subnetId));
+        vpcConfig.setPublicAccessCidrs(List.of("::/0"));
+        CreateClusterRequest v6 = new CreateClusterRequest();
+        v6.setName("cluster-sg-ipv6");
+        v6.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        v6.setResourcesVpcConfig(vpcConfig);
+        v6.setKubernetesNetworkConfig(network("ipv6", null));
+        try {
+            service.createCluster(v6);
+        } catch (AwsException e) {
+            failed.add("ipv6 with ::/0: " + e.getErrorCode());
+        }
+        assertEquals(List.of(), failed);
+    }
+
+    private static KubernetesNetworkConfig network(String family, String serviceCidr) {
+        KubernetesNetworkConfig network = new KubernetesNetworkConfig();
+        network.setIpFamily(family);
+        network.setServiceIpv4Cidr(serviceCidr);
+        return network;
     }
 
     @Test

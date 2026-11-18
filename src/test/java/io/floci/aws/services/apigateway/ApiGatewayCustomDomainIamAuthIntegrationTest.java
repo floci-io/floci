@@ -1,8 +1,8 @@
 package io.floci.aws.services.apigateway;
 
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.MethodOrderer;
@@ -24,18 +24,14 @@ import static org.hamcrest.Matchers.notNullValue;
  * actually sends, {@code Host: <domain>} and the base-path-mapped path, while the custom domain
  * filter rewrites the URI onto {@code /execute-api/...} before dispatch. Verification has to run
  * against the signed form, so the rewritten path must not leak into the canonical request.
+ *
+ * <p>The class runs on {@link RdsMockProfile}, which turns IoT off, so the invocation controllers
+ * are checked with IoT's data-plane host routing out of the way.
  */
 @QuarkusTest
-@TestProfile(ApiGatewayCustomDomainIamAuthIntegrationTest.IotDisabled.class)
+@TestProfile(RdsMockProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayCustomDomainIamAuthIntegrationTest {
-
-    public static class IotDisabled implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iot.enabled", "false");
-        }
-    }
 
     private static final String REGION = "us-east-1";
     private static final String ACCESS_KEY = "test";

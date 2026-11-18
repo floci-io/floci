@@ -3,8 +3,6 @@ package io.floci.aws.services.cloudwatch.logs;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
@@ -26,11 +24,7 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @QuarkusTest
-@TestProfile(CloudWatchLogsMetricFilterRetryIntegrationTest.ResetIsolationProfile.class)
 class CloudWatchLogsMetricFilterRetryIntegrationTest {
-    /** HTTP reset wipes every service; do not share this application with other test classes. */
-    public static class ResetIsolationProfile implements QuarkusTestProfile {}
-
     @InjectSpy CloudWatchMetricsService metrics;
     @Inject CloudWatchLogsMetricFilterService publications;
     private static final String REGION = "eu-west-1";

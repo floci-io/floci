@@ -3,6 +3,7 @@ package io.floci.aws.services.rds;
 import com.github.dockerjava.api.exception.DockerException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -62,6 +63,7 @@ class RdsQueryHandlerTest {
     private DocDbQueryHandler docDbHandler;
     private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
+    private final RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
 
     @BeforeEach
     void setUp() {
@@ -77,7 +79,8 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
-        handler = new RdsQueryHandler(service, exportTaskService, config, docDbHandler, neptuneHandler);
+        handler = new RdsQueryHandler(service, exportTaskService, config, regionResolver, docDbHandler,
+                neptuneHandler);
     }
 
     @ParameterizedTest
@@ -791,7 +794,7 @@ class RdsQueryHandlerTest {
     void describeDbInstances_dbSubnetGroupUsesSubnetTag() {
         DbInstance instance = makeInstance("mydb");
         instance.setDbSubnetGroupName("custom-group");
-        when(service.getDbSubnetGroup("custom-group", null)).thenReturn(customSubnetGroup());
+        when(service.getDbSubnetGroup("custom-group", "us-east-1")).thenReturn(customSubnetGroup());
         when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
 
         Response response = handler.handle("DescribeDBInstances", params());
@@ -1082,7 +1085,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         instance.setDbSubnetGroupName("sample-db-subnets");
         when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
-        when(service.getDbSubnetGroup("sample-db-subnets", null)).thenReturn(new DbSubnetGroup(
+        when(service.getDbSubnetGroup("sample-db-subnets", "us-east-1")).thenReturn(new DbSubnetGroup(
                 "sample-db-subnets", "test subnets", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
                 Map.of("subnet-aaa", "us-east-1a", "subnet-bbb", "us-east-1b")));
 

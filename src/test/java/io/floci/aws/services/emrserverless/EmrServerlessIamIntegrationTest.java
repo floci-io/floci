@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EmrServerlessRequests.tagsPath;
 import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -98,6 +99,32 @@ class EmrServerlessIamIntegrationTest {
                     "iam:PassRole");
         } finally {
             send(admin, "DELETE", "/applications/" + application, null).then().statusCode(200);
+        }
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR Serverless holds on the application a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller read that team's application and not
+     * another's.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheApplication() throws Exception {
+        String tagged = createApplication();
+        String other = createApplication();
+        send(admin, "POST", tagsPath(applicationArn(tagged)), "{\"tags\":{\"team\":\"data\"}}").then()
+                .statusCode(200);
+        send(admin, "POST", tagsPath(applicationArn(other)), "{\"tags\":{\"team\":\"web\"}}").then()
+                .statusCode(200);
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "emrs-iam-", "access",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Action\":\"emr-serverless:GetApplication\",\"Resource\":\"*\","
+                        + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}]}")) {
+            send(user.signer("emr-serverless"), "GET", "/applications/" + tagged, null).then().statusCode(200);
+            denied(send(user.signer("emr-serverless"), "GET", "/applications/" + other, null),
+                    "emr-serverless:GetApplication");
+        } finally {
+            send(admin, "DELETE", "/applications/" + tagged, null).then().statusCode(200);
+            send(admin, "DELETE", "/applications/" + other, null).then().statusCode(200);
         }
     }
 

@@ -90,6 +90,7 @@ class SparkConnectProxyTest {
         assertEquals("0", answer.trailers.get("grpc-status"));
         // The token is Floci's to check, so the server never sees it.
         assertNull(serverSaw.get().get(SparkConnectProxy.TOKEN_METADATA));
+        assertNull(serverSaw.get().get("authorization"));
         assertEquals("trailers", serverSaw.get().get("te"));
         assertNull(serverSaw.get().get("transfer-encoding"));
         awaitCount(callsEnded, 1);
@@ -170,6 +171,8 @@ class SparkConnectProxyTest {
                 .putHeader("te", "trailers");
         if (token != null) {
             options.putHeader(SparkConnectProxy.TOKEN_METADATA, token);
+            // As AWS's EMR connection string adds the session's id.
+            options.putHeader("authorization", "is-SESSION");
         }
         // As a gRPC client sends a call: its message streamed, with no Content-Length.
         return await(client.request(options)

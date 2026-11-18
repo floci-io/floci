@@ -2,6 +2,7 @@ package io.floci.aws.services.emrserverless.model;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.floci.aws.services.emrserverless.SparkConnectSession;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -10,7 +11,7 @@ import java.util.Map;
 /** GetSession's session. Timestamps go out as epoch seconds, the restJson1 default. */
 @RegisterForReflection
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public class Session {
+public class Session implements SparkConnectSession {
     private String applicationId;
     private String sessionId;
     private String arn;
@@ -33,7 +34,7 @@ public class Session {
     private Map<String, Object> configurationOverrides;
     private NetworkConfiguration networkConfiguration;
     private Long idleTimeoutMinutes;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private Long totalExecutionDurationSeconds;
 
     public String getApplicationId() { return applicationId; }

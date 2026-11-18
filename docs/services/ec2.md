@@ -49,7 +49,20 @@ A systemd guest gets a private cgroup namespace, as kind runs its nodes, so its 
 | `running → shutting-down → terminated` | `docker rm -f` |
 | Reboot | `docker restart` |
 
-Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned.
+Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned. A sweep that runs every minute removes the expired ones, with their tags, for every account.
+
+Every state change the container manager makes in the background is written to the store as it happens, so a Floci process that is killed or restarted never restores a record stuck in a transitional state. On startup Floci settles any it still finds:
+
+| Stored state | Settled as |
+|---|---|
+| `shutting-down` | The termination is finished and the container removed: `terminated` |
+| `pending`, no container recorded | The launch is treated as failed: `terminated` |
+| `pending`, container running | `running` |
+| `pending`, container not running or not reachable | The container is stopped and kept so the instance can be started again: `stopped` |
+| `stopping` | The container is stopped: `stopped` |
+| `terminated`, recorded without a time | The retention clock starts at this startup |
+
+A record is settled as `stopped` only once Docker confirms that its container stopped or is gone. When Docker cannot confirm it (it is unreachable, for one), the record keeps its state and the next start tries again, and an instance that cannot be settled is named in an error in the log. The releases of a termination (port forwards, firewall rules, addresses) are independent of the container removal, so one that fails neither skips it nor keeps the instance from terminating. The sweep that removes expired instances carries on past one that cannot be removed and reports the failure when it ends.
 
 ## Instance Resource Limits
 
@@ -84,6 +97,20 @@ linked above. It was not part of that API capture.
 The catalog stores these values explicitly; architecture alone
 cannot distinguish Intel from AMD. See the AWS
 [ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
+
+### AMD and Intel instance-type metadata
+
+The catalog includes virtual sizes of M7a, M8a, M7i, M8i, C7a and C7i,
+including 24xlarge and 48xlarge. CPU, memory, x86_64 architecture, AMD/Intel
+manufacturer and network metadata were captured from AWS `DescribeInstanceTypes`
+in us-east-1 on 2026-11-17. The AWS SDK regression fixture is
+`src/test/resources/ec2/x86-instance-types.csv`. Only sizes present in that
+capture are included; for example, there is no `m7i.medium`.
+
+These entries support architecture-compatible AMI selection and the existing
+synthetic offerings. They do not establish vendor-specific hardware performance,
+real AWS capacity or regional availability. The Docker host supplies actual CPU
+execution; a catalog entry does not turn an ARM guest into an x86 guest.
 
 ### Graviton instance-type metadata
 
@@ -1074,6 +1101,15 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 | DeleteLaunchTemplateVersions | Deletes up to 200 numbered versions by template ID or name, with separate success and error items. The default version is retained, and `DryRun` leaves all versions unchanged. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
+
+With IAM enforcement enabled, `DeleteLaunchTemplate`, `CreateLaunchTemplateVersion`,
+`DeleteLaunchTemplateVersions`, and `ModifyLaunchTemplate` resolve a `LaunchTemplateName`
+selector in the caller's account and request region before evaluating the template's
+ID-based ARN. Exact-resource grants and explicit denies apply to both name and ID selectors.
+The request retains that resolved ID, so deleting and recreating a template under the same
+name cannot redirect an authorized mutation to the replacement. `CreateLaunchTemplate`
+authorizes a new template's ARN and preserves the duplicate-name error for an existing name.
+
 Deleting versions updates `$Latest` to the highest surviving version. New versions receive numbers
 above every previously issued version, including deleted versions, and the counter survives restart.
 

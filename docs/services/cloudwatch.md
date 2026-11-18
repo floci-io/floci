@@ -432,6 +432,10 @@ aws logs put-retention-policy \
 
 **Protocol:** Query (XML), JSON 1.0, and OTLP/HTTP.
 
+`GetMetricStatistics` and `GetMetricData` exclude samples exactly at `EndTime`, so
+adjacent query windows do not count their shared boundary twice. A whole-second sample
+before a fractional-second `EndTime` remains included.
+
 The OTLP HTTP metrics endpoint accepts `POST /v1/metrics` with `application/json` or
 `application/x-protobuf`, optionally gzip-compressed. Requests are stored separately from classic
 CloudWatch metrics, retaining their OTLP resource, scope and metric data. The uncompressed request

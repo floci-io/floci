@@ -177,6 +177,27 @@ public final class CfnRollback {
      */
     public static final String EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR = "__FlociEksClusterUpdateSnapshot";
 
+    /**
+     * The tags an EKS nodegroup carried before an in-place update changed them, so a failed stack
+     * update can put them back. Written and spent by {@code EksCfnProvisioner}.
+     */
+    public static final String EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR = "__FlociEksNodegroupUpdateSnapshot";
+
+    /**
+     * The description, key policy, enabled state, rotation and tags a KMS key carried before an
+     * in-place update changed them, so a failed stack update can put them back. Written and spent
+     * by {@code KmsCfnProvisioner}.
+     */
+    public static final String KMS_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociKmsKeyUpdateSnapshot";
+
+    /**
+     * The name, type, URI, identity source, cache TTL and Cognito pools an API Gateway authorizer
+     * carried before an in-place update changed them, or the authorizer an update created because the
+     * prior was gone, so a failed stack update can put them back or delete the created one. Written
+     * and spent by {@code ApiGatewayRestApiCfnProvisioner}.
+     */
+    public static final String APIGW_AUTHORIZER_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayAuthorizerUpdateSnapshot";
+
     public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
 
     /**

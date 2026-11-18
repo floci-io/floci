@@ -147,6 +147,64 @@ the path:
 | `DeleteKeyGroup` | DELETE | `/2020-05-31/key-group/{Id}` |
 | `ListKeyGroups` | GET | `/2020-05-31/key-group` |
 
+### Stored configurations
+
+These operations store what they are given and return it, so code that manages these resources works, but Floci does not act on them: a continuous deployment policy never diverts a primary distribution's requests to its staging distribution, no real-time log or monitoring-subscription metric is delivered, no field is encrypted, and a streaming distribution serves no RTMP. A staging distribution made by `CopyDistribution` still answers on its own domain name, as any enabled distribution does.
+
+#### Staging distributions and continuous deployment
+
+| Operation | Method | Path |
+|---|---|---|
+| `CopyDistribution` | POST | `/2020-05-31/distribution/{PrimaryDistributionId}/copy` |
+| `CreateContinuousDeploymentPolicy` | POST | `/2020-05-31/continuous-deployment-policy` |
+| `GetContinuousDeploymentPolicy` | GET | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `UpdateContinuousDeploymentPolicy` | PUT | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `DeleteContinuousDeploymentPolicy` | DELETE | `/2020-05-31/continuous-deployment-policy/{Id}` |
+| `ListContinuousDeploymentPolicies` | GET | `/2020-05-31/continuous-deployment-policy` |
+
+#### Real-time log configs
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateRealtimeLogConfig` | POST | `/2020-05-31/realtime-log-config` |
+| `GetRealtimeLogConfig` | POST | `/2020-05-31/get-realtime-log-config` |
+| `UpdateRealtimeLogConfig` | PUT | `/2020-05-31/realtime-log-config` |
+| `DeleteRealtimeLogConfig` | POST | `/2020-05-31/delete-realtime-log-config` |
+| `ListRealtimeLogConfigs` | GET | `/2020-05-31/realtime-log-config` |
+
+#### Field-level encryption
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateFieldLevelEncryptionConfig` | POST | `/2020-05-31/field-level-encryption` |
+| `GetFieldLevelEncryptionConfig` | GET | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `UpdateFieldLevelEncryptionConfig` | PUT | `/2020-05-31/field-level-encryption/{Id}/config` |
+| `DeleteFieldLevelEncryptionConfig` | DELETE | `/2020-05-31/field-level-encryption/{Id}` |
+| `ListFieldLevelEncryptionConfigs` | GET | `/2020-05-31/field-level-encryption` |
+| `CreateFieldLevelEncryptionProfile` | POST | `/2020-05-31/field-level-encryption-profile` |
+| `GetFieldLevelEncryptionProfile` | GET | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `UpdateFieldLevelEncryptionProfile` | PUT | `/2020-05-31/field-level-encryption-profile/{Id}/config` |
+| `DeleteFieldLevelEncryptionProfile` | DELETE | `/2020-05-31/field-level-encryption-profile/{Id}` |
+| `ListFieldLevelEncryptionProfiles` | GET | `/2020-05-31/field-level-encryption-profile` |
+
+#### Monitoring subscriptions
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateMonitoringSubscription` | POST | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+| `GetMonitoringSubscription` | GET | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+| `DeleteMonitoringSubscription` | DELETE | `/2020-05-31/distributions/{DistributionId}/monitoring-subscription` |
+
+#### Streaming distributions
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateStreamingDistribution` | POST | `/2020-05-31/streaming-distribution` |
+| `GetStreamingDistribution` | GET | `/2020-05-31/streaming-distribution/{Id}` |
+| `GetStreamingDistributionConfig` | GET | `/2020-05-31/streaming-distribution/{Id}/config` |
+| `UpdateStreamingDistribution` | PUT | `/2020-05-31/streaming-distribution/{Id}/config` |
+| `DeleteStreamingDistribution` | DELETE | `/2020-05-31/streaming-distribution/{Id}` |
+
 ### Tagging
 
 | Operation | Method | Path |
@@ -624,12 +682,11 @@ signatures must still return 403. Verify those cases through the proxy after con
 
 ## Not Supported (Phase 2)
 
-- Continuous deployment policies (`CreateContinuousDeploymentPolicy`, etc.)
-- `CopyDistribution` (staging distributions)
-- Real-time log configs (`CreateRealtimeLogConfig`, etc.)
-- Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
+- Continuous deployment: a policy never diverts a primary distribution's requests to its staging
+  distribution (see [Stored configurations](#stored-configurations))
+- Delivering real-time logs, and encrypting fields with field-level encryption
 - `TestFunction` execution (function is stored, not executed)
-- Streaming distributions (RTMP — deprecated by AWS)
+- Serving RTMP for a streaming distribution (deprecated by AWS)
 - VPC origins, Anycast IP lists
 - Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
   `InvalidArgument`
@@ -637,7 +694,7 @@ signatures must still return 403. Verify those cases through the proxy after con
   from a function with `cf.kvs()`
 - CloudFormation provisioning of `AWS::CloudFront::KeyValueStore`, and `KeyValueStoreAssociations` on
   `AWS::CloudFront::Function`
-- Monitoring subscriptions
+- Publishing the additional metrics a monitoring subscription turns on
 - CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
   (literal custom or managed policy IDs are supported on distributions)
 - Persistent edge caching and global CDN propagation

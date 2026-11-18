@@ -126,6 +126,22 @@ public interface EmulatorConfig {
 
     ProtocolsConfig protocols();
 
+    /** The opt-in log of every request and response, one JSON object per line, for debugging. */
+    RequestLogConfig requestLog();
+
+    interface RequestLogConfig {
+        /** Write each request and its response to {@link #file()}. Env: FLOCI_REQUEST_LOG_ENABLED */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Where the log is written, one JSON object per line (JSONL); {@code ./floci-requests.jsonl} when unset. It
+         * holds request and response bodies as plain text, which can include secrets: known secret headers and query
+         * parameters are redacted, but a secret inside a body is not. Env: FLOCI_REQUEST_LOG_FILE
+         */
+        Optional<String> file();
+    }
+
     interface NetworkConfig {
         SecurityGroupEnforcementConfig securityGroupEnforcement();
     }
@@ -1370,6 +1386,14 @@ public interface EmulatorConfig {
     interface FisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Whether the {@code aws:fis:inject-api-*} actions take any service namespace instead of only the
+         * {@code ec2} and {@code kinesis} ones AWS supports, so they can inject errors into the other services Floci
+         * emulates ({@code FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE}).
+         */
+        @WithDefault("false")
+        boolean injectApiAnyService();
     }
 
     interface Route53ServiceConfig {
@@ -2022,6 +2046,11 @@ public interface EmulatorConfig {
         @WithDefault("7099")
         int proxyMaxPort();
 
+        /** When true, Describe* reports the Port a client requested instead of the proxy port.
+         *  The proxy still listens in the proxy port range; connect there. */
+        @WithDefault("false")
+        boolean advertiseRequestedPort();
+
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
 
@@ -2109,6 +2138,45 @@ public interface EmulatorConfig {
 
         /** Docker network for the database containers. Defaults to Floci's own network. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Where cluster databases live: {@code docker} runs a PostgreSQL container per cluster,
+         * {@code external} uses one PostgreSQL server that already runs, see {@link External}. Any
+         * other value fails Floci's start.
+         */
+        @WithDefault("docker")
+        Backend backend();
+
+        /** The PostgreSQL server of the {@code external} backend. */
+        External external();
+
+        /** Kinds of backend {@link #backend()} accepts. */
+        enum Backend { DOCKER, EXTERNAL }
+
+        interface External {
+            /** Host of the PostgreSQL server. Required with the {@code external} backend. */
+            Optional<String> host();
+
+            @WithDefault("5432")
+            int port();
+
+            /**
+             * Maintenance database Floci connects to in order to create, and later drop, each
+             * cluster's own database and roles.
+             */
+            @WithDefault("postgres")
+            String database();
+
+            /**
+             * Role Floci connects as. It must be a superuser: Floci installs event triggers and
+             * creates each cluster's database and roles.
+             */
+            @WithDefault("postgres")
+            String username();
+
+            /** Password of {@link #username()}; none when the server trusts the connection. */
+            Optional<String> password();
+        }
     }
 
     interface RdsDataServiceConfig {
@@ -4370,6 +4438,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("300")
         int imagePullTimeoutSeconds();
+
+        /**
+         * Seconds between the log lines that report how busy the Docker connection pools are: each
+         * pool's leased, available and pending connections against its limit, its open long-lived
+         * streams by kind, and the docker-java stream threads. A line is written only while a pool is in
+         * use, so an idle emulator logs nothing. 0 turns the lines off.
+         */
+        @WithDefault("60")
+        int poolGaugeIntervalSeconds();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.
