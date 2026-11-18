@@ -24,7 +24,9 @@ import java.util.Map;
  *   tasks, so none needs the sweep. {@code floci.docker.resource-namespace} names their containers
  *   in this run's {@link SidecarContainersProfile#namespace() sidecar namespace}, so another test
  *   JVM on the same Docker daemon and port, whose startup sweep is on, never takes them for its own
- *   leftovers.</li>
+ *   leftovers. {@code LambdaLeftoverContainersDockerIntegrationTest} relies on the namespace too:
+ *   it sweeps the Lambda environments its deployment left on an earlier run, and the namespace,
+ *   which only this test JVM uses, keeps that sweep away from another Floci's containers.</li>
  *   <li>{@code floci.services.ecs.host-volume-roots=/dev/null} makes {@code /dev/null} the one host
  *   path a device may take, since devices are refused by default, and
  *   {@code floci.services.ecs.allow-privileged-containers=true} lets a task definition ask for
@@ -41,9 +43,12 @@ import java.util.Map;
  *   them.</li>
  * </ul>
  *
- * <p>Each is inert for the other classes. Only the three ECS classes run a task or any other
- * container, so only their containers carry the namespace. Their tasks run in bridge mode, which security-group enforcement never protects, and
- * only the Linux parameters class asks for a device or privilege. The pull on every launch reaches
+ * <p>Each is inert for the other classes. Only the three ECS classes and the Lambda leftovers class
+ * start containers, so only theirs carry the namespace. The leftovers class sweeps only Lambda
+ * environments, which no other class here starts, and drives the Lambda launcher directly, without
+ * sending a request, so none of the ECS, CORS, partition or EC2 settings reaches it. The ECS tasks
+ * run in bridge mode, which security-group enforcement never protects, and only the Linux
+ * parameters class asks for a device or privilege. The pull on every launch reaches
  * the other two ECS classes' tasks too, and changes nothing they check: their busybox tasks run
  * the same way on the image the tag names now, and a failed pull runs the cached image. Only
  * {@code GlobalCorsFilterIntegrationTest} sends an {@code Origin} header, the only request the CORS
