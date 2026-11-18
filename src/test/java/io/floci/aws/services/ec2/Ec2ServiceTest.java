@@ -8156,17 +8156,18 @@ class Ec2ServiceTest {
         assertEquals("PrefixListVersionMismatch", error.getErrorCode());
     }
 
-    @Test
-    void awsManagedListsCannotBeModifiedOrDeleted() {
+    @ParameterizedTest
+    @ValueSource(strings = {"pl-63a5400a", "pl-3b927c52"})
+    void awsManagedListsCannotBeModifiedOrDeleted(String prefixListId) {
         Ec2Service service = prefixListService();
 
         AwsException modifyError = assertThrows(AwsException.class, () ->
-                service.modifyManagedPrefixList("us-east-1", "pl-63a5400a", null, "hijacked", null,
+                service.modifyManagedPrefixList("us-east-1", prefixListId, null, "hijacked", null,
                         List.of(), List.of()));
         assertEquals("UnsupportedOperation", modifyError.getErrorCode());
 
         AwsException deleteError = assertThrows(AwsException.class, () ->
-                service.deleteManagedPrefixList("us-east-1", "pl-63a5400a"));
+                service.deleteManagedPrefixList("us-east-1", prefixListId));
         assertEquals("UnsupportedOperation", deleteError.getErrorCode());
     }
 
@@ -8227,17 +8228,6 @@ class Ec2ServiceTest {
             assertTrue(lists.stream().allMatch(l -> l.getPrefixListArn().startsWith(
                     "arn:" + deployment.getValue() + ":ec2:" + unknown + ":aws:prefix-list/")), lists.toString());
         }
-    }
-
-    @Test
-    void cloudFrontOriginFacingListCannotBeModifiedOrDeleted() {
-        Ec2Service service = prefixListService();
-
-        assertEquals("UnsupportedOperation", assertThrows(AwsException.class, () ->
-                service.modifyManagedPrefixList("us-east-1", "pl-3b927c52", null, "hijacked", null,
-                        List.of(), List.of())).getErrorCode());
-        assertEquals("UnsupportedOperation", assertThrows(AwsException.class, () ->
-                service.deleteManagedPrefixList("us-east-1", "pl-3b927c52")).getErrorCode());
     }
 
     @Test

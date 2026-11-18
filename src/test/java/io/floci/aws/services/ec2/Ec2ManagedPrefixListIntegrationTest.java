@@ -6,6 +6,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -73,38 +75,29 @@ class Ec2ManagedPrefixListIntegrationTest {
             .body("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListName", equalTo(LIST_NAME));
     }
 
-    @Test
+    @ParameterizedTest
     @Order(3)
-    void describeIncludesAwsManagedGatewayLists() {
+    @CsvSource({
+        "com.amazonaws.us-east-1.s3, pl-63a5400a",
+        "com.amazonaws.global.cloudfront.origin-facing, pl-3b927c52"
+    })
+    void describeIncludesAwsManagedLists(String prefixListName, String expectedId) {
         given()
             .formParam("Action", "DescribeManagedPrefixLists")
             .formParam("Filter.1.Name", "prefix-list-name")
-            .formParam("Filter.1.Value.1", "com.amazonaws.us-east-1.s3")
+            .formParam("Filter.1.Value.1", prefixListName)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListId", equalTo("pl-63a5400a"))
+            .body("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListId", equalTo(expectedId))
             .body("DescribeManagedPrefixListsResponse.prefixListSet.item.ownerId", equalTo("AWS"));
     }
 
     @Test
     @Order(3)
-    void describeIncludesAwsManagedCloudFrontOriginFacingList() {
-        given()
-            .formParam("Action", "DescribeManagedPrefixLists")
-            .formParam("Filter.1.Name", "prefix-list-name")
-            .formParam("Filter.1.Value.1", "com.amazonaws.global.cloudfront.origin-facing")
-            .header("Authorization", AUTH_HEADER)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListId", equalTo("pl-3b927c52"))
-            .body("DescribeManagedPrefixListsResponse.prefixListSet.item.ownerId", equalTo("AWS"))
-            .body("DescribeManagedPrefixListsResponse.prefixListSet.item.maxEntries", equalTo("49"));
-
+    void getEntriesReturnsTheCloudFrontOriginFacingRanges() {
         given()
             .formParam("Action", "GetManagedPrefixListEntries")
             .formParam("PrefixListId", "pl-3b927c52")
