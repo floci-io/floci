@@ -395,6 +395,22 @@ class RegionResolverTest {
     }
 
     @Test
+    void aStoredResourcesRegionIsTheOneItsArnNamesOrTheDefault() {
+        assertEquals("eu-west-1", resolver.regionOf("arn:aws:appsync:eu-west-1:000000000000:apis/abc"));
+        // Records stored without an ARN, or with one that names no Region, count as the default Region's.
+        assertEquals("us-east-1", resolver.regionOf(null));
+        assertEquals("us-east-1", resolver.regionOf("arn:aws:iam::000000000000:role/r"));
+        assertEquals("us-east-1", resolver.regionOf("not-an-arn"));
+    }
+
+    @Test
+    void outsideARequestOnlyTheDefaultRegionsResourcesAreInTheRequestsRegion() {
+        assertTrue(resolver.inRequestRegion("arn:aws:appsync:us-east-1:000000000000:apis/abc"));
+        assertTrue(resolver.inRequestRegion(null));
+        assertFalse(resolver.inRequestRegion("arn:aws:appsync:eu-west-1:000000000000:apis/abc"));
+    }
+
+    @Test
     void regionFromAuthWithAShortDateStaysDefault() {
         String header = "AWS4-HMAC-SHA256 Credential=AKID/2026021/eu-west-1/s3/aws4_request";
         assertEquals("us-east-1", resolver.resolveRegionFromAuth(header));

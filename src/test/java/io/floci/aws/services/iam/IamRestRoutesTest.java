@@ -17,8 +17,10 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IamRestRoutesTest {
 
@@ -104,6 +106,29 @@ class IamRestRoutesTest {
     }
 
     private final IamRestRoutes routes = routes(ROUTES);
+
+    /**
+     * A model AWS documents outside botocore routes another API's requests, which carry none of the operation's
+     * members: each of its routes, Glue's Iceberg REST endpoint's among the vendored ones, says so, and a botocore
+     * model's does not.
+     */
+    @Test
+    void aDocumentedModelsRoutesTakeRequestsCarryingNoMembers() {
+        IamRestRoutes documented = routes(ROUTES.replace("\"svc\": {\"credentialScope\": \"svc\",",
+                "\"svc\": {\"credentialScope\": \"svc\", \"documented\": {\"page\": \"https://docs.example/svc\"},"));
+        assertTrue(documented.documents("svc"));
+        assertTrue(documented.match("svc", "GET", "/things/web", null).orElseThrow().documented());
+        assertFalse(routes.documents("svc"));
+        assertFalse(routes.match("svc", "GET", "/things/web", null).orElseThrow().documented());
+
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        assertTrue(vendored.match("glue", "POST", "/iceberg/v1/catalogs/:/namespaces/db/tables/t", null)
+                .orElseThrow().documented());
+        assertFalse(vendored.match("lambda", "GET", "/2015-03-31/functions/fn", null).orElseThrow().documented());
+
+        assertThrows(IllegalStateException.class, () -> routes(ROUTES.replace("\"svc\": {\"credentialScope\": \"svc\",",
+                "\"svc\": {\"credentialScope\": \"svc\", \"documented\": \"a page\",")));
+    }
 
     @Test
     void routeDataIsBundledWithTheApplicationRatherThanOnlyWithTests() throws Exception {

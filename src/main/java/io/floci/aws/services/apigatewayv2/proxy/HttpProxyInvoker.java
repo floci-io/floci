@@ -296,18 +296,13 @@ public class HttpProxyInvoker {
 
     // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
     // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the
-    // in-JVM Vertx HttpServer used by ELBv2 listeners for HttpAlbIntegration). sslContext,
-    // when given, adds the extra CAs in floci.tls.extra-ca-path, and Floci's CA when TLS is
-    // on, to the JVM's roots.
+    // in-JVM Vertx HttpServer used by ELBv2 listeners for HttpAlbIntegration).
     private static HttpClient proxyClient(SSLContext sslContext) {
-        HttpClient.Builder builder = HttpClient.newBuilder()
+        return ContainerCaBundle.httpClientBuilder(sslContext)
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(10))
-                .followRedirects(HttpClient.Redirect.NEVER);
-        if (sslContext != null) {
-            builder.sslContext(sslContext);
-        }
-        return builder.build();
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build();
     }
 
     public ProxyResult invoke(Integration integration, RequestContext ctx) {

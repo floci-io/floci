@@ -13,7 +13,7 @@ public class OamSink {
     private String region;
     private String ownerAccountId;
     private String policy;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public OamSink() {}
 

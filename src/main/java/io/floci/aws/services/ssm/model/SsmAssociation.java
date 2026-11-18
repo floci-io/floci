@@ -63,7 +63,7 @@ public class SsmAssociation {
     private String associationVersion;
 
     @JsonProperty("Tags")
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public SsmAssociation() {}
 

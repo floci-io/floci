@@ -77,7 +77,7 @@ public class WafV2Handler {
                 case "PutLoggingConfiguration" -> handlePutLoggingConfiguration(request);
                 case "GetLoggingConfiguration" -> handleGetLoggingConfiguration(request);
                 case "DeleteLoggingConfiguration" -> handleDeleteLoggingConfiguration(request);
-                case "ListLoggingConfigurations" -> handleListLoggingConfigurations();
+                case "ListLoggingConfigurations" -> handleListLoggingConfigurations(request);
                 case "PutPermissionPolicy" -> handlePutPermissionPolicy(request);
                 case "GetPermissionPolicy" -> handleGetPermissionPolicy(request);
                 case "DeletePermissionPolicy" -> handleDeletePermissionPolicy(request);
@@ -366,10 +366,10 @@ public class WafV2Handler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private Response handleListLoggingConfigurations() {
+    private Response handleListLoggingConfigurations(JsonNode request) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("LoggingConfigurations");
-        for (String stored : service.listLoggingConfigurations()) {
+        for (String stored : service.listLoggingConfigurations(text(request, "Scope"))) {
             try {
                 arr.add(objectMapper.readTree(stored));
             } catch (Exception ignored) {

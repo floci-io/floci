@@ -68,7 +68,8 @@ quarkus:
       # (bedrock/model-catalog.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
       # runtime (lambdaweb/index.mjs) into each environment, EMR writes its S3DistCp program
-      # (emr/s3-dist-cp.py) into a step's container, EC2 security group enforcement builds
+      # (emr/s3-dist-cp.py) into a step's container, DSQL renders its bootstrap
+      # (dsql/bootstrap.sql) for each cluster, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -96,6 +97,7 @@ quarkus:
         - iam/service-linked-roles.tsv
         - cloudformation/*.json
         - redshift/*.sql
+        - dsql/*.sql
         - i18n/*.properties
         - floci/version.properties
         - org/apache/velocity/runtime/defaults/*.properties
@@ -305,6 +307,8 @@ floci:
         flush-interval-ms: 5000
       emrserverless:
         flush-interval-ms: 5000
+      emrcontainers:
+        flush-interval-ms: 5000
       lakeformation:
         flush-interval-ms: 5000
 
@@ -336,6 +340,17 @@ floci:
     # Combine with tls.enabled so clients that hardcode https:// are served on port 443
     # with a certificate covering those suffixes and their regional wildcards.
     spoof-aws-endpoints: false                    # FLOCI_DNS_SPOOF_AWS_ENDPOINTS
+
+    # When Floci runs natively: a resolver on 127.0.0.1:<port> answering the same names as the
+    # embedded DNS server (Cloud Map <service>.<namespace>, Route 53 private zones), for the host's
+    # own resolver to point at; other names are refused. Unset starts no listener. In Docker,
+    # publish port 53/udp instead.
+    # host-port: 5354                             # FLOCI_DNS_HOST_PORT
+
+    # When Floci runs natively on a host with a docker0 bridge: also listen on that bridge's
+    # address, port 53, and give it to the containers Floci launches as their resolver. Port 53
+    # needs root or CAP_NET_BIND_SERVICE; without it Floci logs how to grant it.
+    bridge-listener-enabled: true                 # FLOCI_DNS_BRIDGE_LISTENER_ENABLED
 
   auth:
     validate-signatures: false
@@ -377,6 +392,10 @@ floci:
     max-request-size: 2048             # FLOCI_PROTOCOLS_MAX_REQUEST_SIZE: max HTTP request body size in MB (legacy: floci.max-request-size / FLOCI_MAX_REQUEST_SIZE)
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
     reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
+
+  request-log:
+    enabled: false                     # FLOCI_REQUEST_LOG_ENABLED: write every request and response as one JSON line (holds bodies, secrets included)
+    # file: ./floci-requests.jsonl     # FLOCI_REQUEST_LOG_FILE
 
   docker:
     log-max-size: "10m"
@@ -443,6 +462,10 @@ floci:
       vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
       vector-index-backfill-seconds: 10    # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS. Backfilling phase that follows it.
       latest-restorable-lag-seconds: 300   # FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS. How far LatestRestorableDateTime trails now.
+      stream-shard-count: 1                # FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT. Open shards per stream (native engine).
+      stream-shard-rollover-seconds: 0     # FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS. 0: shards stay open.
+      stream-iterator-expiry-enabled: false   # FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED. 15-minute iterators.
+      stream-retention-enabled: false      # FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED. 24-hour records and shards.
       backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
       # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
       local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS
@@ -552,6 +575,7 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+      shell-less-backend: false
     memorydb:
       enabled: true
       mock: false
@@ -584,6 +608,7 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # advertise-requested-port: false         # FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT; true = Describe* reports the requested Port, not the proxy port
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.
@@ -640,13 +665,17 @@ floci:
       cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
       step-duration-seconds: 0              # 0 = a step completes as soon as it starts
       cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
-      runner-mode: immediate                # docker = run bootstrap actions and steps in containers
+      runner-mode: immediate                # docker = run bootstrap actions, steps, sessions' servers and notebooks in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
       yarn-node-memory-mb: 4096             # memory a cluster's NodeManager offers its YARN containers
       yarn-node-vcores: 4                   # virtual cores it offers them
       yarn-max-worker-nodes: 4              # the most core and task nodes a cluster runs as containers of their own
+      pig:
+        enabled: false                      # true = add Apache Pig, downloaded, to a docker cluster that installs Pig
+        # urls: https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz
+        # sha256: 6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.
@@ -806,6 +835,9 @@ floci:
       publish-awsvpc-ports-to-host: false
       dynamic-awsvpc-host-ports: false
       host-port-bind-address: "127.0.0.1"
+      # Put an awsvpc task's containers in one network namespace, so they reach each other on
+      # localhost as on Fargate, without security-group enforcement.
+      shared-task-network: false               # FLOCI_SERVICES_ECS_SHARED_TASK_NETWORK
       host-volume-roots: []
       allow-unsafe-host-volumes: false
       allow-privileged-containers: false
@@ -916,6 +948,12 @@ floci:
       mock: false
       backend-keep-alive: true
       backend-keep-alive-timeout-seconds: 60
+
+      alb-zone-rule: ${FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE:aws}
+      # Per-region entries override this global setting, including an explicit aws reset.
+      # alb-zone-rule-by-region:
+      #   ap-northeast-3: allow-single-zone
+      #   us-east-1: allow-single-zone
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -956,6 +994,7 @@ floci:
       job-completion-delay-seconds: 3
     fis:
       enabled: true
+      inject-api-any-service: false  # Let the aws:fis:inject-api-* actions target any service, not only ec2 and kinesis
     route53:
       enabled: true
       vpc-association-control-plane-delay-ms: 0
@@ -1058,7 +1097,7 @@ floci:
     emrserverless:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
-      runner-mode: immediate        # docker = run each job run's spark-submit or hive in a container
+      runner-mode: immediate        # docker = run each job run, and each session's Spark Connect server, in a container
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # for Hive job runs
@@ -1067,6 +1106,9 @@ floci:
       # Remove the drivers and executors a previous run of this deployment left on the daemon before
       # the first job run starts. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
+    emrcontainers:
+      enabled: true
+      job-run-duration-seconds: 0   # 0 = a job run completes as soon as it is submitted
     ssoadmin:
       enabled: true
     ssooidc:

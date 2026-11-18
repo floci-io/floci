@@ -55,9 +55,9 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -91,8 +91,6 @@ public class ContainerLifecycleManager {
 
     /** Host interface a port marked loopback-only publishes on. */
     private static final String LOOPBACK_HOST_IP = "127.0.0.1";
-
-    private final Semaphore teardownSlots = new Semaphore(8, true);
 
     private final DockerClient dockerClient;
     private final ImageCacheService imageCacheService;
@@ -151,6 +149,16 @@ public class ContainerLifecycleManager {
         return createAndStart(spec, platform, false);
     }
 
+    /**
+     * Creates a container, runs {@code beforeStart} against its id, then starts it, for a launch
+     * that must put files into the container before the process inside it runs. The container is
+     * removed again if the setup or the start fails.
+     */
+    public ContainerInfo createAndStart(ContainerSpec spec, Consumer<String> beforeStart) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image());
+        return createAndStart(spec, resolvedImage, null, false, beforeStart);
+    }
+
     /** Starts a disposable container, reclaiming its anonymous volumes if startup fails. */
     public ContainerInfo createAndStartEphemeral(ContainerSpec spec) {
         return createAndStart(spec, true);
@@ -168,18 +176,21 @@ public class ContainerLifecycleManager {
 
     private ContainerInfo createAndStart(ContainerSpec spec, boolean removeAnonymousVolumes) {
         String resolvedImage = imageCacheService.ensureImageExists(spec.image());
-        return createAndStart(spec, resolvedImage, null, removeAnonymousVolumes);
+        return createAndStart(spec, resolvedImage, null, removeAnonymousVolumes, null);
     }
 
     private ContainerInfo createAndStart(ContainerSpec spec, String platform, boolean removeAnonymousVolumes) {
         String resolvedImage = imageCacheService.ensureImageExists(spec.image(), platform);
-        return createAndStart(spec, resolvedImage, platform, removeAnonymousVolumes);
+        return createAndStart(spec, resolvedImage, platform, removeAnonymousVolumes, null);
     }
 
     private ContainerInfo createAndStart(ContainerSpec spec, String resolvedImage, String platform,
-                                         boolean removeAnonymousVolumes) {
+                                         boolean removeAnonymousVolumes, Consumer<String> beforeStart) {
         String containerId = create(spec, resolvedImage, platform, removeAnonymousVolumes);
         try {
+            if (beforeStart != null) {
+                beforeStart.accept(containerId);
+            }
             return withPublishedHostPorts(startCreated(containerId, spec), spec);
         } catch (RuntimeException failure) {
             removeFailedContainer(containerId, failure, removeAnonymousVolumes);
@@ -343,7 +354,15 @@ public class ContainerLifecycleManager {
         labels.put(CREATE_ATTEMPT_LABEL, createAttemptId);
         createCmd.withLabels(labels);
 
-        String containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+        String containerId;
+        try {
+            containerId = createWithConflictRecovery(createCmd, spec, createAttemptId);
+        } catch (DockerException e) {
+            if (ContainerRejectedException.isRejection(e)) {
+                throw new ContainerRejectedException(e);
+            }
+            throw e;
+        }
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
     }
@@ -375,7 +394,7 @@ public class ContainerLifecycleManager {
             if (spec.name() != null) {
                 Optional<Container> existing = findByName(spec.name());
                 if (existing.isPresent() && matchesSpec(existing.get(), spec, createAttemptId)) {
-                    LOG.infov("Create for {0} hit a name conflict; an earlier attempt's response "
+                    LOG.infov("Create for {0} hit a name conflict; an earlier attempt''s response "
                             + "was lost but the container exists, adopting {1}",
                             spec.name(), existing.get().getId());
                     return existing.get().getId();
@@ -466,7 +485,7 @@ public class ContainerLifecycleManager {
             copyIntoContainerDir(containerId, trustStore.get(), ContainerCaBundle.JAVA_TRUST_STORE_FILE_NAME);
             return true;
         } catch (Exception e) {
-            LOG.warnv("Could not copy the Java trust store into container {0}, whose JVMs keep the image's trust"
+            LOG.warnv("Could not copy the Java trust store into container {0}, whose JVMs keep the image''s trust"
                     + " store and will not trust Floci HTTPS: {1}", containerId, e.getMessage());
             return false;
         }
@@ -610,11 +629,7 @@ public class ContainerLifecycleManager {
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
      */
     public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        withTeardownSlot(() -> stopAndRemoveAdmitted(containerId, logStream, stopTimeoutSeconds));
-    }
-
-    private void stopAndRemoveAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        boolean stoppedOrMissing = stopAdmitted(containerId, stopTimeoutSeconds);
+        boolean stoppedOrMissing = stop(containerId, stopTimeoutSeconds);
 
         // Force removal is the recovery path when Docker could not stop the container cleanly. It also
         // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
@@ -641,12 +656,9 @@ public class ContainerLifecycleManager {
      *
      * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
+     * @return whether the container is stopped or already missing
      */
-    public void stop(String containerId, int stopTimeoutSeconds) {
-        withTeardownSlot(() -> stopAdmitted(containerId, stopTimeoutSeconds));
-    }
-
-    private boolean stopAdmitted(String containerId, int stopTimeoutSeconds) {
+    public boolean stop(String containerId, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
@@ -697,12 +709,6 @@ public class ContainerLifecycleManager {
     /** Strict teardown that can also reclaim the container's anonymous volumes. */
     public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
                                      boolean removeAnonymousVolumes) {
-        withTeardownSlot(() -> stopAndRemoveStrictAdmitted(
-                containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes));
-    }
-
-    private void stopAndRemoveStrictAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds,
-                                             boolean removeAnonymousVolumes) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
@@ -764,15 +770,6 @@ public class ContainerLifecycleManager {
             LOG.debugv("Could not await container {0} removal: {1}", containerId, e.getMessage());
         }
         return presenceOf(containerId) == ContainerPresence.ABSENT;
-    }
-
-    private void withTeardownSlot(Runnable stopAndRemove) {
-        teardownSlots.acquireUninterruptibly();
-        try {
-            stopAndRemove.run();
-        } finally {
-            teardownSlots.release();
-        }
     }
 
     private void closeLogStreamIfPresent(Closeable logStream) {
@@ -1228,7 +1225,7 @@ public class ContainerLifecycleManager {
             String[] env = imageConfig == null ? null : imageConfig.getEnv();
             return Optional.of(env == null ? List.of() : List.of(env));
         } catch (Exception e) {
-            LOG.warnv("Could not read the environment of image {0}, so the JVMs in its container keep the image's"
+            LOG.warnv("Could not read the environment of image {0}, so the JVMs in its container keep the image''s"
                     + " trust store and will not trust Floci HTTPS: {1}", resolvedImage, e.getMessage());
             return Optional.empty();
         }

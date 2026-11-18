@@ -22,7 +22,7 @@ public class EventSubscription {
     private List<String> eventCategoriesList = new ArrayList<>();
     private String severity;
     private boolean enabled;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public String getCustomerAwsId() { return customerAwsId; }
     public void setCustomerAwsId(String customerAwsId) { this.customerAwsId = customerAwsId; }

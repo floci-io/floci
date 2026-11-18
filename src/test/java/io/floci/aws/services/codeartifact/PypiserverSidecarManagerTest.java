@@ -88,7 +88,8 @@ class PypiserverSidecarManagerTest {
         ContainerBuilder realBuilder = new ContainerBuilder(
                 deepConfig, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class));
         when(lifecycleManager.startCreated(any(), any())).thenThrow(new IllegalStateException("no Docker here"));
-        PypiserverSidecarManager manager = new PypiserverSidecarManager(realBuilder, lifecycleManager, deepConfig);
+        PypiserverSidecarManager manager = new PypiserverSidecarManager(realBuilder, lifecycleManager, deepConfig,
+                new CodeArtifactContainerRuns(lifecycleManager, deepConfig).containers());
 
         assertThrows(IllegalStateException.class, () -> manager.ensureReady("pypi-repo-1", "http://localhost:4566"));
 
@@ -107,7 +108,8 @@ class PypiserverSidecarManagerTest {
     }
 
     private PypiserverSidecarManager manager() {
-        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config);
+        return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     @SuppressWarnings("unchecked")

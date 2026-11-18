@@ -14,6 +14,7 @@ import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -51,6 +52,53 @@ import java.util.Map;
  * {@code synchronous}, so every other value leaves the emitters idle; the configured test default
  * already resolves to one of those inert values, and spelling it out here keeps the assumption
  * visible for the CUR classes that rely on it.
+ *
+ * <p>It also carries the settings of other classes that share this application, and who relies on
+ * them:
+ * <ul>
+ *   <li>{@code floci.services.bedrock-runtime.backend=proxy}, with {@code proxy.url} on port
+ *   {@value #BEDROCK_PROXY_PORT}, sends Converse to a stand-in OpenAI-compatible server each Bedrock
+ *   proxy class starts and stops itself. {@code proxy.api-key=test-key} and {@code proxy.model-mapping},
+ *   which maps {@value #BEDROCK_PROXY_MAPPED_MODEL_ID} to {@code claude-3-haiku}, are what
+ *   {@code BedrockProxyIntegrationTest} checks. {@code proxy.passthrough=true} forwards a model id
+ *   with no mapping as it is, for {@code BedrockProxyPassthroughIntegrationTest},
+ *   {@code BedrockProxyCancellationIntegrationTest} and {@code BedrockProxyLoggingIntegrationTest}.
+ *   {@code proxy.error-body-timeout-millis=10} shortens the deadline for an upstream error body, so
+ *   the stalled-error-body tests in {@code BedrockProxyLoggingIntegrationTest} do not each wait the
+ *   one-second default.</li>
+ *   <li>{@code floci.services.dsql.mock=false} backs each DSQL cluster with a real database in
+ *   Docker, on an ephemeral port. The {@code Dsql*IntegrationTest} data-plane classes rely on it.</li>
+ *   <li>{@code floci.services.iot.endpoint-address=}{@value #IOT_ENDPOINT_ADDRESS} is what
+ *   DescribeEndpoint returns for every endpoint type. {@code IotDescribeEndpointOverrideIntegrationTest}
+ *   relies on it. {@code floci.services.iot.rule-sql-strict=true} rejects a topic rule whose SQL is
+ *   outside the subset Floci evaluates. {@code IotTopicRuleSqlStrictIntegrationTest} relies on
+ *   it.</li>
+ *   <li>{@code floci.partitions.allow-unknown-regions=true} gives a region label no partition
+ *   publishes a namespace of its own. {@code PartitionUnknownRegionAllowedIntegrationTest} and
+ *   {@code ColonRegionRejectionIntegrationTest} rely on it.</li>
+ *   <li>{@code floci.services.ec2instanceconnect.enabled=false} turns EC2 Instance Connect off.
+ *   {@code InstanceConnectEnablementIntegrationTest} relies on it.</li>
+ *   <li>{@code floci.storage.services.rekognition.mode=persistent} keeps Rekognition collections on
+ *   disk, in {@code rekognition-collections.json} under the test default
+ *   {@code floci.storage.persistent-path}. {@code RekognitionCollectionIntegrationTest} relies on
+ *   it.</li>
+ * </ul>
+ *
+ * <p>Each of these is inert for the other classes: each is read by a single service, Bedrock
+ * Runtime, DSQL, IoT DescribeEndpoint and topic rule creation, the region check on
+ * a request whose region no partition publishes, EC2 Instance Connect, and Rekognition storage, and
+ * no other class here calls that service or sends such a region. The persistent path stays the test
+ * default every application uses, where Timestream for InfluxDB backups and Lambda code-volume
+ * markers are written whatever the storage mode; the Rekognition file is the only one this profile
+ * adds there, and only Rekognition reads it.
+ *
+ * <p>A class joins if every setting here is either one it relies on or one that never reaches its
+ * requests, if any setting it adds never reaches the requests of a class already here, and if the
+ * containers it starts tolerate the longer names the namespace gives them: an EMR cluster's node
+ * container name passes the 63-character DNS label limit with it, so its HDFS cannot resolve its
+ * datanodes, which is why the EMR classes on {@link CloudFormationSettingsProfile} stay apart. A
+ * profile that extends this one starts from {@link #containerOverrides()} instead, so these settings
+ * stay with the classes they were checked against.
  */
 public class SidecarContainersProfile implements QuarkusTestProfile {
 
@@ -64,8 +112,42 @@ public class SidecarContainersProfile implements QuarkusTestProfile {
 
     private static boolean abandonedSidecarsRemoved;
 
+    /** Port of the stand-in OpenAI-compatible server the Bedrock proxy classes start. */
+    public static final int BEDROCK_PROXY_PORT = 18930;
+
+    /** The model id the Bedrock proxy maps to {@code claude-3-haiku}. */
+    public static final String BEDROCK_PROXY_MAPPED_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0";
+
+    /** What IoT DescribeEndpoint returns for every endpoint type. */
+    public static final String IOT_ENDPOINT_ADDRESS = "iot.example.localhost.floci.io";
+
     @Override
     public Map<String, String> getConfigOverrides() {
+        Map<String, String> overrides = new HashMap<>(containerOverrides());
+        overrides.putAll(Map.ofEntries(
+                Map.entry("floci.services.bedrock-runtime.backend", "proxy"),
+                Map.entry("floci.services.bedrock-runtime.proxy.url", "http://127.0.0.1:" + BEDROCK_PROXY_PORT + "/v1"),
+                Map.entry("floci.services.bedrock-runtime.proxy.api-key", "test-key"),
+                Map.entry("floci.services.bedrock-runtime.proxy.model-mapping",
+                        BEDROCK_PROXY_MAPPED_MODEL_ID + "=claude-3-haiku"),
+                Map.entry("floci.services.bedrock-runtime.proxy.passthrough", "true"),
+                Map.entry("floci.services.bedrock-runtime.proxy.error-body-timeout-millis", "10"),
+                Map.entry("floci.services.dsql.mock", "false"),
+                Map.entry("floci.services.iot.endpoint-address", IOT_ENDPOINT_ADDRESS),
+                Map.entry("floci.services.iot.rule-sql-strict", "true"),
+                Map.entry("floci.partitions.allow-unknown-regions", "true"),
+                Map.entry("floci.services.ec2instanceconnect.enabled", "false"),
+                Map.entry("floci.storage.services.rekognition.mode", "persistent")));
+        return overrides;
+    }
+
+    /**
+     * The namespace, port and billing emitter settings alone, without the service settings this
+     * profile's own classes add. A profile that extends this one for classes of its own starts from
+     * these, so that a setting added here for one class never reaches an application it was not
+     * checked against.
+     */
+    public static Map<String, String> containerOverrides() {
         return Map.of(
                 "floci.docker.resource-namespace", NAMESPACE,
                 "quarkus.http.test-port", String.valueOf(TEST_PORT),

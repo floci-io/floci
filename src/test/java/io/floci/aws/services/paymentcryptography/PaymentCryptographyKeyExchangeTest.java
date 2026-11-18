@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -415,6 +416,24 @@ class PaymentCryptographyKeyExchangeTest {
         String certificate = (String) answer.get("KeyCertificate");
         assertNotNull(certificate);
         assertNotNull(Certificates.parseCertificate(certificate));
+    }
+
+    @Test
+    void aReplicatedKeyPairKeepsItsHalves() {
+        // A replica is the same key in another region, so it has to hold the halves the
+        // primary holds. A replica without them is a record of a key that has none.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+        PaymentCryptographyKey pair = service.createKey("us-east-1", attributes,
+                Map.of("Sign", Boolean.TRUE), true, true, Map.of(), List.of("us-west-2"));
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", pair.getKeyId());
+
+        assertNotNull(replica, "the key was not replicated");
+        assertEquals(pair.getKeyPublicKeyBase64(), replica.getKeyPublicKeyBase64());
+        assertEquals(pair.getKeyPrivateKeyBase64(), replica.getKeyPrivateKeyBase64());
     }
 
     @Test

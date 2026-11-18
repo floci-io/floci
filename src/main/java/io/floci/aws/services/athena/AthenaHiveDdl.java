@@ -17,7 +17,8 @@ import java.util.Set;
  * Parses the Hive DDL statements Athena runs against the Glue Data Catalog rather than against
  * data: {@code CREATE EXTERNAL TABLE}, {@code DROP TABLE}, {@code ALTER TABLE ... ADD|DROP
  * PARTITION}, {@code MSCK REPAIR TABLE} and {@code SHOW PARTITIONS}, and the Iceberg {@code CREATE TABLE ...
- * TBLPROPERTIES ('table_type'='ICEBERG')} and {@code VACUUM}, which Floci runs against Glue's Iceberg catalog.
+ * TBLPROPERTIES ('table_type'='ICEBERG')}, {@code VACUUM} and {@code OPTIMIZE}, which Floci runs against Glue's Iceberg
+ * catalog. A table is named {@code t} or {@code db.t}, its catalog being the query's context catalog.
  * {@link #parse} answers null for every other statement, {@code CREATE TABLE AS} included, so those keep going to
  * the query engine.
  *
@@ -27,7 +28,7 @@ import java.util.Set;
 final class AthenaHiveDdl {
 
     sealed interface Statement permits CreateTable, DropTable, AddPartitions, DropPartitions, RepairTable,
-            ShowPartitions, CreateIcebergTable, Vacuum {
+            ShowPartitions, CreateIcebergTable, Vacuum, Optimize {
         TableRef ref();
     }
 
@@ -65,6 +66,10 @@ final class AthenaHiveDdl {
 
     /** {@code VACUUM}: expires an Iceberg table's old snapshots. */
     record Vacuum(TableRef ref) implements Statement {
+    }
+
+    /** {@code OPTIMIZE ... REWRITE DATA USING BIN_PACK}: compacts an Iceberg table's data files. */
+    record Optimize(TableRef ref) implements Statement {
     }
 
     private record Format(String inputFormat, String outputFormat, String serde) {
@@ -129,6 +134,12 @@ final class AthenaHiveDdl {
         }
         if (acceptWords("VACUUM")) {
             return finish(new Vacuum(tableRef()));
+        }
+        if (acceptWords("OPTIMIZE")) {
+            // Its REWRITE DATA USING BIN_PACK clause and filter are not read: no table this runs on compacts.
+            Optimize optimize = new Optimize(tableRef());
+            position = tokens.size();
+            return optimize;
         }
         if (acceptWords("MSCK", "REPAIR", "TABLE")) {
             return finish(new RepairTable(tableRef()));

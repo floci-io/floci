@@ -356,6 +356,10 @@ both carry the cause `The Task state in AWS Step Functions execution [<arn>] whi
 this resource was aborted`. A `StopExecution` that lands while the state waits ends the wait and
 stops the job with the same cause, and so does the execution's budget, and so does a failure in
 another branch of the `Parallel`, or in another iteration of the `Map`, that the `Task` is in.
+Stopping is best effort: an ECS task that is gone (`InvalidParameterException`) or already stopped,
+or a child execution that is gone (`ExecutionDoesNotExist`) or already ended, leaves the state
+ending as it would have; any other refusal fails it, with `ECS.<code>` or `StepFunctions.<code>`
+and the service's message, and any other failure with `States.Runtime`.
 An `addStep.sync` step is cancelled with `CancelSteps` instead, and the cluster of a
 `createCluster.sync` is left running (see [Amazon EMR tasks](#amazon-emr-tasks)). An EMR Serverless
 job run is cancelled, a started application stopped and a created one deleted (see
@@ -412,6 +416,17 @@ that matches, so an undefined condition in a later rule is never evaluated.
 
 The cause of a real execution carries the state prefix described under
 [The cause of a failure](#the-cause-of-a-failure).
+
+## JSONata constructed-array paths
+
+An indexed constructed array followed by a property path follows JSONata 2.0.6's
+sequence reduction rules. For example,
+`$exists([$states.input.Items.{'ok':true}][0].ok)` returns `false`, including when
+`Items` has one element. The unwrapped path returns no value, so using it directly
+as a state's `Output` fails with `States.QueryEvaluationError`.
+Group the array before indexing, `([$states.input.Items.{'ok':true}])[0].ok`,
+to read the first object's property. A standalone `[...][0]` still returns the
+first object.
 
 ## JSONata functions
 
@@ -1299,7 +1314,10 @@ the same two clocks as the other `.sync` integrations (see [Timeouts](#timeouts)
 fail the Task with `States.TaskFailed`, the describe response as the cause: a JSON string, which a
 `Catch` reads with `States.StringToJson` (for example its `Step.Status.State`). When
 the wait ends early, `addStep.sync` cancels its step with `CancelSteps`, as Step Functions "will make
-a best-effort attempt to cancel the task". A cluster is never terminated: "Step Functions does not
+a best-effort attempt to cancel the task": if EMR answers that the cluster is gone or that its release
+cannot cancel steps (`InvalidRequestException`), or reports the step past cancelling (a `FAILED` entry in
+`CancelStepsInfoList`), the Task ends as it would have; any other failure fails it. A
+cluster is never terminated: "Step Functions does not
 terminate an Amazon EMR cluster automatically if execution is stopped." EMR in Floci reaches each
 state at once, so every wait ends at its first poll.
 

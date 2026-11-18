@@ -522,12 +522,12 @@ public class ElastiCacheQueryHandler {
             // Cache clusters are stored per account; like AWS, only the request's Region's are listed.
             List<ElastiCacheService.MemberCacheCluster> members = service.listMemberCacheClusters(filterId);
             List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId).stream()
-                    .filter(c -> service.inRequestRegion(c.getArn())).toList());
+                    .filter(c -> regionResolver.inRequestRegion(c.getArn())).toList());
             // The Memcached lookup is the one that raises CacheClusterNotFound for an unknown id,
             // which is the right answer only once no other source has answered.
             if (!filtered || (members.isEmpty() && clusterList.isEmpty())) {
                 memcachedService.listCacheClusters(filterId).stream()
-                        .filter(c -> service.inRequestRegion(c.getArn()))
+                        .filter(c -> regionResolver.inRequestRegion(c.getArn()))
                         .forEach(clusterList::add);
                 if (filtered && clusterList.isEmpty()) {
                     throw new AwsException("CacheClusterNotFound", "Cache cluster " + filterId + " not found.", 404);

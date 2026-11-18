@@ -84,7 +84,6 @@ AWS::AutoScaling::AutoScalingGroup	NotificationConfigurations	accepted and ignor
 AWS::AutoScaling::AutoScalingGroup	PlacementGroup	accepted and ignored
 AWS::AutoScaling::AutoScalingGroup	SkipZonalShiftValidation	accepted and ignored
 AWS::AutoScaling::AutoScalingGroup	TrafficSources	accepted and ignored
-AWS::AutoScaling::LaunchConfiguration	BlockDeviceMappings	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCId	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCSecurityGroups	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	EbsOptimized	accepted and ignored
@@ -157,6 +156,7 @@ AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
 AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
 AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
 AWS::Config::ConfigRule	Compliance	accepted and ignored
+AWS::DSQL::Cluster	MetricGroups	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
@@ -288,7 +288,6 @@ AWS::ECS::TaskDefinition	PlacementConstraints	accepted and ignored
 AWS::ECS::TaskDefinition	ProxyConfiguration	accepted and ignored
 AWS::ECS::TaskDefinition	Tags	accepted and ignored
 AWS::ECS::TaskDefinition	TrustedExecutionConfiguration	accepted and ignored
-AWS::ECS::TaskDefinition	Volumes	accepted and ignored
 AWS::EFS::FileSystem	BypassPolicyLockoutSafetyCheck	Floci's EFS service applies a file system policy without a lockout check, so there is nothing to bypass
 AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS replication, so the destination file system is not created
 AWS::EKS::Cluster	AccessConfig	accepted and ignored
@@ -298,19 +297,16 @@ AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
 AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
-AWS::EKS::Cluster	EncryptionConfig	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
 AWS::EKS::Cluster	KubeApiServerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeControllerManagerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
-AWS::EKS::Cluster	KubernetesNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	Logging	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	ResourcesVpcConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
 AWS::EKS::Cluster	StorageConfig	accepted and ignored
-AWS::EKS::Cluster	Tags	accepted and ignored
 AWS::EKS::Cluster	UpgradePolicy	accepted and ignored
 AWS::EKS::Cluster	ZonalShiftConfig	accepted and ignored
 AWS::EKS::Nodegroup	AmiType	accepted and ignored
@@ -324,7 +320,6 @@ AWS::EKS::Nodegroup	NodeRepairConfig	accepted and ignored
 AWS::EKS::Nodegroup	ReleaseVersion	accepted and ignored
 AWS::EKS::Nodegroup	RemoteAccess	accepted and ignored
 AWS::EKS::Nodegroup	ScalingConfig	accepted and ignored
-AWS::EKS::Nodegroup	Tags	accepted and ignored
 AWS::EKS::Nodegroup	Taints	accepted and ignored
 AWS::EKS::Nodegroup	UpdateConfig	accepted and ignored
 AWS::EKS::Nodegroup	Version	accepted and ignored
@@ -372,19 +367,12 @@ AWS::Events::EventBus	DeadLetterConfig	rejected with a ValidationError, not supp
 AWS::Events::EventBus	KmsKeyIdentifier	rejected with a ValidationError, not supported by Floci
 AWS::Events::EventBus	LogConfig	rejected with a ValidationError, not supported by Floci
 AWS::IAM::ManagedPolicy	Description	accepted and ignored
-AWS::IAM::ManagedPolicy	Groups	accepted and ignored
 AWS::IAM::ManagedPolicy	Path	accepted and ignored
 AWS::IAM::ManagedPolicy	PolicyDocument	accepted and ignored
-AWS::IAM::ManagedPolicy	Users	accepted and ignored
 AWS::IAM::Policy	PolicyDocument	accepted and ignored
 AWS::IAM::Role	Tags	accepted and ignored
 AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
 AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
-AWS::KMS::Key	EnableKeyRotation	accepted and ignored
-AWS::KMS::Key	Enabled	accepted and ignored
-AWS::KMS::Key	KeyPolicy	accepted and ignored
-AWS::KMS::Key	MultiRegion	accepted and ignored
-AWS::KMS::Key	Origin	accepted and ignored
 AWS::KMS::Key	PendingWindowInDays	accepted and ignored
 AWS::KMS::Key	RotationPeriodInDays	accepted and ignored
 AWS::Kinesis::Stream	DesiredShardLevelMetrics	accepted and ignored
@@ -632,13 +620,20 @@ AWS::S3::Bucket	ObjectLockConfiguration	silently dropped, as the S3CfnProvisione
 AWS::S3::Bucket	ObjectLockEnabled	accepted and ignored
 AWS::S3::Bucket	ReplicationConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::SES::ConfigurationSet	ArchivingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	DeliveryOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	ReputationOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	SendingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	SuppressionOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	Tags	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	TrackingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	VdmOptions	explicitly rejected; only the Name property is currently provisioned
 AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
 AWS::SNS::Subscription	Region	accepted and ignored
 AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
 AWS::SNS::Topic	ArchivePolicy	accepted and ignored
 AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
 AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored
-AWS::SNS::Topic	DisplayName	accepted and ignored
 AWS::SNS::Topic	KmsMasterKeyId	accepted and ignored
 AWS::SNS::Topic	SignatureVersion	accepted and ignored
 AWS::SNS::Topic	Tags	accepted and ignored

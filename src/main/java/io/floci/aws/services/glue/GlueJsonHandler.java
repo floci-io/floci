@@ -269,7 +269,7 @@ public class GlueJsonHandler {
             case "DeleteUserDefinedFunction" -> handleDeleteUserDefinedFunction(request);
             case "CreateRegistry" -> handleCreateRegistry(request, region);
             case "GetRegistry" -> handleGetRegistry(request, region);
-            case "ListRegistries" -> handleListRegistries(request);
+            case "ListRegistries" -> handleListRegistries(request, region);
             case "UpdateRegistry" -> handleUpdateRegistry(request, region);
             case "DeleteRegistry" -> handleDeleteRegistry(request, region);
             case "CreateSchema" -> handleCreateSchema(request, region);
@@ -284,9 +284,9 @@ public class GlueJsonHandler {
             case "DeleteSchemaVersions" -> handleDeleteSchemaVersions(request, region);
             case "GetSchemaVersionsDiff" -> handleGetSchemaVersionsDiff(request, region);
             case "CheckSchemaVersionValidity" -> handleCheckSchemaVersionValidity(request);
-            case "PutSchemaVersionMetadata" -> handlePutSchemaVersionMetadata(request);
-            case "RemoveSchemaVersionMetadata" -> handleRemoveSchemaVersionMetadata(request);
-            case "QuerySchemaVersionMetadata" -> handleQuerySchemaVersionMetadata(request);
+            case "PutSchemaVersionMetadata" -> handlePutSchemaVersionMetadata(request, region);
+            case "RemoveSchemaVersionMetadata" -> handleRemoveSchemaVersionMetadata(request, region);
+            case "QuerySchemaVersionMetadata" -> handleQuerySchemaVersionMetadata(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "GetTags" -> handleGetTags(request, region);
@@ -930,8 +930,8 @@ public class GlueJsonHandler {
         return Response.ok(registry).build();
     }
 
-    private Response handleListRegistries(JsonNode request) {
-        GlueSchemaRegistryService.Page<Registry> page = schemaRegistryService.listRegistries(readMaxResults(request), readNextToken(request));
+    private Response handleListRegistries(JsonNode request, String region) {
+        GlueSchemaRegistryService.Page<Registry> page = schemaRegistryService.listRegistries(region, readMaxResults(request), readNextToken(request));
         return Response.ok(pageResponse("Registries", registryListItems(page.items()), page.nextToken())).build();
     }
 
@@ -1269,25 +1269,25 @@ public class GlueJsonHandler {
         return instant != null ? instant.toString() : null;
     }
 
-    private Response handlePutSchemaVersionMetadata(JsonNode request) {
+    private Response handlePutSchemaVersionMetadata(JsonNode request, String region) {
         String svId = request.path("SchemaVersionId").asText(null);
         JsonNode kv = request.get("MetadataKeyValue");
         String key = kv != null ? kv.path("MetadataKey").asText(null) : null;
         String value = kv != null ? kv.path("MetadataValue").asText(null) : null;
-        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.putSchemaVersionMetadata(svId, key, value);
+        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.putSchemaVersionMetadata(svId, key, value, region);
         return Response.ok(buildMetadataPutResponse(result)).build();
     }
 
-    private Response handleRemoveSchemaVersionMetadata(JsonNode request) {
+    private Response handleRemoveSchemaVersionMetadata(JsonNode request, String region) {
         String svId = request.path("SchemaVersionId").asText(null);
         JsonNode kv = request.get("MetadataKeyValue");
         String key = kv != null ? kv.path("MetadataKey").asText(null) : null;
         String value = kv != null ? kv.path("MetadataValue").asText(null) : null;
-        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.removeSchemaVersionMetadata(svId, key, value);
+        GlueSchemaRegistryService.MetadataPutResult result = schemaRegistryService.removeSchemaVersionMetadata(svId, key, value, region);
         return Response.ok(buildMetadataPutResponse(result)).build();
     }
 
-    private Response handleQuerySchemaVersionMetadata(JsonNode request) {
+    private Response handleQuerySchemaVersionMetadata(JsonNode request, String region) {
         String svId = request.path("SchemaVersionId").asText(null);
         List<GlueSchemaRegistryService.MetadataKeyValueFilter> filters = new ArrayList<>();
         JsonNode list = request.get("MetadataList");
@@ -1298,7 +1298,7 @@ public class GlueJsonHandler {
                 filters.add(new GlueSchemaRegistryService.MetadataKeyValueFilter(k, v));
             }
         }
-        Map<String, ?> infoMap = schemaRegistryService.querySchemaVersionMetadata(svId, filters);
+        Map<String, ?> infoMap = schemaRegistryService.querySchemaVersionMetadata(svId, filters, region);
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("MetadataInfoMap", infoMap);
         response.put("SchemaVersionId", svId);

@@ -60,6 +60,19 @@ class BedrockModelCatalogIntegrationTest {
     }
 
     @Test
+    void novaLiteAdvertisesVideoInputOnGetAndList() {
+        List<String> expected = List.of("TEXT", "IMAGE", "VIDEO");
+        try (BedrockClient client = client("us-east-1")) {
+            assertEquals(expected, client.getFoundationModel(request -> request.modelIdentifier(NOVA_LITE))
+                    .modelDetails().inputModalitiesAsStrings());
+            FoundationModelSummary summary = client.listFoundationModels(request -> request.byProvider("Amazon"))
+                    .modelSummaries().stream().filter(model -> NOVA_LITE.equals(model.modelId())).findFirst()
+                    .orElseThrow();
+            assertEquals(expected, summary.inputModalitiesAsStrings());
+        }
+    }
+
+    @Test
     void listFoundationModelsOnlyListsModelsServedInTheRegion() {
         try (BedrockClient us = client("us-east-1"); BedrockClient eu = client("eu-west-1")) {
             assertTrue(modelIds(us).contains(LLAMA));

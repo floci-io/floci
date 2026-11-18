@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -68,6 +69,8 @@ public class AthenaIcebergStatements {
     private static final Pattern DML = Pattern.compile("^(?:INSERT\\s+INTO|MERGE\\s+INTO|DELETE\\s+FROM|UPDATE)\\s+",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern S3_URI = Pattern.compile("^s3[an]?://([^/]+)/(.*)$");
+    private static final String S3_TABLES_CATALOG_NAME = "s3tablescatalog";
+    private static final Pattern S3_TABLES_CATALOG = Pattern.compile("(?i)^s3tablescatalog/([a-z0-9][a-z0-9-]*)$");
 
     private final GlueIcebergCatalog catalog;
     private final GlueService glue;
@@ -103,10 +106,23 @@ public class AthenaIcebergStatements {
 
     // ─── CREATE TABLE ─────────────────────────────────────────────────────────────
 
-    /** Creates the Iceberg table {@code create} describes in {@code database}, with no data. */
+    /** Creates the Iceberg table {@code create} describes in {@code database} of the default catalog, with no data. */
     void createTable(String database, AthenaHiveDdl.CreateIcebergTable create) {
+        createTable(DEFAULT_CATALOG, database, create);
+    }
+
+    /**
+     * Creates the Iceberg table {@code create} describes in {@code database} of {@code restCatalog}, the catalog as
+     * Glue's Iceberg REST endpoint names it: the default catalog, or a table bucket of the federated S3 Tables catalog
+     * ({@code s3tablescatalog:<bucket>}), where S3 Tables decides the table's location.
+     */
+    void createTable(String restCatalog, String database, AthenaHiveDdl.CreateIcebergTable create) {
+        if (!DEFAULT_CATALOG.equals(restCatalog) && create.location() != null) {
+            throw invalid("S3 Tables manage their own storage locations: a CREATE TABLE in an S3 Tables catalog names "
+                    + "no LOCATION");
+        }
         String table = create.ref().table();
-        if (create.ifNotExists() && findTable(database, table) != null) {
+        if (DEFAULT_CATALOG.equals(restCatalog) && create.ifNotExists() && findTable(database, table) != null) {
             return;
         }
         Map<String, String> properties = new HashMap<>();
@@ -131,7 +147,7 @@ public class AthenaIcebergStatements {
             throw invalid(e.getMessage());
         }
         try {
-            catalog.createTable(DEFAULT_CATALOG, database, request);
+            catalog.createTable(restCatalog, database, request);
         } catch (IcebergRestException e) {
             if (create.ifNotExists() && "AlreadyExistsException".equals(e.type())) {
                 return;
@@ -154,6 +170,121 @@ public class AthenaIcebergStatements {
         }
     }
 
+    // ─── S3 Tables catalogs ───────────────────────────────────────────────────────
+
+    /**
+     * The table bucket an Athena catalog name ({@code s3tablescatalog/<bucket>}) names, or null for any other catalog:
+     * Athena queries a table bucket integrated with the Glue Data Catalog under that name.
+     */
+    static String s3TablesBucket(String catalogName) {
+        if (catalogName == null) {
+            return null;
+        }
+        Matcher matcher = S3_TABLES_CATALOG.matcher(catalogName);
+        return matcher.matches() ? matcher.group(1).toLowerCase(Locale.ROOT) : null;
+    }
+
+    /** The catalog Glue's Iceberg REST endpoint answers for a table bucket of the caller's federated S3 Tables catalog. */
+    static String restCatalog(String bucket) {
+        return S3_TABLES_CATALOG_NAME + ":" + bucket;
+    }
+
+    /** {@code CREATE DATABASE} in an S3 Tables catalog: a namespace of its table bucket. */
+    void createNamespace(String bucket, String name, boolean ifNotExists) {
+        try {
+            catalog.createNamespace(restCatalog(bucket), mapper.createObjectNode().set("namespace",
+                    mapper.createArrayNode().add(name)));
+        } catch (IcebergRestException e) {
+            if (ifNotExists && "AlreadyExistsException".equals(e.type())) {
+                return;
+            }
+            throw invalid(e.getMessage());
+        }
+    }
+
+    /** {@code DROP TABLE} in an S3 Tables catalog: S3 Tables deletes the table, data and all. */
+    void dropS3Table(String bucket, String namespace, String table, boolean ifExists) {
+        try {
+            catalog.dropTable(restCatalog(bucket), namespace, table);
+        } catch (IcebergRestException e) {
+            if (ifExists && ("NoSuchTableException".equals(e.type()) || "NoSuchNamespaceException".equals(e.type()))) {
+                return;
+            }
+            throw invalid(e.getMessage());
+        }
+    }
+
+    /**
+     * The query engine's attachments of the S3 Tables catalogs a query reads or writes: its context catalog, when that
+     * is one, and every {@code "s3tablescatalog/<bucket>"} it names. Each is attached under its own name, through Glue's
+     * Iceberg REST endpoint with the warehouse {@code <account>:s3tablescatalog/<bucket>}, so the query runs as written;
+     * with a context catalog whose namespace exists, the search path resolves unqualified names in it. The token goes
+     * once the query ends.
+     */
+    record S3TablesAttachment(String attachSql, String searchPathSql, String token) {
+    }
+
+    /** The attachments {@code query} needs, or null when it names no S3 Tables catalog. */
+    S3TablesAttachment s3TablesAttachment(String query, String contextCatalog, String contextDatabase) {
+        Set<String> buckets = new LinkedHashSet<>();
+        String contextBucket = s3TablesBucket(contextCatalog);
+        if (contextBucket != null) {
+            buckets.add(contextBucket);
+        }
+        // A catalog only a comment or a string literal holds is no reference.
+        for (List<String> name : GlueViewDdlBuilder.references(query)) {
+            String bucket = name.size() > 1 ? s3TablesBucket(name.getFirst()) : null;
+            if (bucket != null) {
+                buckets.add(bucket);
+            }
+        }
+        if (buckets.isEmpty()) {
+            return null;
+        }
+        String accountId = regionResolver.getAccountId();
+        String token = tokens.mint(accountId, regionResolver.getRegion(), TOKEN_LIFETIME);
+        StringBuilder attachSql = new StringBuilder("INSTALL iceberg; LOAD iceberg;\n");
+        for (String bucket : buckets) {
+            attachSql.append(attach(accountId + ":" + S3_TABLES_CATALOG_NAME + "/" + bucket,
+                    GlueViewDdlBuilder.quote(S3_TABLES_CATALOG_NAME + "/" + bucket), token));
+        }
+        String searchPath = contextBucket == null || !hasNamespace(contextBucket, contextDatabase) ? ""
+                : "SET search_path = " + literal(GlueViewDdlBuilder.quote(S3_TABLES_CATALOG_NAME + "/" + contextBucket)
+                + "." + GlueViewDdlBuilder.quote(contextDatabase) + ",memory.main") + ";\n";
+        return new S3TablesAttachment(attachSql.toString(), searchPath, token);
+    }
+
+    /**
+     * Whether the table bucket has the namespace: the engine refuses a search path naming one it does not, and a query
+     * whose context database is the {@code default} Athena gives one naming none still runs on the names it qualifies.
+     */
+    private boolean hasNamespace(String bucket, String namespace) {
+        try {
+            catalog.loadNamespace(restCatalog(bucket), namespace);
+            return true;
+        } catch (IcebergRestException e) {
+            if ("NoSuchNamespaceException".equals(e.type())) {
+                return false;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * The query engine's attachment of Glue's Iceberg REST endpoint, as {@code alias}, for the catalog
+     * {@code warehouse} names, with a catalog token, its S3 reads and writes going through the engine's own credentials.
+     */
+    private String attach(String warehouse, String alias, String token) {
+        return "ATTACH " + literal(warehouse) + " AS " + alias + " (TYPE iceberg, ENDPOINT "
+                + literal(containerEndpoint.baseUrl() + "/iceberg") + ", AUTHORIZATION_TYPE 'oauth2', TOKEN "
+                + literal(token) + ", ACCESS_DELEGATION_MODE 'none');\n";
+    }
+
+    /** Gives up the catalog token of an S3 Tables attachment once its query has ended. */
+    void finished(S3TablesAttachment attachment) {
+        tokens.revoke(attachment.token());
+    }
+
     // ─── INSERT / UPDATE / DELETE / MERGE ─────────────────────────────────────────
 
     /**
@@ -166,12 +297,20 @@ public class AthenaIcebergStatements {
 
     /**
      * {@code query} rewritten to write its Iceberg target through the attached catalog, or null when it is not an
-     * {@code INSERT INTO}, {@code UPDATE}, {@code DELETE FROM} or {@code MERGE INTO} of an Iceberg table; a target
-     * named without a database is in {@code contextDatabase}.
+     * {@code INSERT INTO}, {@code UPDATE}, {@code DELETE FROM} or {@code MERGE INTO} of an Iceberg table of the
+     * default catalog; a target named without a database is in {@code contextDatabase}.
      */
     IcebergWrite write(String query, String contextDatabase) {
+        return write(query, AthenaService.DEFAULT_CATALOG, contextDatabase);
+    }
+
+    /**
+     * As {@link #write(String, String)}, in the context catalog {@code contextCatalog}: in an S3 Tables catalog, only a
+     * target naming the default catalog ({@code awsdatacatalog.db.t}) is one, a name giving none being the context's.
+     */
+    IcebergWrite write(String query, String contextCatalog, String contextDatabase) {
         Target target = target(query);
-        if (target == null) {
+        if (target == null || s3TablesBucket(contextCatalog) != null && !target.catalogNamed()) {
             return null;
         }
         String database = target.database() != null ? target.database() : contextDatabase;
@@ -184,9 +323,7 @@ public class AthenaIcebergStatements {
         Lock lock = tableLock(database, target.table()).readLock();
         lock.lock();
         String token = tokens.mint(accountId, regionResolver.getRegion(), TOKEN_LIFETIME);
-        String setup = "INSTALL iceberg; LOAD iceberg;\nATTACH " + literal(accountId) + " AS " + CATALOG_ALIAS
-                + " (TYPE iceberg, ENDPOINT " + literal(containerEndpoint.baseUrl() + "/iceberg")
-                + ", AUTHORIZATION_TYPE 'oauth2', TOKEN " + literal(token) + ", ACCESS_DELEGATION_MODE 'none');\n";
+        String setup = "INSTALL iceberg; LOAD iceberg;\n" + attach(accountId, CATALOG_ALIAS, token);
         String rewritten = query.substring(0, target.start()) + CATALOG_ALIAS + "."
                 + GlueViewDdlBuilder.quote(database) + "." + GlueViewDdlBuilder.quote(target.table())
                 + query.substring(target.end());
@@ -212,8 +349,8 @@ public class AthenaIcebergStatements {
                 + database + "/" + table, key -> new ReentrantReadWriteLock());
     }
 
-    /** The table a statement writes, and where its name sits in the statement. */
-    record Target(String database, String table, int start, int end) {
+    /** The table a statement writes, whether its name gives its catalog, and where its name sits in the statement. */
+    record Target(String database, String table, boolean catalogNamed, int start, int end) {
     }
 
     /**
@@ -222,7 +359,7 @@ public class AthenaIcebergStatements {
      * statement, or one writing another catalog's table.
      */
     static Target target(String query) {
-        int start = statementStart(query);
+        int start = TrinoSqlCompatibility.skipSpaceAndComments(query, 0);
         Matcher dml = DML.matcher(query).region(start, query.length());
         if (!dml.lookingAt()) {
             return null;
@@ -232,7 +369,7 @@ public class AthenaIcebergStatements {
         int nameStart = i;
         int nameEnd;
         while (true) {
-            int partEnd = identifierEnd(query, i);
+            int partEnd = TrinoSqlCompatibility.identifierEnd(query, i);
             if (partEnd == i) {
                 return null;
             }
@@ -249,29 +386,12 @@ public class AthenaIcebergStatements {
             }
         }
         return switch (parts.size()) {
-            case 1 -> new Target(null, parts.get(0), nameStart, nameEnd);
-            case 2 -> new Target(parts.get(0), parts.get(1), nameStart, nameEnd);
+            case 1 -> new Target(null, parts.get(0), false, nameStart, nameEnd);
+            case 2 -> new Target(parts.get(0), parts.get(1), false, nameStart, nameEnd);
             case 3 -> DEFAULT_DATA_CATALOG.equals(parts.get(0))
-                    ? new Target(parts.get(1), parts.get(2), nameStart, nameEnd) : null;
+                    ? new Target(parts.get(1), parts.get(2), true, nameStart, nameEnd) : null;
             default -> null;
         };
-    }
-
-    /** Where the statement starts, past leading whitespace and comments. */
-    private static int statementStart(String query) {
-        int i = 0;
-        while (true) {
-            i = skipSpaces(query, i);
-            if (query.startsWith("--", i)) {
-                int lineEnd = query.indexOf('\n', i);
-                i = lineEnd < 0 ? query.length() : lineEnd + 1;
-            } else if (query.startsWith("/*", i)) {
-                int commentEnd = query.indexOf("*/", i + 2);
-                i = commentEnd < 0 ? query.length() : commentEnd + 2;
-            } else {
-                return i;
-            }
-        }
     }
 
     private static int skipSpaces(String query, int i) {
@@ -279,32 +399,6 @@ public class AthenaIcebergStatements {
             i++;
         }
         return i;
-    }
-
-    /** The index just past the identifier at {@code i}, or {@code i} when none starts there. */
-    private static int identifierEnd(String query, int i) {
-        if (i >= query.length()) {
-            return i;
-        }
-        if (query.charAt(i) == '"') {
-            int j = i + 1;
-            while (j < query.length()) {
-                if (query.charAt(j) == '"') {
-                    if (j + 1 < query.length() && query.charAt(j + 1) == '"') {
-                        j += 2;
-                        continue;
-                    }
-                    return j + 1;
-                }
-                j++;
-            }
-            return i;
-        }
-        int j = i;
-        while (j < query.length() && (Character.isLetterOrDigit(query.charAt(j)) || query.charAt(j) == '_')) {
-            j++;
-        }
-        return j;
     }
 
     // ─── VACUUM ───────────────────────────────────────────────────────────────────

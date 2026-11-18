@@ -167,6 +167,11 @@
     "JobQueueName",
     "JobQueueType"
   ],
+  "AWS::Bedrock::ApplicationInferenceProfile": [
+    "Description",
+    "InferenceProfileName",
+    "ModelSource"
+  ],
   "AWS::BedrockAgentCore::Memory": [
     "Name",
     "EncryptionKeyArn"
@@ -904,6 +909,12 @@
   "AWS::S3Vectors::VectorBucket": [
     "VectorBucketName",
     "EncryptionConfiguration"
+  ],
+  "AWS::SES::ConfigurationSet": [
+    "Name"
+  ],
+  "AWS::SES::ConfigurationSetEventDestination": [
+    "ConfigurationSetName"
   ],
   "AWS::SES::EmailIdentity": [
     "EmailIdentity"

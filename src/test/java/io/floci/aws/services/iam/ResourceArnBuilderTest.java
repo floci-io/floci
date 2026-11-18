@@ -123,6 +123,41 @@ class ResourceArnBuilderTest {
         }).when(ctx).setEntityStream(any(InputStream.class));
     }
 
+    @ParameterizedTest
+    @CsvSource({"aws,us-east-1", "aws-us-gov,us-gov-west-1", "aws-cn,cn-north-1"})
+    void rdsGroupLifecycleUsesTheNamedGroupAndUnfilteredListsRemainWildcard(String partition, String region) {
+        String prefix = "arn:" + partition + ":rds:" + region + ":" + ACCOUNT + ":";
+        for (String[] group : List.of(new String[]{"DBParameterGroup", "pg"},
+                new String[]{"DBClusterParameterGroup", "cluster-pg"}, new String[]{"DBSubnetGroup", "subgrp"})) {
+            for (String verb : List.of("Create", "Modify", "Delete", "Describe")) {
+                String action = verb + group[0] + ("Describe".equals(verb) ? "s" : "");
+                setFormBody(group[0] + "Name=owned");
+                assertEquals(List.of(prefix + group[1] + ":owned"),
+                        builder.buildResources("rds", "rds:" + action, ctx, region, ACCOUNT, partition), action);
+            }
+            setFormBody("");
+            assertEquals(List.of("*"), builder.buildResources("rds", "rds:Describe" + group[0] + "s",
+                    ctx, region, ACCOUNT, partition));
+        }
+        for (String action : List.of("AddTagsToResource", "RemoveTagsFromResource", "ListTagsForResource")) {
+            setFormBody("ResourceName=" + prefix + "pg:owned");
+            assertEquals(List.of(prefix + "pg:owned"),
+                    builder.buildResources("rds", "rds:" + action, ctx, region, ACCOUNT, partition));
+        }
+    }
+
+    @Test
+    void rdsCreatesAuthorizeEachExplicitDatabaseAndGroupTarget() {
+        String prefix = "arn:aws:rds:us-east-1:" + ACCOUNT + ":";
+        setFormBody("DBClusterIdentifier=db&DBClusterParameterGroupName=parameters&DBSubnetGroupName=subnets");
+        assertEquals(List.of(prefix + "cluster:db", prefix + "cluster-pg:parameters", prefix + "subgrp:subnets"),
+                builder.buildResources("rds", "rds:CreateDBCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+        setFormBody("DBInstanceIdentifier=instance&DBClusterIdentifier=db&DBParameterGroupName=parameters"
+                + "&DBSubnetGroupName=subnets");
+        assertEquals(List.of(prefix + "cluster:db", prefix + "db:instance", prefix + "pg:parameters", prefix + "subgrp:subnets"),
+                builder.buildResources("rds", "rds:CreateDBInstance", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── IAM ──────────────────────────────────────────────────────────────────────
 
     /**
@@ -211,8 +246,13 @@ class ResourceArnBuilderTest {
     @Test
     void iamNamesTheDelegationRequestABlockOfActionsActsOn() {
         String id = "dr-0123456789abcdef01234567";
+        // The forward is in this block now. AWS's "Managing Permissions for Delegation Requests"
+        // lists iam:UpdateDelegationRequest among the permissions an administrator grants, as
+        // "Forward a delegation request to an administrator for approval", so it is authorizable
+        // and names the request its id names, where this suite used to pin it at the wildcard on
+        // the belief that AWS published no action for it.
         for (String action : List.of("AssociateDelegationRequest", "AcceptDelegationRequest",
-                "RejectDelegationRequest", "GetDelegationRequest")) {
+                "RejectDelegationRequest", "GetDelegationRequest", "UpdateDelegationRequest")) {
             assertEquals("arn:aws:iam::000000000000:delegation-request/" + id,
                     resourceOf(builder, "Action=" + action + "&DelegationRequestId=" + id), action);
         }
@@ -223,9 +263,6 @@ class ResourceArnBuilderTest {
         // IAM assigns the id, so the create names no resource to authorize against.
         assertEquals("*", resourceOf(builder,
                 "Action=CreateDelegationRequest&Description=d&RequestorWorkflowId=w"));
-        // AWS publishes no authorizable action for the update at all, so it carries no type.
-        assertEquals("*", resourceOf(builder,
-                "Action=UpdateDelegationRequest&DelegationRequestId=dr-0123456789abcdef01234567"));
     }
 
     /**
@@ -2144,7 +2181,7 @@ class ResourceArnBuilderTest {
         Instance<LambdaMicrovmsService> instance = mock(Instance.class);
         when(instance.isResolvable()).thenReturn(true);
         when(instance.get()).thenReturn(microvms);
-        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, instance));
+        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, null, instance, null));
 
         assertEquals(List.of(image), lambda(backed, "GET", "/2025-09-09/microvms/microvm-1", "GetMicrovm"));
         assertEquals(List.of(image), lambda(backed, "POST", "/2025-09-09/microvms/microvm-1/suspend",
@@ -2512,7 +2549,7 @@ class ResourceArnBuilderTest {
         String callbackId = Base64.getEncoder().encodeToString((execution + "|c1|nonce").getBytes(StandardCharsets.UTF_8));
         @SuppressWarnings("unchecked")
         Instance<LambdaMicrovmsService> none = mock(Instance.class);
-        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, none));
+        ResourceArnBuilder backed = reading(new LambdaStoredResourceArns(null, null, none, null));
         assertEquals(List.of(execution), lambda(backed, "POST",
                 "/2025-12-01/durable-execution-callbacks/" + callbackId.replace("/", "%2F") + "/succeed",
                 "SendDurableExecutionCallbackSuccess"));

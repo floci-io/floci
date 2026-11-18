@@ -71,6 +71,89 @@ create_key() {
     [ "$(json_get "$output" '.Tags | length')" = "0" ]
 }
 
+@test "Payment Cryptography control plane: a resource policy is put, read and deleted" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    # The cross-account grant the reference's own page shows.
+    local policy='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:role/ExampleRole"},"Action":["payment-cryptography:GenerateCardValidationData","payment-cryptography:VerifyCardValidationData"],"Resource":"*"}]}'
+
+    run aws_cmd payment-cryptography put-resource-policy \
+        --resource-arn "$KEY_ARN" \
+        --policy "$policy"
+    assert_success
+    [ "$(json_get "$output" '.Policy')" = "$policy" ]
+
+    run aws_cmd payment-cryptography get-resource-policy --resource-arn "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Policy')" = "$policy" ]
+
+    run aws_cmd payment-cryptography delete-resource-policy --resource-arn "$KEY_ARN"
+    assert_success
+
+    run aws_cmd payment-cryptography get-resource-policy --resource-arn "$KEY_ARN"
+    assert_failure
+}
+
+@test "Payment Cryptography control plane: a policy that grants public access is refused" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography put-resource-policy \
+        --resource-arn "$KEY_ARN" \
+        --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["payment-cryptography:EncryptData"],"Resource":"*"}]}'
+    assert_failure
+    [[ "$output" == *"PublicPolicyException"* ]]
+}
+
+@test "Payment Cryptography control plane: a policy that names another key is refused" {
+    # The reference says the resource of a policy must be every resource or the ARN of the
+    # key the policy is on.
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography put-resource-policy \
+        --resource-arn "$KEY_ARN" \
+        --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:role/ExampleRole"},"Action":["payment-cryptography:GenerateCardValidationData"],"Resource":"arn:aws:payment-cryptography:us-east-1:000000000000:key/1234abcd1234abcd"}]}'
+    assert_failure
+    [[ "$output" == *"ValidationException"* ]]
+}
+
+@test "Payment Cryptography control plane: a key is stopped and started again" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography stop-key-usage --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.Enabled')" = "false" ]
+    [ -n "$(json_get "$output" '.Key.UsageStopTimestamp')" ]
+
+    run aws_cmd payment-cryptography start-key-usage --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.Enabled')" = "true" ]
+    [ -n "$(json_get "$output" '.Key.UsageStartTimestamp')" ]
+}
+
+@test "Payment Cryptography control plane: a deleted key is restored" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography delete-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "DELETE_PENDING" ]
+
+    run aws_cmd payment-cryptography get-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "DELETE_PENDING" ]
+
+    run aws_cmd payment-cryptography restore-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "CREATE_COMPLETE" ]
+    # The reference's own restore example answers with a key that is disabled: it is
+    # start-key-usage that enables a key again.
+    [ "$(json_get "$output" '.Key.Enabled')" = "false" ]
+}
+
 @test "Payment Cryptography control plane: a key pair is created with the usage its derived keys have" {
     # The usage a derived key is for is named when the key pair is made, as the export
     # guide's key agreement flow does.
@@ -84,4 +167,27 @@ create_key() {
     run aws_cmd payment-cryptography get-key --key-identifier "$PAIR_ARN"
     assert_success
     [ "$(json_get "$output" '.Key.DeriveKeyUsage')" = "TR31_K1_KEY_BLOCK_PROTECTION_KEY" ]
+}
+
+@test "Payment Cryptography control plane: a Multi-Party Approval team is associated and removed" {
+    # The team's ARN is kept as the request names it: the emulator has no Multi-Party
+    # Approval service to check it against.
+    local team="arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha"
+
+    run aws_cmd payment-cryptography associate-mpa-team \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE \
+        --mpa-team-arn "$team"
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.MpaTeamArn')" = "$team" ]
+    [ "$(json_get "$output" '.MpaTeamAssociation.AssociationState')" = "ACTIVE" ]
+
+    run aws_cmd payment-cryptography get-mpa-team-association \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.MpaTeamArn')" = "$team" ]
+
+    run aws_cmd payment-cryptography disassociate-mpa-team \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.AssociationState')" = "DELETE_PENDING" ]
 }

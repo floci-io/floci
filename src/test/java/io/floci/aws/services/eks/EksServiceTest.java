@@ -1578,6 +1578,17 @@ class EksServiceTest {
         assertEquals(FargateProfileStatus.DELETING, deleted.getStatus());
         assertThrows(AwsException.class, () -> eksService.describeFargateProfile("my-eks-cluster", "profile-a"));
         assertEquals(List.of("profile-b"), eksService.listFargateProfiles("my-eks-cluster"));
+        assertEquals(Optional.of(deleted.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        FargateProfile replacement = eksService.createFargateProfile("my-eks-cluster", fargateProfileRequest("profile-a"));
+        assertNotEquals(deleted.getFargateProfileArn(), replacement.getFargateProfileArn());
+        assertEquals(Optional.of(replacement.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-a");
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-b");
+        eksService.deleteCluster("my-eks-cluster");
+        createTestCluster("my-eks-cluster");
+        assertTrue(eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a").isEmpty());
     }
 
     @Test
@@ -1783,6 +1794,19 @@ class EksServiceTest {
                 .anyMatch(p -> "-1".equals(p.getIpProtocol())
                         && p.getUserIdGroupPairs().stream().anyMatch(u -> sgId.equals(u.getGroupId())));
         assertTrue(hasSelfEgress, "Security group should have self-referencing outbound egress rule for EFA");
+
+        int groupsBefore = ec2Service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).size();
+        KubernetesNetworkConfig badFamily = new KubernetesNetworkConfig();
+        badFamily.setIpFamily("ipv5");
+        CreateClusterRequest bad = new CreateClusterRequest();
+        bad.setName("cluster-sg-bad-family");
+        bad.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        bad.setResourcesVpcConfig(vpcConfig);
+        bad.setKubernetesNetworkConfig(badFamily);
+        assertEquals("InvalidParameterException",
+                assertThrows(AwsException.class, () -> service.createCluster(bad)).getErrorCode());
+        assertEquals(groupsBefore,
+                ec2Service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).size());
     }
 
     @Test

@@ -269,7 +269,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         }
         String arn = resource.getPhysicalId();
         List<String> priorSubnets = prior.isEmpty() ? List.of() : List.of(prior.split(","));
-        elbV2Service.setSubnets(AwsArnUtils.parse(arn).region(), arn, priorSubnets);
+        elbV2Service.restoreSubnetSnapshot(AwsArnUtils.parse(arn).region(), arn, priorSubnets);
         recordUsedSubnets(resource, priorSubnets);
         resource.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
         return true;

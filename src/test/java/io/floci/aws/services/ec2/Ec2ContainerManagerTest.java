@@ -44,6 +44,7 @@ import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
+import io.floci.aws.testing.HelperShellFixture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -1609,7 +1610,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
         verify(harness.vpcNetworkManager, timeout(2000).atLeastOnce())
-                .releasePrivateIp("us-west-2", "subnet-lease", "10.0.1.10");
+                .releasePrivateIp(null, "us-west-2", "subnet-lease", "10.0.1.10");
     }
 
     @Test
@@ -1624,9 +1625,9 @@ class Ec2ContainerManagerTest {
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
         // Detach before release: Docker holds the address while the endpoint stands, so handing it
         // to the next launch before disconnecting would have the daemon refuse it.
-        verify(harness.vpcNetworkManager, timeout(2000)).detach("us-west-2", "vpc-lease", null);
+        verify(harness.vpcNetworkManager, timeout(2000)).detach(null, "us-west-2", "vpc-lease", null);
         verify(harness.vpcNetworkManager, timeout(2000))
-                .releasePrivateIp("us-west-2", "subnet-lease", "10.0.1.10");
+                .releasePrivateIp(null, "us-west-2", "subnet-lease", "10.0.1.10");
     }
 
     private static Instance leasedInstance(String instanceId) {

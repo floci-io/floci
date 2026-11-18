@@ -10,6 +10,7 @@ import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
@@ -36,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(PartitionUnknownRegionAllowedIntegrationTest.AllowUnknownRegionsProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class ColonRegionRejectionIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";

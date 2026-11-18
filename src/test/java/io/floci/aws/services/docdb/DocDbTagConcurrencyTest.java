@@ -1,7 +1,7 @@
 package io.floci.aws.services.docdb;
 
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.testing.DocDbMockProfile;
+import io.floci.aws.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -24,10 +24,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * that no describe created and no delete can remove.
  *
  * <p>The race is in storage, not in the container, so the DocumentDB container layer is mocked:
- * starting one per attempt would only add seconds.
+ * starting one per attempt would only add seconds. {@link IamEnforcementProfile} mocks it and
+ * leaves RDS alone.
  */
 @QuarkusTest
-@TestProfile(DocDbMockProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class DocDbTagConcurrencyTest {
 
     @Inject

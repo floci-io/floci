@@ -6,7 +6,6 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Digests;
-import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
@@ -399,7 +398,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // Mount host AWS config into Lambda container (read-only) for SDK credential discovery
         awsConfigPath.ifPresent(hostPath -> {
             if (!Files.isDirectory(Path.of(hostPath))) {
-                LOG.warnv("awsConfigPath '{0}' does not exist or is not a directory; "
+                LOG.warnv("awsConfigPath ''{0}'' does not exist or is not a directory; "
                         + "Lambda containers may fail to discover credentials", hostPath);
             }
             specBuilder.withReadOnlyBind(hostPath, "/opt/aws-config");
@@ -517,6 +516,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 lambdaAccountId, containerId, cwLogGroup, cwLogStream,
                 lambdaRegion, "lambda:" + fn.getFunctionName());
         handle.setLogStream(logHandle);
+        handle.setLogTailReader(initialization -> InvocationLogTail.captureDocker(dockerClient, handle.getContainerId(), initialization));
 
         return handle;
         } catch (RuntimeException e) {
@@ -719,16 +719,16 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 || subnets.isEmpty() || !(subnets.getFirst() instanceof String subnetId)) {
             return;
         }
-        // Provisioned and cross-account launches run outside the owner's request scope.
-        Optional<String> address = RequestScopes.callAs(accountId, region,
-                () -> ec2Service.allocateVpcPrivateIp(region, subnetId));
+        // Provisioned and cross-account launches run outside the owner's request scope, so the owner is named.
+        Optional<String> address = ec2Service.allocateVpcPrivateIp(accountId, region, subnetId);
         if (address.isEmpty()) {
             return;
         }
-        if (ec2Service.attachContainerToVpc(region, fn.getVpcId(), subnetId, containerId, address.get()).isPresent()) {
-            vpcLeases.put(containerId, new VpcLease(region, subnetId, address.get()));
+        if (ec2Service.attachContainerToVpc(accountId, region, fn.getVpcId(), subnetId, containerId, address.get())
+                .isPresent()) {
+            vpcLeases.put(containerId, new VpcLease(accountId, region, subnetId, address.get()));
         } else {
-            ec2Service.releaseVpcPrivateIp(region, subnetId, address.get());
+            ec2Service.releaseVpcPrivateIp(accountId, region, subnetId, address.get());
         }
     }
 
@@ -736,7 +736,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private void releaseVpcLease(String containerId) {
         VpcLease lease = vpcLeases.remove(containerId);
         if (lease != null) {
-            ec2Service.releaseVpcPrivateIp(lease.region(), lease.subnetId(), lease.address());
+            ec2Service.releaseVpcPrivateIp(lease.accountId(), lease.region(), lease.subnetId(), lease.address());
         }
     }
 
@@ -1456,7 +1456,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     /** Where a container's output is sent: the CloudWatch log group/stream and its region. */
     private record LogDestination(String accountId, String logGroup, String logStream, String region) { }
 
-    private record VpcLease(String region, String subnetId, String address) { }
+    private record VpcLease(String accountId, String region, String subnetId, String address) { }
 
     /**
      * Arms an async watch (via Docker's own wait-for-exit API, not polling) that notices when

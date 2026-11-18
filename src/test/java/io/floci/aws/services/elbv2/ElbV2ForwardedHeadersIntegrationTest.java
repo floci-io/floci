@@ -4,7 +4,7 @@ import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.Certificate;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
-import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -48,7 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** What a target receives through a real listener socket, against the header tables in the ALB guide. */
 @QuarkusTest
-@TestProfile(RealElbV2DataPlaneProfile.class)
+@TestProfile(RdsMockProfile.class)
 class ElbV2ForwardedHeadersIntegrationTest {
 
     private static final String AUTH =

@@ -37,6 +37,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -413,6 +414,37 @@ class RedshiftServerlessServiceTest {
 
         assertEquals(Map.of("env", "dev"),
                 service.listTagsForResource(created.getNamespaceArn(), REGION));
+    }
+
+    @Test
+    void storedTagsReadTheNamespaceOrTheSnapshotTheArnNamesInItsAccountAndRegion() {
+        String namespace = service.createNamespace("stored-tags-ns", "admin", null, null, null, null, null,
+                Map.of("team", "data"), REGION).getNamespaceArn();
+        String snapshot = service.createSnapshot("stored-tags-snap", "stored-tags-ns", null, Map.of("team", "backup"),
+                REGION).getSnapshotArn();
+
+        assertEquals(Map.of("team", "data"), service.storedTags(namespace));
+        assertEquals(Map.of("team", "backup"), service.storedTags(snapshot));
+        assertEquals(Map.of(), service.storedTags(namespace.replace(ACCOUNT_ID, "111111111111")));
+        assertEquals(Map.of(), service.storedTags(namespace.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), service.storedTags(namespace + "0"));
+
+        service.tagResource(namespace, Map.of("stage", "prod"), REGION);
+        service.untagResource(namespace, List.of("team"), REGION);
+
+        assertEquals(Map.of("stage", "prod"), service.storedTags(namespace));
+    }
+
+    @Test
+    void storedTagsReadAPreMultiAccountNamespaceAsTheDefaultAccountsAndAsNoOthers() {
+        Namespace legacy = new Namespace();
+        legacy.setNamespaceArn("arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT_ID + ":namespace/legacy-id");
+        legacy.setTags(Map.of("team", "legacy"));
+        doAnswer(invocation -> Stream.of(legacy).filter(invocation.<Predicate<Namespace>>getArgument(0)).toList())
+                .when(store).scanUnscopedLegacy(any());
+
+        assertEquals(Map.of("team", "legacy"), service.storedTags(legacy.getNamespaceArn()));
+        assertEquals(Map.of(), service.storedTags(legacy.getNamespaceArn().replace(ACCOUNT_ID, "111111111111")));
     }
 
     @Test

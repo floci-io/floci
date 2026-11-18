@@ -157,6 +157,25 @@ class RedshiftDataOperationsTest {
     }
 
     @Test
+    @DisplayName("SUPER and VARBYTE columns round trip through JSON_PARSE, TO_VARBYTE and their readers")
+    void superAndVarbyteRoundTrip() throws Exception {
+        run("CREATE TABLE compat_super (id int, doc SUPER, raw VARBYTE(16))");
+        run("INSERT INTO compat_super VALUES (1, JSON_PARSE('[10001,10002,\"abc\"]'), TO_VARBYTE('6162', 'hex'))");
+
+        String selectId = run("SELECT JSON_SERIALIZE(doc), JSON_TYPEOF(doc), FROM_VARBYTE(raw, 'utf8'), "
+                + "CAN_JSON_PARSE('This is a string.') FROM compat_super");
+        GetStatementResultResponse result = data.getStatementResult(GetStatementResultRequest.builder()
+                .id(selectId)
+                .build());
+
+        assertThat(result.records()).hasSize(1);
+        assertThat(result.records().get(0).get(0).stringValue()).isEqualTo("[10001,10002,\"abc\"]");
+        assertThat(result.records().get(0).get(1).stringValue()).isEqualTo("array");
+        assertThat(result.records().get(0).get(2).stringValue()).isEqualTo("ab");
+        assertThat(result.records().get(0).get(3).booleanValue()).isFalse();
+    }
+
+    @Test
     @DisplayName("named SQL parameters are bound through the SDK model")
     void parameterizedStatementBindsSqlParameters() throws Exception {
         String id = data.executeStatement(ExecuteStatementRequest.builder()

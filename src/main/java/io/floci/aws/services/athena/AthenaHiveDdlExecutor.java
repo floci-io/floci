@@ -49,8 +49,35 @@ final class AthenaHiveDdlExecutor {
      * each, and no rows for every other statement.
      */
     List<String> execute(AthenaHiveDdl.Statement statement, String contextDatabase) {
+        return execute(statement, AthenaService.DEFAULT_CATALOG, contextDatabase);
+    }
+
+    /**
+     * Runs {@code statement} in the context catalog {@code contextCatalog}. In an S3 Tables catalog
+     * ({@code s3tablescatalog/<bucket>}), which holds Iceberg tables only, a {@code CREATE TABLE} creates one in the
+     * table bucket and {@code DROP TABLE} deletes it; Hive DDL, {@code OPTIMIZE} and {@code VACUUM} are refused, as on
+     * Athena.
+     */
+    List<String> execute(AthenaHiveDdl.Statement statement, String contextCatalog, String contextDatabase) {
         String database = statement.ref().database() != null ? statement.ref().database() : contextDatabase;
         String table = statement.ref().table();
+        String bucket = AthenaIcebergStatements.s3TablesBucket(contextCatalog);
+        if (bucket != null) {
+            return switch (statement) {
+                case AthenaHiveDdl.CreateIcebergTable create -> {
+                    icebergStatements.createTable(AthenaIcebergStatements.restCatalog(bucket), database, create);
+                    yield List.of();
+                }
+                case AthenaHiveDdl.DropTable drop -> {
+                    icebergStatements.dropS3Table(bucket, database, table, drop.ifExists());
+                    yield List.of();
+                }
+                case AthenaHiveDdl.Vacuum vacuum -> throw maintainedByS3();
+                case AthenaHiveDdl.Optimize optimize -> throw maintainedByS3();
+                default -> throw new AwsException("InvalidRequestException", "Catalog " + contextCatalog
+                        + " holds Iceberg tables only; this statement is not supported in it", 400);
+            };
+        }
         return switch (statement) {
             case AthenaHiveDdl.CreateTable create -> {
                 createTable(database, create);
@@ -79,7 +106,18 @@ final class AthenaHiveDdlExecutor {
             }
             case AthenaHiveDdl.Vacuum vacuum ->
                     throw new IllegalStateException("VACUUM runs on the query engine, not against the catalog alone");
+            case AthenaHiveDdl.Optimize optimize ->
+                    throw new AwsException("InvalidRequestException", "OPTIMIZE is not supported yet", 400);
         };
+    }
+
+    /**
+     * Athena's refusal of {@code OPTIMIZE} and {@code VACUUM} on S3 Tables, whose compaction and snapshots S3
+     * manages.
+     */
+    private static AwsException maintainedByS3() {
+        return new AwsException("InvalidRequestException",
+                "OPTIMIZE and VACUUM are not supported on S3 Tables: S3 manages their compaction and snapshots", 400);
     }
 
     private void createTable(String database, AthenaHiveDdl.CreateTable create) {
@@ -237,7 +275,7 @@ final class AthenaHiveDdlExecutor {
     }
 
     /** Athena's location for a partition added without one: {@code <table location>/key=value/...}. */
-    private static String defaultLocation(Table table, List<String> values) {
+    static String defaultLocation(Table table, List<String> values) {
         String location = table.getStorageDescriptor() != null && table.getStorageDescriptor().getLocation() != null
                 ? table.getStorageDescriptor().getLocation() : "";
         StringBuilder path = new StringBuilder(location.endsWith("/") ? location : location + "/");

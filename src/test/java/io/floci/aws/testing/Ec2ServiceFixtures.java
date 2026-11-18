@@ -6,6 +6,7 @@ import io.floci.aws.services.ec2.Ec2ContainerManager;
 import io.floci.aws.services.ec2.Ec2ImageCatalog;
 import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 
 import static org.mockito.Mockito.mock;
@@ -14,7 +15,7 @@ import static org.mockito.Mockito.when;
 /**
  * A mock-mode {@link Ec2Service} over in-memory storage for account 000000000000, for unit tests
  * that drive the service directly: containers, port forwarding and images are mocks, so nothing
- * leaves the JVM.
+ * leaves the JVM. {@link #securityGroup} builds a group for a test that mocks the service instead.
  */
 public final class Ec2ServiceFixtures {
 
@@ -39,5 +40,14 @@ public final class Ec2ServiceFixtures {
         return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 storage);
+    }
+
+    /** Security group {@code groupId} named {@code groupName} in {@code vpcId}, with no rules. */
+    public static SecurityGroup securityGroup(String groupId, String groupName, String vpcId) {
+        SecurityGroup group = new SecurityGroup();
+        group.setGroupId(groupId);
+        group.setGroupName(groupName);
+        group.setVpcId(vpcId);
+        return group;
     }
 }

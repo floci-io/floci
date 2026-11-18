@@ -12,7 +12,7 @@ import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterStatus;
 import io.floci.aws.testing.PartitionCleanup;
-import io.floci.aws.testing.RealEksProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -52,12 +52,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * user data works unchanged. A pod scheduled in the cluster pulls its image through the configured
  * host, with the custom header that registries.yaml could not express.
  *
- * <p>The real cluster comes from {@link RealEksProfile}, which this class shares with the other
+ * <p>The real cluster comes from {@link RdsMockProfile}, which this class shares with the other
  * classes that run a k3s cluster, so it removes the cluster, node group and launch template it
  * creates.
  */
 @QuarkusTest
-@TestProfile(RealEksProfile.class)
+@TestProfile(RdsMockProfile.class)
 // Bounded cluster/workload waits total 285 s; allow Docker setup and cleanup as well.
 @Timeout(value = 6, unit = TimeUnit.MINUTES)
 class EksRegistryHostsDockerIntegrationTest {

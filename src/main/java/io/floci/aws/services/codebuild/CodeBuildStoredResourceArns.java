@@ -8,11 +8,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
  * What IAM asks CodeBuild of the resources a request names: the project the caller's build of an id belongs to, as
- * the service stores them, which CodeBuild checks a call naming the build on.
+ * the service stores them, which CodeBuild checks a call naming the build on, and the tags of a project or a report
+ * group.
  */
 @ApplicationScoped
 public class CodeBuildStoredResourceArns implements StoredResourceArns {
@@ -48,5 +50,10 @@ public class CodeBuildStoredResourceArns implements StoredResourceArns {
                 .map(Project::getArn)
                 .distinct()
                 .toList();
+    }
+
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        return codeBuild.storedTags(arn);
     }
 }

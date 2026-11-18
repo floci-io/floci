@@ -99,6 +99,19 @@ each destination and the SQS queue or SNS topic SAM creates when a destination g
 Asynchronous invocations apply its retry, event age, destination settings, and dead-letter queue
 configurations (`DeadLetterConfig`).
 
+### Deployment package storage
+
+New Lambda deployment buckets are service-owned and do not appear in S3 `ListBuckets`,
+including paginated results. Deleting a function removes its package objects while
+retaining the shared regional bucket for other functions. Customer buckets with similar
+names remain visible. Existing persisted buckets without service-ownership metadata are
+not migrated or reclassified by name.
+
+Creating a customer bucket with the exact name of an existing service-owned deployment
+bucket returns `BucketAlreadyExists` (HTTP 409), including in `us-east-1`. Ordinary
+customer buckets keep S3's default-region creation behavior, and Lambda can reuse its
+shared deployment bucket for subsequent functions.
+
 ### Function policies under IAM enforcement
 
 With [IAM enforcement](iam.md#resource-based-policies) on, the statements `AddPermission` adds take
@@ -129,8 +142,9 @@ part in authorizing calls to the function:
   authorized against the function as its name gives it, as the Service Reference lists the function
   alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
-- `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
-  admits no caller.
+- `aws:PrincipalOrgID` is in the request context for a caller whose account is in an organization,
+  so a grant added with `PrincipalOrgID` admits the callers of that organization and no others. A
+  caller in no organization carries no value for the key, and such a grant then admits none.
 
 ### Qualified reads
 
@@ -1063,6 +1077,19 @@ exist, and `AWS_LAMBDA_LOG_GROUP_NAME` names that group. Once a group is named, 
 functions can share, each stream's name carries the function's name, as on AWS:
 `2026/10/16/my-fn[$LATEST]<id>` rather than the default group's `2026/10/16/[$LATEST]<id>`.
 
+For a synchronous `Invoke`, `LogType=Tail` returns the last 4,096 bytes of that invocation's
+standard output and standard error, base64-encoded in `X-Amz-Log-Result` (`LogResult` in
+the SDK and CLI). The first invocation also includes initialization output. A warm
+invocation's tail excludes earlier invocations in the same environment. `LogType=None`,
+an omitted log type, `Event` and `DryRun` omit the header. CloudWatch log forwarding
+continues independently.
+
+Warm invocation boundaries come from the Docker daemon's or kubelet's log timestamps,
+so differences between Floci's clock and the log source's clock do not affect filtering.
+Kubernetes snapshots also filter timestamps locally at nanosecond precision. Synchronous
+durable invocations return a bounded tail across their handler invocations, including
+logs produced after a checkpoint completes the execution and before the handler returns.
+
 The execution environment gets `AWS_LAMBDA_LOG_FORMAT` from `LogFormat` and, under `LogFormat=JSON`,
 `AWS_LAMBDA_LOG_LEVEL` from `ApplicationLogLevel` (`INFO` when unset, the level the API reports).
 The runtime interface clients read both: a Python function writes each record as a JSON object,
@@ -1090,6 +1117,10 @@ groups fail with `InvalidParameterValueException` before the function is mutated
 A rejected update preserves the configuration and revision. Empty subnet and security
 group lists detach the function, and the response then omits `VpcConfig`. Published
 versions retain their network configuration when `$LATEST` changes.
+
+As on AWS, where a function's network interfaces sit in the subnets its `VpcConfig` names,
+EC2's `DeleteSubnet` and `DeleteVpc` fail with `DependencyViolation` while a function, or a
+published version of one, names the subnet or is configured in the VPC.
 
 These checks validate the declaration. Function containers still use the configured
 Docker network. With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true`

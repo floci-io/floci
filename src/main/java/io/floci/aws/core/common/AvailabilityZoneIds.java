@@ -46,6 +46,18 @@ public final class AvailabilityZoneIds {
         return forIndex(region, 1);
     }
 
+    /**
+     * The Region of zone {@code zoneName}, the name without its zone letter: {@code us-east-1} for
+     * {@code us-east-1a}. Null for a name that doesn't end in a letter.
+     */
+    public static String regionOf(String zoneName) {
+        if (zoneName == null || zoneName.length() < 2
+                || !Character.isLetter(zoneName.charAt(zoneName.length() - 1))) {
+            return null;
+        }
+        return zoneName.substring(0, zoneName.length() - 1);
+    }
+
     /** The id of the {@code index}-th zone of {@code region}, counting from 1. */
     public static String forIndex(String region, int index) {
         return prefix(region) + SEPARATOR + index;

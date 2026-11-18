@@ -21,7 +21,7 @@ public class EcsCluster {
     private List<Map<String, Object>> defaultCapacityProviderStrategy;
     private Map<String, Object> configuration;
     private Map<String, Object> serviceConnectDefaults;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public String getClusterArn() { return clusterArn; }
     public void setClusterArn(String clusterArn) { this.clusterArn = clusterArn; }

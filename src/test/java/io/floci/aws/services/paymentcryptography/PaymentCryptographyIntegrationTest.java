@@ -12,17 +12,26 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -59,10 +68,25 @@ class PaymentCryptographyIntegrationTest {
             .when().post("/");
     }
 
-    private static final String CREATE_KEY = """
+    private static final String CREATE_KEY_BODY = """
             {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
              "KeyUsage":"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
              "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
+             "Exportable":true%s}""";
+
+    private static final String CREATE_KEY = CREATE_KEY_BODY.formatted("");
+
+    /** The member that makes a key disabled, as the request names it. */
+    private static final String DISABLED = """
+            ,"Enabled":false""";
+
+    /** A key that is made disabled when it is created. */
+    private static final String CREATE_DISABLED_KEY = CREATE_KEY_BODY.formatted(DISABLED);
+
+    private static final String CREATE_WRAPPING_KEY = """
+            {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+             "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+             "KeyModesOfUse":{"Wrap":true,"Unwrap":true}},
              "Exportable":true}""";
 
     private static final String CREATE_KEY_PAIR = """
@@ -70,6 +94,21 @@ class PaymentCryptographyIntegrationTest {
              "KeyUsage":"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
              "KeyModesOfUse":{"Sign":true,"Verify":true}},
              "Exportable":true}""";
+
+    /**
+     * The body of a request that puts a resource policy on a key.
+     *
+     * <p>The policy is a JSON document in a string, so the body that carries it escapes
+     * the quotes and the line breaks the document holds.
+     *
+     * @param arn the ARN of the key the policy is put on
+     * @param policy the policy document
+     * @return the body of the request
+     */
+    private static String putPolicyBody(String arn, String policy) {
+        return PaymentCryptographyTestFixtures.request(Map.of(
+                "ResourceArn", arn, "Policy", policy)).toString();
+    }
 
     @Test
     void aKeyIsCreatedAndReadBack() {
@@ -184,17 +223,10 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void anImportedKeyCarriesTheEnabledFlagAndTheTags() {
         // The import names the key's state and its tags, and the key comes back that way.
-        String wrapping = call("CreateKey", """
-                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
-                 "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
-                 "KeyModesOfUse":{"Wrap":true,"Unwrap":true}},
-                 "Exportable":true}
-                """)
+        String wrapping = call("CreateKey", CREATE_WRAPPING_KEY)
                 .then().statusCode(200)
                     .extract().path("Key.KeyArn");
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
         String block = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn
                 + "\",\"KeyMaterial\":{\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\""
                 + wrapping + "\"}}}")
@@ -218,9 +250,7 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void aRequestNamingTwoFormsIsRefused() {
         // The union holds one form per request, and naming two is not naming one.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\"" + arn + "\"},"
@@ -234,9 +264,7 @@ class PaymentCryptographyIntegrationTest {
     void theTr34FormIsServed() {
         // The TR-34 form is one the service makes now, so a request that names one is
         // refused for what it is missing and not for naming an unserved form.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"Tr34KeyBlock\":{\"WrappingKeyCertificate\":\"x\","
@@ -250,9 +278,7 @@ class PaymentCryptographyIntegrationTest {
     void theAs2805FormIsServed() {
         // The AS2805 form is one the service makes now, so a request that names one is
         // refused for what it is missing and not for naming an unserved form.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"As2805KeyCryptogram\":{\"As2805KeyVariant\":"
@@ -267,9 +293,7 @@ class PaymentCryptographyIntegrationTest {
     void aRequestNamingNoFormIsRefused() {
         // Every form the model names is one the service makes now, so a request that
         // names none of them names no form at all.
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{}}")
                 .then().statusCode(400)
@@ -284,9 +308,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void theModelCheckRefusesAnExportWithoutAWrappingKeyCertificate() {
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"KeyCryptogram\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\"}}}");
@@ -385,6 +407,15 @@ class PaymentCryptographyIntegrationTest {
         assertTheModelRefused(answer, "KeyDerivationHashAlgorithm");
     }
 
+    /**
+     * The body of a request that creates a key replicated to the regions the member names.
+     *
+     * @param regions the member that names the regions, as the request spells it
+     */
+    private static String createReplicatedKeyBody(String regions) {
+        return CREATE_KEY_BODY.formatted(",\"ReplicationRegions\":" + regions);
+    }
+
     /** The ARN of a key the request may name. */
     private static String keyArn() {
         return call("CreateKey", CREATE_KEY).then().statusCode(200)
@@ -404,9 +435,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void theModelCheckRefusesATr34ExportWithoutItsWrappingKeyCertificate() {
-        String arn = call("CreateKey", CREATE_KEY)
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\","
@@ -496,8 +525,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void theKeysOfARegionAreListed() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ListKeys", "{}")
                 .then().statusCode(200)
@@ -509,8 +537,7 @@ class PaymentCryptographyIntegrationTest {
     void aListedKeyIsItsSummary() {
         // A list carries the key's summary and not the whole key: the identifier, the state,
         // the attributes, the check value and the two flags.
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ListKeys", "{}")
                 .then().statusCode(200)
@@ -527,13 +554,110 @@ class PaymentCryptographyIntegrationTest {
                     // key, which the list does not carry.
                     .body("Keys.find { it.KeyArn == '" + arn + "' }.CreateTimestamp", nullValue())
                     .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyOrigin", nullValue())
-                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue());
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue())
+                    // A key that replicates nowhere is not a multi-region key, so the summary
+                    // says nothing about where it stands.
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.MultiRegionKeyType", nullValue());
+    }
+
+    @Test
+    void aReplicaAnswersWithTheKindOfTheKeyAndItsPrimaryRegion() {
+        // The replication status and the defaults flag are the primary's alone, as the
+        // reference's own answer shows.
+        String arn = call("CreateKey", createReplicatedKeyBody("[\"us-west-2\"]"))
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("Key.MultiRegionKeyType", equalTo("PRIMARY"))
+                .body("Key.PrimaryRegion", equalTo("us-east-1"))
+                .body("Key.ReplicationStatus.'us-west-2'.Status", equalTo("SYNCHRONIZED"))
+                .body("Key.UsingDefaultReplicationRegions", equalTo(false));
+
+        String replicaArn = arn.replace(":us-east-1:", ":us-west-2:");
+        callIn("us-west-2", "GetKey", "{\"KeyIdentifier\":\"" + replicaArn + "\"}")
+                .then().statusCode(200)
+                .body("Key.MultiRegionKeyType", equalTo("REPLICA"))
+                .body("Key.PrimaryRegion", equalTo("us-east-1"))
+                .body("Key.ReplicationStatus", nullValue())
+                .body("Key.UsingDefaultReplicationRegions", nullValue());
+    }
+
+    @Test
+    void aReplicationRegionThatIsNotANameIsRefused() {
+        // The replication regions are names, so a request that names something else is
+        // refused rather than answered as if it had named no region at all. The shape check
+        // settles that the member is a list of names, so the refusal is the model's own.
+        String arn = keyArn();
+
+        call("CreateKey", createReplicatedKeyBody("[123]"))
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+
+        call("AddKeyReplicationRegions",
+                "{\"KeyIdentifier\":\"" + arn + "\",\"ReplicationRegions\":[null]}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+    }
+
+    @Test
+    void aReplicationRegionThatIsNotAListIsRefused() {
+        call("CreateKey", createReplicatedKeyBody("\"us-west-2\""))
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("ReplicationRegions"));
+    }
+
+    @Test
+    void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
+        // The team's ARN is kept as the request names it: the emulator has no Multi-Party
+        // Approval service to check it against.
+        String team = "arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha";
+        String association = """
+                {"Action":"IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"}""";
+
+        call("AssociateMpaTeam", """
+                {"Action":"IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE","MpaTeamArn":"%s"}""".formatted(team))
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.Action", equalTo("IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"))
+                    .body("MpaTeamAssociation.MpaTeamArn", equalTo(team))
+                    .body("MpaTeamAssociation.AssociationState", equalTo("ACTIVE"));
+
+        call("GetMpaTeamAssociation", association)
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.MpaTeamArn", equalTo(team));
+
+        call("DisassociateMpaTeam", association)
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.AssociationState", equalTo("DELETE_PENDING"));
+
+        call("GetMpaTeamAssociation", association)
+                .then().statusCode(400)
+                    .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aReplicationRegionOfAnotherPartitionIsRefused() {
+        // A key is replicated within the partition it is in, as the reference says, so a
+        // Region of another partition is refused.
+        call("CreateKey", createReplicatedKeyBody("[\"cn-north-1\"]"))
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("cn-north-1"));
+
+        call("EnableDefaultKeyReplicationRegions", """
+                {"ReplicationRegions":["us-gov-west-1"]}""")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("us-gov-west-1"));
     }
 
     @Test
     void anAliasIsCreatedAndListed() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("CreateAlias", "{\"AliasName\":\"alias/team/card-key\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -551,8 +675,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void anAliasNameIsUniqueInARegion() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         call("CreateAlias", "{\"AliasName\":\"alias/team/duplicate\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);
 
@@ -563,8 +686,7 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aKeyIsTaggedAndUntagged() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("TagResource", "{\"ResourceArn\":\"" + arn + "\","
                 + "\"Tags\":[{\"Key\":\"Origin\",\"Value\":\"PRIMARY\"}]}")
@@ -585,6 +707,294 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aResourcePolicyIsPutReadAndDeleted() {
+        String arn = keyArn();
+        String policy = PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY;
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("ResourceArn", equalTo(arn))
+                    .body("Policy", equalTo(policy));
+
+        call("GetResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("ResourceArn", equalTo(arn))
+                    .body("Policy", equalTo(policy));
+
+        call("DeleteResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200);
+
+        call("GetResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void thePolicyOfTheReferenceIsAttachedAndReadBack() {
+        // The reference's own page shows this policy, and the service keeps the document as
+        // it was given.
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY))
+                .then().statusCode(200)
+                    .body("ResourceArn", equalTo(arn))
+                    .body("Policy", equalTo(PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
+
+        call("GetResourcePolicy", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Policy", equalTo(PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
+    }
+
+    @Test
+    void aPolicyThatNamesAnotherKeyIsRefused() {
+        // The reference says the resource of a policy must be every resource or the ARN of
+        // the key the policy is on.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"arn:aws:payment-cryptography:us-east-1:000000000000:"
+                + "key/1234abcd1234abcd\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatGrantsPublicAccessIsRefused() {
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":\"*\",\"Action\":[\"payment-cryptography:EncryptData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("PublicPolicyException"));
+    }
+
+    @Test
+    void aPolicyThatIsNotJsonIsRefused() {
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn, "not json"))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatNamesTheKeyItIsOnIsAttached() {
+        // The resource may be the key's own ARN as well as every resource.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"" + arn + "\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyOfOneStatementIsAttached() {
+        // The statement may stand alone rather than in a list.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyThatNamesNoResourceIsRefused() {
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"arn:aws:payment-cryptography:us-east-1:000000000000:"
+                + "key/1234abcd1234abcd\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatCarriesNoStatementIsRefused() {
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn, "{\"Version\":\"2012-10-17\"}"))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatGrantsEveryoneAccessThroughItsPrincipalIsRefused() {
+        // The principal may be written as a list of principals, and a wildcard among them
+        // is everyone.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":[\"arn:aws:iam::111122223333:role/ExampleRole\",\"*\"]},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("PublicPolicyException"));
+    }
+
+    @Test
+    void aPolicyThatCarriesAConditionIsAttached() {
+        // A condition narrows the grant, so the grant is not to everyone.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":\"*\","
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:PrincipalAccount\":\"111122223333\"}}}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyThatGrantsEveryoneAccessThroughThePrincipalItExcludesIsRefused() {
+        // A grant that names the principals it excludes reaches everyone else, and a
+        // wildcard among them is everyone.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("PublicPolicyException"));
+    }
+
+    @Test
+    void aPolicyThatExcludesEveryoneIsAttached() {
+        // A grant that excludes everyone reaches nobody, so it opens nothing.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"NotPrincipal\":\"*\","
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(200)
+                    .body("Policy", equalTo(policy));
+    }
+
+    @Test
+    void aPolicyThatCarriesAnEmptyStatementIsRefused() {
+        // A policy that grants nothing is not a policy, so it is refused.
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn, "{\"Version\":\"2012-10-17\",\"Statement\":[]}"))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyWhoseStatementNamesNoActionIsRefused() {
+        // A grant names an effect, a principal, an action and a resource, and one that
+        // names no action grants nothing.
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyWhoseStatementNamesNoPrincipalIsRefused() {
+        String arn = keyArn();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        call("PutResourcePolicy", putPolicyBody(arn, policy))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void aPolicyThatCarriesSomethingAfterTheDocumentIsRefused() {
+        // The whole string is what the key keeps, so a string that is not one document is
+        // not a policy.
+        String arn = keyArn();
+
+        call("PutResourcePolicy", putPolicyBody(arn,
+                "{\"Version\":\"2012-10-17\",\"Statement\":[]} {\"Version\":\"2012-10-17\"}"))
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+    @Test
+    void aKeyIsStoppedAndStartedAgain() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.UsageStopTimestamp", notNullValue());
+
+        assertKeyIsStarted(call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+    }
+
+    @Test
+    void aKeyCreatedDisabledIsStarted() {
+        // A key may be made disabled, and it is enabled again with the same operation that
+        // starts a key that was stopped.
+        String arn = call("CreateKey", CREATE_DISABLED_KEY)
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .extract().path("Key.KeyArn");
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+
+        assertKeyIsStarted(call("StartKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+    }
+
+    @Test
+    void aStoppedKeyStopsItsReplica() {
+        // The reference says a stop on the primary stops the usage of the replicas too, so
+        // the replica of the key is disabled as well.
+        String arn = call("CreateKey", createReplicatedKeyBody("[\"us-west-2\"]"))
+                .then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        // The replica goes with the primary, so one delete takes both.
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+        String replicaArn = arn.replace(":us-east-1:", ":us-west-2:");
+
+        call("StopKeyUsage", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false));
+
+        callIn("us-west-2", "GetKey", "{\"KeyIdentifier\":\"" + replicaArn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.UsageStopTimestamp", notNullValue());
+    }
+
+    /** A key that is started is enabled again, and it says when its use began. */
+    private static void assertKeyIsStarted(Response answer) {
+        answer.then().statusCode(200)
+                .body("Key.Enabled", equalTo(true))
+                .body("Key.UsageStartTimestamp", notNullValue());
+    }
+
+    @Test
     void aKeyThatDoesNotExistIsNotFound() {
         call("GetKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:000000000000:key/"
                 + "0123456789abcdef0123456789abcdef\"}")
@@ -593,16 +1003,37 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
-    void aKeyIsDeleted() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+    void aKeyIsDeletedAndStaysReadableWhileItIsPending() {
+        String arn = keyArn();
 
         call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(200);
 
         call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.KeyState", equalTo("DELETE_PENDING"));
+    }
+
+    @Test
+    void aDeletedKeyIsRestored() {
+        String arn = keyArn();
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200);
+
+        call("RestoreKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.KeyState", equalTo("CREATE_COMPLETE"))
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.DeletePendingTimestamp", nullValue());
+    }
+
+    @Test
+    void aKeyThatIsNotPendingDeletionIsNotRestored() {
+        String arn = keyArn();
+
+        call("RestoreKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(400)
-                    .body("__type", containsString("ResourceNotFoundException"));
+                    .body("__type", containsString("ConflictException"));
     }
 
     @Test
@@ -618,11 +1049,11 @@ class PaymentCryptographyIntegrationTest {
         // as the unknown operation it is. The body it carries does not change that: a body
         // that breaks the model's rules is not the answer to an operation that is not
         // served at all.
-        call("RestoreKey", "{}")
+        call("GetCertificateSigningRequest", "{}")
                 .then().statusCode(400)
                     .body("__type", containsString("UnknownOperationException"));
-        call("RestoreKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:"
-                + "000000000000:key/abcdefghijklmnop\"}")
+        call("GetCertificateSigningRequest", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:"
+                + "us-east-1:000000000000:key/abcdefghijklmnop\"}")
                 .then().statusCode(400)
                     .body("__type", containsString("UnknownOperationException"));
     }
@@ -682,8 +1113,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aDeletedKeyIsAnsweredWithTheKey() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -700,13 +1130,16 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aWaitingPeriodOutsideTheServiceRangeIsRefused() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
-        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":1}")
+        call("DeleteKey", """
+                {"KeyIdentifier":"%s","DeleteKeyInDays":1}
+                """.formatted(arn))
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
-        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":7}")
+        call("DeleteKey", """
+                {"KeyIdentifier":"%s","DeleteKeyInDays":7}
+                """.formatted(arn))
                 .then().statusCode(200);
     }
 
@@ -716,15 +1149,44 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void theKeysAreListedByTheirState() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
+        // The key this test deletes is not cleaned up again: a deletion of a key that is
+        // already pending deletion is refused, and the key stays pending until the waiting
+        // period ends.
+        String secondArn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + secondArn + "\"}")
+                .then().statusCode(200));
+        List<String> listedArns = new ArrayList<>();
+        Map<String, Object> request = new HashMap<>(Map.of("KeyState", "CREATE_COMPLETE", "MaxResults", 1));
+        Set<String> seenTokens = new HashSet<>();
+        String nextToken;
+        do {
+            Response page = call("ListKeys", PaymentCryptographyTestFixtures.request(request).toString())
+                    .then().statusCode(200)
+                        .body("Keys.KeyState", everyItem(equalTo("CREATE_COMPLETE")))
+                        .extract().response();
+            listedArns.addAll(page.jsonPath().getList("Keys.KeyArn", String.class));
+            nextToken = page.path("NextToken");
+            if (nextToken != null) {
+                assertThat("ListKeys must advance its continuation token", seenTokens.add(nextToken), equalTo(true));
+            }
+            request.put("NextToken", nextToken);
+        } while (nextToken != null);
+        assertThat(listedArns, hasItems(arn, secondArn));
+        call("ListKeys", "{\"KeyState\":\"DELETE_PENDING\"}")
+                .then().statusCode(200)
+                    .body("Keys.KeyArn", not(hasItem(equalTo(arn))));
+
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200);
 
         call("ListKeys", "{\"KeyState\":\"CREATE_COMPLETE\"}")
                 .then().statusCode(200)
-                    .body("Keys.KeyArn", hasItem(equalTo(arn)));
+                    .body("Keys.KeyArn", not(hasItem(equalTo(arn))));
         call("ListKeys", "{\"KeyState\":\"DELETE_PENDING\"}")
                 .then().statusCode(200)
-                    .body("Keys", hasSize(0));
+                    .body("Keys.KeyArn", hasItem(equalTo(arn)));
+
         call("ListKeys", "{\"KeyState\":\"NO_SUCH_STATE\"}")
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
@@ -736,8 +1198,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void anAliasIsDetachedFromItsKeyByAnUpdateNamingNoKey() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         call("CreateAlias", "{\"AliasName\":\"alias/team/detached\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);
 
@@ -761,8 +1222,7 @@ class PaymentCryptographyIntegrationTest {
                     .body("Key.Enabled", equalTo(false))
                     .body("Key.Exportable", equalTo(false));
 
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
 
         call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
@@ -771,10 +1231,8 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aTaggingRequestNamesItsKeyInResourceArnOnly() {
-        String named = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
-        String other = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String named = keyArn();
+        String other = keyArn();
 
         // The request names one key and another besides it. The change follows the member
         // the operation names its key in, which is the member the permission check reads.
@@ -796,8 +1254,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aKeyIsNamedByItsArnOrByAnAliasAndNotByABareId() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         String id = arn.substring(arn.lastIndexOf('/') + 1);
         call("CreateAlias", "{\"AliasName\":\"alias/team/named\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);
@@ -825,8 +1282,7 @@ class PaymentCryptographyIntegrationTest {
                     .body("message", containsString("You can't create an alias without a key."));
 
         // The name was not taken by the refused request.
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         call("CreateAlias", "{\"AliasName\":\"alias/team/reserved\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
                     .body("Alias.AliasName", equalTo("alias/team/reserved"))
@@ -876,8 +1332,7 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aTaggingRequestNamingItsKeyByAnIdOrAnAliasIsRefused() {
-        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
-                .extract().path("Key.KeyArn");
+        String arn = keyArn();
         String id = arn.substring(arn.lastIndexOf('/') + 1);
         call("CreateAlias", "{\"AliasName\":\"alias/team/tagged\",\"KeyArn\":\"" + arn + "\"}")
                 .then().statusCode(200);

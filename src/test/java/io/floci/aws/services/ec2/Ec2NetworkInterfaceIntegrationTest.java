@@ -798,6 +798,13 @@ class Ec2NetworkInterfaceIntegrationTest {
         return out;
     }
 
+    @Test
+    @Order(40)
+    void nonIntegerSecondaryCountIsRejected() {
+        createWithList("SecondaryPrivateIpAddressCount", "not-an-integer").statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
     private static void deleteEni(String id) {
         given().formParam("Action", "DeleteNetworkInterface").formParam("NetworkInterfaceId", id)
             .header("Authorization", AUTH_HEADER).when().post("/").then().statusCode(200);

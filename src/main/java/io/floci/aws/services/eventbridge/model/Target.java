@@ -15,6 +15,7 @@ public class Target {
     private String input;
     private String inputPath;
     private InputTransformer inputTransformer;
+    private KinesisParameters kinesisParameters;
     private SqsParameters sqsParameters;
     private BatchParameters batchParameters;
     private EcsParameters ecsParameters;
@@ -51,6 +52,11 @@ public class Target {
     public InputTransformer getInputTransformer() { return inputTransformer; }
     public void setInputTransformer(InputTransformer inputTransformer) { this.inputTransformer = inputTransformer; }
 
+    public KinesisParameters getKinesisParameters() { return kinesisParameters; }
+    public void setKinesisParameters(KinesisParameters kinesisParameters) {
+        this.kinesisParameters = kinesisParameters;
+    }
+
     public SqsParameters getSqsParameters() { return sqsParameters; }
     public void setSqsParameters(SqsParameters sqsParameters) { this.sqsParameters = sqsParameters; }
 
@@ -76,6 +82,11 @@ public class Target {
 
     public AppSyncParameters getAppSyncParameters() { return appSyncParameters; }
     public void setAppSyncParameters(AppSyncParameters appSyncParameters) { this.appSyncParameters = appSyncParameters; }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record KinesisParameters(@JsonProperty("PartitionKeyPath") String partitionKeyPath) {}
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)

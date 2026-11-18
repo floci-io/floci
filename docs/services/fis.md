@@ -43,11 +43,24 @@ List operations accept AWS-compatible `maxResults` and `nextToken` parameters wh
 
 ## Local Experiment Semantics
 
-Experiment execution is a safe local simulation. Starting or stopping an experiment creates and updates AWS-shaped FIS control-plane state, including action state, resolved targets, timestamps, target-account snapshots, and safety-lever effects. Floci does **not** inject latency, terminate resources, interrupt networking, or otherwise mutate resources in other emulated services.
+Experiment execution is a safe local simulation. Starting or stopping an experiment creates and updates AWS-shaped FIS control-plane state, including action state, resolved targets, timestamps, target-account snapshots, and safety-lever effects. Floci does **not** inject latency, terminate resources, interrupt networking, or otherwise mutate resources in other emulated services. The `aws:fis:inject-api-*` actions are the exception, described below.
+
+### API error injection
+
+While an `aws:fis:inject-api-internal-error`, `aws:fis:inject-api-throttle-error` or `aws:fis:inject-api-unavailable-error` action runs, Floci fails the calls it impairs, as AWS does:
+
+- **Which calls.** A call is impaired when it is signed with a session of one of the action's target roles (`aws:iam:role`, resolved from `resourceArns`), and calls one of the comma-separated `operations` in the action's `service` namespace. The `percentage` parameter sets the share of those calls, from 1 to 100, that fail. Calls made with long-term credentials, other roles' sessions or other operations are left alone, and a call IAM enforcement refuses is refused first.
+- **The error.** The AWS action reference says the response "depends on each service and API". EC2 answers with `InternalError` (500), `RequestLimitExceeded` (503) or `Unavailable` (503), from its error code list. Kinesis answers with the common errors `InternalFailure` (500), `ThrottlingException` (400) or `ServiceUnavailable` (503), in JSON or CBOR to match the request.
+- **Parameters.** Templates must give `service` as `ec2` or `kinesis`, the two namespaces AWS supports, a `percentage` from 1 to 100, and a `duration` from one minute to 12 hours in ISO 8601 format.
+- **Completion.** An inject-api action completes once its `duration` has run out, and an action that starts after it then starts. The experiment completes when every action has completed or been skipped. Other actions still run until the experiment is stopped, so an experiment that also holds one keeps running.
+
+Setting `FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE` to `true` lets the inject-api actions target any namespace Floci emulates, not only `ec2` and `kinesis`. The `service` can be the IAM namespace, such as `cloudwatch`, or the name the service signs under, such as `monitoring`. Those services answer with the common errors in the envelope their protocol reads: an `ErrorResponse` in the service's own XML namespace for Query and REST-XML services, S3's `Error`, JSON or CBOR.
+
+A template stored before these checks existed is checked again when an experiment starts from it.
 
 Explicit resource ARNs are sampled at random according to the target selection mode and recorded as locally resolved targets. Floci does not query other emulated services to resolve tag, filter, or parameter selectors, so those selectors resolve to an empty set. The template's `emptyTargetResolutionMode` then follows AWS behavior: `fail` fails the experiment, while `skip` skips actions whose selector-based targets are empty. Targets defined by unique identifiers such as ARNs cannot be skipped and fail the experiment if their selection resolves to nothing. Selector criteria are never reported as if they were resolved resources.
 
-The action and target-resource catalogs let clients discover and validate AWS-defined action IDs and target shapes. Floci validates the Smithy-modeled string shapes, known and required parameters, target slots and resource types, plus documented selector restrictions. It does not yet enforce every action-specific parameter range, enum, or conditional rule that AWS defines only in the FIS actions user guide. The catalogs are metadata used by the local simulation, not adapters that execute the corresponding faults.
+The action and target-resource catalogs let clients discover and validate AWS-defined action IDs and target shapes. Floci validates the Smithy-modeled string shapes, known and required parameters, target slots and resource types, plus documented selector restrictions. It does not yet enforce every action-specific parameter range, enum, or conditional rule that AWS defines only in the FIS actions user guide. The catalogs are metadata used by the local simulation, not adapters that execute the corresponding faults, the inject-api actions aside.
 
 Regional, account-scoped limits mirror the default AWS FIS quotas for 500 experiment templates, 5 active experiments, 20 actions per template, 10 actions that can run in parallel, 5 stop conditions, and 40 target-account configurations per template. Quota violations use the modeled `ServiceQuotaExceededException` response.
 
@@ -56,6 +69,7 @@ Regional, account-scoped limits mirror the default AWS FIS quotas for 500 experi
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_FIS_ENABLED` | `true` | Enable or disable AWS FIS |
+| `FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE` | `false` | Let the `aws:fis:inject-api-*` actions target any service namespace, not only `ec2` and `kinesis` |
 | `FLOCI_STORAGE_SERVICES_FIS_MODE` | *(inherits global)* | Optional FIS storage-mode override |
 | `FLOCI_STORAGE_SERVICES_FIS_FLUSH_INTERVAL_MS` | `5000` | Hybrid storage flush interval in milliseconds |
 

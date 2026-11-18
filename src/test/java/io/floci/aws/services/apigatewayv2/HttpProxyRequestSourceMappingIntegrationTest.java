@@ -14,11 +14,13 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class HttpProxyRequestSourceMappingIntegrationTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final List<String> HEADERS = List.of("x-order", "x-backend", "x-stage", "x-route", "x-api",
-            "x-account", "x-path", "x-epoch", "x-missing", "x-missing-stage");
+            "x-account", "x-path", "x-epoch", "x-missing", "x-missing-stage", "x-request-id", "x-extended-request-id");
     private final AtomicReference<JsonNode> received = new AtomicReference<>();
     private HttpServer backend;
     private String apiId;
@@ -86,6 +88,42 @@ class HttpProxyRequestSourceMappingIntegrationTest {
     }
 
     @Test
+    void extendedRequestIdMatchesRequestIdAndResponseRequestId() {
+        configureApi();
+        String responseRequestId = invoke("{}");
+        JsonNode request = received.get();
+        String requestId = request.path("x-request-id").asText();
+        assertFalse(requestId.isEmpty());
+        assertEquals(requestId, request.path("x-extended-request-id").asText());
+        assertEquals(requestId, responseRequestId);
+    }
+
+    @Test
+    void requestIdOverrideReachesMappingsAndResponse() {
+        configureApi();
+        String override = UUID.randomUUID().toString();
+        String responseRequestId = given().contentType(ContentType.JSON).header("x-amzn-RequestId", override)
+                .body("{}").post("/execute-api/" + apiId + "/test/orders")
+                .then().statusCode(200).extract().header("x-amzn-RequestId");
+        JsonNode request = received.get();
+        assertEquals(override, request.path("x-request-id").asText());
+        assertEquals(override, request.path("x-extended-request-id").asText());
+        assertEquals(override, responseRequestId);
+    }
+
+    @Test
+    void invalidRequestIdOverrideIsReplacedInMappingsAndResponse() {
+        configureApi();
+        String responseRequestId = given().contentType(ContentType.JSON).header("x-amzn-RequestId", "not-a-uuid")
+                .body("{}").post("/execute-api/" + apiId + "/test/orders")
+                .then().statusCode(200).extract().header("x-amzn-RequestId");
+        JsonNode request = received.get();
+        assertTrue(responseRequestId.endsWith("_REPLACED_INVALID_REQUEST_ID"));
+        assertEquals(responseRequestId, request.path("x-request-id").asText());
+        assertEquals(responseRequestId, request.path("x-extended-request-id").asText());
+    }
+
+    @Test
     void bodyThatIsNotJsonSkipsBodyMappings() {
         configureApi();
         invoke("not json");
@@ -125,6 +163,8 @@ class HttpProxyRequestSourceMappingIntegrationTest {
                 Map.entry("overwrite:header.x-account", "$context.accountId"),
                 Map.entry("overwrite:header.x-path", "$context.path"),
                 Map.entry("overwrite:header.x-epoch", "$context.requestTimeEpoch"),
+                Map.entry("overwrite:header.x-request-id", "$context.requestId"),
+                Map.entry("overwrite:header.x-extended-request-id", "$context.extendedRequestId"),
                 Map.entry("overwrite:header.x-missing", "$request.body.order.missing"),
                 Map.entry("overwrite:header.x-missing-stage", "$stageVariables.missing"),
                 Map.entry("overwrite:querystring.order", "$request.body.order.id"),
@@ -141,9 +181,10 @@ class HttpProxyRequestSourceMappingIntegrationTest {
                 .patch(apiPath + "/integrations/" + integrationId).then().statusCode(200);
     }
 
-    private void invoke(String body) {
-        given().contentType(ContentType.JSON).body(body)
-                .post("/execute-api/" + apiId + "/test/orders").then().statusCode(200);
+    private String invoke(String body) {
+        return given().contentType(ContentType.JSON).body(body)
+                .post("/execute-api/" + apiId + "/test/orders").then().statusCode(200)
+                .extract().header("x-amzn-RequestId");
     }
 
     private void invokeExpectingRejectedHeader(String body, String header) {

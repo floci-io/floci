@@ -44,7 +44,7 @@ class AwsJsonControllerSerializationTest {
 
         AwsJsonController controller = new AwsJsonController(mapper, catalog, regionResolver,
                 null, null, sqs, null, null, null,
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null);
         Response result = controller.handleJsonRequest("AmazonSQS.Test", headers, "{}");
 
         assertSame(original, result);

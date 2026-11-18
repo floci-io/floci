@@ -8,8 +8,9 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,18 +31,19 @@ class Route53ResolverDnsForwardingRulesTest {
     @Inject
     ObjectMapper objectMapper;
 
-    private final List<String> createdRuleIds = new ArrayList<>();
+    /** The rules a test created, each with the Region it was created in, where it is deleted. */
+    private final Map<String, String> createdRules = new LinkedHashMap<>();
 
     @AfterEach
     void deleteCreatedRules() {
-        for (String ruleId : createdRuleIds) {
+        createdRules.forEach((ruleId, region) -> {
             try {
-                resolverService.deleteResolverRule(ruleId);
+                resolverService.deleteResolverRule(ruleId, region);
             } catch (Exception ignored) {
                 // best-effort cleanup; the rule may already be gone
             }
-        }
-        createdRuleIds.clear();
+        });
+        createdRules.clear();
     }
 
     @Test
@@ -98,7 +100,7 @@ class Route53ResolverDnsForwardingRulesTest {
         ObjectNode association = objectMapper.createObjectNode();
         association.put("ResolverRuleId", ruleId);
         association.put("VPCId", vpcId);
-        resolverService.associateResolverRule(association);
+        resolverService.associateResolverRule(association, "eu-west-1");
 
         assertEquals(List.of(ruleId), resolverService.resolverRuleIdsAssociatedWith(ACCOUNT, vpcId));
         assertTrue(forwardingRules.rulesFor(ACCOUNT, REGION, vpcId).isEmpty());
@@ -148,7 +150,7 @@ class Route53ResolverDnsForwardingRulesTest {
         ObjectNode association = objectMapper.createObjectNode();
         association.put("ResolverRuleId", createRule(ruleRequest));
         association.put("VPCId", vpcId);
-        resolverService.associateResolverRule(association);
+        resolverService.associateResolverRule(association, REGION);
     }
 
     private String createRule(ObjectNode ruleRequest) {
@@ -157,7 +159,7 @@ class Route53ResolverDnsForwardingRulesTest {
 
     private String createRuleIn(ObjectNode ruleRequest, String region) {
         String ruleId = resolverService.createResolverRule(ruleRequest, region, ACCOUNT).get("Id").asText();
-        createdRuleIds.add(ruleId);
+        createdRules.put(ruleId, region);
         return ruleId;
     }
 

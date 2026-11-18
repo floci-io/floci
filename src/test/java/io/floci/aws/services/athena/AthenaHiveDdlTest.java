@@ -165,6 +165,14 @@ class AthenaHiveDdlTest {
     }
 
     @Test
+    void optimizeNamesItsTableWhateverItsClauses() {
+        assertEquals(new AthenaHiveDdl.TableRef("lake", "events"), assertInstanceOf(AthenaHiveDdl.Optimize.class,
+                AthenaHiveDdl.parse("OPTIMIZE lake.events REWRITE DATA USING BIN_PACK WHERE id > 5")).ref());
+        assertEquals(new AthenaHiveDdl.TableRef(null, "events"), assertInstanceOf(AthenaHiveDdl.Optimize.class,
+                AthenaHiveDdl.parse("optimize events rewrite data using bin_pack;")).ref());
+    }
+
+    @Test
     void dropRepairAndShowNameTheirTable() {
         AthenaHiveDdl.DropTable drop = assertInstanceOf(AthenaHiveDdl.DropTable.class,
                 AthenaHiveDdl.parse("DROP TABLE IF EXISTS lake.events;"));

@@ -177,10 +177,13 @@ public final class ReplacementCleanup {
     /**
      * Whether a revert puts back the prior value of an attribute: the public ones, and the hidden
      * {@link CfnRollback#USES_ATTR_PREFIX} ones, which describe the entity as the public ones do.
-     * Other {@code __Floci} keys are rollback bookkeeping that outlives the revert.
+     * So are the {@code __Floci...TagKeys} records of the tag keys the stack owns, which name the
+     * live entity's tags as {@link Ec2Tags#recordKeys} writes them. Other {@code __Floci} keys are
+     * rollback bookkeeping that outlives the revert.
      */
     private static boolean restoredOnRevert(String key) {
-        return !key.startsWith("__Floci") || key.startsWith(CfnRollback.USES_ATTR_PREFIX);
+        return !key.startsWith("__Floci") || key.startsWith(CfnRollback.USES_ATTR_PREFIX)
+                || key.endsWith("TagKeys");
     }
 
     /** Deletes a rolled-back replacement; one whose delete throws stays owed and named for the retry. */

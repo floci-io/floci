@@ -632,6 +632,7 @@ class EmrServerlessSparkRunnerTest {
                 .thenReturn(new LaunchImage(pulled, null));
         EmrServerlessSparkRunner runner = runner(builder);
         when(lifecycle.create(any(), eq("linux/arm64"))).thenReturn("driver");
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
 
         // The executors' worker type naming the same custom image.
         runner.run(customImageJob(custom).withExecutors(new SparkJobRunner.Executors(2, custom, 0, 0, 0, null))
@@ -1016,6 +1017,30 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aStepOnItsClustersYarnKeepsItsEventLogsInTheClustersHdfsUnlessItsClusterSaysOtherwise() {
+        SparkJobRunner.Job job = stepJob(Map.of("spark.eventLog.dir", "s3://logs/spark/"))
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci:4566")
+                        .withSparkHistoryServer("ip-10-0-0-1.ec2.internal"));
+
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566", List.of());
+
+        // "By default, Amazon EMR stores event logs in the /var/log/spark/apps directory of HDFS", which the primary
+        // node's Spark History Server reads, and which an ended application's tracking URL leads to.
+        assertTrue(arguments.contains("spark.eventLog.enabled=true"), arguments.toString());
+        int hdfs = arguments.indexOf("spark.eventLog.dir=hdfs:///var/log/spark/apps");
+        assertTrue(hdfs > 0 && arguments.indexOf("spark.eventLog.dir=s3://logs/spark/") > hdfs, arguments.toString());
+        assertTrue(arguments.contains("spark.yarn.historyServer.address=ip-10-0-0-1.ec2.internal:18080"));
+        assertFalse(EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT).toString()
+                .contains("spark.eventLog.dir"));
+        // A cluster whose primary node runs no Spark History Server, one without Spark, keeps the image's.
+        String withoutServer = EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of())
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci:4566")), ENDPOINT,
+                List.of()).toString();
+        assertFalse(withoutServer.contains("spark.eventLog") || withoutServer.contains("historyServer"),
+                withoutServer);
+    }
+
+    @Test
     void aStepNotOnYarnRunsInLocalModeWithNoneOfYarnsSettings() {
         List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT);
 
@@ -1104,6 +1129,11 @@ class EmrServerlessSparkRunnerTest {
         assertTrue(site.contains("<name>yarn.app.mapreduce.am.resource.mb</name><value>1024</value>"), site);
         assertTrue(site.contains("<name>mapreduce.map.memory.mb</name><value>768</value>"), site);
         assertTrue(site.contains("<name>mapreduce.reduce.memory.mb</name><value>768</value>"), site);
+        // The cluster's JobHistory server, which the job's client asks about it once its application master has ended.
+        assertTrue(site.contains("<name>mapreduce.jobhistory.address</name>"
+                + "<value>ip-10-0-0-1.ec2.internal:10020</value>"), site);
+        assertTrue(site.contains("<name>mapreduce.jobhistory.webapp.address</name>"
+                + "<value>ip-10-0-0-1.ec2.internal:19888</value>"), site);
     }
 
     @Test
@@ -1113,6 +1143,55 @@ class EmrServerlessSparkRunnerTest {
 
         assertTrue(site.contains("<value>/opt/hadoop-mapreduce/*,/opt/hadoop-mapreduce/lib/*,/opt/hadoop/*"), site);
         assertTrue(site.contains(",HADOOP_MAPRED_HOME=/opt/hadoop-mapreduce</value>"), site);
+    }
+
+    @Test
+    void aCommandsTezOnItsClustersYarnRunsStockTezThereAsHivesDoes() {
+        String site = EmrServerlessSparkRunner.tezSite(stepJob(Map.of()).onStorage(ON_YARN), AWS_ENVIRONMENT);
+
+        for (String setting : List.of("tez.local.mode</name><value>false",
+                "yarn.resourcemanager.hostname</name><value>ip-10-0-0-1.ec2.internal",
+                "tez.framework.client</name><value>org.apache.tez.client.TezYarnClient",
+                "tez.am.yarn.scheduler.class</name><value>org.apache.tez.dag.app.rm.YarnTaskSchedulerService",
+                "tez.am.shuffle.auxiliary-service.id</name><value>mapreduce_shuffle",
+                "tez.lib.uris</name><value>file:///usr/lib/tez/,file:///usr/lib/tez/lib/",
+                "tez.use.cluster.hadoop-libs</name><value>false",
+                "tez.am.resource.memory.mb</name><value>1024",
+                "tez.task.resource.memory.mb</name><value>768",
+                "tez.runtime.intermediate-output.should-compress</name><value>false")) {
+            assertTrue(site.contains("<name>" + setting + "</value>"), setting + " in " + site);
+        }
+        // Without Hive's jar or home, which a command's Tez does not run.
+        assertTrue(site.contains("<name>tez.cluster.additional.classpath.prefix</name><value>$PWD/*:/usr/lib/tez/*:"
+                + "/usr/lib/tez/lib/*:/usr/lib/hadoop-mapreduce/*:/usr/lib/hadoop-mapreduce/lib/*:/usr/lib/hadoop/*:"
+                + "/usr/lib/hadoop/lib/*:/usr/lib/hadoop-hdfs/*:/usr/lib/hadoop-hdfs/lib/*:/usr/lib/hadoop-yarn/*:"
+                + "/usr/lib/hadoop-yarn/lib/*:/usr/lib/hadoop-lzo/lib/*</value>"), site);
+        String environment = "</name><value>JDK_JAVA_OPTIONS=" + EmrServerlessSparkRunner.yarnJavaOptions()
+                + ",TEZ_HOME=/usr/lib/tez,AWS_ACCESS_KEY_ID=ASIASTEP,AWS_ENDPOINT_URL=http://floci:4566</value>";
+        assertTrue(site.contains("<name>tez.am.launch.env" + environment), site);
+        assertTrue(site.contains("<name>tez.task.launch.env" + environment), site);
+        assertFalse(site.contains("hive"), site);
+    }
+
+    @Test
+    void aCommandsTezWhereThereIsNoYarnRunsInLocalModeWithoutTheJarsAContainerIsGiven() {
+        String site = EmrServerlessSparkRunner.tezSite(stepJob(Map.of()).onStorage(STORAGE), List.of());
+
+        assertEquals("<property><name>tez.local.mode</name><value>true</value></property>\n"
+                + "<property><name>tez.ignore.lib.uris</name><value>true</value></property>\n"
+                + "<property><name>tez.runtime.optimize.local.fetch</name><value>true</value></property>", site);
+    }
+
+    @Test
+    void aCommandOnItsClusterGetsItsTezSite() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("pig", "-e", "fs -ls /"), Map.of(), STORAGE), progress);
+
+        verify(spec).withEnv(eq("FLOCI_TEZ_SITE"), argThat(site -> site.contains(
+                "<name>tez.local.mode</name><value>true</value>")));
     }
 
     @Test
@@ -1186,6 +1265,22 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aHiveStepsTezLogsItsDagsToTheTimelineServerOfItsClusterWhereItsPrimaryNodeRunsOne() {
+        List<String> logged = EmrServerlessSparkRunner.hiveArguments(hiveJob(List.of("-e", "select 1"))
+                .onStorage(ON_YARN.withTimelineServer("ip-10-0-0-1.ec2.internal")), ENDPOINT, AWS_ENVIRONMENT);
+        List<String> notLogged = EmrServerlessSparkRunner.hiveArguments(
+                hiveJob(List.of("-e", "select 1")).onStorage(ON_YARN), ENDPOINT, AWS_ENVIRONMENT);
+
+        for (String setting : List.of(
+                "tez.history.logging.service.class=org.apache.tez.dag.history.logging.ats.ATSHistoryLoggingService",
+                "yarn.timeline-service.enabled=true",
+                "yarn.timeline-service.hostname=ip-10-0-0-1.ec2.internal")) {
+            assertTrue(logged.contains(setting), setting + " in " + logged);
+            assertFalse(notLogged.contains(setting), setting + " in " + notLogged);
+        }
+    }
+
+    @Test
     void aHiveStepOnItsClustersYarnRunsStockTezThereInPlaceOfEmrServerlesssPlugins() {
         List<String> arguments = EmrServerlessSparkRunner.hiveArguments(
                 hiveJob(List.of("-e", "select 1")).onStorage(ON_YARN), ENDPOINT, AWS_ENVIRONMENT);
@@ -1216,7 +1311,10 @@ class EmrServerlessSparkRunnerTest {
                 // A task's two would never match the one YARN's default scheduler grants.
                 "hive.tez.cpu.vcores=1",
                 "tez.runtime.intermediate-output.should-compress=false",
-                "tez.runtime.intermediate-input.is-compressed=false")) {
+                "tez.runtime.intermediate-input.is-compressed=false",
+                // The cluster's JobHistory server, for a query whose hive.execution.engine is mr.
+                "mapreduce.jobhistory.address=ip-10-0-0-1.ec2.internal:10020",
+                "mapreduce.jobhistory.webapp.address=ip-10-0-0-1.ec2.internal:19888")) {
             assertTrue(arguments.contains(setting), setting + " in " + arguments);
         }
         assertTrue(arguments.contains("tez.cluster.additional.classpath.prefix=$PWD/*:/usr/lib/hive/lib/hive-exec.jar:"

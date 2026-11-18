@@ -40,6 +40,7 @@ AWS::Backup::BackupVault	BackupVaultCfnProvisioner
 AWS::Batch::ComputeEnvironment	BatchCfnProvisioner
 AWS::Batch::JobDefinition	BatchCfnProvisioner
 AWS::Batch::JobQueue	BatchCfnProvisioner
+AWS::Bedrock::ApplicationInferenceProfile	BedrockCfnProvisioner
 AWS::BedrockAgentCore::Memory	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::Runtime	BedrockAgentCoreCfnProvisioner
 AWS::BedrockAgentCore::RuntimeEndpoint	BedrockAgentCoreCfnProvisioner
@@ -186,6 +187,8 @@ AWS::S3::Bucket	S3CfnProvisioner
 AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::S3Vectors::Index	S3VectorsCfnProvisioner
 AWS::S3Vectors::VectorBucket	S3VectorsCfnProvisioner
+AWS::SES::ConfigurationSet	SesCfnProvisioner
+AWS::SES::ConfigurationSetEventDestination	SesEventDestinationCfnProvisioner
 AWS::SES::EmailIdentity	SesCfnProvisioner
 AWS::SES::ReceiptRule	SesReceiptRuleCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner

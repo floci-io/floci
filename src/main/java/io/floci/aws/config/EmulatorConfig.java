@@ -126,6 +126,22 @@ public interface EmulatorConfig {
 
     ProtocolsConfig protocols();
 
+    /** The opt-in log of every request and response, one JSON object per line, for debugging. */
+    RequestLogConfig requestLog();
+
+    interface RequestLogConfig {
+        /** Write each request and its response to {@link #file()}. Env: FLOCI_REQUEST_LOG_ENABLED */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Where the log is written, one JSON object per line (JSONL); {@code ./floci-requests.jsonl} when unset. It
+         * holds request and response bodies as plain text, which can include secrets: known secret headers and query
+         * parameters are redacted, but a secret inside a body is not. Env: FLOCI_REQUEST_LOG_FILE
+         */
+        Optional<String> file();
+    }
+
     interface NetworkConfig {
         SecurityGroupEnforcementConfig securityGroupEnforcement();
     }
@@ -244,6 +260,26 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean spoofAwsEndpoints();
+
+        /**
+         * When Floci runs natively, the UDP port of a resolver on {@code 127.0.0.1} that answers the names the
+         * embedded DNS server answers for containers, Cloud Map {@code <service>.<namespace>} and Route 53 private
+         * zones among them, so the host's own resolver can be pointed at Floci for them. It refuses every other
+         * name rather than forwarding it. Unset by default, which starts no listener. When Floci runs in Docker,
+         * publish the container's port 53/udp instead.
+         * Env: {@code FLOCI_DNS_HOST_PORT}
+         */
+        OptionalInt hostPort();
+
+        /**
+         * When Floci runs natively on a host with a {@code docker0} bridge, the embedded DNS server also listens on
+         * that bridge's address, port 53, and the containers Floci launches resolve through it, as they do when
+         * Floci runs in Docker. Port 53 needs root or {@code CAP_NET_BIND_SERVICE}; without either, Floci logs how
+         * to grant it and the containers keep resolving through Docker.
+         * Env: {@code FLOCI_DNS_BRIDGE_LISTENER_ENABLED}
+         */
+        @WithDefault("true")
+        boolean bridgeListenerEnabled();
     }
 
     interface SecurityConfig {
@@ -400,6 +436,7 @@ public interface EmulatorConfig {
         RumStorageConfig rum();
         GuardDutyStorageConfig guardduty();
         EmrServerlessStorageConfig emrserverless();
+        EmrContainersStorageConfig emrcontainers();
 
         ControlTowerStorageConfig controltower();
 
@@ -714,6 +751,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface EmrContainersStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface LakeFormationStorageConfig {
         Optional<String> mode();
 
@@ -862,6 +906,7 @@ public interface EmulatorConfig {
         RumServiceConfig rum();
         GuardDutyServiceConfig guardduty();
         EmrServerlessServiceConfig emrserverless();
+        EmrContainersServiceConfig emrcontainers();
         Route53ResolverServiceConfig route53resolver();
         NetworkFirewallServiceConfig networkfirewall();
         ServiceCatalogServiceConfig servicecatalog();
@@ -1155,6 +1200,20 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface EmrContainersServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * How long a job run stays RUNNING before it completes; 0, the default, completes a job run as
+         * soon as it is submitted. Floci follows the job run states without running Spark on Kubernetes.
+         *
+         * Env var: FLOCI_SERVICES_EMRCONTAINERS_JOB_RUN_DURATION_SECONDS
+         */
+        @WithDefault("0")
+        int jobRunDurationSeconds();
+    }
+
     interface EmrServerlessServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1327,6 +1386,14 @@ public interface EmulatorConfig {
     interface FisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Whether the {@code aws:fis:inject-api-*} actions take any service namespace instead of only the
+         * {@code ec2} and {@code kinesis} ones AWS supports, so they can inject errors into the other services Floci
+         * emulates ({@code FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE}).
+         */
+        @WithDefault("false")
+        boolean injectApiAnyService();
     }
 
     interface Route53ServiceConfig {
@@ -1626,6 +1693,37 @@ public interface EmulatorConfig {
         @WithDefault("300")
         int latestRestorableLagSeconds();
 
+        /**
+         * Open shards in each DynamoDB stream of the native engine. An item's changes always go to the shard its
+         * partition key picks, so they stay in order. AWS gives each table partition a shard of its own.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT
+         */
+        @WithDefault("1")
+        int streamShardCount();
+
+        /**
+         * Seconds a stream shard of the native engine stays open before it closes and a child shard, which names it
+         * as its parent, takes its keys. 0 keeps shards open until the stream is disabled.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS
+         */
+        @WithDefault("0")
+        long streamShardRolloverSeconds();
+
+        /**
+         * Expire a stream shard iterator 15 minutes after it is returned, as AWS does.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamIteratorExpiryEnabled();
+
+        /**
+         * Keep stream records, and shards after they close, for 24 hours as AWS does, and refuse a shard iterator
+         * for a sequence number the shard no longer holds or never held.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamRetentionEnabled();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();
@@ -1799,6 +1897,27 @@ public interface EmulatorConfig {
         @WithDefault("memcached:1.6")
         String defaultMemcachedImage();
 
+        /**
+         * Start and snapshot the backend of a Redis or Valkey replication group the way an image
+         * with no shell and no CLI needs: server flags go to the container as arguments instead of
+         * the {@code VALKEY_EXTRA_FLAGS} hook, a snapshot is taken with {@code SAVE} over the RESP
+         * connection and read out of the container through the Docker archive API, and a snapshot
+         * is restored by placing its file in the data directory before the server starts, so no
+         * {@code DEBUG} command is involved. Off by default and never inferred from the image name:
+         * the default image keeps the {@code VALKEY_EXTRA_FLAGS} and CLI path.
+         */
+        @WithDefault("false")
+        boolean shellLessBackend();
+
+        /**
+         * Name of the snapshot file the server loads from its data directory at startup. Only used
+         * with {@link #shellLessBackend()}: a restore places the snapshot under this name, and a
+         * snapshot export falls back to it when the server does not report {@code dbfilename}.
+         * Set it to the name the image's server uses ({@code dump.rdb} for Redis and Valkey).
+         */
+        @WithDefault("dump.rdb")
+        String shellLessBackendDbfilename();
+
         /** Docker network to attach ElastiCache containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
 
@@ -1926,6 +2045,11 @@ public interface EmulatorConfig {
 
         @WithDefault("7099")
         int proxyMaxPort();
+
+        /** When true, Describe* reports the Port a client requested instead of the proxy port.
+         *  The proxy still listens in the proxy port range; connect there. */
+        @WithDefault("false")
+        boolean advertiseRequestedPort();
 
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
@@ -2207,6 +2331,9 @@ public interface EmulatorConfig {
         @WithDefault("4")
         int yarnMaxWorkerNodes();
 
+        /** Apache Pig for a {@code docker} cluster's Pig steps, which no AWS image carries; off unless enabled. */
+        EmrPigConfig pig();
+
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
          * container a previous run of <em>this same</em> Floci left on the daemon (matched by the
@@ -2218,6 +2345,37 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean reconcileContainersOnStartup();
+    }
+
+    interface EmrPigConfig {
+        /**
+         * When true, a {@code docker} cluster whose {@code Applications} name Pig has Apache Pig in the image its steps
+         * run in, downloaded from {@link #urls()} when Floci makes that image, and its Pig steps run it. Off by default,
+         * as the download is Apache's, not AWS's, and about 470 MB.
+         *
+         * Env var: FLOCI_SERVICES_EMR_PIG_ENABLED
+         */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Where Floci downloads Apache Pig's binary distribution from, the first that answers: Apache's download CDN,
+         * which serves current releases, then its archive, which keeps every release.
+         *
+         * Env var: FLOCI_SERVICES_EMR_PIG_URLS
+         */
+        @WithDefault("https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,"
+                + "https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz")
+        List<String> urls();
+
+        /**
+         * The SHA-256 of the distribution {@link #urls()} name; one downloaded with another fails the step, and no
+         * image is made of it.
+         *
+         * Env var: FLOCI_SERVICES_EMR_PIG_SHA256
+         */
+        @WithDefault("6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a")
+        String sha256();
     }
 
     interface WafV2ServiceConfig {
@@ -2606,6 +2764,15 @@ public interface EmulatorConfig {
         /** Host interface for published awsvpc task ports, including firewall namespaces. */
         @WithDefault("127.0.0.1")
         String hostPortBindAddress();
+
+        /**
+         * Opt-in: the containers of an {@code awsvpc} task share one network namespace, held by a helper
+         * container as the ECS agent's pause container holds it, so they reach each other on {@code localhost}
+         * as on Fargate. Applies while security-group enforcement is off, which already gives a task one
+         * namespace. Off by default: each container keeps a namespace and address of its own.
+         */
+        @WithDefault("false")
+        boolean sharedTaskNetwork();
 
         Optional<String> dockerNetwork();
 
@@ -3642,7 +3809,8 @@ public interface EmulatorConfig {
         /**
          * When true, TCP ports opened by an instance's security-group ingress rules are
          * published on the host via a socat sidecar container, both at launch and on later
-         * authorize-security-group-ingress. Set false to keep security groups as metadata only.
+         * authorize-security-group-ingress. With security-group enforcement on, only ports a rule
+         * opens to every address (0.0.0.0/0 or ::/0) are. Set false to publish none.
          */
         @WithDefault("true")
         boolean publishSecurityGroupPorts();
@@ -3847,6 +4015,18 @@ public interface EmulatorConfig {
         /** Default idle-pool timeout in seconds; zero disables expiry. Target Keep-Alive may override it. */
         @WithDefault("60")
         int backendKeepAliveTimeoutSeconds();
+
+        /** AWS defaults unless explicitly overridden for local deployments. */
+        @WithDefault("aws")
+        AlbZoneRule albZoneRule();
+
+        /** A region entry takes precedence over the global rule, including an explicit AWS reset. */
+        Map<String, AlbZoneRule> albZoneRuleByRegion();
+    }
+
+    enum AlbZoneRule {
+        AWS,
+        ALLOW_SINGLE_ZONE
     }
 
     interface EksServiceConfig {

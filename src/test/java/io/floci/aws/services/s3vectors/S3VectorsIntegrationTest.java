@@ -653,7 +653,7 @@ class S3VectorsIntegrationTest {
 
     @Test
     @Order(18)
-    void listVectorsByIndexArnResolvesTheArnsOwnRegionNotTheRequestRegion() {
+    void listVectorsByIndexArnIsRefusedOutsideTheRequestsRegion() {
         String bucketName = "cross-region-vector-bucket";
         String indexName = "cross-region-idx";
         String otherRegionAuth = "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/s3vectors/aws4_request";
@@ -705,11 +705,24 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200);
 
-        // No Authorization header here, so this request resolves to the default region — not
-        // us-west-2. The lookup must still succeed because it honors the region encoded in the
-        // ARN itself, not the region the ListVectors request happens to be signed for.
+        // No Authorization header here, so this request resolves to the default region, not us-west-2. S3 Vectors
+        // refuses an ARN of another Region than the request's (measured on AWS).
         given()
             .contentType(JSON_CONTENT_TYPE)
+            .body("""
+                { "indexArn": "%s" }
+                """.formatted(indexArn))
+        .when()
+            .post("/ListVectors")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unexpected value for ARN region component"));
+
+        // Signed for the ARN's Region, it lists the index's vectors.
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .header("Authorization", otherRegionAuth)
             .body("""
                 { "indexArn": "%s" }
                 """.formatted(indexArn))

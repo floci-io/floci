@@ -4,7 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -64,16 +66,23 @@ public class PaymentCryptographyKey {
     private String keyCertificatePem;
     private long createTimestamp;
     private long usageStartTimestamp;
+    private long usageStopTimestamp;
     private long deletePendingTimestamp;
     private long deleteTimestamp;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
+    /**
+     * The resource-based policy attached to the key, in JSON, or null when the key has none.
+     * It is the key's own, so it goes when the key goes.
+     */
+    private String resourcePolicy;
     /** The region of the primary of a multi-region key, and its own region otherwise. */
-
+    private String primaryRegion;
     /** The regions a multi-region key is in, besides the primary's. */
-
+    private List<String> replicationRegions = new ArrayList<>();
     /** Whether this record is the primary of a multi-region key or a replica of one. */
-
+    private String multiRegionKeyType;
     /** Whether the key took the account's default replication regions. */
+    private boolean usingDefaultReplicationRegions;
 
     public String getKeyId() { return keyId; }
     public void setKeyId(String keyId) { this.keyId = keyId; }
@@ -154,6 +163,12 @@ public class PaymentCryptographyKey {
         this.usageStartTimestamp = usageStartTimestamp;
     }
 
+    /** When the key was last stopped, zero while it has not been stopped. */
+    public long getUsageStopTimestamp() { return usageStopTimestamp; }
+    public void setUsageStopTimestamp(long usageStopTimestamp) {
+        this.usageStopTimestamp = usageStopTimestamp;
+    }
+
     /** When the key is deleted, zero while it is not scheduled for deletion. */
     public long getDeletePendingTimestamp() { return deletePendingTimestamp; }
     public void setDeletePendingTimestamp(long deletePendingTimestamp) {
@@ -164,6 +179,24 @@ public class PaymentCryptographyKey {
     public long getDeleteTimestamp() { return deleteTimestamp; }
     public void setDeleteTimestamp(long deleteTimestamp) { this.deleteTimestamp = deleteTimestamp; }
 
+    public String getPrimaryRegion() { return primaryRegion; }
+    public void setPrimaryRegion(String primaryRegion) { this.primaryRegion = primaryRegion; }
+
+    public List<String> getReplicationRegions() { return replicationRegions; }
+    public void setReplicationRegions(List<String> replicationRegions) { this.replicationRegions = replicationRegions; }
+
+    public String getMultiRegionKeyType() { return multiRegionKeyType; }
+    public void setMultiRegionKeyType(String multiRegionKeyType) { this.multiRegionKeyType = multiRegionKeyType; }
+
+    public boolean isUsingDefaultReplicationRegions() { return usingDefaultReplicationRegions; }
+    public void setUsingDefaultReplicationRegions(boolean usingDefaultReplicationRegions) {
+        this.usingDefaultReplicationRegions = usingDefaultReplicationRegions;
+    }
+
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    /** The resource-based policy of the key, or null when it has none. */
+    public String getResourcePolicy() { return resourcePolicy; }
+    public void setResourcePolicy(String resourcePolicy) { this.resourcePolicy = resourcePolicy; }
 }

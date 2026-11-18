@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
  * Prepares a customer's SDL for the (AWS-agnostic) GraphQL sidecar and validates it against it
  * (issue #2917): what {@code AppSyncSchemaParser} used to do in-process. AppSync provides its
  * directive declarations ({@code @aws_auth} etc.) and the 17 custom scalar type declarations
- * implicitly: customers never write {@code scalar AWSDateTime} themselves. That injection is
+ * implicitly, though customers may also declare these scalar types in their own SDL. That injection is
  * pure AWS-specific knowledge (which directives exist, their exact argument shapes) with no
  * business living in the sidecar, so it happens here, before the SDL is ever sent anywhere.
  */
@@ -83,23 +83,23 @@ public class SidecarSchemaCompiler {
 
     /** The SDL to actually send the sidecar for plan/execute: same injection as at validation time. */
     public String withDirectivesAndScalars(String sdl) {
+        List<String> declaredScalars = declaredScalars(sdl);
         StringBuilder sb = new StringBuilder();
         for (AppSyncDirective directive : AppSyncDirective.values()) {
             sb.append(directive.sdl()).append('\n');
         }
         sb.append('\n');
         for (String scalarName : SCALAR_NAMES) {
-            sb.append("scalar ").append(scalarName).append('\n');
+            if (!declaredScalars.contains(scalarName)) {
+                sb.append("scalar ").append(scalarName).append('\n');
+            }
         }
         sb.append('\n').append(sdl);
         return sb.toString();
     }
 
     private void validateNoUnknownDirectives(String sdl) {
-        String clean = sdl
-                .replaceAll("\"\"\"[\\s\\S]*?\"\"\"", "")
-                .replaceAll("\"(?:[^\"\\\\]|\\\\.)*\"", "")
-                .replaceAll("#[^\n]*", "");
+        String clean = stripIgnoredTokens(sdl);
         Matcher matcher = DIRECTIVE_USE.matcher(clean);
         while (matcher.find()) {
             String name = matcher.group(1);
@@ -109,6 +109,127 @@ public class SidecarSchemaCompiler {
                                 toCodeError("VALIDATION_ERROR", "Unknown directive: @" + name, 0, 0))));
             }
         }
+    }
+
+    private List<String> declaredScalars(String sdl) {
+        String clean = stripIgnoredTokens(sdl);
+        List<String> declaredScalars = new ArrayList<>();
+        int braces = 0;
+        int parentheses = 0;
+        int brackets = 0;
+        String previousTopLevelToken = "";
+        boolean expectingScalarName = false;
+        int index = 0;
+        while (index < clean.length()) {
+            char current = clean.charAt(index);
+            if (current == '{') {
+                expectingScalarName = false;
+                braces++;
+                index++;
+            } else if (current == '}') {
+                expectingScalarName = false;
+                braces--;
+                index++;
+            } else if (current == '(') {
+                expectingScalarName = false;
+                parentheses++;
+                index++;
+            } else if (current == ')') {
+                expectingScalarName = false;
+                parentheses--;
+                index++;
+            } else if (current == '[') {
+                expectingScalarName = false;
+                brackets++;
+                index++;
+            } else if (current == ']') {
+                expectingScalarName = false;
+                brackets--;
+                index++;
+            } else if (isGraphqlNameStart(current)) {
+                int tokenStart = index++;
+                while (index < clean.length() && isGraphqlNamePart(clean.charAt(index))) {
+                    index++;
+                }
+                String token = clean.substring(tokenStart, index);
+                if (braces == 0 && parentheses == 0 && brackets == 0) {
+                    if (expectingScalarName) {
+                        declaredScalars.add(token);
+                    }
+                    expectingScalarName = token.equals("scalar") && !previousTopLevelToken.equals("extend");
+                    previousTopLevelToken = token;
+                }
+            } else {
+                if (braces == 0 && parentheses == 0 && brackets == 0
+                        && !Character.isWhitespace(current) && current != ',') {
+                    expectingScalarName = false;
+                    previousTopLevelToken = String.valueOf(current);
+                }
+                index++;
+            }
+        }
+        return declaredScalars;
+    }
+
+    private boolean isGraphqlNameStart(char value) {
+        return value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z';
+    }
+
+    private boolean isGraphqlNamePart(char value) {
+        return isGraphqlNameStart(value) || value >= '0' && value <= '9';
+    }
+
+    /** Replaces GraphQL comments and string tokens while preserving whitespace and line breaks. */
+    private String stripIgnoredTokens(String sdl) {
+        StringBuilder clean = new StringBuilder(sdl.length());
+        int index = 0;
+        while (index < sdl.length()) {
+            char current = sdl.charAt(index);
+            if (current == '#') {
+                while (index < sdl.length() && sdl.charAt(index) != '\n' && sdl.charAt(index) != '\r') {
+                    clean.append(' ');
+                    index++;
+                }
+            } else if (sdl.startsWith("\"\"\"", index)) {
+                clean.append("   ");
+                index += 3;
+                while (index < sdl.length() && !sdl.startsWith("\"\"\"", index)) {
+                    char blockChar = sdl.charAt(index);
+                    if (blockChar == '\\' && sdl.startsWith("\\\"\"\"", index)) {
+                        clean.append("    ");
+                        index += 4;
+                    } else {
+                        clean.append(blockChar == '\n' || blockChar == '\r' ? blockChar : ' ');
+                        index++;
+                    }
+                }
+                if (index < sdl.length()) {
+                    clean.append("   ");
+                    index += 3;
+                }
+            } else if (current == '"') {
+                clean.append(' ');
+                index++;
+                while (index < sdl.length() && sdl.charAt(index) != '"') {
+                    if (sdl.charAt(index) == '\\' && index + 1 < sdl.length()) {
+                        clean.append("  ");
+                        index += 2;
+                    } else {
+                        char stringChar = sdl.charAt(index);
+                        clean.append(stringChar == '\n' || stringChar == '\r' ? stringChar : ' ');
+                        index++;
+                    }
+                }
+                if (index < sdl.length()) {
+                    clean.append(' ');
+                    index++;
+                }
+            } else {
+                clean.append(current);
+                index++;
+            }
+        }
+        return clean.toString();
     }
 
     private AwsException toAwsException(SchemaValidationException e) {

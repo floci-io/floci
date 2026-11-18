@@ -159,22 +159,13 @@ public class SesReceiptRuleCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static void setCleanup(StackResource resource, Identity identity, String region, boolean retainable) {
-        resource.getAttributes().put(CLEANUP_ATTR,
-                address(identity, region).put("retainable", retainable).put("attempts", 0).toString());
+        CfnLifecycleRecords.setCleanup(resource, CLEANUP_ATTR, address(identity, region), retainable);
     }
 
     private void deletePending(StackResource resource) {
         ObjectNode pending = read(resource, CLEANUP_ATTR);
-        if (pending != null) {
-            if (!retained(resource, pending)) {
-                delete(identity(pending), pending.path("region").asText());
-            }
-            resource.getAttributes().remove(CLEANUP_ATTR);
-        }
-    }
-
-    private static boolean retained(StackResource resource, JsonNode pending) {
-        return pending.path("retainable").asBoolean() && "Retain".equals(resource.getUpdateReplacePolicy());
+        CfnLifecycleRecords.deletePending(resource, CLEANUP_ATTR, pending, true,
+                record -> delete(identity(record), record.path("region").asText()));
     }
 
     @Override
@@ -234,7 +225,7 @@ public class SesReceiptRuleCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public String updateCleanupPhysicalId(StackResource resource) {
         ObjectNode pending = read(resource, CLEANUP_ATTR);
-        return pending == null || retained(resource, pending) ? null : pending.path("name").asText();
+        return CfnLifecycleRecords.cleanupPhysicalId(resource, pending);
     }
 
     @Override
@@ -248,20 +239,8 @@ public class SesReceiptRuleCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeDeleteCleanup(StackResource resource) {
         ObjectNode pending = read(resource, CLEANUP_ATTR);
-        if (pending == null) {
-            return retainsFailedUpdateState(resource) ? new UpdateCleanupResult(true, true, null, 0, null)
-                    : UpdateCleanupResult.notApplicable();
-        }
-        String name = pending.path("name").asText();
-        try {
-            deletePending(resource);
-            return new UpdateCleanupResult(true, true, name, 0, null);
-        } catch (RuntimeException failure) {
-            int attempts = pending.path("attempts").asInt() + 1;
-            pending.put("attempts", attempts);
-            resource.getAttributes().put(CLEANUP_ATTR, pending.toString());
-            return new UpdateCleanupResult(true, false, name, attempts, failure.getMessage());
-        }
+        return CfnLifecycleRecords.completePending(resource, CLEANUP_ATTR, UPDATE_ATTR, pending, true,
+                record -> delete(identity(record), record.path("region").asText()));
     }
 
     @Override
@@ -270,19 +249,8 @@ public class SesReceiptRuleCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static ObjectNode read(StackResource resource, String key) {
-        String raw = resource.getAttributes().get(key);
-        if (raw == null) {
-            return null;
-        }
-        try {
-            JsonNode node = MAPPER.readTree(raw);
-            if (node.isObject()) {
-                return (ObjectNode) node;
-            }
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Invalid SES receipt rule lifecycle record", e);
-        }
-        throw new IllegalStateException("Invalid SES receipt rule lifecycle record");
+        String error = "Invalid SES receipt rule lifecycle record";
+        return CfnLifecycleRecords.read(resource, key, error, error);
     }
 
     private static ReceiptRule parseRule(JsonNode node) {

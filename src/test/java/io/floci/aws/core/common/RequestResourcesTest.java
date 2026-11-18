@@ -1229,6 +1229,49 @@ class RequestResourcesTest {
     }
 
     /**
+     * A DDL statement Athena runs against the Glue Data Catalog makes, as the caller, the Glue requests the table gives
+     * it from the permissions Athena's user guide gives each statement: each action on the catalog, the database and
+     * the table the statement names, in the request's partition, Region and account, partition actions only for a
+     * partitioned table, and none for a statement the guide gives no permissions.
+     */
+    @Test
+    void aStatementMakesTheRequestsTheVendoredPermissionsGiveItOnWhatItNames() {
+        String operation = "athena:StartQueryExecution";
+        String glue = "arn:aws-cn:glue:cn-north-1:111122223333:";
+        Map<String, String> names = Map.of("database", "sales", "table", "orders");
+        List<RequestResources.StatementRequest> drop = RequestResources.statementRequests(operation, "DROP TABLE",
+                names, false, "aws-cn", "cn-north-1", "111122223333");
+        assertEquals(List.of(
+                new RequestResources.StatementRequest("glue:GetDatabase", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:GetDatabase", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:GetTable", glue + "table/sales/orders"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "catalog"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "database/sales"),
+                new RequestResources.StatementRequest("glue:DeleteTable", glue + "table/sales/orders")), drop);
+        List<String> partitioned = RequestResources.statementRequests(operation, "DROP TABLE", names, true, "aws-cn",
+                "cn-north-1", "111122223333").stream().map(RequestResources.StatementRequest::action).distinct().toList();
+        assertEquals(List.of("glue:GetDatabase", "glue:GetTable", "glue:DeleteTable", "glue:GetPartitions",
+                "glue:GetPartition", "glue:DeletePartition"), partitioned);
+
+        // A wildcard of the guide's policy stays open; the database a statement creates is named by its name.
+        assertTrue(RequestResources.statementRequests(operation, "SHOW TABLES", names, false, "aws", "us-east-1",
+                "000000000000").contains(new RequestResources.StatementRequest("glue:GetTables",
+                "arn:aws:glue:us-east-1:000000000000:table/sales/*")));
+        assertEquals(List.of("arn:aws:glue:us-east-1:000000000000:catalog",
+                        "arn:aws:glue:us-east-1:000000000000:database/sales"),
+                RequestResources.statementRequests(operation, "CREATE DATABASE", Map.of("database", "sales"), false,
+                        "aws", "us-east-1", "000000000000").stream()
+                        .filter(request -> request.action().equals("glue:CreateDatabase"))
+                        .map(RequestResources.StatementRequest::resource).toList());
+        assertEquals(List.of(), RequestResources.statementRequests(operation, "VACUUM", names, false, "aws",
+                "us-east-1", "000000000000"));
+        assertEquals(List.of(), RequestResources.statementRequests("athena:GetWorkGroup", "DROP TABLE", names, false,
+                "aws", "us-east-1", "000000000000"));
+    }
+
+    /**
      * An ECS request names its cluster by name or ARN, and the default cluster, which ECS gives, when it names none; a
      * service or a task given by its own ARN is that resource, and by its name in the cluster the request names too
      * when that is another, as a handler may read the one or the other; and a task definition is the revision ECS

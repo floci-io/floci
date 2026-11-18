@@ -89,7 +89,7 @@ class DynamoDbStreamServiceTest {
         service.captureEvent("INSERT", null, item, table, "us-east-1");
 
         String iterator = service.getShardIterator(
-                sd.getStreamArn(), "shardId-000000000000", "TRIM_HORIZON", null);
+                sd.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
         List<DynamoDbStreamRecord> records = service.getRecords(iterator, 10).records();
 
         assertEquals(1, records.size());

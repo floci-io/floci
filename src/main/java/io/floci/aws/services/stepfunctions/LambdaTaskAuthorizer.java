@@ -240,7 +240,7 @@ public class LambdaTaskAuthorizer {
         if (target.isEmpty()) {
             // STS refuses a role that does not exist as it refuses one the caller may not assume,
             // and no policy of the role took part, so the message names none.
-            LOG.infov("Role {0} named by a task's Credentials does not exist", roleArn);
+            LOG.infov("Role {0} named by a task''s Credentials does not exist", roleArn);
             return Optional.of(denied(callerRoleArn, ASSUME_ROLE, roleArn, null));
         }
         String targetRoleArn = target.get().getArn();
@@ -257,7 +257,8 @@ public class LambdaTaskAuthorizer {
         // session name, and a session's aws:userid is role-id:session-name, so it and aws:username
         // stay absent, which is what makes a condition on either of them not match.
         CallerArns trustCaller = new CallerArns(sessionArn(callerRoleArn), callerRoleArn,
-                CallerArns.TYPE_ASSUMED_ROLE, null, null);
+                CallerArns.TYPE_ASSUMED_ROLE, null, null)
+                .withOrganization(iamService.organizationContextOf(callerId.accountId()).orElse(null));
         TrustDecision trust = trustEvaluator.decide(target.get().getAssumeRolePolicyDocument(), trustCaller,
                 callerId.accountId(), context);
         ResourceAccountRelationship relationship = relationship(callerId.accountId(), roleAccount);

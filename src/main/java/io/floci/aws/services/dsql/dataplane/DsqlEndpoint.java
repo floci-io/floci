@@ -77,7 +77,7 @@ public class DsqlEndpoint {
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
     static final Duration EXPIRY_GRACE = Duration.ofSeconds(5);
     private static final int HANDSHAKE_TIMEOUT_MILLIS = 30_000;
-    private static final String ADMIN = "admin";
+    static final String ADMIN = "admin";
 
     private final DsqlTlsCertificates certificates;
     private final IamService iamService;
@@ -455,6 +455,9 @@ public class DsqlEndpoint {
              PreparedStatement record = connection.prepareStatement("INSERT INTO sys.session_identity"
                      + " (pid, iam_session_user, session_id) VALUES (?, ?, ?) ON CONFLICT (pid) DO UPDATE"
                      + " SET iam_session_user = EXCLUDED.iam_session_user, session_id = EXCLUDED.session_id")) {
+            // Not the database's repeatable read, where two logins purging the same ended session
+            // fail one another with a serialization error.
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             purge.executeUpdate();
             record.setInt(1, pid);
             record.setString(2, principal);

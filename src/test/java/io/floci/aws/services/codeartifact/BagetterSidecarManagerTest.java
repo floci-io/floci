@@ -113,7 +113,8 @@ class BagetterSidecarManagerTest {
     }
 
     private BagetterSidecarManager manager() {
-        return new BagetterSidecarManager(containerBuilder, lifecycleManager, config);
+        return new BagetterSidecarManager(containerBuilder, lifecycleManager, config,
+                new CodeArtifactContainerRuns(lifecycleManager, config).containers());
     }
 
     @SuppressWarnings("unchecked")

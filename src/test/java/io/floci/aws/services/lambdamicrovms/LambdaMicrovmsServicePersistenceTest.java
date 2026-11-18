@@ -13,11 +13,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -93,6 +95,65 @@ class LambdaMicrovmsServicePersistenceTest {
         assertEquals(Map.of("STAGE", "two"), image.runtimeSettings.environmentVariables());
         assertTrue(image.versions.get(1).runtimeSettings.loggingDisabled());
         assertEquals(image.runtimeSettings, image.versions.get(1).runtimeSettings);
+    }
+
+    @Test
+    void buildInputsRemainVersionSpecificAfterReload() {
+        createAndUpdateVersionedImage();
+        LambdaMicrovmsService reloaded = process();
+
+        assertBuildInputs(versionResponse(reloaded, "1.0"), "original", "1.0");
+        assertBuildInputs(versionResponse(reloaded, "2.0"), "replacement", "2.0");
+        assertEquals("s3://artifacts/replacement.zip", reloaded.getImage(REGION, "versioned-image").codeArtifactUri);
+    }
+
+    @Test
+    void legacyVersionsUseLastKnownInputsWithoutRewritingStorage() throws IOException {
+        createAndUpdateVersionedImage();
+        Path file = storageDir.resolve("lambda-microvm-images.json");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode stored = mapper.readTree(file.toFile());
+        for (JsonNode versions : stored.findValues("versions")) {
+            for (JsonNode version : versions) {
+                ((ObjectNode) version).remove("buildSpec");
+            }
+        }
+        mapper.writeValue(file.toFile(), stored);
+        String beforeRead = Files.readString(file);
+
+        JsonNode response = versionResponse(process(), "1.0");
+        assertEquals("1.0", response.path("imageVersion").asText());
+        assertBuildInputs(response, "replacement", "2.0");
+        assertEquals(beforeRead, Files.readString(file));
+    }
+
+    private void createAndUpdateVersionedImage() {
+        LambdaMicrovmsService service = process();
+        service.createImage(REGION, ACCOUNT_ID, "versioned-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:original",
+                "arn:aws:iam::000000000000:role/original", "s3://artifacts/original.zip", null,
+                "1.0", LambdaMicrovmsService.RuntimeSettings.defaults(), Map.of());
+        service.updateImage(REGION, "versioned-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:replacement",
+                "arn:aws:iam::000000000000:role/replacement", "s3://artifacts/replacement.zip", null,
+                "2.0", LambdaMicrovmsService.RuntimeSettings.defaults());
+    }
+
+    private static JsonNode versionResponse(LambdaMicrovmsService service, String version) {
+        RegionResolver resolver = mock(RegionResolver.class);
+        when(resolver.resolveRegion(null)).thenReturn(REGION);
+        LambdaMicrovmsController controller = new LambdaMicrovmsController(service, resolver, new ObjectMapper());
+        return (JsonNode) controller.getVersion(null, "versioned-image", version).getEntity();
+    }
+
+    private static void assertBuildInputs(JsonNode response, String label, String baseVersion) {
+        assertAll(
+                () -> assertEquals("arn:aws:lambda:us-east-1:aws:microvm-image:" + label,
+                        response.path("baseImageArn").asText()),
+                () -> assertEquals(baseVersion, response.path("baseImageVersion").asText()),
+                () -> assertEquals("arn:aws:iam::000000000000:role/" + label,
+                        response.path("buildRoleArn").asText()),
+                () -> assertEquals("s3://artifacts/" + label + ".zip", response.path("codeArtifact").path("uri").asText()));
     }
 
     @Test

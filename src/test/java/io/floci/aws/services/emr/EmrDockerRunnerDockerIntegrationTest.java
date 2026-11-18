@@ -10,8 +10,9 @@ import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.S3TestClients;
@@ -62,7 +63,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * CI pulls it (3.5 GB) the first time.
  */
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EmrDockerRunnerDockerIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -487,12 +488,7 @@ class EmrDockerRunnerDockerIntegrationTest {
 
     /** Adds one step to the cluster and returns the state it ended in. */
     private String runStep(String jar, String... args) {
-        ObjectNode request = JSON.createObjectNode().put("JobFlowId", clusterId);
-        ObjectNode step = request.putArray("Steps").addObject().put("Name", jar).put("ActionOnFailure", "CONTINUE");
-        ObjectNode hadoopJarStep = step.putObject("HadoopJarStep").put("Jar", jar);
-        List.of(args).forEach(hadoopJarStep.putArray("Args")::add);
-        String stepId = emr("AddJobFlowSteps", request.toString())
-                .then().statusCode(200).extract().jsonPath().getString("StepIds[0]");
+        String stepId = EmrRequests.addStep(clusterId, jar, jar, args);
         return awaitStep(clusterId, stepId).jsonPath().getString("Step.Status.State");
     }
 
@@ -530,14 +526,7 @@ class EmrDockerRunnerDockerIntegrationTest {
                 .toList();
     }
 
-    /** What a job wrote under {@code prefix}: its part files, in key order, one after the other. */
     private String partFiles(String prefix) {
-        StringBuilder text = new StringBuilder();
-        for (S3Object object : s3.listObjectsV2(request -> request.bucket(bucket).prefix(prefix)).contents()) {
-            if (object.key().substring(prefix.length()).startsWith("part-")) {
-                text.append(s3.getObjectAsBytes(request -> request.bucket(bucket).key(object.key())).asUtf8String());
-            }
-        }
-        return text.toString();
+        return S3TestClients.partFiles(s3, bucket, prefix);
     }
 }

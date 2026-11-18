@@ -47,10 +47,11 @@ public class S3TablesService {
                                          Object storageClassConfiguration, Map<String, String> tags, String region) {
         validateBucketName(name);
         String key = storageKey(region, name);
-        if (store.get(key).isPresent()) {
+        String arn = bucketArn(region, name);
+        if (findTableBucket(key, arn).isPresent()) {
             throw conflict("The table bucket " + name + " already exists.");
         }
-        TableBucket bucket = new TableBucket(name, bucketArn(region, name), now(), regionResolver.getAccountId(),
+        TableBucket bucket = new TableBucket(name, arn, now(), regionResolver.getAccountId(),
                 encryptionConfiguration, storageClassConfiguration, tags);
         store.put(key, bucket);
         LOG.infov("Created S3 Tables bucket {0} in region {1}", name, region);
@@ -59,7 +60,8 @@ public class S3TablesService {
 
     public synchronized TableBucket getTableBucket(String tableBucketArn, String region) {
         String name = resourceName(tableBucketArn, BUCKET_PREFIX);
-        TableBucket bucket = store.get(storageKey(region, name))
+        String key = storageKey(region, name);
+        TableBucket bucket = findTableBucket(key, tableBucketArn)
                 .orElseThrow(() -> notFound("The table bucket does not exist."));
         if (!bucket.getArn().equals(tableBucketArn)) {
             throw notFound("The table bucket does not exist.");
@@ -485,6 +487,15 @@ public class S3TablesService {
 
     private String storageKey(String region, String name) {
         return region + "::" + name;
+    }
+
+    private Optional<TableBucket> findTableBucket(String key, String tableBucketArn) {
+        if (store instanceof AccountAwareStorageBackend<TableBucket> aware) {
+            String accountId = regionResolver.getAccountId();
+            return aware.getForAccountMigratingLegacy(accountId, key,
+                    legacy -> accountId.equals(aware.defaultAccountId()) && tableBucketArn.equals(legacy.getArn()));
+        }
+        return store.get(key);
     }
 
     /** The bucket stored under {@code key} in the account, or the default account's legacy one, read only. */

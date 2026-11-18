@@ -60,7 +60,7 @@ class NetworkFirewallConcurrencyTest {
                     request.putArray("SubnetMappings")
                             .addObject().put("SubnetId", subnetId);
                     start.await();
-                    return service.associateSubnets(request);
+                    return service.associateSubnets(request, REGION);
                 }));
             }
             start.countDown();
@@ -106,7 +106,7 @@ class NetworkFirewallConcurrencyTest {
                     request.put("FirewallArn", firewallArn);
                     request.putArray("SubnetIds").add(subnetId);
                     start.await();
-                    return service.disassociateSubnets(request);
+                    return service.disassociateSubnets(request, REGION);
                 }));
             }
             start.countDown();
@@ -219,7 +219,7 @@ class NetworkFirewallConcurrencyTest {
                     request.putObject("RuleGroup").putObject("RulesSource")
                             .put("RulesString", "drop ip any any # caller " + callerIndex);
                     start.await();
-                    return service.updateRuleGroup(request);
+                    return service.updateRuleGroup(request, REGION);
                 }));
             }
             start.countDown();

@@ -1,12 +1,6 @@
 package io.floci.aws.services.ecs;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
@@ -24,7 +18,6 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -41,7 +34,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -305,11 +297,7 @@ class EcsServiceAwaitStableTest {
     }
 
     private EcsService mockModeService(EcsContainerManager containerManager) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(true);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        return track(new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null));
+        return track(EcsServiceFixtures.builder().containerManager(containerManager).build());
     }
 
     /** A container manager that runs {@code onStart} in {@code startTask}; its containers keep running. */
@@ -327,15 +315,10 @@ class EcsServiceAwaitStableTest {
     }
 
     private EcsService dockerModeService(EcsContainerManager containerManager) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().ecs().mock()).thenReturn(false);
-        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
-        return track(new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory(), null));
+        return track(EcsServiceFixtures.builder().containerManager(containerManager).dockerMode().build());
     }
 
     private EcsService track(EcsService service) {
-        service.initializeStorage();
         created.add(service);
         return service;
     }
@@ -357,21 +340,5 @@ class EcsServiceAwaitStableTest {
         return service.describeTasks(null, service.listTasks(null, null, null, null, REGION), REGION).stream()
                 .filter(t -> TaskStatus.RUNNING.name().equals(t.getLastStatus()))
                 .toList();
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
-
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                                                        TypeReference<Map<String, V>> typeReference) {
-            return (AccountAwareStorageBackend<V>) stores.computeIfAbsent(fileName,
-                    ignored -> AccountAwareStorageBackend.inMemory("000000000000"));
-        }
     }
 }

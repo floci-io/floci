@@ -101,6 +101,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // Where a step on its cluster's YARN finds the ResourceManager, as a yarn-site.xml property, a Hadoop client reading
     // yarn-site.xml after core-site.xml.
     private static final String YARN_SITE_VARIABLE = "FLOCI_YARN_SITE";
+    // How a command's Tez, Pig's among them, runs its DAGs, as tez-site.xml properties (see tezSite).
+    private static final String TEZ_SITE_VARIABLE = "FLOCI_TEZ_SITE";
     // The folder of a step's image holding the Hadoop its cluster's nodes run from, which its hadoop command runs from
     // on YARN, as the MapReduce home the local job runner uses has no YARN client to speak of.
     private static final String HADOOP_ROOT_VARIABLE = "FLOCI_HADOOP_ROOT";
@@ -120,6 +122,16 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // The port of a cluster's NameNode, HDFS's own default, which hdfs:// paths and those without a scheme
     // ("hdfs:// (or no prefix)") reach through the cluster's primary node.
     private static final int HDFS_PORT = 8020;
+    /** The ports of a cluster's MapReduce JobHistory server on its primary node, Hadoop's own defaults. */
+    public static final int JOB_HISTORY_PORT = 10020;
+    public static final int JOB_HISTORY_WEB_PORT = 19888;
+    /** A cluster's Spark History Server's port, "Spark HistoryServer | http://master-public-dns-name:18080/". */
+    public static final int SPARK_HISTORY_WEB_PORT = 18080;
+    /**
+     * Where a cluster's Spark applications keep their event logs, which its Spark History Server reads: "By default,
+     * Amazon EMR stores event logs in the /var/log/spark/apps directory of HDFS".
+     */
+    public static final String SPARK_EVENT_LOGS = "/var/log/spark/apps";
     // Spark's default checkpoint manager goes through Hadoop's FileContext, which refuses an hdfs:// path without a
     // host, though "hdfs:///path-to-data" and "/path-to-data" "would resolve to the same location in HDFS", as the
     // Management Guide puts it; so a streaming query keeps its checkpoints through the file system instead.
@@ -219,18 +231,19 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "fi",
             "export SPARK_CONF_DIR=\"$conf\"");
     // On a cluster, the hadoop command, and MapReduce in a step's spark-submit, get its HDFS and Floci's S3 too,
-    // through a copy of its Hadoop configuration (the image's, or the folder a spark-env export names), links
-    // followed, whose core-site.xml takes in the original's through Hadoop's XInclude, whatever its XML, by a name
-    // relative to the folder, which Spark ships to YARN's containers on a cluster that runs it, then
-    // HADOOP_SITE_VARIABLE's properties, which win (see hadoopSite), and whose mapred-site.xml runs MapReduce in local
-    // mode the same way (see mapredSite). The cluster's hadoop-log4j lines follow the log4j.properties, on a line of
-    // their own, a later key winning, and its hadoop-env exports start the hadoop-env.sh the hadoop command reads,
-    // ahead of the image's own lines, which add to HADOOP_CLASSPATH rather than set it, so a HADOOP_CLASSPATH the
-    // cluster sets keeps the LZO codec the image's core-site.xml names. The hadoop script runs only once its HDFS,
-    // MapReduce and YARN homes name folders that are there, and the image has /usr/lib/hadoop alone, without
-    // MapReduce, so the MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot run, so hdfs dfs
-    // runs as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has runs. A step's
-    // command can run sudo, as on EMR, which the image does not have, so it finds Floci's first (see SUDO).
+    // through a copy of its Hadoop configuration (the image's, or the folder a spark-env export names), links followed,
+    // whose core-site.xml takes in the original's through Hadoop's XInclude, whatever its XML, by a name relative to
+    // the folder, which Spark ships to YARN's containers on a cluster that runs it, then HADOOP_SITE_VARIABLE's
+    // properties, which win (see hadoopSite), and whose mapred-site.xml runs MapReduce in local mode the same way (see
+    // mapredSite), as a command's tez-site.xml does Tez (see tezSite). The cluster's hadoop-log4j lines follow the
+    // log4j.properties, on a line of their own, a later key winning, and its hadoop-env exports start the hadoop-env.sh
+    // the hadoop command reads, ahead of the image's own lines, which add to HADOOP_CLASSPATH rather than set it, so a
+    // HADOOP_CLASSPATH the cluster sets keeps the LZO codec the image's core-site.xml names. The hadoop script runs
+    // only once its HDFS, MapReduce and YARN homes name folders that are there, and the image has /usr/lib/hadoop
+    // alone, without MapReduce, so the MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot
+    // run, so hdfs dfs runs as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has
+    // runs. A step's command can run sudo, as on EMR, which the image does not have, so it finds Floci's first (see
+    // SUDO).
     private static final List<String> HADOOP_CONF_SETUP = List.of(
             "if [ -n \"${" + HADOOP_SITE_VARIABLE + ":-}\" ]; then",
             "  hadoop_conf=/tmp/floci-hadoop-conf source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"",
@@ -252,6 +265,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  fi",
             "  if [ -n \"${" + YARN_SITE_VARIABLE + ":-}\" ]; then",
             "    site yarn-site.xml \"$" + YARN_SITE_VARIABLE + "\"",
+            "  fi",
+            "  if [ -n \"${" + TEZ_SITE_VARIABLE + ":-}\" ]; then",
+            "    site tez-site.xml \"$" + TEZ_SITE_VARIABLE + "\"",
             "  fi",
             "  if [ ! -s \"$hadoop_conf/log4j.properties\" ]; then",
             "    printf '%s\\n' '" + String.join("' '", HADOOP_CONSOLE_LOG) + "' > \"$hadoop_conf/log4j.properties\"",
@@ -294,6 +310,38 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "    chmod +x /tmp/floci-bin/hadoop /tmp/floci-bin/hadoop-streaming",
             "  fi",
             "fi");
+    /**
+     * The lines a step's command gets after those of Pig's own {@code pig.properties}, a later key winning, in a Pig
+     * configuration of the container's own ({@link #PIG_CONF}), which {@code PIG_CONF_DIR} names; set for a cluster
+     * with Pig.
+     */
+    public static final String PIG_PROPERTIES_VARIABLE = "FLOCI_PIG_PROPERTIES";
+    /** The lines that follow those of that configuration's {@code log4j.properties}, its template's where it has none. */
+    public static final String PIG_LOG4J_VARIABLE = "FLOCI_PIG_LOG4J";
+    /** The lines that start that configuration's {@code pig-env.sh}, which Pig's launcher reads. */
+    public static final String PIG_ENV_VARIABLE = "FLOCI_PIG_ENV";
+    /** Where a step's command has its Pig configuration. */
+    public static final String PIG_CONF = "/tmp/floci-pig-conf";
+    // On a cluster with Pig, a command's pig reads a configuration of its own: a copy of the one PIG_CONF_DIR names, or
+    // Pig's, links followed, whose pig.properties, log4j.properties and pig-env.sh get the cluster's lines.
+    private static final List<String> PIG_CONF_SETUP = List.of(
+            "if [ -n \"${" + PIG_PROPERTIES_VARIABLE + ":-}\" ]; then",
+            "  mkdir -p " + PIG_CONF,
+            "  cp -rL \"${PIG_CONF_DIR:-/usr/lib/pig/conf}/.\" " + PIG_CONF + " 2>/dev/null",
+            "  printf '\\n%s\\n' \"$" + PIG_PROPERTIES_VARIABLE + "\" >> " + PIG_CONF + "/pig.properties",
+            "  if [ -n \"${" + PIG_LOG4J_VARIABLE + ":-}\" ]; then",
+            "    if [ ! -f " + PIG_CONF + "/log4j.properties ]; then",
+            "      cp " + PIG_CONF + "/log4j.properties.template " + PIG_CONF + "/log4j.properties 2>/dev/null",
+            "    fi",
+            "    printf '\\n%s\\n' \"$" + PIG_LOG4J_VARIABLE + "\" >> " + PIG_CONF + "/log4j.properties",
+            "  fi",
+            "  if [ -n \"${" + PIG_ENV_VARIABLE + ":-}\" ]; then",
+            "    { printf '%s\\n' \"$" + PIG_ENV_VARIABLE + "\"; cat " + PIG_CONF + "/pig-env.sh 2>/dev/null; }"
+                    + " > " + PIG_CONF + "/floci-pig-env.sh",
+            "    mv " + PIG_CONF + "/floci-pig-env.sh " + PIG_CONF + "/pig-env.sh",
+            "  fi",
+            "  export PIG_CONF_DIR=" + PIG_CONF,
+            "fi");
     // A step on a cluster, or one whose job has log4j2.properties lines, runs spark-submit after this.
     private static final String SPARK_CONF_WRAPPER = wrapper(SPARK_CONF_COPY, HADOOP_CONF_SETUP);
     // A command runs after this sets up a Spark configuration of its own, so a spark-submit it starts runs
@@ -305,7 +353,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "sed -i -e '/^spark\\.master[[:space:]]/d' -e '/^spark\\.submit\\.deployMode[[:space:]]/d'"
                     + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
             "printf '\\n%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\""),
-            HADOOP_CONF_SETUP);
+            HADOOP_CONF_SETUP, PIG_CONF_SETUP);
     // The archives a driver needs in its working directory are put in this folder of its container, each in a
     // numbered folder of its own, which the copy creates.
     private static final String ARCHIVES_FOLDER = "/tmp/floci-archives";
@@ -342,6 +390,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final List<SparkSetting> HIVE_SETTINGS = List.of(
             new SparkSetting("tez.local.mode", "true"),
             new SparkSetting("tez.am.client.am.port-range", "40000-40100"));
+    // A command's Tez where there is no YARN: in local mode, in the JVM that starts it, which has Tez's jars already,
+    // its tasks' output read where it is written, as Pig's own Tez local mode has it.
+    private static final List<SparkSetting> TEZ_LOCAL_SETTINGS = List.of(
+            new SparkSetting("tez.local.mode", "true"),
+            new SparkSetting("tez.ignore.lib.uris", "true"),
+            new SparkSetting("tez.runtime.optimize.local.fetch", "true"));
     // On a cluster, Hive's metastore is the cluster's own, as "Hive records metastore information in a MySQL database
     // on the primary node's file system": the metastore service on its primary node (see EmrClusterStorage), in place
     // of the Glue Data Catalog client the image's hive-site names, or, where that does not run, an embedded Derby
@@ -558,6 +612,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                             .withEnv(YARN_SITE_VARIABLE, siteProperty("yarn.resourcemanager.hostname",
                                     job.storage().resourceManager()));
                 }
+                if (job.command() != null) {
+                    container.withEnv(TEZ_SITE_VARIABLE, tezSite(job, executorEnvironment));
+                }
                 if (job.storage() != null && job.storage().replication() > 0) {
                     container.withEnv(HDFS_SITE_VARIABLE, siteProperty("dfs.replication",
                             String.valueOf(job.storage().replication())));
@@ -568,6 +625,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 if (!job.hadoopEnvironment().isEmpty()) {
                     container.withEnv(HADOOP_ENV_VARIABLE, hadoopEnvFile(job));
                 }
+            }
+            if (job.listenPort() > 0) {
+                // Reached through Floci alone, so published on the host's loopback interface only.
+                container.withLoopbackPortBinding(job.listenPort(), 0);
             }
             ContainerSpec spec = container
                     .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))
@@ -599,9 +660,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (stopped.getAsBoolean()) {
                 return Outcome.halted();
             }
-            lifecycleManager.startCreated(containerId, spec);
+            ContainerLifecycleManager.ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             logHandle = attachLog(containerId, job);
             progress.started();
+            if (job.listenPort() > 0) {
+                ContainerLifecycleManager.EndpointInfo listening = info.getEndpoint(job.listenPort());
+                progress.listening(listening.host(), listening.port());
+            }
             if (job.executors() != null) {
                 capacity = joinCapacity(job.executors().application());
                 executors = new SparkExecutors(job.executors(), driver(containerId),
@@ -698,6 +763,24 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         } catch (RuntimeException e) {
             LOG.warnv("Could not remove the {0} Spark drivers an earlier Floci process left: {1}", service,
                     e.getMessage());
+        }
+    }
+
+    @Override
+    public void removeLeftoverDriver(String service, String runId) {
+        if (launches.get(runId) != null) {
+            return;
+        }
+        try {
+            lifecycleManager.findByName(ContainerStorageHelper.dockerName(config, service + "-" + runId))
+                    .ifPresent(container -> {
+                        lifecycleManager.removeIfExists(container.getId());
+                        LOG.infov("Removed {0} Spark driver {1} of {2}, left running by an earlier Floci process",
+                                service, container.getId(), runId);
+                    });
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove the {0} Spark driver of {1} an earlier Floci process left: {2}", service,
+                    runId, e.getMessage());
         }
     }
 
@@ -1207,7 +1290,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A MapReduce job on the cluster's YARN: its application master and tasks find Hadoop in the nodes' layout, which
     // yarn.application.classpath's default does not name, and S3A's AWS SDK, reach Floci with the step's AWS environment,
     // and are sized for a NodeManager as Spark's executors are. The image's core-site.xml names the LZO codec, so its
-    // jars come too.
+    // jars come too. Its client asks the cluster's JobHistory server about it once its application master has ended.
     private static List<SparkSetting> yarnMapReduceSettings(Job job, List<String> executorEnvironment) {
         String root = hadoopRoot(job);
         List<String> classPath = new ArrayList<>(hadoopLayout(root));
@@ -1222,23 +1305,73 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("mapreduce.reduce.env", environment),
                 new SparkSetting("yarn.app.mapreduce.am.resource.mb", "1024"),
                 new SparkSetting("mapreduce.map.memory.mb", "768"),
-                new SparkSetting("mapreduce.reduce.memory.mb", "768"));
+                new SparkSetting("mapreduce.reduce.memory.mb", "768"),
+                jobHistory(job), jobHistoryWeb(job));
     }
 
-    // Hive's Tez on the cluster's YARN. The image's tez-site.xml names EMR Serverless's own plugins, whose stock
-    // counterparts are in the same jars, named here as Tez's own defaults are; its port ranges and addresses are
-    // placeholders EMR Serverless fills, its compression needs a native library the image lacks, and a task's two
-    // virtual cores never match the one YARN's default scheduler grants, so Tez would give each container back. An
-    // application master says where it is by ${env.NM_HOST}, which is left for its own node to fill in: the settings
-    // are read on the step's side first, and $NM_HOST or an env of the step's would be filled in there.
+    // The cluster's MapReduce JobHistory server on its primary node, which a MapReduce job's client asks about it once
+    // its application master has ended, and its web pages.
+    private static SparkSetting jobHistory(Job job) {
+        return new SparkSetting("mapreduce.jobhistory.address",
+                job.storage().resourceManager() + ":" + JOB_HISTORY_PORT);
+    }
+
+    private static SparkSetting jobHistoryWeb(Job job) {
+        return new SparkSetting("mapreduce.jobhistory.webapp.address",
+                job.storage().resourceManager() + ":" + JOB_HISTORY_WEB_PORT);
+    }
+
+    /**
+     * The {@code tez-site.xml} properties a step's command gets, so that Tez, which Pig runs a script on by default,
+     * runs its DAGs on its cluster's YARN, as Hive's does there, or, where there is no YARN to run them on, in the JVM
+     * that starts them, without the jars a YARN container is given.
+     */
+    static String tezSite(Job job, List<String> executorEnvironment) {
+        List<SparkSetting> settings = new ArrayList<>();
+        if (onYarn(job)) {
+            settings.addAll(tezOnYarnSettings(job, executorEnvironment, List.of()));
+            settings.add(new SparkSetting("tez.task.resource.memory.mb", "768"));
+        } else {
+            settings.addAll(TEZ_LOCAL_SETTINGS);
+        }
+        List<String> properties = new ArrayList<>();
+        settings.forEach(setting -> properties.add(siteProperty(setting.key(), setting.value())));
+        return String.join("\n", properties);
+    }
+
+    // Hive's Tez on the cluster's YARN, sized as its tasks are by Hive's own settings: a task's two virtual cores never
+    // match the one YARN's default scheduler grants, so Tez would give each container back. A query that runs MapReduce
+    // instead, its hive.execution.engine set to mr, asks the cluster's JobHistory server about its jobs.
     private static List<SparkSetting> hiveOnYarnSettings(Job job, List<String> executorEnvironment) {
         String root = hadoopRoot(job);
-        List<String> classPath = new ArrayList<>(List.of("$PWD/*", root + "/hive/lib/hive-exec.jar", root + "/tez/*",
-                root + "/tez/lib/*"));
-        classPath.addAll(hadoopLayout(root));
-        String environment = containerEnvironment(executorEnvironment, "HIVE_HOME=" + root + "/hive",
-                "TEZ_HOME=" + root + "/tez");
-        return List.of(
+        List<SparkSetting> settings = new ArrayList<>(tezOnYarnSettings(job, executorEnvironment,
+                List.of(root + "/hive/lib/hive-exec.jar"), "HIVE_HOME=" + root + "/hive"));
+        settings.add(new SparkSetting("hive.tez.container.size", "768"));
+        settings.add(new SparkSetting("hive.tez.cpu.vcores", "1"));
+        settings.add(jobHistory(job));
+        settings.add(jobHistoryWeb(job));
+        return settings;
+    }
+
+    // Tez on the cluster's YARN, its containers given classPath, then Tez's and Hadoop's jars, and variables, then
+    // TEZ_HOME. The image's tez-site.xml names EMR Serverless's own plugins, whose stock counterparts are in the same
+    // jars, named here as Tez's own defaults are; its port ranges and addresses are placeholders EMR Serverless fills,
+    // and its compression needs a native library the image lacks. An application master says where it is by
+    // ${env.NM_HOST}, which is left for its own node to fill in: the settings are read on the step's side first, and
+    // $NM_HOST or an env of the step's would be filled in there. Where the cluster's primary node runs the YARN
+    // timeline server, the application master logs its DAGs there, through the timeline server's REST interface, which
+    // the Tez UI reads.
+    private static List<SparkSetting> tezOnYarnSettings(Job job, List<String> executorEnvironment,
+                                                        List<String> classPath, String... variables) {
+        String root = hadoopRoot(job);
+        List<String> containerClassPath = new ArrayList<>(List.of("$PWD/*"));
+        containerClassPath.addAll(classPath);
+        containerClassPath.addAll(List.of(root + "/tez/*", root + "/tez/lib/*"));
+        containerClassPath.addAll(hadoopLayout(root));
+        List<String> containerVariables = new ArrayList<>(List.of(variables));
+        containerVariables.add("TEZ_HOME=" + root + "/tez");
+        String environment = containerEnvironment(executorEnvironment, containerVariables.toArray(String[]::new));
+        List<SparkSetting> settings = new ArrayList<>(List.of(
                 new SparkSetting("yarn.resourcemanager.hostname", job.storage().resourceManager()),
                 new SparkSetting("tez.local.mode", "false"),
                 new SparkSetting("tez.framework.client", "org.apache.tez.client.TezYarnClient"),
@@ -1258,14 +1391,20 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("tez.shuffle.bind-host", "0.0.0.0"),
                 new SparkSetting("tez.lib.uris", "file://" + root + "/tez/,file://" + root + "/tez/lib/"),
                 new SparkSetting("tez.use.cluster.hadoop-libs", "false"),
-                new SparkSetting("tez.cluster.additional.classpath.prefix", String.join(":", classPath)),
+                new SparkSetting("tez.cluster.additional.classpath.prefix", String.join(":", containerClassPath)),
                 new SparkSetting("tez.am.launch.env", environment),
                 new SparkSetting("tez.task.launch.env", environment),
                 new SparkSetting("tez.am.resource.memory.mb", "1024"),
-                new SparkSetting("hive.tez.container.size", "768"),
-                new SparkSetting("hive.tez.cpu.vcores", "1"),
                 new SparkSetting("tez.runtime.intermediate-output.should-compress", "false"),
-                new SparkSetting("tez.runtime.intermediate-input.is-compressed", "false"));
+                new SparkSetting("tez.runtime.intermediate-input.is-compressed", "false")));
+        String timeline = job.storage().timelineServer();
+        if (timeline != null) {
+            settings.add(new SparkSetting("tez.history.logging.service.class",
+                    "org.apache.tez.dag.history.logging.ats.ATSHistoryLoggingService"));
+            settings.add(new SparkSetting("yarn.timeline-service.enabled", "true"));
+            settings.add(new SparkSetting("yarn.timeline-service.hostname", timeline));
+        }
+        return settings;
     }
 
     // The folders holding Hadoop on a cluster's nodes, as a class path's entries; the LZO codec's beside them.
@@ -1307,8 +1446,16 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * is left out, as its line would run what it holds.
      */
     static String hadoopEnvFile(Job job) {
+        return exportLines(job.hadoopEnvironment());
+    }
+
+    /**
+     * An export of each of {@code variables}, as given, in single quotes, with no shell expansion. A name a shell cannot
+     * export is left out, as its line would run what it holds.
+     */
+    public static String exportLines(Map<String, String> variables) {
         List<String> lines = new ArrayList<>();
-        job.hadoopEnvironment().forEach((name, value) -> {
+        variables.forEach((name, value) -> {
             if (SHELL_NAME.matcher(name).matches()) {
                 lines.add("export " + name + "='" + value.replace("'", "'\\''") + "'");
             }
@@ -1316,8 +1463,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         return String.join("\n", lines);
     }
 
-    // Each property as a line Properties.load reads back as it is.
-    private static String propertiesLines(Map<String, String> properties) {
+    /** Each property as a line {@code Properties.load} reads back as it is. */
+    public static String propertiesLines(Map<String, String> properties) {
         List<String> lines = new ArrayList<>();
         properties.forEach((key, value) ->
                 lines.add(propertiesEscaped(key, true) + " = " + propertiesEscaped(value, false)));
@@ -1495,8 +1642,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A step's Spark on its cluster's YARN: the ResourceManager on the primary node; Spark's jars from the node's image,
     // which is the step's; executors and a cluster-mode driver sized for the NodeManager rather than the image's 14 GB
     // ("determined by the core and task instance types" on EMR), which the cluster's spark-defaults and the step's own
-    // options replace; a client-mode driver reached at the container's name on the cluster's network; and the step's
-    // AWS environment for each executor and a cluster-mode driver, as its container has it.
+    // options replace; a client-mode driver reached at the container's name on the cluster's network; where the
+    // primary node runs a Spark History Server, as on a cluster with Spark, its event logs in the cluster's HDFS, where
+    // the server reads them, which the application's tracking URL leads to once it has ended; and the step's AWS
+    // environment for each executor and a cluster-mode driver, as its container has it.
     private static List<SparkSetting> yarnSettings(Job job, List<String> executorEnvironment) {
         List<SparkSetting> settings = new ArrayList<>(List.of(
                 new SparkSetting("spark.hadoop.yarn.resourcemanager.hostname", job.storage().resourceManager()),
@@ -1507,6 +1656,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("spark.driver.cores", "1"),
                 new SparkSetting("spark.driver.host", driverHost(job)),
                 new SparkSetting("spark.driver.bindAddress", "0.0.0.0")));
+        String history = job.storage().sparkHistoryServer();
+        if (history != null) {
+            settings.add(new SparkSetting("spark.eventLog.enabled", "true"));
+            settings.add(new SparkSetting("spark.eventLog.dir", "hdfs://" + SPARK_EVENT_LOGS));
+            settings.add(new SparkSetting("spark.yarn.historyServer.address", history + ":" + SPARK_HISTORY_WEB_PORT));
+        }
         for (String variable : executorEnvironment) {
             int equals = variable.indexOf('=');
             String name = variable.substring(0, equals);

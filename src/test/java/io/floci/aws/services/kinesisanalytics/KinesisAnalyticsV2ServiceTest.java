@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.kinesisanalytics.container.FlinkContainerManager;
 import io.floci.aws.services.kinesisanalytics.model.ApplicationStatus;
@@ -19,6 +20,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -389,6 +391,55 @@ class KinesisAnalyticsV2ServiceTest {
         Map<String, String> after = service.untagResource(app.getApplicationArn(), List.of("team"));
         assertFalse(after.containsKey("team"));
         assertEquals("dev", after.get("env"));
+    }
+
+    /**
+     * IAM's lookup reads the tags the application the ARN names holds, as the tag calls leave them, and nothing for
+     * another account's, another Region's or an unknown application; a tag call puts a new map, so one a reader
+     * already holds stays as it was.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheApplicationTheArnNamesAndTaggingPutsANewMap() {
+        FlinkApplication app = create("demo");
+        String arn = app.getApplicationArn();
+        service.tagResource(arn, Map.of("team", "data", "env", "dev"));
+        Map<String, String> held = app.getTags();
+
+        service.untagResource(arn, List.of("env"));
+
+        assertEquals(Map.of("team", "data", "env", "dev"), held);
+        assertEquals("kinesisanalytics", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertTrue(service.storedTags(arn.replace("000000000000", "111122223333")).isEmpty());
+        assertTrue(service.storedTags(arn.replace("us-east-1", "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(arn.replace("application/demo", "application/nope")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:kinesis:us-east-1:000000000000:stream/demo").isEmpty());
+    }
+
+    /**
+     * An application stored under its name alone, before applications were kept by Region, or before storage was
+     * account-aware, is read where the handlers find it, in place: the lookup migrates nothing.
+     */
+    @Test
+    void storedTagsReadALegacyRecordInPlaceWithoutMigratingIt() {
+        InMemoryStorage<String, FlinkApplication> raw = new InMemoryStorage<>();
+        KinesisAnalyticsV2Service legacyState =
+                mockModeService(new AccountAwareStorageBackend<>(raw, null, "000000000000"));
+        FlinkApplication byName = legacyApplication("by-name");
+        byName.setTags(Map.of("team", "data"));
+        raw.put("000000000000/by-name", byName);
+        FlinkApplication bare = legacyApplication("bare");
+        bare.setTags(Map.of("team", "ops"));
+        raw.put("bare", bare);
+        FlinkApplication unscoped = legacyApplication("unscoped");
+        unscoped.setTags(Map.of("team", "web"));
+        raw.put("us-east-1/unscoped", unscoped);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(byName.getApplicationArn()));
+        assertEquals(Map.of("team", "ops"), legacyState.storedTags(bare.getApplicationArn()));
+        assertEquals(Map.of("team", "web"), legacyState.storedTags(unscoped.getApplicationArn()));
+        assertTrue(legacyState.storedTags(byName.getApplicationArn().replace("us-east-1", "us-west-2")).isEmpty());
+        assertEquals(Set.of("000000000000/by-name", "bare", "us-east-1/unscoped"), raw.keys());
     }
 
     @Test
