@@ -1174,14 +1174,26 @@ class LambdaServiceTest {
     @Test
     void createFunctionRejectsOversizedDirectZipUploadWithAwsError() {
         Map<String, Object> request = baseRequest("oversized-zip");
-        byte[] oversized = new byte[(int) ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES + 1];
-        request.put("Code", Map.of("ZipFile", Base64.getEncoder().encodeToString(oversized)));
+        // Zero bytes, one more than the limit allows, as Base64: refused from its length, before it is decoded.
+        long chunks = ZipExtractor.DIRECT_UPLOAD_MAX_COMPRESSED_BYTES / 3 + 1;
+        request.put("Code", Map.of("ZipFile", "A".repeat((int) (chunks * 4))));
 
         AwsException error = assertThrows(AwsException.class,
                 () -> service.createFunction(REGION, request));
 
         assertEquals("RequestEntityTooLargeException", error.getErrorCode());
         assertEquals(413, error.getHttpStatus());
+    }
+
+    @Test
+    void anUploadsDecodedLengthIsReadFromItsBase64LengthPaddedOrNot() {
+        assertEquals(0, LambdaService.decodedLength(""));
+        assertEquals(3, LambdaService.decodedLength("AAAA"));
+        assertEquals(4, LambdaService.decodedLength("AAAAAA=="));
+        assertEquals(4, LambdaService.decodedLength("AAAAAA"));
+        assertEquals(5, LambdaService.decodedLength("AAAAAAA="));
+        byte[] limit = new byte[1024];
+        assertEquals(limit.length, LambdaService.decodedLength(Base64.getEncoder().encodeToString(limit)));
     }
 
     @Test

@@ -1,7 +1,7 @@
 package io.floci.aws.services.cur;
 
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
-import io.floci.aws.testing.SynchronousBillingEmissionProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
@@ -27,7 +27,7 @@ import static org.hamcrest.Matchers.equalTo;
  * {@link ParquetEmitterIntegrationTest} for prerequisites.
  */
 @QuarkusTest
-@TestProfile(SynchronousBillingEmissionProfile.class)
+@TestProfile(RdsMockProfile.class)
 @EnabledIfEnvironmentVariable(named = "FLOCI_DUCK_CROSS_CONTAINER_TEST", matches = "1|true|yes")
 class CurNonDefaultAccountEmissionIntegrationTest {
 

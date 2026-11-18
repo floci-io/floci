@@ -1,6 +1,5 @@
 package io.floci.aws.lifecycle;
 
-import io.floci.aws.lifecycle.UiController.StatusResponse;
 import io.floci.aws.services.floci.ui.FlociUiManager;
 import io.floci.aws.services.floci.ui.FlociUiManager.UiStatus;
 import io.floci.aws.services.floci.ui.UiPages;
@@ -10,6 +9,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -40,7 +42,7 @@ class UiControllerTest {
     void readyStatusReplacesOnlyTheHostPort(String host, String url) {
         when(uiManager.status()).thenReturn(new UiStatus(true, true, 4500, null));
 
-        assertEquals(new StatusResponse(true, url, null), status(host));
+        assertEquals(body(true, url, null), status(host));
     }
 
     @ParameterizedTest
@@ -52,7 +54,7 @@ class UiControllerTest {
     void malformedHostsKeepTheExistingBehavior(String host, String url) {
         when(uiManager.status()).thenReturn(new UiStatus(true, true, 4500, null));
 
-        assertEquals(new StatusResponse(true, url, null), status(host));
+        assertEquals(body(true, url, null), status(host));
     }
 
     @ParameterizedTest
@@ -61,7 +63,7 @@ class UiControllerTest {
     void missingHostDefaultsToLocalhost(String host) {
         when(uiManager.status()).thenReturn(new UiStatus(true, true, 4500, null));
 
-        assertEquals(new StatusResponse(true, "http://localhost:4500/", null), status(host));
+        assertEquals(body(true, "http://localhost:4500/", null), status(host));
     }
 
     @ParameterizedTest
@@ -69,17 +71,26 @@ class UiControllerTest {
     void statusWithoutAReadyPublishedPortHasNoUrl(boolean ready, int port) {
         when(uiManager.status()).thenReturn(new UiStatus(true, ready, port, null));
 
-        assertEquals(new StatusResponse(false, null, null), status("[::1]:4566"));
+        assertEquals(body(false, null, null), status("[::1]:4566"));
     }
 
     @Test
     void statusErrorTakesPrecedenceOverReadiness() {
         when(uiManager.status()).thenReturn(new UiStatus(true, true, 4500, "sidecar failed"));
 
-        assertEquals(new StatusResponse(false, null, "sidecar failed"), status("[::1]:4566"));
+        assertEquals(body(false, null, "sidecar failed"), status("[::1]:4566"));
     }
 
-    private StatusResponse status(String host) {
-        return (StatusResponse) controller.status(host).getEntity();
+    private Map<?, ?> status(String host) {
+        return (Map<?, ?>) controller.status(host).getEntity();
+    }
+
+    /** The {@code {ready, url, error}} body the wait view reads, every key present even when its value is null. */
+    private static Map<String, Object> body(boolean ready, String url, String error) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("ready", ready);
+        body.put("url", url);
+        body.put("error", error);
+        return body;
     }
 }

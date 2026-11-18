@@ -449,6 +449,69 @@ violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
 `src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
 generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
+### What a malformed policy ARN answers
+
+`PolicyArn` is `arnType` on every operation that takes one, 20 to 2048 characters and no pattern,
+so the declared check refuses a shorter value and nothing holds the rest to parsing as an ARN. What
+AWS answers beyond that length is recorded rather than published, and it is two sentences rather
+than one, both `ValidationError` with a 400 and a sender fault.
+
+- Attaching names the value: `ARN <value> is not valid.` Recorded on `AttachRolePolicy` for a bare
+  policy name on 2026-11-03, and on `AttachUserPolicy`, `AttachGroupPolicy` and `AttachRolePolicy`
+  for a value that is no ARN at all on 2026-11-06.
+- Everything else answers `Invalid ARN:  Could not be parsed!`, which is wholly fixed: the slot the
+  value would fill renders empty, so two spaces follow the colon and the request's value never
+  appears in it. Recorded on the three `Detach*Policy` operations on 2026-11-06, on
+  `ListEntitiesForPolicy` on 2026-11-03 and on `GetPolicy` on 2026-10-29.
+
+The remaining operations that take the member, the tag and version families among them, carry no
+recording and answer the parse sentence with those eight: one member read by one parser answers one
+way, and the attach side is the exception the recordings name. That is this emulator's reading
+under the standing decision rather than a measurement. A value that parses as an ARN and names no
+policy is unchanged by all of this, still the 404 `NoSuchEntity` each operation already answered.
+
+An older recording disagrees about the attach side and is no longer followed. LocalStack's
+AWS-validated snapshots have `AttachUserPolicy` and `AttachRolePolicy` answering the parse sentence
+for a 21-character value that is no ARN and for a bare policy name, validated 2025-03-06 and
+2025-06-19, where all three 2026 recordings have the attach side naming the value. Two
+AWS-validated sources disagree on one operation and one class of input, seventeen months apart, so
+the reading here is that AWS reworded that side between them and the newer recordings are what this
+emulator follows. A recording that shows otherwise moves this paragraph and `IamArnShapes`.
+
+`PolicySourceArn`, which the two principal simulators resolve an entity from, carries the same type
+and one more recorded case: a value of `*` answers `InvalidInput` 400, `Invalid Entity Arn: * does
+not clearly define entity type and name.`, where the member's declared minimum is 20 and that value
+is one character, so AWS's entity parse runs ahead of its length check for it. Recorded on
+`SimulatePrincipalPolicy` on 2026-11-03. `GetContextKeysForPrincipalPolicy` takes the same member
+through the same resolver and answers it the same way, which is a reading rather than a recording.
+A value that clears 20 characters and parses as no ARN keeps the sentence its own capture settled,
+`Invalid ARN provided in the request: <value>`, and a value under 20 keeps the declared length.
+### What a policy ARN that names nothing answers
+
+IAM answers two sentences for a managed policy ARN it cannot resolve, both 404 `NoSuchEntity`, and
+they are not interchangeable: the operation decides which one it gives. `Policy <arn> was not
+found.` says the ARN names nothing. `Policy <arn> does not exist or is not attachable.` says it
+names nothing this call could attach, and AWS answers it for both of its own cases on purpose, so a
+caller cannot tell an absent policy from an unattachable one.
+
+Recorded against a real account: `GetPolicy` and `TagPolicy` answer the first, on 2026-10-26, as do
+`DetachUserPolicy`, `DetachGroupPolicy` and `DetachRolePolicy`, on 2026-10-29, including for a
+policy that exists and is not attached, where this emulator used to add a clause naming the user,
+group or role. `ListEntitiesForPolicy` answers the second, on 2026-10-25, and so do
+`CreatePolicyVersion`, `GetPolicyVersion` and `ListPolicyVersions`, on 2026-10-29, with
+`GetPolicyVersion` naming the version inside the same sentence: `Policy <arn> version <id> does not
+exist or is not attachable.` The attach operations answer the second as well, which is where an
+AWS-managed name under the wrong path lands.
+
+The operations no recording covers answer with their own family, which is this emulator's reading
+rather than a measurement. `UntagPolicy` and `ListPolicyTags` read with `TagPolicy`, and
+`DeletePolicyVersion`, `SetDefaultPolicyVersion` and a permissions boundary that names no policy
+read with the attach family. `DeletePolicy` reads with `GetPolicy`. One case stays as it was
+because nothing records it and no family settles it: a version id that names nothing on a policy
+that exists keeps `Policy version <id> does not exist.`, which is about the version rather than the
+ARN. A recording for any of those moves that operation alone, the sentences being sited per
+operation in `IamService.PolicyNotFound`.
+
 ### Permission Boundaries
 
 | Action | Description |
@@ -3315,8 +3378,12 @@ floci populates:
   Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for its
   scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
   instances, ACM for its certificates, Firehose for its delivery streams, Cognito for its user pools and identity
-  pools, OpenSearch for its domains, Signer for its signing profiles, and Access Analyzer for its analyzers. Tag keys
-  differing only in case are one condition key holding every value.
+  pools, OpenSearch for its domains, Signer for its signing profiles, Access Analyzer for its analyzers, Managed Service
+  for Apache Flink for its applications, S3 Vectors for its vector buckets and indexes, Timestream for InfluxDB for its
+  DB instances, DB clusters, parameter groups and backups, CloudTrail for its trails, Budgets for its budgets and budget
+  actions, AWS FIS for its experiment templates, experiments and actions, CodePipeline for its pipelines, webhooks and
+  custom action types, DataSync for its agents, locations and tasks, and Global Accelerator for its accelerators,
+  listeners and endpoint groups. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

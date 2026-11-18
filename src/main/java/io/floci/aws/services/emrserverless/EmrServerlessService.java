@@ -451,7 +451,7 @@ public class EmrServerlessService {
                 throw new AwsException("InternalServerException", "The custom image " + imageUri
                         + " could not be resolved: " + e.getMessage(), 500);
             }
-            LOG.infov("The custom image {0} has no digest in Floci's ECR ({1}), so each run resolves it: {2}",
+            LOG.infov("The custom image {0} has no digest in Floci''s ECR ({1}), so each run resolves it: {2}",
                     imageUri, e.getErrorCode(), e.getMessage());
             return null;
         }

@@ -82,7 +82,7 @@ public class DocDbContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). DocumentDB metadata "
-                        + "operations keep working and clusters still reach 'available', but they "
+                        + "operations keep working and clusters still reach ''available'', but they "
                         + "have no backing MongoDB container until a daemon becomes reachable.",
                         e.getMessage());
             }

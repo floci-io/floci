@@ -92,6 +92,35 @@ class S3VectorsIamIntegrationTest {
         }
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags S3 Vectors holds on the vector bucket or the index a request
+     * names, an index's own and not its bucket's, so an allow on one team's tag lets the caller read that team's
+     * bucket and index and not another's.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheBucketOrTheIndex() throws Exception {
+        String tagged = bucketName();
+        String other = bucketName();
+        createBucket(tagged, "{\"team\":\"data\"}");
+        createBucket(other, "{\"team\":\"web\"}");
+        createIndex(other, "events", "{\"team\":\"data\"}");
+        createIndex(other, "orders", "{\"team\":\"web\"}");
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3v-iam-", "access",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Action\":[\"s3vectors:GetVectorBucket\",\"s3vectors:GetIndex\"],\"Resource\":\"*\","
+                        + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}]}")) {
+            send(user.signer("s3vectors"), "/GetVectorBucket", bucket(tagged)).then().statusCode(200);
+            denied(send(user.signer("s3vectors"), "/GetVectorBucket", bucket(other)), "s3vectors:GetVectorBucket");
+            send(user.signer("s3vectors"), "/GetIndex", index(other, "events")).then().statusCode(200);
+            denied(send(user.signer("s3vectors"), "/GetIndex", index(other, "orders")), "s3vectors:GetIndex");
+        } finally {
+            send(admin, "/DeleteIndex", index(other, "events")).then().statusCode(200);
+            send(admin, "/DeleteIndex", index(other, "orders")).then().statusCode(200);
+            deleteBucket(tagged);
+            deleteBucket(other);
+        }
+    }
+
     private static String bucketName() {
         return "iam-" + UUID.randomUUID().toString().substring(0, 8);
     }
@@ -110,13 +139,25 @@ class S3VectorsIamIntegrationTest {
     }
 
     private String createBucket(String name) throws Exception {
-        return send(admin, "/CreateVectorBucket", bucket(name)).then().statusCode(200)
+        return createBucket(name, null);
+    }
+
+    /** The ARN of the vector bucket {@code name} the administrator creates, with the {@code tags} object if any. */
+    private String createBucket(String name, String tags) throws Exception {
+        return send(admin, "/CreateVectorBucket", "{\"vectorBucketName\":\"" + name + "\""
+                + (tags == null ? "" : ",\"tags\":" + tags) + "}").then().statusCode(200)
                 .extract().path("vectorBucketArn");
     }
 
     private String createIndex(String bucket, String index) throws Exception {
+        return createIndex(bucket, index, null);
+    }
+
+    /** The ARN of the index the administrator creates in {@code bucket}, with the {@code tags} object if any. */
+    private String createIndex(String bucket, String index, String tags) throws Exception {
         return send(admin, "/CreateIndex", "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"" + index
-                + "\",\"dataType\":\"float32\",\"dimension\":2,\"distanceMetric\":\"cosine\"}").then()
+                + "\",\"dataType\":\"float32\",\"dimension\":2,\"distanceMetric\":\"cosine\""
+                + (tags == null ? "" : ",\"tags\":" + tags) + "}").then()
                 .statusCode(200).extract().path("indexArn");
     }
 

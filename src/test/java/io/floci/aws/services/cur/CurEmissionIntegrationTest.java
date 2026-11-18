@@ -3,8 +3,8 @@ package io.floci.aws.services.cur;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
-import io.floci.aws.testing.SynchronousBillingEmissionProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * {@link ParquetEmitterIntegrationTest} for prerequisites.
  */
 @QuarkusTest
-@TestProfile(SynchronousBillingEmissionProfile.class)
+@TestProfile(RdsMockProfile.class)
 @EnabledIfEnvironmentVariable(named = "FLOCI_DUCK_CROSS_CONTAINER_TEST", matches = "1|true|yes")
 class CurEmissionIntegrationTest {
 

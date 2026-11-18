@@ -9,7 +9,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.eks.model.Cluster;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -30,11 +30,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Configures the link-local IMDS endpoint on a stand-in cluster container and queries it from the
  * node and from a pod network namespace. The settings come from
- * {@link ContainerDataPlaneProfile}, which this class shares with
+ * {@link CloudFormationSettingsProfile}, which this class shares with
  * {@code TimestreamInfluxDbDockerIntegrationTest}.
  */
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class EksImdsDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksImdsDockerIntegrationTest.class);

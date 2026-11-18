@@ -6,10 +6,10 @@ import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.PublishedPortFamily;
 import io.floci.aws.services.ec2.model.Reservation;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.floci.aws.testing.IpPermissions;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,20 +35,12 @@ import static org.mockito.Mockito.when;
 /**
  * Startup restore runs from {@code @PostConstruct}, on a thread with no request, where account-aware
  * storage resolves to the default account. These tests run it the same way, on a bare thread, for
- * an instance owned by another account.
+ * an instance owned by another account. {@link ContainerBackedEc2Profile} runs EC2 container-backed,
+ * and security groups are enforced by test default, so restore resolves the instance's groups.
  */
 @QuarkusTest
-@TestProfile(Ec2RestoreEveryAccountIntegrationTest.EnforcedContainerBackedEc2.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class Ec2RestoreEveryAccountIntegrationTest {
-
-    /** Container-backed EC2 with security groups enforced, so restore resolves the instance's groups. */
-    public static class EnforcedContainerBackedEc2 implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ec2.mock", "false",
-                    "floci.network.security-group-enforcement.enabled", "true");
-        }
-    }
 
     private static final String REGION = "us-east-1";
     private static final String OTHER_ACCOUNT = "111122223333";

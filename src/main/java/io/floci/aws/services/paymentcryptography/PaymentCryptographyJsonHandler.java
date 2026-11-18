@@ -10,6 +10,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.iam.PolicyDocument;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyMpaTeamAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -65,6 +66,7 @@ public class PaymentCryptographyJsonHandler {
             case "GetKey" -> () -> getKey(request, region);
             case "ListKeys" -> () -> listKeys(request, region);
             case "DeleteKey" -> () -> deleteKey(request, region);
+            case "RestoreKey" -> () -> restoreKey(request, region);
             case "StartKeyUsage" -> () -> startKeyUsage(request, region);
             case "StopKeyUsage" -> () -> stopKeyUsage(request, region);
             case "CreateAlias" -> () -> createAlias(request, region);
@@ -88,6 +90,9 @@ public class PaymentCryptographyJsonHandler {
             case "PutResourcePolicy" -> () -> putResourcePolicy(request, region);
             case "GetResourcePolicy" -> () -> getResourcePolicy(request, region);
             case "DeleteResourcePolicy" -> () -> deleteResourcePolicy(request, region);
+            case "AssociateMpaTeam" -> () -> associateMpaTeam(request, region);
+            case "GetMpaTeamAssociation" -> () -> getMpaTeamAssociation(request, region);
+            case "DisassociateMpaTeam" -> () -> disassociateMpaTeam(request, region);
             default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported by floci", 400);
         };
@@ -181,14 +186,24 @@ public class PaymentCryptographyJsonHandler {
     }
 
     /**
-     * Deletes a key and answers with the key, as the reference does.
+     * Schedules a key for deletion and answers with the key, as the reference does.
      *
-     * <p>The waiting period the reference offers is read, and the key is
-     * deleted at once all the same: the service deletes a key the moment it
-     * is asked to.
+     * <p>The waiting period is the one the request names, or the reference's default of
+     * seven days. The model settles the range, so a period outside it is refused before
+     * the key is touched.
      */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
-        PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
+        int days = request.hasNonNull("DeleteKeyInDays")
+                ? request.path("DeleteKeyInDays").asInt() : 7;
+        PaymentCryptographyKey key = service.deleteKey(
+                requiredKey(request, region, KEY_IDENTIFIER), days);
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Cancels the scheduled deletion of a key. */
+    private Map<String, Object> restoreKey(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.restoreKey(
+                requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of("Key", keyObject(key));
     }
 
@@ -470,6 +485,47 @@ public class PaymentCryptographyJsonHandler {
             return false;
         }
         return true;
+    }
+
+    // ---- multi-party approval ------------------------------------------------
+
+    /**
+     * Associates a Multi-Party Approval team with a protected operation.
+     *
+     * <p>An operation has one team, so a second association replaces the first, as the
+     * reference replaces one.
+     */
+    private Map<String, Object> associateMpaTeam(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association = service.associateMpaTeam(region,
+                request.path("Action").asText(), request.path("MpaTeamArn").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /** The Multi-Party Approval team associated with a protected operation. */
+    private Map<String, Object> getMpaTeamAssociation(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association =
+                service.mpaTeamAssociation(region, request.path("Action").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /**
+     * Removes the Multi-Party Approval team associated with a protected operation.
+     *
+     * <p>The answer carries the association as it was, its state now {@code DELETE_PENDING}.
+     */
+    private Map<String, Object> disassociateMpaTeam(JsonNode request, String region) {
+        PaymentCryptographyMpaTeamAssociation association =
+                service.disassociateMpaTeam(region, request.path("Action").asText());
+        return Map.of("MpaTeamAssociation", mpaAssociation(association));
+    }
+
+    /** The association, as the model names its members. */
+    private static Map<String, Object> mpaAssociation(PaymentCryptographyMpaTeamAssociation association) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("Action", association.getAction());
+        out.put("MpaTeamArn", association.getMpaTeamArn());
+        out.put("AssociationState", association.getAssociationState());
+        return out;
     }
 
     /** The tags of a request, as the name and the value of each. */

@@ -1,6 +1,6 @@
 package io.floci.aws.services.dynamodb;
 
-import io.floci.aws.testing.DynamoDbPartitionedStorageProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -14,7 +14,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
 
-import static io.floci.aws.testing.DynamoDbPartitionedStorageProfile.STORAGE_DIR;
+import static io.floci.aws.testing.CloudFormationSettingsProfile.DYNAMODB_PARTITIONED_STORAGE_DIR;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  * files rather than in a single items file, one set per account.
  */
 @QuarkusTest
-@TestProfile(DynamoDbPartitionedStorageProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 class DynamoDbPartitionedStorageIntegrationTest {
 
     private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
@@ -44,7 +44,7 @@ class DynamoDbPartitionedStorageIntegrationTest {
     void itemsAreWrittenToPerAccountShardFiles() throws IOException {
         // The directory outlives a run, so each run uses its own table name.
         String table = "partitioned-" + UUID.randomUUID();
-        Path itemsDirectory = Path.of(STORAGE_DIR, "dynamodb-items");
+        Path itemsDirectory = Path.of(DYNAMODB_PARTITIONED_STORAGE_DIR, "dynamodb-items");
         try {
             for (String auth : List.of(AUTH_ACCOUNT_1, AUTH_ACCOUNT_2)) {
                 call(auth, "CreateTable", """
@@ -57,7 +57,7 @@ class DynamoDbPartitionedStorageIntegrationTest {
             call(AUTH_ACCOUNT_2, "PutItem", item(table, "two"));
 
             assertEquals(2, shardFilesOf(itemsDirectory, table), "one shard file per account's table");
-            assertFalse(Files.exists(Path.of(STORAGE_DIR, "dynamodb-items.json")));
+            assertFalse(Files.exists(Path.of(DYNAMODB_PARTITIONED_STORAGE_DIR, "dynamodb-items.json")));
             getItem(AUTH_ACCOUNT_1, table, "one");
             getItem(AUTH_ACCOUNT_2, table, "two");
         } finally {

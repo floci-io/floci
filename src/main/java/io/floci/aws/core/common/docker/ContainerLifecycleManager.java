@@ -485,7 +485,7 @@ public class ContainerLifecycleManager {
             copyIntoContainerDir(containerId, trustStore.get(), ContainerCaBundle.JAVA_TRUST_STORE_FILE_NAME);
             return true;
         } catch (Exception e) {
-            LOG.warnv("Could not copy the Java trust store into container {0}, whose JVMs keep the image's trust"
+            LOG.warnv("Could not copy the Java trust store into container {0}, whose JVMs keep the image''s trust"
                     + " store and will not trust Floci HTTPS: {1}", containerId, e.getMessage());
             return false;
         }
@@ -1225,7 +1225,7 @@ public class ContainerLifecycleManager {
             String[] env = imageConfig == null ? null : imageConfig.getEnv();
             return Optional.of(env == null ? List.of() : List.of(env));
         } catch (Exception e) {
-            LOG.warnv("Could not read the environment of image {0}, so the JVMs in its container keep the image's"
+            LOG.warnv("Could not read the environment of image {0}, so the JVMs in its container keep the image''s"
                     + " trust store and will not trust Floci HTTPS: {1}", resolvedImage, e.getMessage());
             return Optional.empty();
         }

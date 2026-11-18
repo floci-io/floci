@@ -1,14 +1,13 @@
 package io.floci.aws.services.emr;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.S3EnforceAuthProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 
 import static io.floci.aws.testing.EmrRequests.emr;
 import static org.hamcrest.Matchers.equalTo;
@@ -18,21 +17,12 @@ import static org.hamcrest.Matchers.nullValue;
 
 /**
  * With the lifecycle durations set, a cluster is seen STARTING and TERMINATING, and its steps PENDING,
- * over the wire. They are an hour long here, so nothing moves on while the test runs.
+ * over the wire. They are an hour long here, set by {@link S3EnforceAuthProfile}, so nothing moves on
+ * while the test runs.
  */
 @QuarkusTest
-@TestProfile(EmrTimedLifecycleIntegrationTest.HourLong.class)
+@TestProfile(S3EnforceAuthProfile.class)
 class EmrTimedLifecycleIntegrationTest {
-
-    public static class HourLong implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.emr.cluster-startup-delay-seconds", "3600",
-                    "floci.services.emr.step-duration-seconds", "3600",
-                    "floci.services.emr.cluster-termination-delay-seconds", "3600");
-        }
-    }
 
     @BeforeAll
     static void configure() {

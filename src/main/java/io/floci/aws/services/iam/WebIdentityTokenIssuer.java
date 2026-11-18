@@ -194,7 +194,7 @@ public class WebIdentityTokenIssuer {
             key.setPublicKey(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));
             key.setPrivateKey(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
             AccountAwareStorageBackend.putInAccount(keyStore, accountId, algorithm.name(), key);
-            LOG.debugv("Generated the account's {0} web identity token signing key", algorithm);
+            LOG.debugv("Generated the account''s {0} web identity token signing key", algorithm);
             return key;
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException(

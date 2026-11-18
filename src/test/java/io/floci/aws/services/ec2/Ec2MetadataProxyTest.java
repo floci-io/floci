@@ -4,6 +4,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
+import io.floci.aws.testing.HelperShellFixture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,8 +44,7 @@ class Ec2MetadataProxyTest {
                 Ec2MetadataProxy.installCommand(),
                 Ec2MetadataProxy.installEc2Command(),
                 Ec2MetadataProxy.startCommand("10.0.0.1", 9169),
-                Ec2MetadataProxy.startEc2Command("10.0.0.1", 9169),
-                Ec2MetadataProxy.podIdentityStartCommand("10.0.0.1", 4566)}) {
+                Ec2MetadataProxy.startEc2Command("10.0.0.1", 9169)}) {
             assertTrue(command[2].startsWith("set -eu\n" + prelude + "\n"), command[2]);
         }
     }
@@ -150,21 +150,6 @@ class Ec2MetadataProxyTest {
         assertEquals(5L, script.lines().filter(line -> line.contains("is_socat_listener ")).count(), script);
         assertTrue(script.contains("remove_nft_rule \"$nft_rule_marker\" || true"), script);
         assertFalse(script.contains("remove_nft_rule floci-imds-relay-42169"), script);
-    }
-
-    @Test
-    void podIdentityStartCommandAttachesAddressIdempotentlyAndTargetsHostAndPort() {
-        String[] command = Ec2MetadataProxy.podIdentityStartCommand("10.0.0.1", 4566);
-        assertEquals(3, command.length);
-        assertEquals("sh", command[0]);
-        assertEquals("-c", command[1]);
-
-        String script = command[2];
-        assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.170.23/32' || ip addr add 169.254.170.23/32 dev lo"));
-        assertTrue(script.contains("is_socat_listener \"$pid\" 'TCP-LISTEN:80,bind=169.254.170.23,'; then"
-                + "\n  exit 0\nfi"), script);
-        assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.170.23,fork,reuseaddr TCP:10.0.0.1:4566 >/tmp/floci-pod-identity-proxy.log 2>&1 &"));
-        assertTrue(script.contains("http://169.254.170.23/v1/credentials"));
     }
 
     @Test
@@ -420,55 +405,17 @@ class Ec2MetadataProxyTest {
     @Test
     void readinessProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
         List<String> proxied = new CopyOnWriteArrayList<>();
-        HttpServer proxy = failingProxy(proxied);
+        HttpServer proxy = HelperShellFixture.failingProxy(proxied);
         try (Ec2MetadataTestFixture fixture = new Ec2MetadataTestFixture()) {
             fixture.start();
             requireTokens(fixture.instance());
 
-            int result = HelperShellFixture.run(probe(fixture.endpoint()), directory, proxyEnvironment(proxy));
+            int result = HelperShellFixture.run(probe(fixture.endpoint()), directory, HelperShellFixture.proxyEnvironment(proxy));
 
             assertEquals(0, result, HelperShellFixture.output(directory));
             assertEquals(List.of(), proxied);
         } finally {
             proxy.stop(0);
-        }
-    }
-
-    /**
-     * The pod identity relay answers 400 without a pod token, which still proves socat relays. A
-     * proxy that answered in its place would look the same to the status check, so the probe
-     * must not go through one.
-     */
-    @Test
-    void podIdentityProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
-        List<String> proxied = new CopyOnWriteArrayList<>();
-        AtomicInteger relayed = new AtomicInteger();
-        HttpServer proxy = null;
-        HttpServer relay = null;
-        try {
-            proxy = failingProxy(proxied);
-            relay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            relay.createContext("/v1/credentials", exchange -> {
-                relayed.incrementAndGet();
-                exchange.sendResponseHeaders(400, -1);
-                exchange.close();
-            });
-            relay.start();
-            String[] probe = {"sh", "-c",
-                    Ec2MetadataProxy.podIdentityProbeCommand("http://127.0.0.1:" + relay.getAddress().getPort())};
-
-            int result = HelperShellFixture.run(probe, directory, proxyEnvironment(proxy));
-
-            assertEquals(0, result, HelperShellFixture.output(directory));
-            assertEquals(1, relayed.get(), HelperShellFixture.output(directory));
-            assertEquals(List.of(), proxied);
-        } finally {
-            if (relay != null) {
-                relay.stop(0);
-            }
-            if (proxy != null) {
-                proxy.stop(0);
-            }
         }
     }
 
@@ -616,24 +563,6 @@ class Ec2MetadataProxyTest {
     }
 
     /** An HTTP proxy that records every request it is sent and answers each with 502. */
-    private static HttpServer failingProxy(List<String> proxied) throws Exception {
-        HttpServer proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        proxy.createContext("/", exchange -> {
-            proxied.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
-            exchange.sendResponseHeaders(502, -1);
-            exchange.close();
-        });
-        proxy.start();
-        return proxy;
-    }
-
-    /** The proxy settings an image could carry, with nothing exempted. */
-    private static Map<String, String> proxyEnvironment(HttpServer proxy) {
-        String proxyUrl = "http://127.0.0.1:" + proxy.getAddress().getPort();
-        return Map.of("http_proxy", proxyUrl, "HTTP_PROXY", proxyUrl, "all_proxy", proxyUrl,
-                "ALL_PROXY", proxyUrl, "no_proxy", "", "NO_PROXY", "");
-    }
-
     private static String[] probe(String endpoint) {
         return new String[]{"sh", "-c", Ec2MetadataProxy.imdsProbeCommand(endpoint)};
     }

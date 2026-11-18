@@ -994,6 +994,7 @@ floci:
       job-completion-delay-seconds: 3
     fis:
       enabled: true
+      inject-api-any-service: false  # Let the aws:fis:inject-api-* actions target any service, not only ec2 and kinesis
     route53:
       enabled: true
       vpc-association-control-plane-delay-ms: 0

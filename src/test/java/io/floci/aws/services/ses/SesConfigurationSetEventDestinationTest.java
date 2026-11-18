@@ -266,6 +266,7 @@ class SesConfigurationSetEventDestinationTest {
                         withEventBridge("arn:aws:events:us-east-1:111111111111:event-bus/default"),
                         ACCOUNT_ID, REGION));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid Event Bridge destination, cross account is not supported.", ex.getMessage());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -276,6 +277,7 @@ class SesConfigurationSetEventDestinationTest {
                         withEventBridge("arn:aws:events:us-west-2:000000000000:event-bus/default"),
                         ACCOUNT_ID, REGION));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid Event Bridge destination, must be in region <us-east-1>.", ex.getMessage());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -300,6 +302,7 @@ class SesConfigurationSetEventDestinationTest {
                         withEventBridge(
                                 "arn:aws:events:us-east-1:000000000000:event-bus/custom-bus"), ACCOUNT_ID, REGION));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid Event Bridge destination, must be default bus.", ex.getMessage());
     }
 
     @Test
@@ -309,6 +312,34 @@ class SesConfigurationSetEventDestinationTest {
                         withEventBridge(
                                 "arn:aws:sns:us-east-1:000000000000:event-bus/default"), ACCOUNT_ID, REGION));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid Event Bridge destination, event-bus ARN is wrongly formatted", ex.getMessage());
+    }
+
+    @Test
+    void eventBridgeNonBusResource_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge("arn:aws:events:us-east-1:000000000000:rule/floci-rule"), ACCOUNT_ID, REGION));
+        assertEquals("Invalid Event Bridge destination, event-bus ARN is wrongly formatted", ex.getMessage());
+    }
+
+    // SES was probed with one fault per call, so these two pin the order Floci chose.
+    @Test
+    void eventBridgeAccountIsCheckedBeforeRegionAndBus() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge("arn:aws:events:us-west-2:111111111111:event-bus/custom-bus"),
+                        ACCOUNT_ID, REGION));
+        assertEquals("Invalid Event Bridge destination, cross account is not supported.", ex.getMessage());
+    }
+
+    @Test
+    void eventBridgeRegionIsCheckedBeforeBus() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge("arn:aws:events:us-west-2:000000000000:event-bus/custom-bus"),
+                        ACCOUNT_ID, REGION));
+        assertEquals("Invalid Event Bridge destination, must be in region <us-east-1>.", ex.getMessage());
     }
 
     @Test
@@ -317,6 +348,7 @@ class SesConfigurationSetEventDestinationTest {
                 () -> SesConfigurationSetService.validateEventDestination(
                         withEventBridge("not-an-arn"), ACCOUNT_ID, REGION));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid event bus ARN provided.", ex.getMessage());
     }
 
     private static EventDestination withEventBridge(String busArn) {

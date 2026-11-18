@@ -8,6 +8,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -66,7 +67,8 @@ class SesTestRenderV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("TemplateDoesNotExist"));
+            .body(containsString("<Code>TemplateDoesNotExist</Code>"))
+            .body(containsString("Unable to find &lt;ghost&gt; for &lt;000000000000&gt;"));
     }
 
     @Test
@@ -121,7 +123,7 @@ class SesTestRenderV1IntegrationTest {
 
     @Test
     @Order(8)
-    void testRenderTemplate_utf8Body_uses8bitEncoding() {
+    void testRenderTemplate_utf8Body_isBase64WithAnEncodedSubject() {
         given()
             .contentType("application/x-www-form-urlencoded; charset=UTF-8")
             .header("Authorization", AUTH)
@@ -145,8 +147,29 @@ class SesTestRenderV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("Subject: 件名 太郎"))
-            .body(containsString("Content-Transfer-Encoding: 8bit"))
-            .body(containsString("こんにちは 太郎 さん"));
+            .body(containsString("Subject: =?UTF-8?B?5Lu25ZCNIOWkqumDjg==?="))
+            .body(containsString("Content-Transfer-Encoding: base64"))
+            .body(containsString("44GT44KT44Gr44Gh44GvIOWkqumDjiDjgZXjgpM="));
+    }
+
+    @Test
+    @Order(9)
+    void testRenderTemplate_controlCharacterInData_staysParseableXml() {
+        String rendered = given()
+            .contentType("application/x-www-form-urlencoded; charset=UTF-8")
+            .header("Authorization", AUTH)
+            .formParam("Action", "TestRenderTemplate")
+            .formParam("TemplateName", "v1-render-welcome")
+            .formParam("TemplateData", "{\"name\":\"A\\u0001B\",\"team\":\"floci\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("TestRenderTemplateResponse.TestRenderTemplateResult.RenderedTemplate");
+
+        // The control character is encoded, not dropped: the XML parses and the message keeps it.
+        assertTrue(rendered.contains("Subject: =?UTF-8?Q?Hello_A=01B?=\r\n"), rendered);
+        assertTrue(rendered.contains("Content-Transfer-Encoding: quoted-printable\r\n\r\nHi A=01B, team floci!\r\n"),
+                rendered);
     }
 }

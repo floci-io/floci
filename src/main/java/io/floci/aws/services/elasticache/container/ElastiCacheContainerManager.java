@@ -115,7 +115,7 @@ public class ElastiCacheContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). ElastiCache metadata "
-                        + "operations keep working and replication groups still reach 'available', "
+                        + "operations keep working and replication groups still reach ''available'', "
                         + "but they have no backing Valkey container until a daemon becomes "
                         + "reachable.", e.getMessage());
             }

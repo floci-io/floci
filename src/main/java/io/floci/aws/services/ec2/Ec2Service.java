@@ -1395,7 +1395,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 moved++;
             }
         }
-        LOG.infov("Moved {0} EC2 tag record(s) under their resource's region; kept {1} for instances not yet"
+        LOG.infov("Moved {0} EC2 tag record(s) under their resource''s region; kept {1} for instances not yet"
                 + " restored; dropped {2} whose resource no region holds", moved, kept, dropped);
     }
 
