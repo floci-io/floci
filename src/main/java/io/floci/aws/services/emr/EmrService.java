@@ -2990,7 +2990,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             if (copies != null) {
                 return copies;
             }
-            LOG.warnv("The dfs.replication of EMR cluster {0}, {1}, is not a whole number above zero, so it keeps EMR's"
+            LOG.warnv("The dfs.replication of EMR cluster {0}, {1}, is not a whole number above zero, so it keeps EMR''s"
                     + " default", cluster.getId(), configured);
         }
         int core = cluster.getProvisionedCoreNodes();
