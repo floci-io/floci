@@ -16,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -243,6 +244,43 @@ class CodeDeployCfnProvisionerTest {
         verify(codeDeploy).deleteApplication("us-east-1", replacement);
         verify(codeDeploy, never()).deleteApplication("us-east-1", "old-app");
         assertEquals("old-app", r.getPhysicalId());
+    }
+
+    /** The dispatcher's stub for App, as a stack created before this provisioner holds it. */
+    private static StackResource stub() {
+        StackResource r = resource();
+        r.getAttributes().put("Arn", "arn:aws:stub:::App");
+        return r;
+    }
+
+    @Test
+    void anUpdateOfAStubCreatesTheApplicationUnderTheStubsId() {
+        when(codeDeploy.createApplication(eq("us-east-1"), eq("App-1a2b3c4d"), eq("Lambda"), any()))
+                .thenReturn(app("App-1a2b3c4d"));
+        StackResource r = stub();
+        ObjectNode props = mapper.createObjectNode().put("ComputePlatform", "Lambda");
+
+        provisioner.provision(r, props, ctx("App-1a2b3c4d", props.deepCopy()));
+
+        verify(codeDeploy).createApplication(eq("us-east-1"), eq("App-1a2b3c4d"), eq("Lambda"), any());
+        verify(codeDeploy, never()).tagResource(anyString(), any());
+        verify(codeDeploy, never()).untagResource(anyString(), any());
+        assertEquals("App-1a2b3c4d", r.getPhysicalId());
+        assertFalse(r.getAttributes().containsKey("Arn"), "the stub's Arn names nothing that exists");
+    }
+
+    @Test
+    void rollingBackAStubMigrationDeletesTheApplicationAndRestoresTheStub() {
+        when(codeDeploy.createApplication(eq("us-east-1"), eq("App-1a2b3c4d"), any(), any()))
+                .thenReturn(app("App-1a2b3c4d"));
+        StackResource r = stub();
+        provisioner.provision(r, mapper.createObjectNode(), ctx("App-1a2b3c4d", mapper.createObjectNode()));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(codeDeploy).deleteApplication("us-east-1", "App-1a2b3c4d");
+        assertEquals("App-1a2b3c4d", r.getPhysicalId());
+        assertEquals("arn:aws:stub:::App", r.getAttributes().get("Arn"));
     }
 
     @Test

@@ -85,13 +85,20 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         }
 
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
-        if (ctx.reusesPriorEntity(name)) {
+        // A stack from before this type had a provisioner, or deployed while CodeDeploy was disabled,
+        // holds the dispatcher's stub, which names no application: taking over its id is a create.
+        boolean stub = CfnResourceDispatcher.isStub(priorPhysicalId, attributesBefore);
+        if (ctx.reusesPriorEntity(name) && !stub) {
             reconcileTags(codeDeployService.applicationArn(ctx.region(), name), tags);
         } else {
             codeDeployService.createApplication(ctx.region(), name, written(props, "ComputePlatform", ctx),
                     toTagList(tags));
         }
         r.setPhysicalId(name);
+        if (stub) {
+            // The type has no Arn attribute; a rollback puts the stub's back from the cleanup record.
+            r.getAttributes().remove("Arn");
+        }
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
