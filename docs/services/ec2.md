@@ -1317,6 +1317,10 @@ AWS takes one attribute per `ModifyNetworkInterfaceAttribute` call; Floci applie
 owner can grant: another account's interface is `InvalidNetworkInterfaceID.NotFound`, as it is to
 every other action of that account.
 
+Floci accepts any ordinary 12-digit AWS account ID as an `INSTANCE-ATTACH` grantee.
+This is a Floci compatibility choice: AWS requires an AWS-authorized grantee account,
+so an ordinary account accepted here can be rejected by AWS with `OperationNotPermitted`.
+
 A repeated grant of the same permission to the same account answers the grant already in place.
 AWS documents no duplicate error for it; this is Floci's choice. Grants are kept on the interface,
 so they go when it is deleted. `DeleteNetworkInterfacePermission` is not served.
