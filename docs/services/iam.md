@@ -486,6 +486,31 @@ is one character, so AWS's entity parse runs ahead of its length check for it. R
 through the same resolver and answers it the same way, which is a reading rather than a recording.
 A value that clears 20 characters and parses as no ARN keeps the sentence its own capture settled,
 `Invalid ARN provided in the request: <value>`, and a value under 20 keeps the declared length.
+### What a policy ARN that names nothing answers
+
+IAM answers two sentences for a managed policy ARN it cannot resolve, both 404 `NoSuchEntity`, and
+they are not interchangeable: the operation decides which one it gives. `Policy <arn> was not
+found.` says the ARN names nothing. `Policy <arn> does not exist or is not attachable.` says it
+names nothing this call could attach, and AWS answers it for both of its own cases on purpose, so a
+caller cannot tell an absent policy from an unattachable one.
+
+Recorded against a real account: `GetPolicy` and `TagPolicy` answer the first, on 2026-10-26, as do
+`DetachUserPolicy`, `DetachGroupPolicy` and `DetachRolePolicy`, on 2026-10-29, including for a
+policy that exists and is not attached, where this emulator used to add a clause naming the user,
+group or role. `ListEntitiesForPolicy` answers the second, on 2026-10-25, and so do
+`CreatePolicyVersion`, `GetPolicyVersion` and `ListPolicyVersions`, on 2026-10-29, with
+`GetPolicyVersion` naming the version inside the same sentence: `Policy <arn> version <id> does not
+exist or is not attachable.` The attach operations answer the second as well, which is where an
+AWS-managed name under the wrong path lands.
+
+The operations no recording covers answer with their own family, which is this emulator's reading
+rather than a measurement. `UntagPolicy` and `ListPolicyTags` read with `TagPolicy`, and
+`DeletePolicyVersion`, `SetDefaultPolicyVersion` and a permissions boundary that names no policy
+read with the attach family. `DeletePolicy` reads with `GetPolicy`. One case stays as it was
+because nothing records it and no family settles it: a version id that names nothing on a policy
+that exists keeps `Policy version <id> does not exist.`, which is about the version rather than the
+ARN. A recording for any of those moves that operation alone, the sentences being sited per
+operation in `IamService.PolicyNotFound`.
 
 ### Permission Boundaries
 
