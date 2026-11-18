@@ -101,6 +101,8 @@ aws sqs set-queue-attributes \
 
 `GetQueueAttributes` with `--attribute-names All` returns the set AWS returns for a standard queue: `QueueArn`, `CreatedTimestamp`, `LastModifiedTimestamp`, `ApproximateNumberOfMessages`, `ApproximateNumberOfMessagesNotVisible`, `ApproximateNumberOfMessagesDelayed`, `VisibilityTimeout`, `MaximumMessageSize`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds` and `SqsManagedSseEnabled`. `Policy`, `RedrivePolicy` and `KmsMasterKeyId` appear only once set, and FIFO queues also report `FifoQueue` and `ContentBasedDeduplication`.
 
+A standard queue has no `FifoQueue` attribute: `CreateQueue` refuses one, even `FifoQueue=false`, with `InvalidAttributeName` (`Unknown Attribute FifoQueue.`), as AWS does. An `AWS::SQS::Queue` declaring `FifoQueue: false` fails its stack the same way; leave the property out for a standard queue.
+
 `MaximumMessageSize` defaults to `1048576` bytes, the AWS default and maximum since August 2025, when AWS raised both from `262144`. `CreateQueue` and `SetQueueAttributes` reject values outside 1024 to 1048576 with `InvalidAttributeValue`; raising `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` above the AWS maximum raises that accepted ceiling with it. Lowering the variable below 1048576 only changes the default a new queue receives: the accepted ceiling stays at the AWS maximum, so a queue can still be set to `1048576` explicitly.
 
 `DelaySeconds` must be 0 to 900, both on a message and as a queue attribute: `SendMessage` rejects other values with `InvalidParameterValue` (in `SendMessageBatch` only that entry fails), and `CreateQueue` and `SetQueueAttributes` reject them with `InvalidAttributeValue`.
