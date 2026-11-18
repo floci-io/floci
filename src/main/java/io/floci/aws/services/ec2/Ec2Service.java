@@ -17321,9 +17321,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public record NetworkInterfacePermissionPage(List<NetworkInterfacePermission> permissions, String nextToken) {}
 
     /**
-     * CreateNetworkInterfacePermission: the interface's owner grants another account
-     * {@code INSTANCE-ATTACH}, which {@link #attachNetworkInterface} then honours for that account's
-     * instances. Only the owner can grant: the interface is looked up in the caller's account, and
+     * CreateNetworkInterfacePermission: the interface's owner records an {@code INSTANCE-ATTACH}
+     * grant for another account. Attachment execution does not yet consume these grants.
+     * Only the owner can grant: the interface is looked up in the caller's account, and
      * one another account owns is {@code InvalidNetworkInterfaceID.NotFound}, as it is to every
      * other action of that account.
      *

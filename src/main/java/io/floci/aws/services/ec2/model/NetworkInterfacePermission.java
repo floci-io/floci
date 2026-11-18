@@ -5,9 +5,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
  * A permission the account that owns a network interface has granted another account over it
- * ({@code NetworkInterfacePermission}): {@code INSTANCE-ATTACH} lets that account attach the
- * interface to one of its own instances. CreateNetworkInterfacePermission grants one; it is kept on
- * the interface it is over.
+ * ({@code NetworkInterfacePermission}). CreateNetworkInterfacePermission records an
+ * {@code INSTANCE-ATTACH} grant on the interface it is over. Attachment execution does not yet
+ * consume these grants.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
