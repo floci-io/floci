@@ -1,8 +1,8 @@
 package io.floci.aws.services.servicequotas;
 
+import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -10,7 +10,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
-import java.util.Map;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -18,18 +17,15 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+/**
+ * GetServiceQuota reports a configured applied value. The value, 7, comes from
+ * {@link IndependentServiceSettingsProfile}.
+ */
 @QuarkusTest
-@TestProfile(ServiceQuotasAppliedValueIntegrationTest.AppliedQuotaProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class ServiceQuotasAppliedValueIntegrationTest {
 
     private static final String CODE = "L-1216C47A";
-
-    public static class AppliedQuotaProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.servicequotas.standard-on-demand-vcpus", "7");
-        }
-    }
 
     @BeforeAll
     static void configureContentTypes() {

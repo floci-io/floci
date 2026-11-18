@@ -68,6 +68,11 @@ import java.util.Map;
  *   supported wire protocol claims, and leaves REST and well-formed RPC traffic untouched.
  *   {@code StrictProtocolClaimingIntegrationTest} and {@code SwfLegacyProtocolIntegrationTest} rely
  *   on it.</li>
+ *   <li>{@code floci.services.servicequotas.standard-on-demand-vcpus=7} is what GetServiceQuota
+ *   reports as the applied value of the standard On-Demand vCPU quota.
+ *   {@code ServiceQuotasAppliedValueIntegrationTest} relies on it. EC2 only enforces that quota
+ *   when {@code floci.services.ec2.enforce-vcpu-quotas} is on, which it is not here, so
+ *   {@code Ec2VolumeBlockDeviceDockerIntegrationTest}'s instances never meet it.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes. Each one is read by a single service: the
@@ -75,8 +80,8 @@ import java.util.Map;
  * Neptune cluster creation, Route53 VPC association and authorization, CloudFront origin fetches,
  * Cognito app client validation, the Scheduler dispatcher, the RDS Data API and Aurora auto-pause,
  * Firehose delivery, the Lambda runtime image resolver, the IoT MQTT broker, EC2, SageMaker
- * training jobs, Bedrock Runtime and ElastiCache. Each class is the only one here that calls its
- * service, so no override reaches another class. Strict claiming is read for every request, but
+ * training jobs, Bedrock Runtime, ElastiCache and Service Quotas. Each class is the only one here
+ * that calls its service, so no override reaches another class. Strict claiming is read for every request, but
  * only changes the answer to an RPC-signaled request no protocol claims, which only the two
  * protocol classes send. Route53 and RDS do look VPCs and subnets up in EC2, but only
  * read what EC2 has stored, which does not change with EC2 mocked or not.
@@ -121,7 +126,8 @@ public class IndependentServiceSettingsProfile implements QuarkusTestProfile {
                 Map.entry("floci.services.bedrock-runtime.proxy.url", "not a valid url"),
                 Map.entry("floci.services.bedrock-runtime.proxy.passthrough", "true"),
                 Map.entry("floci.services.elasticache.shell-less-backend", "true"),
-                Map.entry("floci.protocols.strict-claiming", "true")));
+                Map.entry("floci.protocols.strict-claiming", "true"),
+                Map.entry("floci.services.servicequotas.standard-on-demand-vcpus", "7")));
         overrides.putAll(new YamlConfigSource("runtime-images", """
                 floci:
                   services:
