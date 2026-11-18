@@ -9,6 +9,7 @@ import io.floci.aws.core.common.auth.SigV4aSignature;
 import io.floci.aws.services.apigateway.ApiGatewayAwsExecuteController;
 import io.floci.aws.services.apigateway.ApiGatewayExecuteController;
 import io.floci.aws.services.apigateway.ApiGatewayUserRequestController;
+import io.floci.aws.services.appsync.events.AppSyncEventsController;
 import io.floci.aws.services.appsync.graphql.AppSyncExecutionController;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.RequestBodyReader;
@@ -111,7 +112,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
     /** Resources whose signatures another verifier owns; see the class comment. */
     private static final Set<Class<?>> VERIFIED_ELSEWHERE = Set.of(S3Controller.class,
             ApiGatewayExecuteController.class, ApiGatewayAwsExecuteController.class,
-            ApiGatewayUserRequestController.class, AppSyncExecutionController.class);
+            ApiGatewayUserRequestController.class, AppSyncExecutionController.class, AppSyncEventsController.class);
 
     /** REST-XML resources the catalog does not list: S3 Control answers in S3's XML. */
     private static final Set<Class<?>> UNCATALOGUED_REST_XML = Set.of(S3ControlController.class);

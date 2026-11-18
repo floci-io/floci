@@ -38,11 +38,21 @@ public final class AppSyncRequestSigner {
     public static Map<String, String> signedHeaders(String apiId, String host, String body,
                                                      String accessKeyId, String secretKey,
                                                      String region, Instant signedAt) throws Exception {
+        return signedHeadersForPath("/v1/apis/" + apiId + "/graphql", host, body, accessKeyId, secretKey,
+                region, signedAt);
+    }
+
+    /**
+     * As {@link #signedHeaders}, for a header-signed {@code POST} to {@code canonicalUri}, such as an
+     * Events publish to {@code /event} or {@code /_aws/appsync/events/<apiId>/event}.
+     */
+    public static Map<String, String> signedHeadersForPath(String canonicalUri, String host, String body,
+                                                            String accessKeyId, String secretKey,
+                                                            String region, Instant signedAt) throws Exception {
         String amzDate = AMZ_DATE.format(signedAt);
         String scopeDate = SCOPE_DATE.format(signedAt);
         String credentialScope = scopeDate + "/" + region + "/" + SIGNING_SERVICE + "/aws4_request";
         String signedHeaderNames = "host;x-amz-date";
-        String canonicalUri = "/v1/apis/" + apiId + "/graphql";
 
         String canonicalRequest = "POST\n"
                 + canonicalUri + "\n"

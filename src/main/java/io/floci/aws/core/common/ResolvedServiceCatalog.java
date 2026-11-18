@@ -10,6 +10,7 @@ import io.floci.aws.services.appconfig.AppConfigDataController;
 import io.floci.aws.services.appintegrations.AppIntegrationsController;
 import io.floci.aws.services.appsync.AppSyncApiController;
 import io.floci.aws.services.appsync.AppSyncController;
+import io.floci.aws.services.appsync.events.AppSyncEventsController;
 import io.floci.aws.services.appsync.graphql.AppSyncExecutionController;
 import io.floci.aws.services.aps.ApsController;
 import io.floci.aws.services.backup.BackupController;
@@ -737,7 +738,8 @@ public class ResolvedServiceCatalog {
                         config.storage().services().appsync().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("appsync"), Set.of(), Set.of(AppSyncController.class,
-                                AppSyncApiController.class, AppSyncExecutionController.class)),
+                                AppSyncApiController.class, AppSyncExecutionController.class,
+                                AppSyncEventsController.class)),
                 descriptor("s3vectors", "s3vectors", config.services().s3vectors().enabled(), true,
                         "s3vectors", storageMode(config.storage().services().s3vectors().mode(), config.storage().mode()),
                         config.storage().services().s3vectors().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

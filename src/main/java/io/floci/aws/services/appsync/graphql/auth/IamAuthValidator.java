@@ -77,16 +77,27 @@ public class IamAuthValidator {
     }
 
     public Map<String, Object> validateRequest(String authorization, String apiId, AuthRequestInfo info) {
+        return validateRequest(authorization, "POST", "/v1/apis/" + apiId + "/graphql", "appsync:GraphQL",
+                requestArn(info.region(), info.accountId(), apiId), info);
+    }
+
+    /**
+     * Verifies a SigV4-signed AppSync data-plane request against the method and raw path the caller
+     * signed, then evaluates {@code action} on {@code resourceArn} for a registered caller. The
+     * GraphQL endpoint signs {@code POST /v1/apis/<apiId>/graphql}; an Events publish signs
+     * {@code POST} on the path it was sent to, {@code /event} on its own host.
+     */
+    public Map<String, Object> validateRequest(String authorization, String method, String canonicalPath,
+                                               String action, String resourceArn, AuthRequestInfo info) {
         if (authorization == null || !authorization.trim().startsWith(ALGORITHM)) {
             throw AppSyncAuth.unauthorized();
         }
-        String accessKeyId = verifySignature(authorization.trim(), apiId, info);
+        String accessKeyId = verifySignature(authorization.trim(), method, canonicalPath, info);
         if (!isEmulatorAllow(accessKeyId)) {
             CallerContext caller = iamService.resolveCallerContext(accessKeyId);
             if (caller != null) {
-                String resource = requestArn(info.region(), info.accountId(), apiId);
                 IamPolicyEvaluator.Decision decision = iamPolicyEvaluator.evaluate(
-                        caller, null, "appsync:GraphQL", resource, null);
+                        caller, null, action, resourceArn, null);
                 if (decision == IamPolicyEvaluator.Decision.DENY) {
                     throw AppSyncAuth.permissionDenied();
                 }
@@ -111,7 +122,7 @@ public class IamAuthValidator {
      * that scope, so it is not checked. There is no default secret and no path that authenticates
      * an unregistered key.
      */
-    private String verifySignature(String authorization, String apiId, AuthRequestInfo info) {
+    private String verifySignature(String authorization, String method, String canonicalPath, AuthRequestInfo info) {
         Map<String, String> headers = info.requestHeaders();
         SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
         if (parsed.missingEqualSign()) {
@@ -171,7 +182,7 @@ public class IamAuthValidator {
                     SigV4RequestValidator.sanitizeForLog(accessKeyId));
             throw AppSyncAuth.unrecognizedClient();
         }
-        String canonicalRequest = "POST\n/v1/apis/" + apiId + "/graphql\n\n" + canonicalHeaders(names, headers)
+        String canonicalRequest = method + "\n" + canonicalPath + "\n\n" + canonicalHeaders(names, headers)
                 + "\n" + names + "\n" + Digests.sha256Hex(info.rawBody().getBytes(StandardCharsets.UTF_8));
         String stringToSign = ALGORITHM + "\n" + amzDate + "\n" + String.join("/", scope[1], scope[2], scope[3], scope[4])
                 + "\n" + Digests.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
@@ -322,6 +333,11 @@ public class IamAuthValidator {
 
     static String requestArn(String region, String accountId, String apiId) {
         return appsyncArn(region, accountId, "apis/" + apiId + "/*");
+    }
+
+    /** The resource an Events publish or subscribe is authorized on: its channel namespace. */
+    public static String channelNamespaceArn(String region, String accountId, String apiId, String namespace) {
+        return appsyncArn(region, accountId, "apis/" + apiId + "/channelNamespace/" + namespace);
     }
 
     public static String fieldArn(String region, String accountId, String apiId, String typeName, String fieldName) {

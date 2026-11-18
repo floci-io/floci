@@ -54,6 +54,16 @@ public class HttpOptionsCustomizer implements HttpServerOptionsCustomizer {
      */
     static final List<String> MQTT_WEBSOCKET_SUBPROTOCOLS = List.of("mqtt", "mqttv3.1", "mqttv3.1.1");
 
+    /**
+     * The subprotocol an AppSync Events realtime client offers beside its {@code header-<...>}
+     * authorization subprotocol. A browser refuses a handshake that offered subprotocols and got
+     * none back, so the server has to know this one to echo it.
+     */
+    static final String APPSYNC_EVENTS_SUBPROTOCOL = "aws-appsync-event-ws";
+
+    static final List<String> WEBSOCKET_SUBPROTOCOLS = List.of("mqtt", "mqttv3.1", "mqttv3.1.1",
+            APPSYNC_EVENTS_SUBPROTOCOL);
+
     @Override
     public void customizeHttpServer(HttpServerOptions options) {
         customize(options);
@@ -68,6 +78,6 @@ public class HttpOptionsCustomizer implements HttpServerOptionsCustomizer {
         options.setMaxFormAttributeSize(-1);
         options.setMaxWebSocketFrameSize(MAX_WS_FRAME_SIZE);
         options.setMaxWebSocketMessageSize(MAX_WS_MESSAGE_SIZE);
-        options.setWebSocketSubProtocols(MQTT_WEBSOCKET_SUBPROTOCOLS);
+        options.setWebSocketSubProtocols(WEBSOCKET_SUBPROTOCOLS);
     }
 }

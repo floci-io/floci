@@ -47,9 +47,9 @@ those providers, or the request fails with `BadRequestException`. An `AWS_LAMBDA
 
 `dns.HTTP` and `dns.REALTIME` carry the AWS host names,
 `<apiId>.appsync-api.<region>.<dnsSuffix>` and `<apiId>.appsync-realtime-api.<region>.<dnsSuffix>`,
-with the DNS suffix of the region's partition. Floci does not serve the Events data plane on
-those hosts yet; see [Not Implemented](#not-implemented). `logConfig` is stored and returned, but
-no logs are delivered.
+with the DNS suffix of the region's partition. Floci serves publishing and the realtime WebSocket
+on those hosts and on a path form; see [Events data plane](#events-data-plane). `logConfig` is
+stored and returned, but no logs are delivered.
 
 ### Schema
 
@@ -305,6 +305,82 @@ Configured modes are the API default `authenticationType` plus `additionalAuthen
 SDL field auth: unmarked fields require the API **default** mode. Additional modes unlock fields tagged `@aws_api_key` / `@aws_iam` / `@aws_oidc` / `@aws_cognito_user_pools` / `@aws_lambda`. Multiple directives on a field are OR. Field-level directives override type-level. `@aws_auth` is allowed on `OBJECT \| FIELD_DEFINITION` and is ignored when additional modes exist.
 
 Duplicate `API_KEY` / `AWS_IAM` / `AWS_LAMBDA` (and the same Cognito pool or OIDC issuer) between default and additional providers is rejected on create/update with management 400 `BadRequestException`: `Authentication type {TYPE} for additional authentication provider {N} already specified on the API. It can only be specified once.` (`N` is 1-based in `additionalAuthenticationProviders`).
+
+## Events data plane
+
+An Events API takes HTTP publishes and realtime WebSocket subscriptions. Both are served on the
+API's own hosts and on a path form, for clients whose host names do not resolve to Floci:
+
+| Surface | AWS form | Floci path form |
+|---|---|---|
+| Publish | `POST https://<apiId>.appsync-api.<region>.<dnsSuffix>/event` | `POST http://localhost:4566/_aws/appsync/events/<apiId>/event` |
+| Realtime | `wss://<apiId>.appsync-realtime-api.<region>.<dnsSuffix>/event/realtime` | `ws://localhost:4566/_aws/appsync/events/<apiId>/event/realtime` |
+
+The host forms accept the AWS DNS suffix, `localhost` and Floci's built-in suffixes after the
+region (for example `<apiId>.appsync-api.us-east-1.localhost:4566`), the same grammar as
+API Gateway execute-api hosts. Custom domain names associated with an API are not routed.
+
+### Publishing
+
+A publish body is `{"channel": "/<namespace>/...", "events": ["<json>", ...]}` with one to five
+events, each a string holding JSON. It answers 200 with
+`{"successful": [{"identifier": "<uuid>", "index": 0}], "failed": []}`. A refused publish answers
+with `{"errors": [{"errorType": "...", "message": "..."}]}`: 401 `UnauthorizedException` for a
+credential the channel's publish modes do not accept, 400 `BadRequestException` for a malformed
+body, an unknown namespace or a wildcard channel, and 404 `NotFoundException` for an unknown API.
+These status codes and the error envelope are Floci's choice: the AWS documentation does not give
+the HTTP error responses.
+
+A channel has one to five segments of 1 to 50 letters, digits or dashes, the first naming an
+existing channel namespace. The publish modes are the namespace's `publishAuthModes`, or the
+API's `defaultPublishAuthModes` when the namespace has none.
+
+### Realtime WebSocket
+
+The client offers the `aws-appsync-event-ws` subprotocol, which Floci echoes, and a
+`header-<base64url JSON>` subprotocol carrying its connection authorization, for example
+`{"host": "...", "Authorization": "<token>"}` or `{"host": "...", "x-api-key": "da2-..."}`. The
+connection is authorized against `connectionAuthModes` during the handshake. A missing, unreadable
+or refused authorization gets a `connection_error` message and the socket is closed.
+
+| Client sends | Floci answers |
+|---|---|
+| `connection_init` | `connection_ack` with `connectionTimeoutMs: 300000`, then `ka` every 60 seconds |
+| `subscribe` with `id`, `channel` and `authorization` | `subscribe_success`, or `subscribe_error` with `errors` |
+| `unsubscribe` with `id` | `unsubscribe_success`, or `unsubscribe_error` for an unknown id |
+| `publish` with `id`, `channel`, `events` and `authorization` | `publish_success` with `successful` and `failed`, or `publish_error` |
+
+After `subscribe_success`, each event published to a matching channel arrives as
+`{"type": "data", "id": "<subscription id>", "event": "<the event's JSON string>"}`, one event per
+message, whether it was published over HTTP or the WebSocket. A subscription channel may end in
+`*`: `/ns/a/*` matches `/ns/a/b` and anything deeper, and `/ns/*` every channel of the namespace.
+Subscriptions live in memory and end with their connection.
+
+### Authorization
+
+The credential's kind picks the mode it is checked as, and that mode must be one the operation
+accepts:
+
+- `x-api-key`: `API_KEY`, checked against the API's keys.
+- A SigV4 `Authorization` header: `AWS_IAM`, verified against the method and path the caller
+  signed (`/event` on the API's host, or the path form), and evaluated as `appsync:EventPublish` on
+  `arn:<partition>:appsync:<region>:<account>:apis/<apiId>/channelNamespace/<namespace>`.
+  `AWS_IAM` is verified on HTTP publishes only. Over the WebSocket an IAM credential is a signature
+  of a separate request that Floci does not verify, so an IAM connect, subscribe or WebSocket
+  publish is refused.
+- A JWT `Authorization`: `AMAZON_COGNITO_USER_POOLS` or `OPENID_CONNECT`, through the same
+  validators GraphQL APIs use.
+- Any other `Authorization` value: `AWS_LAMBDA`. The authorizer is invoked with
+  `{"authorizationToken", "requestContext": {"apiId", "accountId", "requestId", "operation",
+  "channelNamespaceName", "channel"}, "requestHeaders"}`, where `operation` is `EVENT_CONNECT`,
+  `EVENT_SUBSCRIBE` or `EVENT_PUBLISH`, and the namespace and channel are null for a connection.
+  Its `{"isAuthorized", "ttlOverride", "handlerContext"}` answer is cached per API, operation,
+  channel and token for `ttlOverride` seconds, or the provider's `authorizerResultTtlInSeconds`
+  when it returns none; `0` disables caching. An `authorizerUri` that is a function ARN is invoked
+  in that ARN's account and region.
+
+Not implemented: the `onPublish` and `onSubscribe` handlers and data-source integrations of a
+channel namespace, the 24-hour connection limit, and `logConfig` delivery.
 
 ## Resolver execution
 
@@ -657,7 +733,7 @@ These AWS AppSync capabilities are not yet implemented and are tracked in future
 - **Data source adapters**: EventBridge, OpenSearch, and Bedrock connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
 - **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions
-- **Events data plane**: `POST /event` publishing and the `/event/realtime` WebSocket of an Events API, and the `onPublish` and `onSubscribe` handlers of a channel namespace
+- **Events handlers**: the `onPublish` and `onSubscribe` handlers and data-source integrations of a channel namespace
 - **Caching**: API-level and per-resolver caching
 - **Merged API source management**: `AssociateMergedGraphqlApi`, `AssociateSourceGraphqlApi`, `StartSchemaMerge`, `ListTypesByAssociation`
 - **Data source introspection**: `StartDataSourceIntrospection`, `GetDataSourceIntrospection`

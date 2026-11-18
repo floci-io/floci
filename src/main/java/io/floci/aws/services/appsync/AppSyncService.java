@@ -48,7 +48,7 @@ public class AppSyncService {
     private static final int API_KEY_RANDOM_LENGTH = 26;
 
     private final StorageBackend<String, GraphqlApi> apiStore;
-    private final StorageBackend<String, Api> eventApiStore;
+    private final AccountAwareStorageBackend<Api> eventApiStore;
     private final AccountAwareStorageBackend<String> schemaStore;
     private final AccountAwareStorageBackend<SchemaCreationStatus> schemaStatusStore;
     private final StorageBackend<String, DataSource> dataSourceStore;
@@ -315,6 +315,51 @@ public class AppSyncService {
         deleteDomainAssociationsForApi(apiId);
         lambdaAuthorizerCache.evictApi(apiId);
         LOG.infov("Deleted Events API {0}", apiId);
+    }
+
+    /** An Events API together with the account that owns it, for the data plane. */
+    public record EventApiOwner(String accountId, Api api) {}
+
+    /**
+     * Finds an Events API by id in whichever account owns it. The data plane addresses an API by
+     * its host or path alone, and a WebSocket handshake runs outside any request scope, so the
+     * owner cannot come from the caller's credentials. An id held by two accounts is refused.
+     */
+    public Optional<EventApiOwner> findEventApi(String apiId) {
+        if (apiId == null || apiId.isBlank()) {
+            return Optional.empty();
+        }
+        List<AccountAwareStorageBackend.AccountEntry<Api>> matches =
+                eventApiStore.scanAllAccountEntries(key -> key.equals(apiId));
+        if (matches.size() > 1) {
+            throw new AwsException("ConflictException", "API id '" + apiId + "' is ambiguous across accounts", 409);
+        }
+        return matches.stream().findFirst().map(entry -> new EventApiOwner(entry.accountId(), entry.value()));
+    }
+
+    /** A channel namespace of an API in an explicit account, for the data plane. */
+    public Optional<ChannelNamespace> findChannelNamespace(String accountId, String apiId, String name) {
+        return AccountAwareStorageBackend.getInAccount(channelNamespaceStore, accountId, apiKey(apiId, name));
+    }
+
+    /** As {@link #validateApiKey}, in an explicit account rather than the request's. */
+    public Optional<ApiKey> validateApiKeyForAccount(String accountId, String apiId, String keyValue) {
+        if (apiId == null || keyValue == null || keyValue.isBlank()) {
+            return Optional.empty();
+        }
+        List<ApiKey> keys = apiKeyStore instanceof AccountAwareStorageBackend<ApiKey> aware
+                ? aware.scanForAccount(accountId, k -> k.startsWith(apiId + "::"))
+                : apiKeyStore.scan(k -> k.startsWith(apiId + "::"));
+        long now = clock.instant().getEpochSecond();
+        for (ApiKey key : keys) {
+            if (key.getId() != null && key.getId().startsWith(API_KEY_PREFIX) && keyValue.equals(key.getId())) {
+                if (key.getExpires() != null && key.getExpires() <= now) {
+                    return Optional.empty();
+                }
+                return Optional.of(key);
+            }
+        }
+        return Optional.empty();
     }
 
     private String requireEventApiName(Object value) {

@@ -402,4 +402,53 @@ class IamAuthValidatorTest {
                 IamAuthValidator.fieldArn("us-east-1", "000000000000", "api-1", "Query", "hello")));
         assertFalse(validator.isFieldDenied("test", fieldArn));
     }
+
+    // ── Events publish ──────────────────────────────────────────────────────
+
+    private static final String EVENTS_HOST = "abc.appsync-api.us-east-1.amazonaws.com";
+    private static final String EVENT_BODY = "{\"channel\":\"/ns/a\",\"events\":[\"{}\"]}";
+    private static final String PUBLISH_ALLOW = """
+        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"appsync:EventPublish",
+         "Resource":"arn:aws:appsync:us-east-1:000000000000:apis/abc/channelNamespace/ns"}]}""";
+    private static final String PUBLISH_DENY = """
+        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"appsync:*","Resource":"*"},
+         {"Effect":"Deny","Action":"appsync:EventPublish","Resource":"*"}]}""";
+
+    private AuthRequestInfo eventsInfo(Map<String, String> signedHeaders) {
+        return new AuthRequestInfo(null, null, Map.of(), List.of(), "req-2", "000000000000", REGION,
+                signedHeaders, EVENT_BODY);
+    }
+
+    /** An Events publish is signed for POST on the path it was sent to, not the GraphQL path. */
+    @Test
+    void anEventsPublishIsVerifiedAgainstThePathItSigned() throws Exception {
+        when(iamService.resolveCallerContext("AKIAGOOD")).thenReturn(CallerContext.of(List.of(PUBLISH_ALLOW)));
+        when(iamService.resolveCallerArn("AKIAGOOD")).thenReturn(Optional.of("arn:aws:iam::000000000000:user/alice"));
+        Map<String, String> signed = AppSyncRequestSigner.signedHeadersForPath(
+                "/event", EVENTS_HOST, EVENT_BODY, "AKIAGOOD", "good-secret", REGION, NOW);
+        String resource = IamAuthValidator.channelNamespaceArn(REGION, "000000000000", "abc", "ns");
+
+        Map<String, Object> identity = validator.validateRequest(authorization(signed), "POST", "/event",
+                "appsync:EventPublish", resource, eventsInfo(signed));
+
+        assertEquals("AKIAGOOD", identity.get("user"));
+        assertEquals("arn:aws:appsync:us-east-1:000000000000:apis/abc/channelNamespace/ns", resource);
+        AppSyncTransportException wrongPath = assertThrows(AppSyncTransportException.class,
+                () -> validator.validateRequest(authorization(signed), "POST", "/_aws/appsync/events/abc/event",
+                        "appsync:EventPublish", resource, eventsInfo(signed)));
+        assertEquals("BadRequestException", wrongPath.getErrorType());
+    }
+
+    @Test
+    void anEventsPublishEvaluatesEventPublishOnTheNamespace() throws Exception {
+        when(iamService.resolveCallerContext("AKIAGOOD")).thenReturn(CallerContext.of(List.of(PUBLISH_DENY)));
+        Map<String, String> signed = AppSyncRequestSigner.signedHeadersForPath(
+                "/event", EVENTS_HOST, EVENT_BODY, "AKIAGOOD", "good-secret", REGION, NOW);
+
+        AppSyncTransportException denied = assertThrows(AppSyncTransportException.class,
+                () -> validator.validateRequest(authorization(signed), "POST", "/event", "appsync:EventPublish",
+                        IamAuthValidator.channelNamespaceArn(REGION, "000000000000", "abc", "ns"), eventsInfo(signed)));
+
+        assertEquals(401, denied.getHttpStatus());
+    }
 }
