@@ -1222,9 +1222,47 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void anApplicationIsCheckedOnTheArnItsNameGives() {
         String name = "res-app-" + suffix();
+        String arn = application(name, null);
+        assertEquals("arn:aws:kinesisanalytics:" + REGION + ":" + ACCOUNT + ":application/" + name, arn);
+
+        User user = user("res-application");
+        user.policy(allowOn("kinesisanalytics:DescribeApplication", arn));
+        describeApplication(user, name).statusCode(200);
+        refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Managed Service for Apache Flink holds on the application a
+     * request names, as TagResource leaves them, so an allow on one team's tag lets the caller describe that team's
+     * application and not another's.
+     */
+    @Test
+    void aKinesisAnalyticsResourceTagConditionReadsTheTagsOfTheApplication() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = "res-app-tagged-" + suffix();
+        String other = "res-app-other-" + suffix();
+        String taggedArn = application(tagged, web);
+        application(other, web);
+        adminJson("kinesisanalytics", "KinesisAnalytics_20180523.TagResource")
+                .body("{\"ResourceARN\":\"" + taggedArn + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-application-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"kinesisanalytics:DescribeApplication\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeApplication(user, tagged).statusCode(200);
+        refusedJson(describeApplication(user, other), "kinesisanalytics:DescribeApplication");
+    }
+
+    /**
+     * The ARN of the application {@code name} an administrator creates, with the {@code tags} list if any, deleted
+     * afterwards.
+     */
+    private String application(String name, String tags) {
         String arn = adminJson("kinesisanalytics", "KinesisAnalytics_20180523.CreateApplication")
                 .body("{\"ApplicationName\":\"" + name + "\",\"RuntimeEnvironment\":\"FLINK-1_18\","
-                        + "\"ServiceExecutionRole\":\"arn:aws:iam::" + ACCOUNT + ":role/flink-role\"}")
+                        + "\"ServiceExecutionRole\":\"arn:aws:iam::" + ACCOUNT + ":role/flink-role\""
+                        + (tags == null ? "" : ",\"Tags\":" + tags) + "}")
                 .post("/").then().statusCode(200).extract().path("ApplicationDetail.ApplicationARN");
         cleanup.register(() -> adminJson("kinesisanalytics", "KinesisAnalytics_20180523.DeleteApplication")
                 .body("{\"ApplicationName\":\"" + name + "\",\"CreateTimestamp\":"
@@ -1232,12 +1270,7 @@ class IamRequestResourceEnforcementIntegrationTest {
                         .body("{\"ApplicationName\":\"" + name + "\"}").post("/").then().statusCode(200).extract()
                         .jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
                         .getString("ApplicationDetail.CreateTimestamp") + "}").post("/"));
-        assertEquals("arn:aws:kinesisanalytics:" + REGION + ":" + ACCOUNT + ":application/" + name, arn);
-
-        User user = user("res-application");
-        user.policy(allowOn("kinesisanalytics:DescribeApplication", arn));
-        describeApplication(user, name).statusCode(200);
-        refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
+        return arn;
     }
 
     /**
