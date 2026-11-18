@@ -427,6 +427,11 @@ floci:
     # Keep in step with the @WithDefault on EmulatorConfig.DockerConfig.imagePullTimeoutSeconds: a value
     # set here WINS over the annotation.
     image-pull-timeout-seconds: 300
+    # FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS: seconds between the log lines that report each Docker
+    # pool's leased, available and pending connections, its open streams by kind and the stream
+    # threads, written only while a pool is in use; 0 turns them off. Keep in step with the
+    # @WithDefault on EmulatorConfig.DockerConfig.poolGaugeIntervalSeconds: a value set here WINS over the annotation.
+    pool-gauge-interval-seconds: 60
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume

@@ -23,7 +23,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -33,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -320,6 +323,75 @@ class FlociDockerHttpClientTest {
                 "GET /containers/abc/stats?stream=0", "POST /containers/abc/start", "POST /containers/create",
                 "DELETE /containers/abc", "GET /_ping")) {
             assertFalse(FlociDockerHttpClient.isLongLivedStream(request(ordinary)), ordinary);
+        }
+    }
+
+    @Test
+    void streamKindNamesEachLongLivedStream() {
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("POST /containers/abc/wait", "wait");
+        expected.put("POST /containers/abc/attach?stream=1", "attach");
+        expected.put("POST /exec/abc/start", "exec");
+        expected.put("POST /build?t=x", "build");
+        expected.put("POST /images/create?fromImage=alpine", "pull");
+        expected.put("GET /events", "events");
+        expected.put("GET /containers/abc/logs?follow=1&stdout=1", "logs");
+        expected.put("GET /containers/abc/stats", "stats");
+        expected.forEach((methodAndPath, kind) ->
+                assertEquals(kind, FlociDockerHttpClient.streamKind(request(methodAndPath)), methodAndPath));
+        assertNull(FlociDockerHttpClient.streamKind(request("GET /containers/abc/logs?stdout=1")));
+        assertNull(FlociDockerHttpClient.streamKind(request("GET /containers/abc/stats?stream=0")));
+        assertNull(FlociDockerHttpClient.streamKind(request("POST /containers/abc/start")));
+    }
+
+    // Catches: gauges that do not follow the pool, so a held stream reads as idle or a closed one
+    // stays counted, and the pool log line would report the wrong pressure.
+    @Test
+    @Timeout(30)
+    void gaugesCountALeaseAndItsOpenStreamUntilTheResponseCloses() throws Exception {
+        List<Socket> accepted = new CopyOnWriteArrayList<>();
+        try (ServerSocket server = new ServerSocket(0)) {
+            Thread acceptor = Thread.ofVirtual().start(() -> {
+                try {
+                    while (true) {
+                        Socket socket = server.accept();
+                        accepted.add(socket);
+                        // Answer the headers of a chunked body that never ends, as a container wait does.
+                        socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                + "Transfer-Encoding: chunked\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                        socket.getOutputStream().flush();
+                    }
+                } catch (IOException expected) {
+                    // The server socket closed at the end of the test.
+                }
+            });
+            try (FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()
+                    .dockerHost(URI.create("tcp://127.0.0.1:" + server.getLocalPort()))
+                    .maxConnections(4)
+                    .responseTimeout(Duration.ofSeconds(30))
+                    .connectionRequestTimeout(Duration.ofSeconds(5))
+                    .build()) {
+                assertTrue(client.gauges().idle(), "a new pool should be idle: " + client.gauges());
+
+                DockerHttpClient.Response wait = client.execute(request("POST /containers/held/wait"));
+                FlociDockerHttpClient.PoolGauges held = client.gauges();
+                assertEquals(1, held.leased(), held.toString());
+                assertEquals(4, held.max(), held.toString());
+                assertEquals(Map.of("wait", 1), held.openStreams());
+                assertFalse(held.idle());
+
+                wait.close();
+                wait.close();
+                FlociDockerHttpClient.PoolGauges released = client.gauges();
+                assertEquals(0, released.leased(), released.toString());
+                assertEquals(Map.of(), released.openStreams(), "a closed stream, closed twice, counts once");
+                assertTrue(released.idle(), released.toString());
+            } finally {
+                for (Socket socket : accepted) {
+                    socket.close();
+                }
+                acceptor.interrupt();
+            }
         }
     }
 

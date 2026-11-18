@@ -56,10 +56,13 @@ public class DockerClientProducer {
     private static final ObjectMapper DOCKER_CONTEXT_JSON_MAPPER = new ObjectMapper();
 
     private final EmulatorConfig config;
+    private final DockerPoolGaugeLogger gaugeLogger;
 
     @Inject
     public DockerClientProducer(EmulatorConfig config) {
         this.config = config;
+        this.gaugeLogger = new DockerPoolGaugeLogger(
+                validatePoolGaugeIntervalSeconds(config.docker().poolGaugeIntervalSeconds()));
     }
 
     /**
@@ -414,6 +417,15 @@ public class DockerClientProducer {
                 "FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS");
     }
 
+    /** 0 turns the pool gauge lines off; a negative interval names no schedule. */
+    static int validatePoolGaugeIntervalSeconds(int seconds) {
+        if (seconds < 0) {
+            throw new IllegalArgumentException("floci.docker.pool-gauge-interval-seconds "
+                    + "(FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS) must be 0 or more, got: " + seconds);
+        }
+        return seconds;
+    }
+
     private static int requireAtLeastOne(int value, String setting, String envVar) {
         if (value < 1) {
             throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
@@ -452,10 +464,12 @@ public class DockerClientProducer {
     }
 
     void disposeDockerClient(@Disposes DockerClient client) throws IOException {
+        gaugeLogger.unregister("control-plane");
         client.close();
     }
 
     void disposeStreamingDockerClient(@Disposes @StreamingDocker DockerClient client) throws IOException {
+        gaugeLogger.unregister("streaming");
         client.close();
     }
 
@@ -499,10 +513,12 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(newHttpClient(clientConfig, maxConnections,
+        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections,
                 Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds())),
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
-                        config.docker().connectionRequestTimeoutSeconds()))), role));
+                        config.docker().connectionRequestTimeoutSeconds())));
+        gaugeLogger.register(role, transport::gauges);
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
