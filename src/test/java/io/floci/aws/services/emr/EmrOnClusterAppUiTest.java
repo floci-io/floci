@@ -82,6 +82,11 @@ class EmrOnClusterAppUiTest {
         assertEquals("/jobhistory/job/job_1763395200000_0002",
                 path(appUis.onClusterUrl(clusterId, "JobHistoryServer", application, false)));
         assertTrue(appUis.onClusterUrl(clusterId, "JobHistoryServer", null, false).url().contains("-19888."));
+        // A cluster with Spark: its Spark History Server, on the primary node.
+        EmrAppUiService.Presigned history = appUis.onClusterUrl(clusterId, "SparkHistoryServer", application, false);
+        assertTrue(history.url().contains("-18080.emrappui."), history.url());
+        assertEquals("/history/" + application + "/", path(history));
+        assertEquals("/", path(appUis.onClusterUrl(clusterId, "SparkHistoryServer", null, false)));
     }
 
     @Test
@@ -156,8 +161,7 @@ class EmrOnClusterAppUiTest {
     void anInterfaceFlociDoesNotRunOpensFlocisOwnPage() {
         fixture.clusterStorage.webInterfaces.put(RESOURCE_MANAGER, RESOURCE_MANAGER_ON_HOST);
 
-        EmrAppUiService.Presigned link = appUis.onClusterUrl(yarnCluster().getId(), "SparkHistoryServer", null,
-                false);
+        EmrAppUiService.Presigned link = appUis.onClusterUrl(yarnCluster().getId(), "TezUI", null, false);
 
         assertTrue(link.ready());
         assertTrue(link.url().startsWith("http://localhost:4566" + EmrAppUiService.PATH + "?"), link.url());

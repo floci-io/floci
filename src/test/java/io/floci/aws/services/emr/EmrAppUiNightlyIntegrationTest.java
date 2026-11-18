@@ -37,9 +37,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  * On-cluster application UIs open for real: on an emr-7.5.0 cluster no step has run on yet, the ResourceManager's link
  * starts the primary node and is ready once the node is, then opens the ResourceManager through Floci on a host of its
  * own; after a MapReduce step, the ResourceManager's answer links to the job on the JobHistory server's own host, which
- * opens it, as the JobHistory server's link does.
+ * opens it, as the JobHistory server's link does; after a Spark step, whose event logs are in the cluster's HDFS, the
+ * ResourceManager's answer links to the application on the Spark History Server's own host, which lists and opens it,
+ * as the Spark History Server's link does.
  *
- * <p>A nightly check: the cluster's image, its HDFS and YARN, and a MapReduce job take minutes and gigabytes.
+ * <p>A nightly check: the cluster's image, its HDFS and YARN, and a MapReduce job and a Spark one take minutes and
+ * gigabytes.
  */
 @QuarkusTest
 @TestProfile(EmrAppUiNightlyIntegrationTest.Profile.class)
@@ -63,6 +66,7 @@ class EmrAppUiNightlyIntegrationTest {
 
     private static final int PORT = 4598;
     private static final String EXAMPLES = "/usr/lib/hadoop-mapreduce/hadoop-mapreduce-examples.jar";
+    private static final String SPARK_EXAMPLES = "/usr/lib/spark/examples/jars/spark-examples.jar";
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -133,6 +137,47 @@ class EmrAppUiNightlyIntegrationTest {
         String jobLink = readyLink(clusterId, "JobHistoryServer", applicationId);
         assertEquals(jobPath, URI.create(jobLink).getPath());
         assertTrue(open(jobLink).asString().contains("QuasiMonteCarlo"));
+
+        String sparkStep = EmrRequests.addStep(clusterId, "spark-pi", "command-runner.jar", "spark-submit",
+                "--class", "org.apache.spark.examples.SparkPi", SPARK_EXAMPLES, "10");
+        assertEquals("COMPLETED", awaitStep(clusterId, sparkStep).jsonPath().getString("Step.Status.State"));
+        // Its tracking URL, the ResourceManager's proxy, sends the browser on, once it has ended, to its page on the
+        // Spark History Server's own host.
+        JsonPath sparkApps = open(linked.getScheme() + "://" + linked.getRawAuthority() + "/ws/v1/cluster/apps")
+                .jsonPath();
+        String spark = "apps.app.find { it.applicationType == 'SPARK' }";
+        String sparkId = sparkApps.getString(spark + ".id");
+        String sparkTracking = sparkApps.getString(spark + ".trackingUrl");
+        assertEquals(String.format(origin, EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT) + "/proxy/" + sparkId + "/",
+                sparkTracking);
+        Response sparkProxied = open(sparkTracking);
+        assertTrue(sparkProxied.statusCode() / 100 == 3, sparkProxied.statusCode() + " " + sparkProxied.asString());
+        String historyOrigin = String.format(origin, EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT);
+        assertTrue(sparkProxied.getHeader("Location").startsWith(historyOrigin + "/history/" + sparkId),
+                sparkProxied.getHeader("Location"));
+        // The Spark History Server's own link lists it from its event logs, read as they come, and lands on it, once
+        // the server has read its finished log: one it listed while the application ran is renamed as it ends, and is
+        // found again at the server's next look.
+        String historyLink = readyLink(clusterId, "SparkHistoryServer", null);
+        await(() -> open(historyLink.replaceFirst("/$", "") + "/api/v1/applications?status=completed").asString()
+                .contains(sparkId), Duration.ofMinutes(2));
+        String applicationLink = readyLink(clusterId, "SparkHistoryServer", sparkId);
+        assertEquals("/history/" + sparkId + "/", URI.create(applicationLink).getPath());
+        Response application = follow(applicationLink);
+        assertEquals(200, application.statusCode(), application.asString());
+        assertTrue(application.asString().contains("Spark Pi"), application.asString());
+        assertTrue(follow(sparkTracking).asString().contains("Spark Pi"));
+    }
+
+    // A browser's request to the link, following the redirects it is sent, each to a link's host.
+    private static Response follow(String url) {
+        String at = url;
+        Response response = open(at);
+        for (int hop = 0; hop < 5 && response.statusCode() / 100 == 3; hop++) {
+            at = URI.create(at).resolve(response.getHeader("Location")).toString();
+            response = open(at);
+        }
+        return response;
     }
 
     private static JsonPath link(String clusterId, String type, String applicationId) {

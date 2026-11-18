@@ -977,8 +977,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     /**
      * The web interfaces Floci serves of a cluster's primary node, where it runs YARN there, in the docker runner
-     * mode: its ResourceManager, its MapReduce JobHistory server, and, where the node works, its NodeManager; empty
-     * elsewhere.
+     * mode: its ResourceManager, its MapReduce JobHistory server, where the node works its NodeManager, and on a
+     * cluster with Spark its Spark History Server; empty elsewhere.
      */
     public Optional<WebInterfaces> webInterfaces(EmrCluster cluster) {
         if (!runsOnClusters() || !runsYarn(cluster)) {
@@ -986,8 +986,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         }
         Set<Integer> ports = new LinkedHashSet<>(List.of(EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT,
                 EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT));
-        if (yarnOf(cluster).primaryWorks()) {
+        ClusterStorage.Yarn yarn = yarnOf(cluster);
+        if (yarn.primaryWorks()) {
             ports.add(EmrClusterStorage.NODE_MANAGER_WEB_PORT);
+        }
+        if (yarn.sparkHistory()) {
+            ports.add(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT);
         }
         return Optional.of(new WebInterfaces(masterPrivateDnsName(cluster), Set.copyOf(ports)));
     }
@@ -2878,7 +2882,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return nodeManager.withHadoopFolder(EmrReleaseImages.hadoopFolder(cluster.getReleaseLabel()))
                 .onNodes(nodes, (int) Math.max(1, Math.min(replication(cluster), coreNodes)),
                         EmrSparkSteps.containerLogFolder(cluster))
-                .withPrimaryWorking(cluster.getProvisionedCoreNodes() == 0 || coreNodes == 0);
+                .withPrimaryWorking(cluster.getProvisionedCoreNodes() == 0 || coreNodes == 0)
+                .withSparkHistory(EmrSparkSteps.names(cluster.getApplications(), SNAPSHOT_MAPPER, "Spark"));
     }
 
     // What a cluster asks of YARN when it is read, which may be later than now; what it asks now, if it has gone by then.

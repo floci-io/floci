@@ -143,6 +143,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // The MapReduce JobHistory server's information on its web port, which says it has started.
     private static final String JOB_HISTORY_INFO = "http://" + BIND + ":"
             + EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT + "/ws/v1/history/info";
+    // Set on a primary node that runs a Spark History Server, as on a cluster with Spark; its version on its web port
+    // says it has started.
+    private static final String SPARK_HISTORY_VARIABLE = "FLOCI_SPARK_HISTORY";
+    private static final String SPARK_HISTORY_VERSION = "http://" + BIND + ":"
+            + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT + "/api/v1/version";
     // Where a NodeManager keeps its containers' logs, on the node's volume, as <application>/<container>/<file>.
     private static final String YARN_LOGS = "/mnt/yarn/logs";
     private static final int LOG_LISTING_SECONDS = 30;
@@ -274,10 +279,13 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // ClusterId the one its format gave it, rather than another cluster's in that namespace, the DataNode has joined
     // and the NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the folders EMR's
     // HDFS has for steps, /tmp and the hadoop user's home, are made, and the metastore's warehouse and HIVE_JARS, which
-    // Hive's exec jar goes in. HDFS_READY then says the node is ready, once the metastore takes connections, the
-    // NodeManager has registered and the JobHistory server answers. A daemon that exits, before or after, the metastore
-    // among them, ends the container, its readiness gone, so the next step starts it again on its data. With
-    // HADOOP_FOLDER_VARIABLE set, every daemon runs from the Hadoop in that folder.
+    // Hive's exec jar goes in, and, with YARN, the folder its Spark applications' event logs go in
+    // (EmrServerlessSparkRunner.SPARK_EVENT_LOGS). With SPARK_HISTORY_VARIABLE set, a Spark History Server starts then,
+    // as EMR's primary node runs one on a cluster with Spark, reading that folder, listening on its port where HDFS
+    // does. HDFS_READY then says the node is ready, once the metastore takes connections, the NodeManager has
+    // registered, and the JobHistory server and the Spark History Server answer. A daemon that exits, before or after,
+    // the metastore among them, ends the container, its readiness gone, so the next step starts it again on its data.
+    // With HADOOP_FOLDER_VARIABLE set, every daemon runs from the Hadoop in that folder.
     // Where a node's daemons listen: FLOCI_HDFS_BIND, or, with SUBNET_VARIABLE set, the node's own address in that subnet,
     // its cluster's network, alone, so another network it joins does not reach its HDFS or its YARN; written to
     // BIND_FILE. Hive 3's metastore has no setting for the address it listens on, so it takes every one.
@@ -308,6 +316,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + "if [ -z \"$" + NODE_WORKERS_VARIABLE + "\" ] || [ -d /mnt/datanode/current ]; then "
                     + "hdfs datanode & n=2; fi; "
                     + "dirs=\"/tmp /user/hadoop\"; "
+                    + "[ -z \"$" + YARN_MEMORY_VARIABLE + "\" ] || dirs=\"$dirs "
+                    + EmrServerlessSparkRunner.SPARK_EVENT_LOGS + "\"; "
                     + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
                     + "dirs=\"$dirs /user/hive/warehouse " + HIVE_JARS + "\"; "
                     + "[ -z \"$" + HIVE_METASTORE_SITE_VARIABLE + "\" ] || mapfile -t site <<< \"$"
@@ -337,6 +347,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + untilReady("curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
                             + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"")
                     + "hdfs dfs -mkdir -p $dirs || exit 1; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + "SPARK_LOCAL_IP=$FLOCI_HDFS_BIND SPARK_HISTORY_OPTS=\"-Dspark.history.fs.logDirectory="
+                    + "hdfs://$FLOCI_HDFS_HOST:8020" + EmrServerlessSparkRunner.SPARK_EVENT_LOGS
+                    + " -Dspark.history.ui.port=" + EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT + "\""
+                    + " /usr/lib/spark/bin/spark-class org.apache.spark.deploy.history.HistoryServer & n=$((n + 1)); "
+                    + "fi; "
                     + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
                     + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); "
                     + "hdfs dfs -put -f \"$jar\" " + HIVE_JARS
@@ -347,6 +363,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + untilReady("curl -sf -m 5 " + RESOURCE_MANAGER_METRICS
                             + " | grep -q \"\\\"activeNodes\\\":[1-9]\"")
                     + untilReady("curl -sf -m 5 " + JOB_HISTORY_INFO + " | grep -q historyInfo")
+                    + "fi; "
+                    + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 " + SPARK_HISTORY_VERSION + " > /dev/null")
                     + "fi; "
                     + "touch " + HDFS_READY + "; "
                     // Not wait -n: an emr-6.x image's bash, 4.2, does not have it.
@@ -743,6 +762,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             boolean everyWorkerJoined = network != null && clusterSubnet(clusterId) != null
                     && (hiveMetastore == null || !yarn.primaryWorks());
             storage = storage.withYarn(host, everyWorkerJoined ? awsEnv.flociEndpoint() : flociEndpointOn(name));
+            if (yarn.sparkHistory()) {
+                storage = storage.withSparkHistoryServer(host);
+            }
             return yarn.nodes().stream().anyMatch(Node::core) ? storage.withReplication(yarn.replication()) : storage;
         }
     }
@@ -1312,6 +1334,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (yarn.primaryWorks()) {
                 spec.withLoopbackPortBinding(NODE_MANAGER_WEB_PORT, 0);
             }
+            if (yarn.sparkHistory()) {
+                spec.withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
+            }
         }
         if (yarn != null) {
             spec.withEnv(YARN_MEMORY_VARIABLE, String.valueOf(yarn.memoryMb()))
@@ -1322,6 +1347,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
             if (yarn.hadoopFolder() != null) {
                 spec.withEnv(HADOOP_FOLDER_VARIABLE, yarn.hadoopFolder());
+            }
+            if (yarn.sparkHistory()) {
+                spec.withEnv(SPARK_HISTORY_VARIABLE, "1");
             }
         }
         // The metastore and the executors YARN runs reach Floci, Floci on the host by its address, Floci's own

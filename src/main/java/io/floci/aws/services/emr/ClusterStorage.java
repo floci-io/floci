@@ -117,19 +117,20 @@ public interface ClusterStorage {
      * YARN on a cluster: a ResourceManager on its primary node, and a NodeManager on each of its {@code nodes}, and on
      * the primary node too when it {@code primaryWorks}, each offering its containers {@code memoryMb} of memory and
      * {@code vcores} virtual cores, which run its steps' Spark executors; the folder of the nodes' image holding the
-     * Hadoop their daemons run from, or null for the image's own; the copies of a block its HDFS keeps; and the S3
-     * folder its applications' logs go in, or null. A primary node that works runs a DataNode as well.
+     * Hadoop their daemons run from, or null for the image's own; the copies of a block its HDFS keeps; the S3
+     * folder its applications' logs go in, or null; and whether its primary node runs a Spark History Server, as on a
+     * cluster with Spark. A primary node that works runs a DataNode as well.
      */
     record Yarn(int memoryMb, int vcores, String hadoopFolder, List<Node> nodes, int replication, String logFolder,
-                boolean primaryWorks) {
+                boolean primaryWorks, boolean sparkHistory) {
 
         Yarn(int memoryMb, int vcores) {
-            this(memoryMb, vcores, null, List.of(), 1, null, true);
+            this(memoryMb, vcores, null, List.of(), 1, null, true, false);
         }
 
         /** This YARN with its daemons run from the Hadoop in {@code folder}. */
         Yarn withHadoopFolder(String folder) {
-            return new Yarn(memoryMb, vcores, folder, nodes, replication, logFolder, primaryWorks);
+            return new Yarn(memoryMb, vcores, folder, nodes, replication, logFolder, primaryWorks, sparkHistory);
         }
 
         /**
@@ -138,12 +139,17 @@ public interface ClusterStorage {
          */
         Yarn onNodes(List<Node> workers, int copies, String folder) {
             return new Yarn(memoryMb, vcores, hadoopFolder, List.copyOf(workers), copies, folder,
-                    workers.stream().noneMatch(Node::core));
+                    workers.stream().noneMatch(Node::core), sparkHistory);
         }
 
         /** This YARN with its primary node running a DataNode and a NodeManager, or not. */
         Yarn withPrimaryWorking(boolean works) {
-            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, works);
+            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, works, sparkHistory);
+        }
+
+        /** This YARN with its primary node running a Spark History Server, or not. */
+        Yarn withSparkHistory(boolean runs) {
+            return new Yarn(memoryMb, vcores, hadoopFolder, nodes, replication, logFolder, primaryWorks, runs);
         }
     }
 
