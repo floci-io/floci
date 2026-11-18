@@ -52,9 +52,10 @@ import java.util.Optional;
  * the tags of a budget or a budget action; AWS FIS, for the tags of an experiment template, an experiment or an action;
  * CodePipeline, for the tags of a pipeline, a webhook or a custom action type; DataSync, for the tags of an agent, a
  * location or a task; Global Accelerator, for the tags of an accelerator, a listener or an endpoint group; EMR
- * Serverless, for the tags of an application, a job run or a session); looked up lazily by {@code ResourceArnBuilder}
- * and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or
- * an ARN is of, so IAM never depends on that service directly.</p>
+ * Serverless, for the tags of an application, a job run or a session; EMR on EKS, for the tags of a virtual cluster, a
+ * job run, a managed endpoint, a job template or a security configuration); looked up lazily by
+ * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
+ * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

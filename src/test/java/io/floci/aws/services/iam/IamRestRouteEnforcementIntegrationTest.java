@@ -1216,6 +1216,35 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(request(user, "oam", "POST", "/GetSink", getSink), "oam:GetSink");
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR on EKS holds on the job template a request names, those
+     * it was created with (TagResource takes only virtual clusters, job runs and managed endpoints), so an allow on one
+     * team's tag lets the caller read that team's template and not another's.
+     */
+    @Test
+    void anEmrContainersResourceTagConditionReadsTheTagsOfTheJobTemplate() {
+        String tagged = emrContainersJobTemplate("data");
+        String other = emrContainersJobTemplate("web");
+        String user = user("route-emrc-tags");
+
+        policy(user, onTeam("Allow", "emr-containers:DescribeJobTemplate", "data"));
+        request(user, "emr-containers", "GET", "/jobtemplates/" + tagged, null).statusCode(200);
+        refused(request(user, "emr-containers", "GET", "/jobtemplates/" + other, null),
+                "emr-containers:DescribeJobTemplate");
+    }
+
+    /** The id of an EMR on EKS job template an administrator creates, tagged with {@code team}, deleted after. */
+    private String emrContainersJobTemplate(String team) {
+        String body = "{\"name\":\"route-template-" + suffix() + "\",\"clientToken\":\"" + suffix()
+                + "\",\"tags\":{\"team\":\"" + team + "\"},\"jobTemplateData\":{\"executionRoleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/emr-job\",\"releaseLabel\":\"emr-7.5.0-latest\",\"jobDriver\":"
+                + "{\"sparkSubmitJobDriver\":{\"entryPoint\":\"s3://bucket/pi.py\"}}}}";
+        String id = adminOf("emr-containers").body(body).post("/jobtemplates").then().statusCode(200).extract()
+                .path("id");
+        cleanup.register(() -> adminOf("emr-containers").delete("/jobtemplates/" + id).then().statusCode(200));
+        return id;
+    }
+
     /** A statement with {@code effect} on {@code action} for every resource whose {@code team} tag is the one given. */
     private static String onTeam(String effect, String action, String team) {
         return "{\"Effect\":\"" + effect + "\",\"Action\":\"" + action + "\",\"Resource\":\"*\","
