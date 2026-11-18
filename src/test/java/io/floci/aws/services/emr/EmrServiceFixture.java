@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
@@ -19,11 +20,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -97,6 +100,16 @@ final class EmrServiceFixture {
         final List<List<String>> relays = new ArrayList<>();
         final List<Instance> given = new ArrayList<>();
         final List<String> released = new ArrayList<>();
+        // Where each port of a primary node's web interfaces is reached, once the node is ready.
+        final Map<Integer, ContainerLifecycleManager.EndpointInfo> webInterfaces = new HashMap<>();
+        // The clusters whose history is kept; where each port of a kept history's container is reached, once it
+        // answers; what was asked of the histories, in order; and the clusters each sweep kept.
+        final Set<String> historiesKept = new HashSet<>();
+        final Map<Integer, ContainerLifecycleManager.EndpointInfo> historyInterfaces = new HashMap<>();
+        final List<String> historyEvents = new ArrayList<>();
+        final List<Set<String>> historySweeps = new ArrayList<>();
+        // Whether copying a cluster's event logs into its kept history fails.
+        boolean keepFails;
         // How each cluster's nodes are known as EC2 instances.
         final Map<String, Function<String, Instance>> identities = new HashMap<>();
 
@@ -148,6 +161,48 @@ final class EmrServiceFixture {
         @Override
         public boolean ownNetwork(String dockerNetwork) {
             return ownNetwork;
+        }
+
+        @Override
+        public Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+            return Optional.ofNullable(webInterfaces.get(port));
+        }
+
+        @Override
+        public boolean keepHistory(String clusterId) {
+            if (keepFails) {
+                historyEvents.add("could not keep " + clusterId);
+                return false;
+            }
+            historyEvents.add("kept " + clusterId + (removed.contains(clusterId) ? " after its removal" : ""));
+            historiesKept.add(clusterId);
+            return true;
+        }
+
+        @Override
+        public boolean historyKept(String clusterId) {
+            return historiesKept.contains(clusterId);
+        }
+
+        @Override
+        public Optional<ContainerLifecycleManager.EndpointInfo> historyInterface(String clusterId, String accountId,
+                String region, Supplier<String> image, Consumer<String> released, String primaryHost, Yarn yarn,
+                int port) {
+            ContainerLifecycleManager.EndpointInfo endpoint = historyInterfaces.get(port);
+            if (endpoint == null) {
+                historyEvents.add("starting " + clusterId + " as " + primaryHost);
+            }
+            return Optional.ofNullable(endpoint);
+        }
+
+        @Override
+        public void stopHistory(String clusterId) {
+            historyEvents.add("stopped " + clusterId);
+        }
+
+        @Override
+        public void removeHistoriesBut(Set<String> kept) {
+            historySweeps.add(Set.copyOf(kept));
         }
 
         @Override
@@ -232,6 +287,8 @@ final class EmrServiceFixture {
     private final List<Runnable> deliveries = new ArrayList<>();
     // The docker runner mode's step threads, not yet run; a session server's thread may add one too.
     private final List<Runnable> stepThreads = new CopyOnWriteArrayList<>();
+    // Whether the pool refuses what it is handed, as a pool shut down does.
+    volatile boolean threadsRefused;
     private boolean waking;
     final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
@@ -314,9 +371,9 @@ final class EmrServiceFixture {
         };
         service = sessionProbe == null
                 ? new EmrService(storage, config(false), regionResolver, publisher, clock, recorded, runner, bootstrap,
-                        clusterStorage, releaseImages, stepThreads::add, iam)
+                        clusterStorage, releaseImages, this::handToThread, iam)
                 : new EmrService(storage, config(false), regionResolver, publisher, clock, recorded, runner, bootstrap,
-                        clusterStorage, releaseImages, stepThreads::add, iam,
+                        clusterStorage, releaseImages, this::handToThread, iam,
                         new SparkConnectServers(runner, task -> Thread.ofPlatform().daemon().start(task), null,
                                 sessionProbe, clock));
     }
@@ -338,7 +395,7 @@ final class EmrServiceFixture {
      */
     EmrService restartReconciling(SparkJobRunner runner, EmrService.Wakeups wakeups) {
         return new EmrService(storage, config(true), new RegionResolver(REGION, ACCOUNT), publisher, clock, wakeups,
-                runner, bootstrap, clusterStorage, releaseImages, stepThreads::add, iam);
+                runner, bootstrap, clusterStorage, releaseImages, this::handToThread, iam);
     }
 
     /**
@@ -349,7 +406,7 @@ final class EmrServiceFixture {
         EmulatorConfig config = config(false);
         when(config.services().emr().hiveImageTemplate()).thenReturn(Optional.of(hiveImageTemplate));
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
-                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);
     }
 
@@ -361,7 +418,7 @@ final class EmrServiceFixture {
         EmulatorConfig config = config(false);
         when(config.services().emr().pig().enabled()).thenReturn(true);
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
-                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);
     }
 
@@ -380,6 +437,13 @@ final class EmrServiceFixture {
         when(config.services().emr().yarnMaxWorkerNodes()).thenReturn(4);
         when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
         return config;
+    }
+
+    private void handToThread(Runnable task) {
+        if (threadsRefused) {
+            throw new RejectedExecutionException("The pool takes no more threads");
+        }
+        stepThreads.add(task);
     }
 
     /** Runs the oldest step thread not yet run, as the docker runner mode's pool would. */

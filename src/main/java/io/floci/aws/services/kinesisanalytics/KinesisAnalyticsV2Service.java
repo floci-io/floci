@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -45,7 +46,7 @@ import java.util.regex.Pattern;
  * {@code READY}.
  */
 @ApplicationScoped
-public class KinesisAnalyticsV2Service {
+public class KinesisAnalyticsV2Service implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(KinesisAnalyticsV2Service.class);
 
@@ -55,6 +56,9 @@ public class KinesisAnalyticsV2Service {
     // AWS: "the maximum number of user-defined application tags is 50" (the stated 200-tag ceiling
     // on the Tags/TagKeys shapes includes AWS-managed system tags, which floci does not model).
     private static final int MAX_USER_TAGS = 50;
+
+    /** What an application's ARN resource starts with, its name following. */
+    private static final String APPLICATION_RESOURCE = "application/";
 
     // CreateApplicationPresignedUrl's SessionExpirationDurationInSeconds valid range (30 min - 12 hr).
     private static final long MIN_SESSION_EXPIRATION_SECONDS = 1800;
@@ -183,7 +187,7 @@ public class KinesisAnalyticsV2Service {
 
         String accountId = regionResolver.getAccountId();
         String arn = AwsArnUtils.Arn.of("kinesisanalytics", region, accountId,
-                "application/" + applicationName).toString();
+                APPLICATION_RESOURCE + applicationName).toString();
         String mode = (applicationMode == null || applicationMode.isBlank()) ? "STREAMING" : applicationMode;
 
         FlinkApplication app = new FlinkApplication(applicationName, arn, runtimeEnvironment,
@@ -470,7 +474,11 @@ public class KinesisAnalyticsV2Service {
         return findByArn(resourceArn).getTags();
     }
 
-    public Map<String, String> tagResource(String resourceArn, Map<String, String> tags) {
+    /**
+     * Gives the application a new map holding its tags and {@code tags}. Tag calls run one at a time, so two of them
+     * never lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized Map<String, String> tagResource(String resourceArn, Map<String, String> tags) {
         FlinkApplication app = findByArn(resourceArn);
         Map<String, String> merged = new LinkedHashMap<>(app.getTags());
         if (tags != null) {
@@ -485,13 +493,61 @@ public class KinesisAnalyticsV2Service {
         return app.getTags();
     }
 
-    public Map<String, String> untagResource(String resourceArn, List<String> tagKeys) {
+    /** Gives the application a new map without {@code tagKeys}, one tag call at a time, as {@link #tagResource}. */
+    public synchronized Map<String, String> untagResource(String resourceArn, List<String> tagKeys) {
         FlinkApplication app = findByArn(resourceArn);
+        Map<String, String> remaining = new LinkedHashMap<>(app.getTags());
         if (tagKeys != null) {
-            tagKeys.forEach(app.getTags()::remove);
+            tagKeys.forEach(remaining::remove);
         }
+        app.setTags(remaining);
         putApplication(app);
         return app.getTags();
+    }
+
+    @Override
+    public String namespace() {
+        return "kinesisanalytics";
+    }
+
+    /** A request names an application by its name, which its ARN carries whole: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the application whose ARN is {@code arn}, in the request's account, where the handlers read: an ARN
+     * of another account names none. Read in place under the Region the ARN names and the application's name, and in
+     * the default Region under the name alone, where an application stored before applications were kept by Region
+     * still is, a record stored before storage was account-aware included, and matched on the whole ARN. Moving such
+     * an application to its Regional key puts it there before deleting the name alone, so a read that misses both
+     * while it moves looks under the Regional key again. Tag calls give the application a new map, so the read is of
+     * one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "kinesisanalytics")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = regionResolver.getAccountId();
+        if (!parsed.accountId().equals(account) || !parsed.resource().startsWith(APPLICATION_RESOURCE)) {
+            return Map.of();
+        }
+        String name = parsed.resource().substring(APPLICATION_RESOURCE.length());
+        String key = applicationKey(parsed.region(), name);
+        Optional<FlinkApplication> application = storedApplication(account, key, arn);
+        if (application.isEmpty() && parsed.region().equals(config.defaultRegion())) {
+            application = storedApplication(account, name, arn).or(() -> storedApplication(account, key, arn));
+        }
+        return application.map(app -> new LinkedHashMap<>(app.getTags())).orElseGet(LinkedHashMap::new);
+    }
+
+    /** The application stored under {@code key} in {@code account}, read in place, if its ARN is {@code arn}. */
+    private Optional<FlinkApplication> storedApplication(String account, String key, String arn) {
+        return AccountAwareStorageBackend.readInAccount(storage, account, key)
+                .filter(app -> arn.equals(app.getApplicationArn()));
     }
 
     public Snapshot createApplicationSnapshot(String applicationName, String snapshotName) {
@@ -648,18 +704,17 @@ public class KinesisAnalyticsV2Service {
             throw new AwsException("InvalidArgumentException", "Invalid resource ARN: " + resourceArn, 400);
         }
         String accountId = regionResolver.getAccountId();
-        String resourcePrefix = "application/";
         if (!"kinesisanalytics".equals(arn.service())
-                || !arn.resource().startsWith(resourcePrefix)
-                || arn.resource().length() == resourcePrefix.length()
-                || arn.resource().substring(resourcePrefix.length()).contains("/")) {
+                || !arn.resource().startsWith(APPLICATION_RESOURCE)
+                || arn.resource().length() == APPLICATION_RESOURCE.length()
+                || arn.resource().substring(APPLICATION_RESOURCE.length()).contains("/")) {
             throw new AwsException("InvalidArgumentException", "Invalid resource ARN: " + resourceArn, 400);
         }
         if (!accountId.equals(arn.accountId())) {
             throw new AwsException("ResourceNotFoundException",
                     "No application found for ARN: " + resourceArn, 400);
         }
-        String applicationName = arn.resource().substring(resourcePrefix.length());
+        String applicationName = arn.resource().substring(APPLICATION_RESOURCE.length());
         String region = arn.region().isEmpty() ? config.defaultRegion() : arn.region();
         return getStoredApplication(accountId, region, applicationName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",

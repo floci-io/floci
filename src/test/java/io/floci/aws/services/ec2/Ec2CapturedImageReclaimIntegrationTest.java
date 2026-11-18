@@ -5,9 +5,9 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.ec2.model.Image;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
+import io.floci.aws.testing.ContainerBackedEc2Profile;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,7 +16,6 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -49,22 +48,14 @@ import static org.mockito.Mockito.when;
  * <p>These drive the real CreateImage path rather than setting the captured reference by hand.
  * The image store hands back detached copies, so a mutation applied to a returned Image never
  * reaches the store -- a hand-built fixture silently tests nothing.
+ *
+ * <p>The shared test configuration runs EC2 in mock mode, which skips container work entirely,
+ * capture and reclamation included. {@link ContainerBackedEc2Profile} turns it back on; the
+ * container manager itself is mocked here, so no Docker is involved.
  */
 @QuarkusTest
-@TestProfile(Ec2CapturedImageReclaimIntegrationTest.ContainerBackedEc2.class)
+@TestProfile(ContainerBackedEc2Profile.class)
 class Ec2CapturedImageReclaimIntegrationTest {
-
-    /**
-     * The shared test configuration runs EC2 in mock mode, which skips container work entirely --
-     * including the capture and its reclamation, so neither path would execute. This turns it
-     * back on; the container manager itself is mocked, so no Docker is involved.
-     */
-    public static class ContainerBackedEc2 implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.ec2.mock", "false");
-        }
-    }
 
     @Inject
     Ec2Service service;

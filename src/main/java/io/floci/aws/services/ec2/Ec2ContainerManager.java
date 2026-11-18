@@ -804,7 +804,7 @@ public class Ec2ContainerManager {
                 return version;
             }
         } catch (Exception e) {
-            LOG.debugv("Could not read the Docker host's kernel version: {0}", e.getMessage());
+            LOG.debugv("Could not read the Docker host''s kernel version: {0}", e.getMessage());
         }
         LOG.warn("Docker host kernel version unknown; systemd guest launches without /lib/modules");
         return null;

@@ -1,19 +1,18 @@
 package io.floci.aws.services.iam;
 
-import io.floci.aws.core.common.Totp;
+import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.EnforcementFixtures.MfaDevice;
 import io.floci.aws.testing.S3IamEnforcementProfile;
 import io.floci.aws.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.Base64;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -51,6 +50,8 @@ class StsMfaEnforcementIntegrationTest {
 
     private static final String CODE = "ErrorResponse.Error.Code";
 
+    private static final String MESSAGE = "ErrorResponse.Error.Message";
+
     /** Allows the listing only where the request was authenticated with a device. */
     private static final String LIST_WITH_MFA = """
             {"Version":"2012-10-17","Statement":[
@@ -71,6 +72,11 @@ class StsMfaEnforcementIntegrationTest {
               {"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*",
                "Condition":{"Bool":{"aws:MultiFactorAuthPresent":"true"}}}]}""";
 
+    /** Allows both namespaces with no condition at all, so only the credential itself can refuse. */
+    private static final String LIST_AND_MINT = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":["iam:ListUsers","sts:*"],"Resource":"*"}]}""";
+
     /** Allows the listing only while the authentication is recent. */
     private static final String LIST_WHILE_FRESH = """
             {"Version":"2012-10-17","Statement":[
@@ -82,7 +88,7 @@ class StsMfaEnforcementIntegrationTest {
     void aSessionMintedBehindADeviceIsTheOneThatCarriesThePresentKeyAsTrue() {
         String userName = unique("mfa-present");
         S3RequestSigner user = userWithPolicy(userName, LIST_WITH_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
 
         // The same user, the same policy, two sessions: the key is the only difference between them.
         listUsers(sessionWith(user, device), 200);
@@ -95,7 +101,7 @@ class StsMfaEnforcementIntegrationTest {
     void theDenyTheGuideRecommendsRefusesALongTermKeyAndAnMfaLessSession() {
         String userName = unique("mfa-ifexists");
         S3RequestSigner user = userWithPolicy(userName, LIST_DENIED_WITHOUT_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
 
         // "This combination of Deny, BoolIfExists, and false denies requests that are not
         // authenticated using MFA... It also denies requests that are made using long-term
@@ -109,7 +115,7 @@ class StsMfaEnforcementIntegrationTest {
     void theAgeIsPublishedOnlyWhereThereIsAnAuthenticationToMeasure() {
         String userName = unique("mfa-age");
         S3RequestSigner user = userWithPolicy(userName, LIST_WHILE_FRESH);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
 
         // The device was just used, so the age is inside the hour the policy allows.
         listUsers(sessionWith(user, device), 200);
@@ -122,7 +128,7 @@ class StsMfaEnforcementIntegrationTest {
     void aCodeTheDeviceDidNotProduceAuthenticatesNothing() {
         String userName = unique("mfa-code");
         S3RequestSigner user = userWithPolicy(userName, LIST_WITH_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
 
         // "An incorrect MFA code causes the API to return an access denied error."
         getSessionToken(user, device.serialNumber(), "000000").statusCode(403)
@@ -131,7 +137,7 @@ class StsMfaEnforcementIntegrationTest {
         getSessionToken(user, device.serialNumber(), null).statusCode(403);
         getSessionToken(user, null, device.codeNow()).statusCode(403);
         // A device enabled for somebody else is not this caller's to present.
-        Device other = enabledDeviceFor(unique("mfa-other"));
+        MfaDevice other = enabledDeviceFor(unique("mfa-other"));
         getSessionToken(user, other.serialNumber(), other.codeNow()).statusCode(403);
     }
 
@@ -139,7 +145,7 @@ class StsMfaEnforcementIntegrationTest {
     void aTrustPolicyThatTestsForMfaTakesTheDeviceTheAssumePresents() {
         String userName = unique("mfa-trust");
         S3RequestSigner user = userWithPolicy(userName, LIST_WITH_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
         String roleName = unique("mfa-role");
         createRoleRequiringMfa(roleName, userName);
 
@@ -153,7 +159,7 @@ class StsMfaEnforcementIntegrationTest {
     void aRoleSessionAssumedWithADeviceStillCarriesNoAuthenticationOfItsOwn() {
         String userName = unique("mfa-chain-user");
         S3RequestSigner user = userWithPolicy(userName, LIST_WITH_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
         String roleName = unique("mfa-chain-role");
         createRoleRequiringMfa(roleName, userName);
 
@@ -169,7 +175,7 @@ class StsMfaEnforcementIntegrationTest {
     void aCodeThatMintedASessionMintsNoSecondOne() {
         String userName = unique("mfa-replay");
         S3RequestSigner user = userWithPolicy(userName, LIST_WITH_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
         String code = device.codeNow();
 
         getSessionToken(user, device.serialNumber(), code).statusCode(200);
@@ -184,7 +190,7 @@ class StsMfaEnforcementIntegrationTest {
     void thePolicyForTheAssumeItselfSeesTheDeviceTheCallPresents() {
         String userName = unique("mfa-identity");
         S3RequestSigner user = userWithPolicy(userName, ASSUME_WITH_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
         String roleName = unique("mfa-identity-role");
         createRoleTrustingUser(roleName, userName);
 
@@ -200,7 +206,7 @@ class StsMfaEnforcementIntegrationTest {
     void aSessionMintedBehindADeviceAssumesARoleThatRequiresOneWithoutPresentingItAgain() {
         String userName = unique("mfa-carry");
         S3RequestSigner user = userWithPolicy(userName, LIST_WITH_MFA);
-        Device device = enabledDeviceFor(userName);
+        MfaDevice device = enabledDeviceFor(userName);
         String roleName = unique("mfa-carry-role");
         createRoleRequiringMfa(roleName, userName);
 
@@ -211,17 +217,59 @@ class StsMfaEnforcementIntegrationTest {
         assumeRole(sessionWith(user, null), roleName, null, null).statusCode(403);
     }
 
-    /** A virtual device and its seed, which is what produces the codes a client sends. */
-    private record Device(String serialNumber, String seed) {
+    @Test
+    void anIamCallFromASessionNoDeviceMintedIsRefusedHoweverItsPoliciesRead() {
+        String userName = unique("mfa-iam-reach");
+        S3RequestSigner user = userWithPolicy(userName, LIST_AND_MINT);
+        MfaDevice device = enabledDeviceFor(userName);
 
-        String codeNow() {
-            return Totp.codeAt(seed, Totp.stepAt(Instant.now()));
-        }
+        // "You cannot call any IAM API operations unless MFA authentication information is included
+        // in the request." Nothing in these policies says otherwise, so the credential is what
+        // refuses, and only the session that used no device.
+        listUsers(user, 200);
+        listUsers(sessionWith(user, device), 200);
+        listing(sessionWith(user, null)).statusCode(403)
+                .body(CODE, equalTo("AccessDenied"))
+                .body(MESSAGE, equalTo(
+                        "Cannot call ListUsers with session credentials that include no MFA information"));
+    }
+
+    @Test
+    void aSessionReachesNoStsOperationButAssumeRoleAndGetCallerIdentity() {
+        String userName = unique("mfa-sts-reach");
+        S3RequestSigner user = userWithPolicy(userName, LIST_AND_MINT);
+        MfaDevice device = enabledDeviceFor(userName);
+        String roleName = unique("mfa-sts-reach-role");
+        createRoleTrustingUser(roleName, userName);
+        S3RequestSigner session = sessionWith(user, null);
+
+        // "You cannot call any AWS STS API except AssumeRole or GetCallerIdentity."
+        assumeRole(session, roleName, null, null).statusCode(200);
+        given().filter(session).formParam("Action", "GetCallerIdentity")
+            .when().post("/").then().statusCode(200);
+        accessKeyInfo(session).statusCode(403).body(CODE, equalTo("AccessDenied"))
+                .body(MESSAGE, equalTo("Cannot call GetAccessKeyInfo with session credentials"));
+        // A device buys the IAM half and not this one: the reference publishes the two bullets apart.
+        accessKeyInfo(sessionWith(user, device)).statusCode(403).body(CODE, equalTo("AccessDenied"));
+        // The long-term key that minted them reaches the operation, which then answers for the id
+        // it was asked about rather than for the credentials asking.
+        accessKeyInfo(user).statusCode(400).body(CODE, equalTo("ValidationError"));
     }
 
     private static void listUsers(S3RequestSigner caller, int status) {
-        given().filter(caller).formParam("Action", "ListUsers").formParam("Version", "2010-05-08")
-            .when().post("/").then().statusCode(status);
+        listing(caller).statusCode(status);
+    }
+
+    private static ValidatableResponse listing(S3RequestSigner caller) {
+        return given().filter(caller).formParam("Action", "ListUsers").formParam("Version", "2010-05-08")
+            .when().post("/").then();
+    }
+
+    /** Asked about an id IAM never issued, so the operation itself answers whoever reaches it. */
+    private static ValidatableResponse accessKeyInfo(S3RequestSigner caller) {
+        return given().filter(caller).formParam("Action", "GetAccessKeyInfo")
+                .formParam("AccessKeyId", "AKIAIOSFODNN7EXAMPLE")
+            .when().post("/").then();
     }
 
     private static ValidatableResponse getSessionToken(S3RequestSigner caller, String serialNumber,
@@ -237,7 +285,7 @@ class StsMfaEnforcementIntegrationTest {
     }
 
     /** The caller's own session, minted behind {@code device} when one is given. */
-    private static S3RequestSigner sessionWith(S3RequestSigner caller, Device device) {
+    private static S3RequestSigner sessionWith(S3RequestSigner caller, MfaDevice device) {
         ExtractableResponse<Response> issued = (device == null
                 ? getSessionToken(caller, null, null)
                 : getSessionToken(caller, device.serialNumber(), device.codeNow()))
@@ -261,7 +309,7 @@ class StsMfaEnforcementIntegrationTest {
         return request.when().post("/").then();
     }
 
-    private static S3RequestSigner assumedSession(S3RequestSigner caller, String roleName, Device device) {
+    private static S3RequestSigner assumedSession(S3RequestSigner caller, String roleName, MfaDevice device) {
         ExtractableResponse<Response> issued =
                 assumeRole(caller, roleName, device.serialNumber(), device.codeNow())
                         .statusCode(200).extract();
@@ -290,23 +338,11 @@ class StsMfaEnforcementIntegrationTest {
     }
 
     /** A virtual device created and enabled for a fresh user, the way a client sets one up. */
-    private static Device enabledDeviceFor(String userName) {
+    private static MfaDevice enabledDeviceFor(String userName) {
         if (!userExists(userName)) {
             iam("CreateUser", "UserName", userName);
         }
-        String base = "CreateVirtualMFADeviceResponse.CreateVirtualMFADeviceResult.VirtualMFADevice.";
-        ExtractableResponse<Response> created = given().header("Authorization", auth(ACCOUNT, "iam"))
-                .formParam("Action", "CreateVirtualMFADevice")
-                .formParam("VirtualMFADeviceName", userName + "-device")
-            .when().post("/").then().statusCode(200).extract();
-        String seed = new String(Base64.getDecoder().decode(
-                created.path(base + "Base32StringSeed").toString().trim()), StandardCharsets.UTF_8);
-        String serialNumber = created.path(base + "SerialNumber");
-        long step = Totp.stepAt(Instant.now());
-        iam("EnableMFADevice", "UserName", userName, "SerialNumber", serialNumber,
-                "AuthenticationCode1", Totp.codeAt(seed, step - 1),
-                "AuthenticationCode2", Totp.codeAt(seed, step));
-        return new Device(serialNumber, seed);
+        return EnforcementFixtures.enableMfaDevice(RestAssured.port, auth(ACCOUNT, "iam"), userName);
     }
 
     private static boolean userExists(String userName) {

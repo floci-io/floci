@@ -183,6 +183,13 @@ public final class CfnRollback {
      */
     public static final String EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR = "__FlociEksNodegroupUpdateSnapshot";
 
+    /**
+     * The description, key policy, enabled state, rotation and tags a KMS key carried before an
+     * in-place update changed them, so a failed stack update can put them back. Written and spent
+     * by {@code KmsCfnProvisioner}.
+     */
+    public static final String KMS_KEY_UPDATE_SNAPSHOT_ATTR = "__FlociKmsKeyUpdateSnapshot";
+
     public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
 
     /**

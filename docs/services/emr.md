@@ -45,8 +45,8 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `ListNotebookExecutions` | Lists notebook executions, newest first, by editor, status, time and cluster |
 | `CreatePersistentAppUI` | Makes a cluster's persistent application UIs; see [Application UIs](#application-uis) |
 | `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
-| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
-| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, a page of Floci's |
+| `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
+| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
 | `GetClusterSessionCredentials` | Returns temporary basic credentials for a runtime role enabled cluster; see [Application UIs](#application-uis) |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
@@ -311,8 +311,9 @@ nothing answers.
 
 ## Notebook executions
 
-Floci keeps a notebook execution and its lifecycle, but runs no notebook, in either runner mode, and writes no output
-notebook.
+With `runner-mode` set to `docker`, a notebook execution runs its notebook on its cluster and writes it as run (see
+[Running a notebook execution's notebook](#running-a-notebook-executions-notebook)). With the default `immediate`
+mode, Floci keeps an execution and its lifecycle but runs no notebook and writes no output notebook.
 
 * **StartNotebookExecution** refuses a request without `ExecutionEngine.Id` or `ServiceRole`, or with an
   `ExecutionEngine.Type` or `OutputNotebookFormat` the model does not name, with `ValidationException`, and a member of
@@ -326,24 +327,85 @@ notebook.
   `InvalidRequestException` in Floci's own wording. The editor, relative path, S3 locations and parameters are kept as
   given. The execution's id is `ex-` and 29 letters and digits, and its `ExecutionEngine.Type` is `EMR` unless given.
   IAM's `aws:ResourceTag` conditions read its tags.
-* **States**: an execution is `START_PENDING` as it starts, `RUNNING` from then on, and `FINISHED` once the cluster's
-  `step-duration-seconds` has passed (at once by default), with AWS's "Execution is finished for cluster ...". It is
-  `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An execution is terminated if it runs for
-  more than 30 days", in Floci's own wording.
-* **StopNotebookExecution** stops one that has not ended at once, `STOPPED` with AWS's "Execution is stopped for
-  cluster ...". One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **States**: in the `immediate` mode an execution is `START_PENDING` as it starts, `RUNNING` from then on, and
+  `FINISHED` once the cluster's `step-duration-seconds` has passed (at once by default), with AWS's "Execution is
+  finished for cluster ...". It is `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An
+  execution is terminated if it runs for more than 30 days", in Floci's own wording. In the `docker` mode its run sets
+  them (below).
+* **StopNotebookExecution** stops one that has not ended, `STOPPED` with AWS's "Execution is stopped for cluster ...":
+  at once with no notebook running, else `STOPPING` ("Execution is being stopped for cluster ...") until its run has
+  stopped. One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
 * **ListNotebookExecutions** lists the Region's executions that started from `From` (by default 30 days ago) to
   `To` (by default now), filtered by `EditorId`, `Status` and `ExecutionEngineId`, newest first, at most 50 to a page
   ("Returns a maximum of 50 notebook executions") after a `Marker`, which resumes only the listing it came from: the
   same account, Region and filters.
 
+### Running a notebook execution's notebook
+
+With `runner-mode` set to `docker`, an execution runs its notebook on its cluster as a step's command runs: a
+`spark-submit` there, a YARN application with the cluster's Spark settings, as the execution's `ExecutionRoleArn`,
+else the cluster's instance profile, with its `EnvironmentVariables`. No source names the kernel AWS runs a notebook
+with, so Floci runs it with a program of its own, needing only Python and PySpark, which every release's image has,
+not Jupyter:
+
+* **The notebook** is the execution's `NotebookS3Location`, read through the cluster's S3A. AWS finds an EMR
+  Notebook named by `EditorId` and `RelativePath` under the notebook's own S3 location, which Floci keeps none of, so
+  such an execution fails at once, in Floci's own wording.
+* **Its cells**: the code cells run in turn in one Python namespace that holds `spark` and `sc`, each keeping what it
+  printed, the value of its last expression, and any error, every output an earlier run left cleared first. Of
+  sparkmagic's cell commands, a `%%sql` cell runs its body with `spark.sql`, showing the result's first 20 rows, and a
+  `%%local` or `%%spark` one runs its body as Python; any other (`%%configure`, `%%info`, ...) is not run. A `%` or
+  `!` line of IPython's or sparkmagic's commands is not run either, where the cell is not Python as it stands.
+  `NotebookParams`, "Input parameters in JSON format", go in as papermill puts them, in a cell tagged
+  `injected-parameters` after the one tagged `parameters`, else first, as "You can pass different parameter values to
+  a notebook with a parameterized notebook cell", in place of any such cell an earlier run left; each parameter's name
+  must be a Python variable's, or the run fails before any cell. An environment variable `KERNEL_EXTRA_SPARK_OPTS`, as
+  AWS's example passes, goes to `spark-submit` as its options.
+* **The notebook as run**: no source gives where AWS writes it, so Floci writes it under the
+  `OutputNotebookS3Location` prefix, else beside the notebook, in a folder named for the execution, as `<name>.ipynb`
+  and `<name>.html`, and reports the one `OutputNotebookFormat` names, the HTML one, else the notebook, as the
+  execution's `OutputNotebookURI`.
+* **States**: `START_PENDING` until its container runs, then `RUNNING`; `FINISHED` once every cell has run; `FAILED`
+  at the first cell that raises (the notebook as run, written all the same, holds its error), where the run fails
+  otherwise (its reason giving the run's exit code, the notebook as run perhaps not written), where it could not
+  start, where its cluster shuts down, which stops the run, or after 30 days, in Floci's own wording. One Floci stopped
+  running when it restarted fails too.
+
 ## Application UIs
 
-Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI, YARN timeline server
-or on-cluster UI: a presigned URL opens a page Floci serves at `/_aws/emr/app-ui` on its own address (`base-url`, or
-`hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for. The link is signed with a key
-Floci makes as it starts and lasts an hour, as no source gives AWS's; one changed, past its hour or given before
-Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
+In the `immediate` mode, and for an interface the cluster does not run, a presigned URL opens a page Floci serves at
+`/_aws/emr/app-ui` on its own address (`base-url`, or `hostname`), with the cluster as `DescribeCluster` gives it and
+the interface asked for. The link is signed with a key Floci makes as it starts and lasts an hour, as no source gives
+AWS's; one changed, past its hour or given before Floci restarted opens a `403` page, and one whose cluster has gone a
+`404`.
+
+In the `docker` mode, an on-cluster UI that runs on the cluster's primary node opens for real: the `ResourceManager`
+("YARN ResourceManager | http://master-public-dns-name:8088/"), an `ApplicationMaster` through the ResourceManager's
+web proxy, and the `JobHistoryServer`, on a cluster whose primary node runs YARN (see **YARN**), and on one with Spark
+its `SparkHistoryServer` ("Spark HistoryServer | http://master-public-dns-name:18080/"). A step's Spark on the
+cluster's YARN keeps its event logs where "By default, Amazon EMR stores event logs", "the /var/log/spark/apps directory
+of HDFS" (`spark.eventLog.dir`, unless the cluster's `spark-defaults` give another, which the server then does not
+read), and gives the server's address as `spark.yarn.historyServer.address`, so an ended application's tracking URL
+leads to its page there; the server reads that folder only, whatever the cluster's `spark.history.*` settings say. On a
+cluster with Hadoop, the `YarnTimelineService`, Hadoop's YARN timeline server on its own default port, 8188, with its
+store on the primary node's volume, which the ResourceManager publishes its applications to and which, as no source
+gives how EMR's Tez reaches it, a Hive step's Tez logs its DAGs to through its REST interface; and on one with Tez too,
+where its image has Tez (a cluster with Hive, or Floci's Pig), the `TezUI` ("Tez |
+http://master-public-dns-name:8080/tez-ui"), Tez's own page, whose configuration names the
+timeline server and the ResourceManager, both of which answer its requests from its own host. Each opens on a host of
+its own, as AWS's application UIs are on hosts of their own under "emrappui-prod.us-east-1.amazonaws.com", which "are
+registered in the Public Suffix List": `http://<secret>-<port>.emrappui.<Floci's host and port>/`, the secret 26
+random letters and digits that only this link holds, so the host itself is the link's authority, as the interface
+takes no AWS credentials. Floci's host must resolve its subdomains: `localhost` and `localhost.floci.io` do, and Floci's
+TLS certificate names `*.emrappui.localhost` and `*.emrappui.localhost.floci.io`. Requests to the host go on to that
+port of the primary node, which Floci reaches at a port Docker publishes on the host's loopback interface alone, or,
+Floci in a container, on the cluster's network, which its container joins; the node's daemons write their links to
+one another by the node's name, and Floci makes each such link, in the text it sends, a link to that interface's own
+host under the same secret, so the ResourceManager's links to a job's history and to its containers' logs on the
+NodeManager of a primary node that works open too. A NodeManager on a core or task node, which Floci does not reach,
+keeps its links as written. The link lasts an hour, as the page's does, after which its host answers with a `403`
+page; once its cluster has ended, its host answers with a `404` one. A request's body goes on to the interface as it
+arrives, and an interface that sends nothing for a minute has the request given up with a `502` page.
 
 * **CreatePersistentAppUI** takes an EMR cluster's ARN of the account in the Region as its `TargetResourceArn`; Floci
   keeps none for an EMR on EKS virtual cluster. The persistent Spark History Server is there "Starting with Amazon
@@ -361,8 +423,28 @@ Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
   any source gives. A tag without its `Key`, "the minimum required information for a valid tag", is refused, as it is
   for sessions, Studios and notebook executions.
 * **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
-  refused. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI, the `ResourceManager` by default, while
-  the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. Both are `PresignedURLReady` at once.
+  refused. In the `docker` mode it opens the interface for real, `SHS` the Spark History Server, `YTS` the YARN
+  timeline server and `TEZ` the Tez UI, on a host of its own as an on-cluster UI does: while the cluster runs, its
+  primary node's; once it has ended, as "You can access application history and relevant log files for active and
+  terminated clusters", its kept history's, for the 30 days for which "The logs are available ... after the
+  application ends". Floci keeps it in a volume of the primary node's of its own, which holds the timeline server's
+  store (its entities kept 30 days rather than Hadoop's default 7) and, copied out of the cluster's HDFS as the cluster's
+  storage goes, its Spark applications' event logs, and as a reset or a shutdown removes a node still running; the
+  cluster's other storage goes as before, though a copy that fails keeps it, the event logs in it, for a later try or
+  a restart to remove. The URL is not `PresignedURLReady` while the cluster is ending or its storage
+  is going. Then a container of the image the cluster ran serves it, on a network of its own that no step's container
+  is on, started by the first link, the URL not `PresignedURLReady` until it answers, and stopped once no link to it is
+  valid, a later link starting it again. The kept history goes once its 30 days have passed, whether or not a link
+  asked for it. A restart keeps the histories of the clusters that ended within 30 days, and a reset removes every
+  one. Elsewhere the URL opens Floci's page, ready at once. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI,
+  the `ResourceManager` by default, while the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. With an
+  `ApplicationId`, the ResourceManager's link lands on the application's page, an application master's on its UI
+  through the web proxy, the JobHistory server's on the job of that id (`job_` in place of `application_`), the Spark
+  History Server's, the timeline server's and the Tez UI's on the application's; without one, on the cluster's
+  applications, its running ones, its jobs, its Spark applications, its application history and its DAGs. A link Floci opens for real is
+  `PresignedURLReady` once the primary node is: until then, as on a cluster no step has run on yet, the node starts as
+  a step's would ("Used to determine if the presigned URL is ready"), and its host answers with a `503` page meanwhile.
+  Any other is ready at once.
 * **GetClusterSessionCredentials** gives "temporary, HTTP basic credentials that are associated with a given runtime
   IAM role and used by a cluster with fine-grained access control activated": a random username and password that
   expire in an hour, as no source gives AWS's lifetime, for a `RUNNING` or `WAITING` cluster on `emr-6.11.0` or later
@@ -483,7 +565,10 @@ holding the driver and its executors, or a command or a script. The cluster itse
   reach, and the cluster's Spark, MapReduce (see **Hadoop streaming and MapReduce**) and Hive's Tez (see **Hive steps**)
   run on them. Beside them runs the MapReduce JobHistory server EMR's primary node runs too (a release's `mapred-site`
   classification "Restarts Hadoop MapReduce-HistoryServer"), on Hadoop's own ports, 10020 and 19888 for its web
-  pages, from the jobs' history in the cluster's HDFS, and the node is ready once it answers. A
+  pages, from the jobs' history in the cluster's HDFS, and, on a cluster with Spark, a Spark History Server on 18080,
+  from the Spark applications' event logs in `/var/log/spark/apps` of the cluster's HDFS, on one with Hadoop the YARN
+  timeline server on 8188, and on one with Tez the Tez UI's page on 8080 (see [Application UIs](#application-uis)); the
+  node is ready once each answers. A
   Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
   mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
   mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's
@@ -911,7 +996,7 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_CLUSTER_STARTUP_DELAY_SECONDS` | `0` | Seconds a new cluster takes to be ready to run steps, the first half `STARTING` and the second `BOOTSTRAPPING`; `0` makes it ready as soon as it is created |
 | `FLOCI_SERVICES_EMR_STEP_DURATION_SECONDS` | `0` | Seconds a step stays `RUNNING` before it completes; `0` completes it as soon as it starts |
 | `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
-| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step, and each session's Spark Connect server, in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps) and [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server)) |
+| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step, each session's Spark Connect server and each notebook execution's notebook in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps), [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server) and [Running a notebook execution's notebook](#running-a-notebook-executions-notebook)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label; a mirror sets `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` too |
 | `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image a `docker` cluster takes HDFS and YARN from, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the Hadoop of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |

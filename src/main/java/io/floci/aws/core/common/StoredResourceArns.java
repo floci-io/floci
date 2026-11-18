@@ -45,8 +45,12 @@ import java.util.Optional;
  * key value store a name names and the tags of any resource it tags; ECS, for the revision a task definition
  * reference resolves to, its default cluster and the tags of a cluster, a task definition, a service, a capacity
  * provider, a task or a container instance; ACM, for the tags of a certificate; Firehose, for the tags of a delivery
- * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain); looked up
- * lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through
+ * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain; Signer, for
+ * the tags of a signing profile; Access Analyzer, for the tags of an analyzer; Managed Service for Apache Flink, for
+ * the tags of an application; S3 Vectors, for the tags of a vector bucket or an index; Timestream for InfluxDB, for the
+ * tags of a DB instance, a DB cluster, a parameter group or a backup; CloudTrail, for the tags of a trail; Budgets, for
+ * the tags of a budget or a budget action; AWS FIS, for the tags of an experiment template, an experiment or an
+ * action); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through
  * {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on that
  * service directly.</p>
  *

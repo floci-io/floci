@@ -17,10 +17,11 @@ import java.util.List;
 
 /**
  * The page a presigned URL of {@code GetPersistentAppUIPresignedURL} or {@code GetOnClusterAppUIPresignedURL} opens
- * ({@link EmrAppUiService}). EMR opens the cluster's Spark History Server, Tez UI, YARN timeline server or on-cluster
- * UI; Floci serves none of them, so the page shows the cluster as DescribeCluster gives it and which interface was
- * asked for. A link that is not one of this process's, or whose hour has passed, opens a refusal instead, and so does
- * one whose cluster has gone. Like the rest of Floci the page takes no AWS credentials: the link is all it asks for.
+ * ({@link EmrAppUiService}) for an interface Floci does not run here: EMR opens the cluster's Spark History Server,
+ * Tez UI, YARN timeline server or on-cluster UI, and the page shows the cluster as DescribeCluster gives it and which
+ * interface was asked for. A link that is not one of this process's, or whose hour has passed, opens a refusal
+ * instead, and so does one whose cluster has gone. Like the rest of Floci the page takes no AWS credentials: the link
+ * is all it asks for.
  */
 @Path(EmrAppUiService.PATH)
 public class EmrAppUiController {
@@ -28,8 +29,8 @@ public class EmrAppUiController {
     // No source gives AWS's wording for these; they are Floci's.
     static final String INVALID = "This application UI link is not valid, or its hour has passed. Call"
             + " GetPersistentAppUIPresignedURL or GetOnClusterAppUIPresignedURL for a new one.";
-    static final String NO_UI = "Floci serves no Spark History Server, Tez UI, YARN timeline server or on-cluster"
-            + " application UI, so this page stands in for the interface EMR opens.";
+    static final String NO_UI = "Floci does not run this interface here, so this page stands in for the interface EMR"
+            + " opens; in the docker runner mode, a cluster whose primary node runs it opens it for real.";
 
     private final EmrAppUiService appUis;
 

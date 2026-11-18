@@ -138,7 +138,9 @@ public class IamQueryHandler {
         LOG.debugv("IAM action: {0}", action);
 
         try {
+            IamArnShapes.checkPolicySourceArn(action, params);
             IamRequestShapes.check(action, params);
+            IamArnShapes.checkPolicyArn(action, params);
             return switch (action) {
             // Users
             case "CreateUser" -> handleCreateUser(params);

@@ -156,6 +156,7 @@ AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
 AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
 AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
 AWS::Config::ConfigRule	Compliance	accepted and ignored
+AWS::DSQL::Cluster	MetricGroups	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
@@ -296,12 +297,10 @@ AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
 AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
-AWS::EKS::Cluster	EncryptionConfig	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
 AWS::EKS::Cluster	KubeApiServerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeControllerManagerConfig	accepted and ignored
 AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
-AWS::EKS::Cluster	KubernetesNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	Logging	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
@@ -374,11 +373,6 @@ AWS::IAM::Policy	PolicyDocument	accepted and ignored
 AWS::IAM::Role	Tags	accepted and ignored
 AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
 AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
-AWS::KMS::Key	EnableKeyRotation	accepted and ignored
-AWS::KMS::Key	Enabled	accepted and ignored
-AWS::KMS::Key	KeyPolicy	accepted and ignored
-AWS::KMS::Key	MultiRegion	accepted and ignored
-AWS::KMS::Key	Origin	accepted and ignored
 AWS::KMS::Key	PendingWindowInDays	accepted and ignored
 AWS::KMS::Key	RotationPeriodInDays	accepted and ignored
 AWS::Kinesis::Stream	DesiredShardLevelMetrics	accepted and ignored

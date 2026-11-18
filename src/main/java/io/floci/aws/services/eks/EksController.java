@@ -64,16 +64,18 @@ public class EksController {
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
     private final ObjectMapper objectMapper;
+    private final EksClusterManager clusterManager;
 
     @Inject
     public EksController(EksService eksService, EksAccessEntryService accessEntries,
                          EksPodIdentityAssociationService podIdentityAssociations,
-                         EksAddonService addons, ObjectMapper objectMapper) {
+                         EksAddonService addons, ObjectMapper objectMapper, EksClusterManager clusterManager) {
         this.eksService = eksService;
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
         this.objectMapper = objectMapper;
+        this.clusterManager = clusterManager;
     }
 
     /**
@@ -302,6 +304,10 @@ public class EksController {
     public Response createAddon(@PathParam("name") String name, CreateAddonRequest request) {
         Cluster cluster = eksService.requireClusterInRequestRegion(name);
         Addon addon = addons.create(cluster, request);
+        // After the add-on is stored and outside the add-on service's lock: the node is changed by an exec.
+        if (isPodIdentityAgent(addon)) {
+            clusterManager.podIdentityAgentChanged(cluster);
+        }
         return Response.ok(Map.of("addon", addon)).build();
     }
 
@@ -355,6 +361,10 @@ public class EksController {
                                 @QueryParam("preserve") Boolean preserve) {
         Cluster cluster = eksService.requireClusterInRequestRegion(name);
         Addon addon = addons.delete(cluster, addonName, Boolean.TRUE.equals(preserve));
+        // With preserve, EKS leaves the add-on's software running on the cluster, and so its answers.
+        if (isPodIdentityAgent(addon) && !Boolean.TRUE.equals(preserve)) {
+            clusterManager.podIdentityAgentChanged(cluster);
+        }
         return Response.ok(Map.of("addon", addon)).build();
     }
 
@@ -438,5 +448,9 @@ public class EksController {
         Cluster cluster = eksService.requireClusterInRequestRegion(name);
         PodIdentityAssociation association = podIdentityAssociations.delete(cluster, associationId);
         return Response.ok(Map.of("association", association)).build();
+    }
+
+    private static boolean isPodIdentityAgent(Addon addon) {
+        return EksPodIdentityWebhook.POD_IDENTITY_ADDON.equalsIgnoreCase(addon.addonName());
     }
 }

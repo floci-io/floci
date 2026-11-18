@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.s3vectors.model.VectorBucket;
@@ -25,6 +26,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -33,10 +35,14 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class S3VectorsService {
+public class S3VectorsService implements StoredResourceArns {
     private static final Logger LOG = Logger.getLogger(S3VectorsService.class);
     private static final ObjectReader STRICT_JSON_READER =
             new ObjectMapper().reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+    /** What a vector bucket's ARN resource starts with, its name following. */
+    private static final String BUCKET_RESOURCE = "bucket/";
+    /** What follows a bucket's ARN in the ARN of one of its indexes, the index's name following. */
+    private static final String INDEX_SEGMENT = "/index/";
 
     private final AccountAwareStorageBackend<VectorBucket> store;
     private final RegionResolver regionResolver;
@@ -69,11 +75,11 @@ public class S3VectorsService {
     }
 
     private String buildBucketArn(String region, String bucketName) {
-        return regionResolver.buildArn("s3vectors", region, "bucket/" + bucketName);
+        return regionResolver.buildArn("s3vectors", region, BUCKET_RESOURCE + bucketName);
     }
 
     private String buildIndexArn(String region, String bucketName, String indexName) {
-        return buildBucketArn(region, bucketName) + "/index/" + indexName;
+        return buildBucketArn(region, bucketName) + INDEX_SEGMENT + indexName;
     }
 
     public VectorBucket createVectorBucket(String bucketName, Object encryptionConfiguration, String region) {
@@ -445,6 +451,47 @@ public class S3VectorsService {
             index.setTags(new ConcurrentHashMap<>(tags));
             store.put(buildStorageKey(region, bucketName), bucket);
         }
+    }
+
+    @Override
+    public String namespace() {
+        return "s3vectors";
+    }
+
+    /** A request names a vector bucket or an index by its name, which its ARN carries whole: nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the vector bucket or the index whose ARN is {@code arn}, in the request's account, where the handlers
+     * read: an ARN of another account names none, and an index's ARN names the index's own tags, not its bucket's.
+     * The bucket is read in place under the Region the ARN names and its name, a bucket stored before storage was
+     * account-aware included, and the bucket or the index matched on the whole ARN. Tags are only ever replaced by a
+     * new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "s3vectors")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(store.accountId()) || !parsed.resource().startsWith(BUCKET_RESOURCE)) {
+            return Map.of();
+        }
+        String path = parsed.resource().substring(BUCKET_RESOURCE.length());
+        int segment = path.indexOf(INDEX_SEGMENT);
+        String bucketName = segment < 0 ? path : path.substring(0, segment);
+        Optional<VectorBucket> bucket = AccountAwareStorageBackend.readInAccount(store, parsed.accountId(),
+                buildStorageKey(parsed.region(), bucketName));
+        Map<String, String> tags = segment < 0
+                ? bucket.filter(held -> arn.equals(held.getVectorBucketArn())).map(VectorBucket::getTags)
+                        .orElse(Map.of())
+                : bucket.map(held -> held.getIndexes().get(path.substring(segment + INDEX_SEGMENT.length())))
+                        .filter(index -> arn.equals(index.getIndexArn())).map(VectorIndex::getTags)
+                        .orElse(Map.of());
+        return new LinkedHashMap<>(tags);
     }
 
     public void putVectors(String bucketName, String indexName, List<VectorData> vectors, String region) {

@@ -82,35 +82,6 @@ final class CfnPropertyTypes {
         return shape;
     }
 
-    /** Reject unmodeled members for a provisioner that passes the whole schema-shaped object to a service. */
-    static void rejectUnknownMembers(String resourceType, JsonNode properties) {
-        String shape = Holder.MODEL.operations().get(resourceType);
-        if (shape == null) {
-            throw notVendored(resourceType);
-        }
-        rejectUnknownMembers(properties, shape);
-    }
-
-    private static void rejectUnknownMembers(JsonNode value, String shapeName) {
-        if (value == null || value.isNull()) {
-            return;
-        }
-        Shape shape = Holder.MODEL.shapes().get(shapeName);
-        if ("structure".equals(shape.type()) && value.isObject()) {
-            value.properties().forEach(member -> {
-                String nested = shape.members().get(member.getKey());
-                if (nested == null) {
-                    throw new AwsException("ValidationError", "Unknown property: " + member.getKey(), 400);
-                }
-                rejectUnknownMembers(member.getValue(), nested);
-            });
-        } else if ("list".equals(shape.type()) && value.isArray()) {
-            value.forEach(element -> rejectUnknownMembers(element, shape.element()));
-        } else if ("map".equals(shape.type()) && value.isObject()) {
-            value.forEach(element -> rejectUnknownMembers(element, shape.element()));
-        }
-    }
-
     private static IllegalStateException notVendored(String what) {
         return new IllegalStateException(what + " is not in " + RESOURCE_NAME
                 + "; add the type to tools/aws/regen_cfn_property_types.py");
@@ -170,9 +141,8 @@ final class CfnPropertyTypes {
 
     /**
      * A walk over template values against the shapes the resource schemas declare, resolving them
-     * on the way. What {@code AWS::NoValue} stands for is left out, and members a shape does not
-     * declare are resolved as they are. How a scalar converts, and what a value of the wrong type
-     * does, is each reader's own.
+     * on the way. What {@code AWS::NoValue} stands for is left out. How an unmodeled member or a
+     * scalar converts, and what a value of the wrong type does, is each reader's own.
      */
     private abstract static class ShapeWalk {
 
@@ -198,6 +168,10 @@ final class CfnPropertyTypes {
         /** The members of the object {@code value} in the order they are read: the template's by default. */
         Iterable<Map.Entry<String, JsonNode>> members(JsonNode value, Shape shape) {
             return value.properties();
+        }
+
+        JsonNode readUnknown(String path, String name, JsonNode raw) {
+            return engine.resolveNode(raw);
         }
 
         JsonNode read(String path, String property, JsonNode raw, String shapeName) {
@@ -240,7 +214,7 @@ final class CfnPropertyTypes {
             ObjectNode out = JsonNodeFactory.instance.objectNode();
             for (Map.Entry<String, JsonNode> member : members(value, shape)) {
                 String memberShape = shape.members().get(member.getKey());
-                JsonNode read = memberShape == null ? engine.resolveNode(member.getValue())
+                JsonNode read = memberShape == null ? readUnknown(path, member.getKey(), member.getValue())
                         : read(child(path, member.getKey()), member.getKey(), member.getValue(), memberShape);
                 if (read != null) {
                     out.set(member.getKey(), read);
@@ -349,6 +323,17 @@ final class CfnPropertyTypes {
             return read(path, path.substring(path.lastIndexOf('/') + 1), engine.omitNoValue(raw), shapeName);
         }
 
+        /**
+         * The property {@code property} of {@code resourceType} in {@code props} read as the shape its
+         * resource schema declares; null when {@code props} lacks it or it is {@code AWS::NoValue}.
+         */
+        JsonNode readProperty(String resourceType, JsonNode props, String property) {
+            if (props == null || !props.has(property)) {
+                return null;
+            }
+            return read(property, props.get(property), propertyShape(resourceType, property));
+        }
+
         /** Throws the first model validation failure found by {@link #read}, if any. */
         void finish() {
             if (modelFailure != null) {
@@ -419,6 +404,7 @@ final class CfnPropertyTypes {
 
         private final List<Violation> violations = new ArrayList<>();
         private boolean unconverted;
+        private boolean preserveEcsHandlerSemantics;
 
         HandlerReader(CloudFormationTemplateEngine engine) {
             this(engine, Holder.MODEL);
@@ -434,6 +420,8 @@ final class CfnPropertyTypes {
             if (shape == null) {
                 throw notVendored(resourceType);
             }
+            // ECS forwards unmodeled members and uses presence-only required checks in its API path.
+            preserveEcsHandlerSemantics = "AWS::ECS::TaskDefinition".equals(resourceType);
             JsonNode raw = props == null || props.isNull() ? JsonNodeFactory.instance.objectNode() : props;
             JsonNode read = read("", "", engine.omitNoValue(raw), shape);
             if (unconverted) {
@@ -486,7 +474,17 @@ final class CfnPropertyTypes {
         @Override
         void checkRequired(String path, JsonNode value, Shape shape) {
             for (String member : shape.required()) {
-                if (!value.has(member)) {
+                JsonNode raw = value.get(member);
+                boolean absent = raw == null;
+                if (!absent && !preserveEcsHandlerSemantics) {
+                    absent = raw.isNull() || raw.isMissingNode();
+                    if (!absent && "string".equals(model.shapes().get(shape.members().get(member)).type())) {
+                        JsonNode resolved = engine.resolveNode(raw);
+                        absent = resolved == null || resolved.isNull() || resolved.isMissingNode()
+                                || resolved.isTextual() && resolved.textValue().isBlank();
+                    }
+                }
+                if (absent) {
                     record(new Violation(path, "required key [" + member + "] not found", true), true);
                 }
             }
@@ -503,6 +501,15 @@ final class CfnPropertyTypes {
             });
             value.properties().forEach(member -> ordered.putIfAbsent(member.getKey(), member.getValue()));
             return ordered.entrySet();
+        }
+
+        @Override
+        JsonNode readUnknown(String path, String name, JsonNode raw) {
+            if (preserveEcsHandlerSemantics) {
+                return super.readUnknown(path, name, raw);
+            }
+            record(new Violation(path, "extraneous key [" + name + "] is not permitted", false), false);
+            return null;
         }
 
         private void record(Violation violation, boolean converts) {

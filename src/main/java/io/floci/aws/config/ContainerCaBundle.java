@@ -265,7 +265,7 @@ public final class ContainerCaBundle {
         try {
             return Optional.of(sslContext(bundle.get()));
         } catch (IOException | GeneralSecurityException e) {
-            LOG.warnv(e, "Cannot read {0}; Floci's own HTTPS clients trust the JVM's roots only", bundle.get());
+            LOG.warnv(e, "Cannot read {0}; Floci''s own HTTPS clients trust the JVM''s roots only", bundle.get());
             return Optional.empty();
         }
     }

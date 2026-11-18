@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService.RestoreResult;
@@ -24,6 +25,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -337,6 +339,51 @@ class TimestreamInfluxDbServiceTest {
 
         service.restoreFromDbBackup(json(replaceBase + "}"), REGION);
         verify(containerManager).restore("container-1", backupId);
+    }
+
+    /**
+     * IAM's lookup reads the tags of the resource the ARN names, as the tag calls leave them, and nothing for another
+     * account's, another Region's or an unknown resource.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheResourceTheArnNames() throws Exception {
+        DbInstance instance = createInstance("tagged-db", null);
+        String instanceArn = instance.getArn();
+        service.tagResource(json("{\"resourceArn\":\"" + instanceArn
+                + "\",\"tags\":{\"team\":\"data\",\"env\":\"dev\"}}"));
+        service.untagResource(json("{\"resourceArn\":\"" + instanceArn + "\",\"tagKeys\":[\"env\"]}"));
+        DbParameterGroup group = service.createDbParameterGroup(
+                json("{\"name\":\"tagged-group\",\"tags\":{\"team\":\"web\"}}"), REGION);
+
+        assertEquals("timestream-influxdb", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(instanceArn));
+        assertEquals(Map.of("team", "web"), service.storedTags(group.getArn()));
+        assertTrue(service.storedTags(instanceArn.replace(ACCOUNT, "111122223333")).isEmpty());
+        assertTrue(service.storedTags(instanceArn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(instanceArn.replace("db-instance/", "db-cluster/")).isEmpty());
+        assertTrue(service.storedTags(group.getArn().replace(group.getId(), "missing123")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:timestream:us-east-1:000000000000:database/db").isEmpty());
+    }
+
+    /** A parameter group stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareRecordInPlace() {
+        InMemoryStorage<String, DbParameterGroup> raw = new InMemoryStorage<>();
+        TimestreamInfluxDbService legacyState = new TimestreamInfluxDbService(
+                AccountAwareStorageBackend.<DbInstance>inMemory(ACCOUNT),
+                AccountAwareStorageBackend.<DbCluster>inMemory(ACCOUNT),
+                new AccountAwareStorageBackend<>(raw, null, ACCOUNT),
+                AccountAwareStorageBackend.<DbBackup>inMemory(ACCOUNT),
+                new RegionResolver(REGION, ACCOUNT), mock(SecretsManagerService.class), objectMapper, containerManager,
+                true, Runnable::run);
+        DbParameterGroup legacy = new DbParameterGroup();
+        legacy.setId("legacy1234");
+        legacy.setArn("arn:aws:timestream-influxdb:us-east-1:000000000000:db-parameter-group/legacy1234");
+        legacy.setTags(Map.of("team", "data"));
+        raw.put(REGION + ":legacy1234", legacy);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(legacy.getArn()));
+        assertEquals(Set.of(REGION + ":legacy1234"), raw.keys());
     }
 
     @Test

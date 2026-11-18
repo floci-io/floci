@@ -12,18 +12,26 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -604,6 +612,34 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
+        // The team's ARN is kept as the request names it: the emulator has no Multi-Party
+        // Approval service to check it against.
+        String team = "arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha";
+        String association = """
+                {"Action":"IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"}""";
+
+        call("AssociateMpaTeam", """
+                {"Action":"IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE","MpaTeamArn":"%s"}""".formatted(team))
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.Action", equalTo("IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"))
+                    .body("MpaTeamAssociation.MpaTeamArn", equalTo(team))
+                    .body("MpaTeamAssociation.AssociationState", equalTo("ACTIVE"));
+
+        call("GetMpaTeamAssociation", association)
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.MpaTeamArn", equalTo(team));
+
+        call("DisassociateMpaTeam", association)
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.AssociationState", equalTo("DELETE_PENDING"));
+
+        call("GetMpaTeamAssociation", association)
+                .then().statusCode(400)
+                    .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
     void aReplicationRegionOfAnotherPartitionIsRefused() {
         // A key is replicated within the partition it is in, as the reference says, so a
         // Region of another partition is refused.
@@ -967,15 +1003,37 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
-    void aKeyIsDeleted() {
+    void aKeyIsDeletedAndStaysReadableWhileItIsPending() {
         String arn = keyArn();
 
         call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(200);
 
         call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.KeyState", equalTo("DELETE_PENDING"));
+    }
+
+    @Test
+    void aDeletedKeyIsRestored() {
+        String arn = keyArn();
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200);
+
+        call("RestoreKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.KeyState", equalTo("CREATE_COMPLETE"))
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.DeletePendingTimestamp", nullValue());
+    }
+
+    @Test
+    void aKeyThatIsNotPendingDeletionIsNotRestored() {
+        String arn = keyArn();
+
+        call("RestoreKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
                 .then().statusCode(400)
-                    .body("__type", containsString("ResourceNotFoundException"));
+                    .body("__type", containsString("ConflictException"));
     }
 
     @Test
@@ -991,11 +1049,11 @@ class PaymentCryptographyIntegrationTest {
         // as the unknown operation it is. The body it carries does not change that: a body
         // that breaks the model's rules is not the answer to an operation that is not
         // served at all.
-        call("RestoreKey", "{}")
+        call("GetCertificateSigningRequest", "{}")
                 .then().statusCode(400)
                     .body("__type", containsString("UnknownOperationException"));
-        call("RestoreKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:"
-                + "000000000000:key/abcdefghijklmnop\"}")
+        call("GetCertificateSigningRequest", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:"
+                + "us-east-1:000000000000:key/abcdefghijklmnop\"}")
                 .then().statusCode(400)
                     .body("__type", containsString("UnknownOperationException"));
     }
@@ -1074,10 +1132,14 @@ class PaymentCryptographyIntegrationTest {
     void aWaitingPeriodOutsideTheServiceRangeIsRefused() {
         String arn = keyArn();
 
-        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":1}")
+        call("DeleteKey", """
+                {"KeyIdentifier":"%s","DeleteKeyInDays":1}
+                """.formatted(arn))
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
-        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":7}")
+        call("DeleteKey", """
+                {"KeyIdentifier":"%s","DeleteKeyInDays":7}
+                """.formatted(arn))
                 .then().statusCode(200);
     }
 
@@ -1088,13 +1150,43 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void theKeysAreListedByTheirState() {
         String arn = keyArn();
+        // The key this test deletes is not cleaned up again: a deletion of a key that is
+        // already pending deletion is refused, and the key stays pending until the waiting
+        // period ends.
+        String secondArn = keyArn();
+        cleanup.register(() -> call("DeleteKey", "{\"KeyIdentifier\":\"" + secondArn + "\"}")
+                .then().statusCode(200));
+        List<String> listedArns = new ArrayList<>();
+        Map<String, Object> request = new HashMap<>(Map.of("KeyState", "CREATE_COMPLETE", "MaxResults", 1));
+        Set<String> seenTokens = new HashSet<>();
+        String nextToken;
+        do {
+            Response page = call("ListKeys", PaymentCryptographyTestFixtures.request(request).toString())
+                    .then().statusCode(200)
+                        .body("Keys.KeyState", everyItem(equalTo("CREATE_COMPLETE")))
+                        .extract().response();
+            listedArns.addAll(page.jsonPath().getList("Keys.KeyArn", String.class));
+            nextToken = page.path("NextToken");
+            if (nextToken != null) {
+                assertThat("ListKeys must advance its continuation token", seenTokens.add(nextToken), equalTo(true));
+            }
+            request.put("NextToken", nextToken);
+        } while (nextToken != null);
+        assertThat(listedArns, hasItems(arn, secondArn));
+        call("ListKeys", "{\"KeyState\":\"DELETE_PENDING\"}")
+                .then().statusCode(200)
+                    .body("Keys.KeyArn", not(hasItem(equalTo(arn))));
+
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200);
 
         call("ListKeys", "{\"KeyState\":\"CREATE_COMPLETE\"}")
                 .then().statusCode(200)
-                    .body("Keys.KeyArn", hasItem(equalTo(arn)));
+                    .body("Keys.KeyArn", not(hasItem(equalTo(arn))));
         call("ListKeys", "{\"KeyState\":\"DELETE_PENDING\"}")
                 .then().statusCode(200)
-                    .body("Keys", hasSize(0));
+                    .body("Keys.KeyArn", hasItem(equalTo(arn)));
+
         call("ListKeys", "{\"KeyState\":\"NO_SUCH_STATE\"}")
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));

@@ -11,7 +11,8 @@
 | `CreateKey` | Create a key with fresh material |
 | `GetKey` | Get a key's attributes, state and check value |
 | `ListKeys` | List the keys of a region |
-| `DeleteKey` | Delete a key |
+| `DeleteKey` | Schedule a key for deletion |
+| `RestoreKey` | Cancel a scheduled key deletion |
 | `StartKeyUsage` | Start the use of a key |
 | `StopKeyUsage` | Stop the use of a key |
 | `CreateAlias` | Point an alias name at a key |
@@ -35,6 +36,9 @@
 | `PutResourcePolicy` | Attach or replace the resource-based policy of a key |
 | `GetResourcePolicy` | Get the resource-based policy of a key |
 | `DeleteResourcePolicy` | Remove the resource-based policy of a key |
+| `AssociateMpaTeam` | Associate a Multi-Party Approval team with a protected operation |
+| `GetMpaTeamAssociation` | The Multi-Party Approval team of a protected operation |
+| `DisassociateMpaTeam` | Remove the Multi-Party Approval team of a protected operation |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -54,11 +58,21 @@
   copy of its primary's material and metadata, so a replica carries the primary's tags
   and a change to them is replicated. The alias names are the region's own: an alias
   names a key in its own region, and a replica is named by an alias of that region.
-- **Deletion:** `DeleteKey` removes the key and the aliases that name it, and answers
-  with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
-  A key that is gone does not come back: a tagging request for it is refused. The
-  service deletes a key the moment it is asked to, so the waiting period of
-  `DeleteKeyInDays` is checked against the range the model states and is not waited for.
+- **Deletion and restore:** `DeleteKey` disables the key and answers with the key, its
+  state `DELETE_PENDING` and the moment its deletion takes effect. The key is kept, so it
+  stays readable and keeps its aliases and tags until the waiting period ends.
+  `DeleteKeyInDays` is checked against the range the model states. `RestoreKey` cancels a
+  scheduled deletion and returns the key to `CREATE_COMPLETE` with no pending deletion
+  timestamp; a key that is not pending deletion is refused with `ConflictException`. The
+  reference's own example of the restore says that two members change, the state and the
+  pending timestamp, so the restored key stays disabled and keeps the moments of its use:
+  it is `StartKeyUsage` that enables a key again. The waiting period is not swept by a
+  timer: the emulator keeps the key pending rather than deleting it on a clock. A key that
+  is already pending deletion is refused with `ConflictException`, because the deletion is
+  already under way, and the replicas of the key carry its pending state and the moment the
+  deletion takes effect, as they carry the rest of its metadata. A replica is read-only, so
+  the deletion is cancelled on the primary: a request that names a replica is refused with
+  `ValidationException`.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled`, `Tags`,
   `DeriveKeyUsage` and `ReplicationRegions`, and a key created disabled or with tags
   comes back that way. The `KeyUsage` and the
@@ -76,9 +90,25 @@
   summary the model names: its identifier, its state, its attributes, its check value,
   its two flags and, for a key that is replicated, the kind of key it is and the region
   it is the primary of.
-- **The members a request may name that the service does not read:** `ImportKey` takes
-  `RequesterComment`, and the service reads none of it. No approval is recorded, because
-  the multi-party approval is not emulated.
+- **The members a request may name that the service does not read:** `ImportKey`,
+  `AssociateMpaTeam` and `DisassociateMpaTeam` take `RequesterComment`, and the service
+  reads none of it.
+- **The Multi-Party Approval team of a protected operation:** a protected operation has one
+  team, so a second association replaces the first. The association answers with the
+  operation, the team and the state of the association, and removing it answers with the
+  association as it was, its state now `DELETE_PENDING`, and the association is gone from
+  the service. An operation with no team is refused as the resource the reference cannot
+  find. The team's ARN is kept as the request names it: the emulator has no Multi-Party
+  Approval service to check it against. The requester's comment is read by nobody, so no
+  approval session is recorded.
+- **The approval session itself is not made:** the reference holds the import of a root
+  certificate pending until the team approves it, and answers with a key whose state is
+  `CREATE_IN_PROGRESS` and whose `MpaStatus` carries the session. The emulator has no
+  Multi-Party Approval service to ask, so the import is not held pending and the key is
+  imported at once. The protected operation is the one the reference names, the import of
+  a root public key certificate. The disassociation is not held either: the reference holds
+  it pending the approval of the team that is associated, and the emulator answers it with
+  the state `DELETE_PENDING` and takes the association away at once.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
   that names none removes the key the alias names and leaves the alias. `CreateAlias`
   refuses an alias without a key, as the reference does, though its model requires
@@ -245,7 +275,8 @@
   on, so a policy that names another key is refused. The reference attaches a policy to the
   primary key alone, so a replica takes none and a request that names one is refused. The
   access the policy grants is not enforced: the service's operations are not among the ones
-  IAM checks.
+  IAM checks. A key that is pending deletion keeps its policy, because the key is still
+  there.
 - **Key usage:** `StopKeyUsage` disables the key and records when it stopped, and
   `StartKeyUsage` enables it again and records when it started. The moment recorded is the
   moment the key changed state, so a request that names a key that is already in the state
@@ -253,9 +284,11 @@
   readable and its material stays where it is, so it can be started again. A replica is
   read-only, so the change is made on the primary, and a request that names a replica is
   refused. The change reaches the replicas: a stop on the primary stops the use of the
-  replicas too, as the reference says.
-- **Not yet emulated:** the key restore operation, the multi-party approval operations
-  and the certificate signing request.
+  replicas too, as the reference says. A key that is pending deletion is not the caller's
+  to start or stop: the reference does not publish the answer for that case, so the
+  request is refused with `ConflictException`, which is the code the service uses for a
+  request that conflicts with the state of a key.
+- **Not yet emulated:** the certificate signing request.
 
 ## Configuration
 

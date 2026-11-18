@@ -483,7 +483,7 @@ public class DockerClientProducer {
         connection.tlsCertPath().ifPresent(path -> {
             if (connection.skipTlsVerify()) {
                 LOG.infov("Using TLS material from the active Docker context at: {0}, with server "
-                        + "certificate verification skipped per the context's SkipTLSVerify setting.",
+                        + "certificate verification skipped per the context''s SkipTLSVerify setting.",
                         path);
                 builder.withCustomSslConfig(new SkipVerifySslConfig(path.toString()));
             } else {

@@ -126,6 +126,22 @@ public interface EmulatorConfig {
 
     ProtocolsConfig protocols();
 
+    /** The opt-in log of every request and response, one JSON object per line, for debugging. */
+    RequestLogConfig requestLog();
+
+    interface RequestLogConfig {
+        /** Write each request and its response to {@link #file()}. Env: FLOCI_REQUEST_LOG_ENABLED */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Where the log is written, one JSON object per line (JSONL); {@code ./floci-requests.jsonl} when unset. It
+         * holds request and response bodies as plain text, which can include secrets: known secret headers and query
+         * parameters are redacted, but a secret inside a body is not. Env: FLOCI_REQUEST_LOG_FILE
+         */
+        Optional<String> file();
+    }
+
     interface NetworkConfig {
         SecurityGroupEnforcementConfig securityGroupEnforcement();
     }
@@ -1370,6 +1386,14 @@ public interface EmulatorConfig {
     interface FisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Whether the {@code aws:fis:inject-api-*} actions take any service namespace instead of only the
+         * {@code ec2} and {@code kinesis} ones AWS supports, so they can inject errors into the other services Floci
+         * emulates ({@code FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE}).
+         */
+        @WithDefault("false")
+        boolean injectApiAnyService();
     }
 
     interface Route53ServiceConfig {

@@ -206,6 +206,66 @@ class CloudFormationEksIntegrationTest {
                 + team + "\"}" + (extraTag.isEmpty() ? "" : ", " + extraTag) + "]");
     }
 
+    @Test
+    void aClusterIsCreatedWithItsEncryptionAndNetworkSettings() {
+        String stack = "cfn-eks-set-" + Long.toString(System.nanoTime(), 36);
+        String key = "arn:aws:kms:us-east-1:000000000000:key/11111111-2222-3333-4444-555555555555";
+        String listed = "\"EncryptionConfig\": [{\"Provider\": {\"KeyArn\": \"" + key
+                + "\"}, \"Resources\": [\"secrets\"]}], " + NETWORK;
+        String bare = "\"EncryptionConfig\": [{\"Provider\": {\"KeyArn\": \"" + key + "\"}}]";
+        String template = "{\"Resources\": {"
+                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + listed + "}},"
+                + "\"Bare\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + bare + "}}}}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, template, "CREATE_COMPLETE");
+            JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+            assertEquals(key, cluster.getString("cluster.encryptionConfig[0].provider.keyArn"));
+            assertEquals(List.of("secrets"), cluster.getList("cluster.encryptionConfig[0].resources"));
+            assertEquals("172.20.0.0/16", cluster.getString("cluster.kubernetesNetworkConfig.serviceIpv4Cidr"));
+            assertEquals(List.of("secrets"), given().get("/clusters/" + physicalId(client, stack, "Bare"))
+                    .jsonPath().getList("cluster.encryptionConfig[0].resources"));
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aBlankEncryptionConfigFailsTheClusterInsteadOfCreatingItUnencrypted() {
+        String stack = "cfn-eks-blank-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, subjectStack("", "", "AWS::EKS::Cluster",
+                    ROLE + "\"EncryptionConfig\": \"\""), "ROLLBACK_COMPLETE");
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void changingTheServiceCidrReplacesTheClusterWithTheNewOne() {
+        String stack = "cfn-eks-cidr-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, subjectStack("", "", "AWS::EKS::Cluster", ROLE + NETWORK),
+                    "CREATE_COMPLETE");
+            String first = physicalId(client, stack, "Subject");
+            createUpdateChangeSet(client, stack, "cidr", subjectStack("", "", "AWS::EKS::Cluster",
+                    ROLE + NETWORK.replace("172.20.0.0/16", "192.168.128.0/20")));
+            executeAndAwaitUpdate(client, stack, "cidr");
+            String second = physicalId(client, stack, "Subject");
+            assertNotEquals(first, second);
+            assertEquals("192.168.128.0/20", given().get("/clusters/" + second).jsonPath()
+                    .getString("cluster.kubernetesNetworkConfig.serviceIpv4Cidr"));
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static final String ROLE = "\"RoleArn\": \"arn:aws:iam::000000000000:role/eks-set\", ";
+    private static final String NETWORK = "\"KubernetesNetworkConfig\": {\"IpFamily\": \"ipv4\","
+            + " \"ServiceIpv4Cidr\": \"172.20.0.0/16\"}";
+
     private static String cluster(String role, String team) {
         return subjectStack("", "", "AWS::EKS::Cluster", "\"RoleArn\": \"arn:aws:iam::000000000000:role/" + role
                 + "\", \"Tags\": [{\"Key\": \"team\", \"Value\": \"" + team + "\"}]");

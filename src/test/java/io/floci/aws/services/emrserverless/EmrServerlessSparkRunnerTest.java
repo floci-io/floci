@@ -1017,6 +1017,30 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aStepOnItsClustersYarnKeepsItsEventLogsInTheClustersHdfsUnlessItsClusterSaysOtherwise() {
+        SparkJobRunner.Job job = stepJob(Map.of("spark.eventLog.dir", "s3://logs/spark/"))
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci:4566")
+                        .withSparkHistoryServer("ip-10-0-0-1.ec2.internal"));
+
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566", List.of());
+
+        // "By default, Amazon EMR stores event logs in the /var/log/spark/apps directory of HDFS", which the primary
+        // node's Spark History Server reads, and which an ended application's tracking URL leads to.
+        assertTrue(arguments.contains("spark.eventLog.enabled=true"), arguments.toString());
+        int hdfs = arguments.indexOf("spark.eventLog.dir=hdfs:///var/log/spark/apps");
+        assertTrue(hdfs > 0 && arguments.indexOf("spark.eventLog.dir=s3://logs/spark/") > hdfs, arguments.toString());
+        assertTrue(arguments.contains("spark.yarn.historyServer.address=ip-10-0-0-1.ec2.internal:18080"));
+        assertFalse(EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT).toString()
+                .contains("spark.eventLog.dir"));
+        // A cluster whose primary node runs no Spark History Server, one without Spark, keeps the image's.
+        String withoutServer = EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of())
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci:4566")), ENDPOINT,
+                List.of()).toString();
+        assertFalse(withoutServer.contains("spark.eventLog") || withoutServer.contains("historyServer"),
+                withoutServer);
+    }
+
+    @Test
     void aStepNotOnYarnRunsInLocalModeWithNoneOfYarnsSettings() {
         List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT);
 
@@ -1238,6 +1262,22 @@ class EmrServerlessSparkRunnerTest {
 
         verify(spec, never()).withEnv(eq("FLOCI_HADOOP_ROOT"), anyString());
         verify(spec, never()).withEnv(eq("FLOCI_YARN_SITE"), anyString());
+    }
+
+    @Test
+    void aHiveStepsTezLogsItsDagsToTheTimelineServerOfItsClusterWhereItsPrimaryNodeRunsOne() {
+        List<String> logged = EmrServerlessSparkRunner.hiveArguments(hiveJob(List.of("-e", "select 1"))
+                .onStorage(ON_YARN.withTimelineServer("ip-10-0-0-1.ec2.internal")), ENDPOINT, AWS_ENVIRONMENT);
+        List<String> notLogged = EmrServerlessSparkRunner.hiveArguments(
+                hiveJob(List.of("-e", "select 1")).onStorage(ON_YARN), ENDPOINT, AWS_ENVIRONMENT);
+
+        for (String setting : List.of(
+                "tez.history.logging.service.class=org.apache.tez.dag.history.logging.ats.ATSHistoryLoggingService",
+                "yarn.timeline-service.enabled=true",
+                "yarn.timeline-service.hostname=ip-10-0-0-1.ec2.internal")) {
+            assertTrue(logged.contains(setting), setting + " in " + logged);
+            assertFalse(notLogged.contains(setting), setting + " in " + notLogged);
+        }
     }
 
     @Test

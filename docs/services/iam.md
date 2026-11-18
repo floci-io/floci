@@ -449,6 +449,44 @@ violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
 `src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
 generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
+### What a malformed policy ARN answers
+
+`PolicyArn` is `arnType` on every operation that takes one, 20 to 2048 characters and no pattern,
+so the declared check refuses a shorter value and nothing holds the rest to parsing as an ARN. What
+AWS answers beyond that length is recorded rather than published, and it is two sentences rather
+than one, both `ValidationError` with a 400 and a sender fault.
+
+- Attaching names the value: `ARN <value> is not valid.` Recorded on `AttachRolePolicy` for a bare
+  policy name on 2026-11-03, and on `AttachUserPolicy`, `AttachGroupPolicy` and `AttachRolePolicy`
+  for a value that is no ARN at all on 2026-11-06.
+- Everything else answers `Invalid ARN:  Could not be parsed!`, which is wholly fixed: the slot the
+  value would fill renders empty, so two spaces follow the colon and the request's value never
+  appears in it. Recorded on the three `Detach*Policy` operations on 2026-11-06, on
+  `ListEntitiesForPolicy` on 2026-11-03 and on `GetPolicy` on 2026-10-29.
+
+The remaining operations that take the member, the tag and version families among them, carry no
+recording and answer the parse sentence with those eight: one member read by one parser answers one
+way, and the attach side is the exception the recordings name. That is this emulator's reading
+under the standing decision rather than a measurement. A value that parses as an ARN and names no
+policy is unchanged by all of this, still the 404 `NoSuchEntity` each operation already answered.
+
+An older recording disagrees about the attach side and is no longer followed. LocalStack's
+AWS-validated snapshots have `AttachUserPolicy` and `AttachRolePolicy` answering the parse sentence
+for a 21-character value that is no ARN and for a bare policy name, validated 2025-03-06 and
+2025-06-19, where all three 2026 recordings have the attach side naming the value. Two
+AWS-validated sources disagree on one operation and one class of input, seventeen months apart, so
+the reading here is that AWS reworded that side between them and the newer recordings are what this
+emulator follows. A recording that shows otherwise moves this paragraph and `IamArnShapes`.
+
+`PolicySourceArn`, which the two principal simulators resolve an entity from, carries the same type
+and one more recorded case: a value of `*` answers `InvalidInput` 400, `Invalid Entity Arn: * does
+not clearly define entity type and name.`, where the member's declared minimum is 20 and that value
+is one character, so AWS's entity parse runs ahead of its length check for it. Recorded on
+`SimulatePrincipalPolicy` on 2026-11-03. `GetContextKeysForPrincipalPolicy` takes the same member
+through the same resolver and answers it the same way, which is a reading rather than a recording.
+A value that clears 20 characters and parses as no ARN keeps the sentence its own capture settled,
+`Invalid ARN provided in the request: <value>`, and a value under 20 keeps the declared length.
+
 ### Permission Boundaries
 
 | Action | Description |
@@ -1343,6 +1381,12 @@ conditioned on MFA reads:
   the session then carries differs by operation, as it does on AWS: a `GetSessionToken` session is
   MFA-authenticated on its own requests, while an assumed-role session is not, "once the user has
   assumed the role, no further MFA checks are made".
+- **A device decides what a session token may reach.** Under enforcement a `GetSessionToken` session
+  calls IAM only where a device minted it, "you cannot call any IAM API operations unless MFA
+  authentication information is included in the request", and reaches no STS operation but
+  `AssumeRole` and `GetCallerIdentity` either way. The refusal names the operation and what the
+  credentials do not carry; see [STS MFA](sts.md#mfa). An assumed-role session carries no such
+  limit.
 
 What a device still does not reach is the console sign-in AWS also gates on one, there being no
 sign-in here, and the hardware and FIDO device types above, so the device behind a session is
@@ -3155,7 +3199,8 @@ variable can only resolve to a key floci populates, which is the list under
 
 A role trust policy is the narrower case, because `sts:AssumeRole` is authorized before there is a
 session to describe: its context carries `aws:PrincipalArn`, `aws:PrincipalAccount`,
-`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `sts:RoleSessionName`,
+`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `aws:CurrentTime`,
+`aws:EpochTime`, `sts:RoleSessionName`, `aws:TokenIssueTime` when the caller is itself a session,
 and `sts:ExternalId` when the request passes one. `aws:username`, `aws:userid` and
 `aws:PrincipalType` are not among them, so a variable naming one of those resolves to nothing in a
 trust policy and the value it sits in matches nothing.
@@ -3308,7 +3353,11 @@ floci populates:
   Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for its
   scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
   instances, ACM for its certificates, Firehose for its delivery streams, Cognito for its user pools and identity
-  pools, and OpenSearch for its domains. Tag keys differing only in case are one condition key holding every value.
+  pools, OpenSearch for its domains, Signer for its signing profiles, Access Analyzer for its analyzers, Managed Service
+  for Apache Flink for its applications, S3 Vectors for its vector buckets and indexes, Timestream for InfluxDB for its
+  DB instances, DB clusters, parameter groups and backups, CloudTrail for its trails, Budgets for its budgets and budget
+  actions, and AWS FIS for its experiment templates, experiments and actions. Tag keys differing only in case are one
+  condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
@@ -3432,6 +3481,24 @@ floci populates:
   `GetSessionToken`, and decides an `AssumeRole` without outliving it; a call that presents one also
   publishes the keys for that call itself, so the permission to make it can be conditioned on MFA.
   See [STS MFA](sts.md#mfa).
+- `aws:TokenIssueTime`: when the temporary credentials the request is signed with were issued, as
+  an ISO 8601 date, for every STS session (`AssumeRole` and its SAML and web identity forms,
+  `GetSessionToken`, `GetFederationToken`, `AssumeRoot`) and every role session floci issues
+  itself (Lambda execution roles, EC2 instance profiles, ECS task roles). The guide says it "is
+  included in the request context only when the principal uses temporary credentials to make the
+  request" and "is not present in AWS CLI, AWS API, or AWS SDK requests that are made using access
+  keys", so it is absent for an IAM user access key and for the account root. It is the key the
+  `AWSRevokeOlderSessions` policy of
+  [revoking role sessions](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)
+  matches: a `Deny` on `DateLessThan` `aws:TokenIssueTime` refuses the sessions issued before that
+  time and leaves later sessions and long-term keys alone. A session stored by an earlier floci
+  version, which did not record its issue time, carries no value for it.
+- `aws:CurrentTime` and `aws:EpochTime`: the time of the request, which the guide says "is always
+  included in the request context": `aws:CurrentTime` as an ISO 8601 date, `aws:EpochTime` as
+  whole seconds since January 1, 1970, so it matches the `Date` and the `Numeric` operators.
+  They are on every request the enforcement filter checks, its `iam:PassRole` checks included,
+  in the context S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`, in a
+  role trust policy's context, and in that of a call an AWS service makes on its own behalf.
 - `aws:TagKeys`: the case-sensitive requested tag keys for all 16 IAM tagging actions
   in the generated table (tag structures or a list of keys), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and

@@ -6,6 +6,7 @@ import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.PartitionCleanup;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -55,7 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * endpoint with TLS and an IAM token, with the refusals measured on AWS (eu-west-1, 2026-10-16).
  */
 @QuarkusTest
-@TestProfile(DsqlDatabasesProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Tag("docker")
 class DsqlDataPlaneIntegrationTest {
