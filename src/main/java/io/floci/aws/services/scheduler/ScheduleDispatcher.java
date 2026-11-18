@@ -35,8 +35,9 @@ import java.util.concurrent.TimeUnit;
  *
  * A single background thread ticks on a fixed interval, scans all persisted
  * schedules, and invokes the target of any schedule whose next fire time has
- * passed. Per-schedule "last fire" state is kept in memory (by schedule ARN);
- * restarts reset it, matching the emulator's loose durability expectations.
+ * passed. When a schedule last fired is stored with the schedule
+ * ({@link Schedule#getLastFiredAt}), so with persistence on a restart neither fires a one-time
+ * schedule again nor fires an immediate catch-up for a rate or cron schedule.
  *
  * Scope of the initial implementation:
  * <ul>
@@ -75,8 +76,6 @@ public class ScheduleDispatcher implements Resettable {
     private final long tickIntervalSeconds;
     private final boolean enabled;
     private final ScheduledExecutorService executor;
-    private final ConcurrentHashMap<String, Instant> lastFireByArn = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Boolean> firedOnceByArn = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Occurrence, Delivery> pendingRetries = new ConcurrentHashMap<>();
 
     @Inject
@@ -113,8 +112,6 @@ public class ScheduleDispatcher implements Resettable {
     }
 
     public void clear() {
-        lastFireByArn.clear();
-        firedOnceByArn.clear();
         pendingRetries.clear();
     }
 
@@ -214,18 +211,16 @@ public class ScheduleDispatcher implements Resettable {
     private Instant computeNextFire(Schedule schedule, Kind kind, Instant now) {
         String expr = schedule.getScheduleExpression();
         String tz = schedule.getScheduleExpressionTimezone();
-        String arn = schedule.getArn();
+        Instant lastFire = schedule.getLastFiredAt();
 
         return switch (kind) {
             case AT -> {
-                if (firedOnceByArn.containsKey(arn)) {
-                    yield null;
-                }
-                yield SchedulerExpressionParser.parseAt(expr, tz);
+                // Fired once its time came, unless it has fired since: an update to a later time re-arms it.
+                Instant at = SchedulerExpressionParser.parseAt(expr, tz);
+                yield lastFire != null && !lastFire.isBefore(at) ? null : at;
             }
             case RATE -> {
                 long intervalMs = SchedulerExpressionParser.parseRateMillis(expr);
-                Instant lastFire = lastFireByArn.get(arn);
                 if (lastFire != null) {
                     yield lastFire.plusMillis(intervalMs);
                 }
@@ -233,9 +228,8 @@ public class ScheduleDispatcher implements Resettable {
                         : schedule.getCreationDate() != null ? schedule.getCreationDate() : now;
             }
             case CRON -> {
-                Instant base = lastFireByArn.getOrDefault(arn, schedule.getCreationDate() != null
-                        ? schedule.getCreationDate()
-                        : now.minusSeconds(1));
+                Instant base = lastFire != null ? lastFire
+                        : schedule.getCreationDate() != null ? schedule.getCreationDate() : now.minusSeconds(1);
                 yield SchedulerExpressionParser.nextCronFire(expr, base, tz);
             }
         };
@@ -278,8 +272,6 @@ public class ScheduleDispatcher implements Resettable {
         try {
             schedulerService.deleteScheduleForAccount(
                     schedule.getAccountId(), schedule.getName(), schedule.getGroupName(), regionOf(schedule));
-            lastFireByArn.remove(schedule.getArn());
-            firedOnceByArn.remove(schedule.getArn());
         } catch (Exception e) {
             LOG.warnv("Post-completion delete failed for {0}: {1}", schedule.getArn(), e.getMessage());
         }
@@ -361,8 +353,8 @@ public class ScheduleDispatcher implements Resettable {
     }
 
     private void recordFire(Schedule schedule, Instant now) {
-        lastFireByArn.put(schedule.getArn(), now);
-        firedOnceByArn.put(schedule.getArn(), Boolean.TRUE);
+        schedule.setLastFiredAt(now);
+        schedulerService.recordFire(schedule, regionOf(schedule), now);
     }
 
     private static boolean isDeleteAfterCompletion(Schedule schedule) {

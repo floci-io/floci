@@ -1,10 +1,12 @@
 package io.floci.aws.services.scheduler;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.services.scheduler.model.DeadLetterConfig;
 import io.floci.aws.services.scheduler.model.FlexibleTimeWindow;
 import io.floci.aws.services.scheduler.model.RetryPolicy;
@@ -14,7 +16,9 @@ import io.floci.aws.services.scheduler.model.ScheduleRequest;
 import io.floci.aws.services.scheduler.model.Target;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +51,65 @@ class SchedulerServiceTest {
         return req;
     }
 
+
+    private Schedule createRateSchedule(SchedulerService schedulers, String name) {
+        return schedulers.createSchedule(newRequest(name, null, "rate(1 hour)", new FlexibleTimeWindow("OFF", null),
+                new Target("arn:t", "arn:aws:iam::000000000000:role/r", null, null)), REGION);
+    }
+
+    @Test
+    void aRecordedFireIsKeptByAnUpdate() {
+        Schedule created = createRateSchedule(service, "fired");
+        Instant firedAt = Instant.parse("2026-04-21T12:00:00Z");
+
+        service.recordFire(created, REGION, firedAt);
+        service.updateSchedule(newRequest("fired", null, "rate(2 hours)", new FlexibleTimeWindow("OFF", null),
+                new Target("arn:t", "arn:aws:iam::000000000000:role/r", null, null)), REGION);
+
+        assertEquals(firedAt, service.getSchedule("fired", null, REGION).getLastFiredAt());
+    }
+
+    // Catches: the dispatcher's record of a fire bringing back a schedule deleted while it fired, or
+    // marking a new schedule created under the same name as already fired.
+    @Test
+    void aFireIsNotRecordedOnADeletedOrRecreatedSchedule() {
+        Schedule created = createRateSchedule(service, "gone");
+        service.deleteSchedule("gone", null, REGION);
+
+        service.recordFire(created, REGION, Instant.parse("2026-04-21T12:00:00Z"));
+        assertThrows(AwsException.class, () -> service.getSchedule("gone", null, REGION));
+
+        Schedule recreated = createRateSchedule(service, "gone");
+        created.setCreationDate(recreated.getCreationDate().minusSeconds(60));
+        service.recordFire(created, REGION, Instant.parse("2026-04-21T12:00:00Z"));
+        assertNull(service.getSchedule("gone", null, REGION).getLastFiredAt());
+    }
+
+    // Catches BL-385 across a real restart: the last fire written to disk is there when the stores are
+    // read back, so the dispatcher neither re-fires a one-time schedule nor catches a recurring one up.
+    @Test
+    void aRecordedFireSurvivesAReloadFromDisk(@TempDir Path dir) {
+        Path groups = dir.resolve("scheduler-groups.json");
+        Path schedules = dir.resolve("scheduler-schedules.json");
+        SchedulerService before = new SchedulerService(
+                new PersistentStorage<>(groups, new TypeReference<Map<String, ScheduleGroup>>() { }),
+                new PersistentStorage<>(schedules, new TypeReference<Map<String, Schedule>>() { }),
+                new RegionResolver(REGION, "000000000000"));
+        Schedule created = createRateSchedule(before, "durable");
+        Instant firedAt = Instant.parse("2026-04-21T12:00:00Z");
+        before.recordFire(created, REGION, firedAt);
+
+        PersistentStorage<String, ScheduleGroup> groupStore =
+                new PersistentStorage<>(groups, new TypeReference<Map<String, ScheduleGroup>>() { });
+        PersistentStorage<String, Schedule> scheduleStore =
+                new PersistentStorage<>(schedules, new TypeReference<Map<String, Schedule>>() { });
+        groupStore.load();
+        scheduleStore.load();
+        SchedulerService after = new SchedulerService(groupStore, scheduleStore,
+                new RegionResolver(REGION, "000000000000"));
+
+        assertEquals(firedAt, after.getSchedule("durable", null, REGION).getLastFiredAt());
+    }
 
     /**
      * Tagging and untagging put a new map in place of the group's, never changing the one a tag lookup may be
