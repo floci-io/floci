@@ -433,7 +433,7 @@ public class TlsConfigSource implements ConfigSource {
         try {
             ContainerCaBundle.writeJavaTrustStore(bundle);
         } catch (Exception e) {
-            LOG.warnv(e, "TLS: could not write the containers' Java trust store under {0}: {1}", tlsDir,
+            LOG.warnv(e, "TLS: could not write the containers'' Java trust store under {0}: {1}", tlsDir,
                     e.getMessage());
         }
     }

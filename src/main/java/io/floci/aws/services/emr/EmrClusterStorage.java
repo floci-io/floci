@@ -1430,8 +1430,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             lifecycleManager.ensureConnected(floci.get(), network, FLOCI_ALIAS);
             return true;
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not connect Floci's container {0} to the Docker network {1}, so the Hive metastore"
-                    + " on it may not reach Floci's S3: {2}", floci.get(), network, e.getMessage());
+            LOG.warnv(e, "Could not connect Floci''s container {0} to the Docker network {1}, so the Hive metastore"
+                    + " on it may not reach Floci''s S3: {2}", floci.get(), network, e.getMessage());
             return false;
         }
     }
