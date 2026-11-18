@@ -49,9 +49,8 @@ class DsqlDataPlaneTest {
 
         plane.provision(cluster, readies::add);
         assertTrue(startBegun.await(10, TimeUnit.SECONDS));
-        CompletableFuture<Void> stopped = CompletableFuture.runAsync(() -> plane.onStop(null));
-        startMayFinish.countDown();
-        stopped.get(10, TimeUnit.SECONDS);
+        stopFlociOnceTheStartHasBegun(plane);
+        shutdown.get().get(10, TimeUnit.SECONDS);
 
         verify(databases, timeout(5_000)).stop(cluster, true);
         verify(endpoint, never()).register(any(), any());
@@ -66,9 +65,8 @@ class DsqlDataPlaneTest {
 
         plane.provision(cluster, readies::add);
         assertTrue(startBegun.await(10, TimeUnit.SECONDS));
-        CompletableFuture<Void> stopped = CompletableFuture.runAsync(() -> plane.onStop(null));
-        startMayFinish.countDown();
-        stopped.get(10, TimeUnit.SECONDS);
+        stopFlociOnceTheStartHasBegun(plane);
+        shutdown.get().get(10, TimeUnit.SECONDS);
 
         verify(databases, timeout(5_000)).stop(cluster, false);
         verify(databases, never()).stop(cluster, true);
