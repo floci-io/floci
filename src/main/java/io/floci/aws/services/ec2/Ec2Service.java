@@ -1161,27 +1161,45 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      *   <li>{@code stopping}: the container is stopped and the record settles as stopped.</li>
      * </ul>
      *
+     * <p>A record settles as stopped only when Docker confirms its container stopped or gone. When
+     * it cannot (Docker unreachable, for one) the record keeps its state and the next start tries
+     * again, because writing {@code stopped} for a container that may be running would be wrong.
+     *
      * @param registered the accounts and keys whose running container the restore loop registered
      */
     private void resumeInterruptedLifecycles(Set<String> registered) {
+        List<String> unsettled = new ArrayList<>();
         for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
             Instance instance = entry.value();
             if (instance == null || instance.getState() == null) {
                 continue;
             }
             boolean containerRegistered = registered.contains(entry.accountId() + "/" + entry.key());
+            // One instance that cannot be settled must neither stop the others being settled nor
+            // stop Floci starting, so a failure is kept apart and reported below.
             try {
-                RequestScopes.runAs(entry.accountId(), instance.getRegion(),
+                boolean settled = RequestScopes.callAs(entry.accountId(), instance.getRegion(),
                         () -> resumeInterruptedLifecycle(entry, containerRegistered));
+                if (!settled) {
+                    unsettled.add(instance.getInstanceId());
+                }
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Could not settle EC2 instance {0} left in state {1} by a previous run",
                         instance.getInstanceId(), instance.getState().getName());
+                unsettled.add(instance.getInstanceId());
             }
+        }
+        if (!unsettled.isEmpty()) {
+            LOG.errorv("{0} EC2 instance(s) left mid-transition by a previous run could not be settled and "
+                    + "keep their state until the next start: {1}", unsettled.size(), unsettled);
         }
     }
 
-    private void resumeInterruptedLifecycle(AccountAwareStorageBackend.AccountEntry<Instance> entry,
-                                            boolean containerRegistered) {
+    /**
+     * @return false when the instance could not be settled and was left as it was
+     */
+    private boolean resumeInterruptedLifecycle(AccountAwareStorageBackend.AccountEntry<Instance> entry,
+                                               boolean containerRegistered) {
         Instance instance = entry.value();
         String state = instance.getState().getName();
         boolean hasContainer = instance.getDockerContainerId() != null;
@@ -1190,21 +1208,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     instance.getInstanceId(), state);
             finishTermination(entry);
         } else if ("pending".equals(state)) {
-            if (!containerRegistered) {
-                containerManager.stopForShutdown(instance);
+            if (!containerRegistered && !containerManager.stopAndConfirm(instance)) {
+                LOG.warnv("The container of EC2 instance {0}, left pending by a previous run, could not be "
+                        + "confirmed stopped, so the instance stays pending", instance.getInstanceId());
+                return false;
             }
             instance.setState(containerRegistered ? InstanceState.running() : InstanceState.stopped());
             putForOwner(instances, entry, instance);
             LOG.infov("EC2 instance {0} left pending by a previous run is now {1}", instance.getInstanceId(),
                     instance.getState().getName());
         } else if ("stopping".equals(state)) {
-            if (hasContainer) {
-                containerManager.stopForShutdown(instance);
+            if (hasContainer && !containerManager.stopAndConfirm(instance)) {
+                LOG.warnv("The container of EC2 instance {0}, left stopping by a previous run, could not be "
+                        + "confirmed stopped, so the instance stays stopping", instance.getInstanceId());
+                return false;
             }
             instance.setState(InstanceState.stopped());
             putForOwner(instances, entry, instance);
             LOG.infov("EC2 instance {0} left stopping by a previous run is now stopped", instance.getInstanceId());
         }
+        return true;
     }
 
     private void finishTermination(AccountAwareStorageBackend.AccountEntry<Instance> entry) {
@@ -5826,6 +5849,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public void pruneTerminatedInstances(Instant now) {
         long cutoff = now.minus(TERMINATED_INSTANCE_RETENTION).toEpochMilli();
+        List<String> failed = new ArrayList<>();
+        RuntimeException failure = null;
         for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
             Instance inst = entry.value();
             if (inst == null || inst.getState() == null
@@ -5834,15 +5859,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     || inst.getTerminatedAt() >= cutoff) {
                 continue;
             }
+            // A record that cannot be removed must not keep the others from expiring, so every
+            // failure is collected and reported once the sweep has been through all of them.
             try {
                 RequestScopes.runAs(entry.accountId(), inst.getRegion(), () -> pruneTerminatedInstance(entry));
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Could not remove terminated EC2 instance {0}", inst.getInstanceId());
+                failed.add(inst.getInstanceId());
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
             }
+        }
+        if (failure != null) {
+            throw new IllegalStateException("Could not remove " + failed.size()
+                    + " expired terminated EC2 instance(s), they are tried again on the next sweep: " + failed,
+                    failure);
         }
     }
 
-    private void pruneTerminatedInstance(AccountAwareStorageBackend.AccountEntry<Instance> entry) {
+    void pruneTerminatedInstance(AccountAwareStorageBackend.AccountEntry<Instance> entry) {
         Instance inst = entry.value();
         String region = inst.getRegion();
         if (region != null) {

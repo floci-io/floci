@@ -2,17 +2,11 @@ package io.floci.aws.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.StopContainerCmd;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.docker.ContainerBuilder;
-import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
-import io.floci.aws.core.common.docker.ContainerLogStreamer;
-import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
-import io.floci.aws.core.common.docker.DockerHostResolver;
-import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.model.Instance;
@@ -20,7 +14,6 @@ import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.Volume;
 import io.floci.aws.services.ec2.model.VolumeAttachment;
-import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.testing.StorageFactories;
 import org.junit.jupiter.api.Test;
@@ -34,13 +27,31 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.floci.aws.testing.Ec2LifecycleFixtures.ACCOUNT;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.REGION;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.await;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.config;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.instance;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.manager;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.persistedRecord;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.seed;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Answers.RETURNS_SELF;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /**
@@ -49,18 +60,16 @@ import static org.mockito.Mockito.when;
  */
 class Ec2TerminatedInstanceRetentionTest {
 
-    private static final String ACCOUNT = "000000000000";
     private static final String OTHER_ACCOUNT = "111111111111";
-    private static final String REGION = "us-east-1";
     private static final Instant NOW = Instant.parse("2026-11-16T12:00:00Z");
-    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final long WAIT_SECONDS = 10;
 
     @TempDir
     Path dir;
 
     @Test
     void aTerminatedInstanceIsListedUntilTheRetentionPassesThenRemovedFromTheStore() throws Exception {
-        seed(terminated("i-expiring", NOW.minus(Duration.ofMinutes(30))));
+        seed(config(dir, true, true), ACCOUNT, terminated("i-expiring", NOW.minus(Duration.ofMinutes(30))));
         Ec2Service service = service();
 
         service.pruneTerminatedInstances(NOW.plus(Duration.ofMinutes(29)));
@@ -74,15 +83,13 @@ class Ec2TerminatedInstanceRetentionTest {
 
     @Test
     void theRetentionIsExactlyOneHour() throws Exception {
-        long terminatedAt = NOW.toEpochMilli();
-        seed(terminated("i-boundary", NOW));
+        seed(config(dir, true, true), ACCOUNT, terminated("i-boundary", NOW));
         Ec2Service service = service();
 
-        service.pruneTerminatedInstances(Instant.ofEpochMilli(terminatedAt).plus(Ec2Service.TERMINATED_INSTANCE_RETENTION));
+        service.pruneTerminatedInstances(NOW.plus(Ec2Service.TERMINATED_INSTANCE_RETENTION));
         assertNotNull(persisted("i-boundary"), "the hour itself has not passed yet");
 
-        service.pruneTerminatedInstances(
-                Instant.ofEpochMilli(terminatedAt).plus(Ec2Service.TERMINATED_INSTANCE_RETENTION).plusMillis(1));
+        service.pruneTerminatedInstances(NOW.plus(Ec2Service.TERMINATED_INSTANCE_RETENTION).plusMillis(1));
         assertNull(persisted("i-boundary"));
     }
 
@@ -92,11 +99,11 @@ class Ec2TerminatedInstanceRetentionTest {
         for (InstanceState state : List.of(InstanceState.pending(), InstanceState.running(),
                 InstanceState.stopping(), InstanceState.stopped(), InstanceState.shuttingDown())) {
             // The ancient time is on purpose: only a terminated record may be removed for age.
-            Instance instance = instance("i-" + state.getName(), state);
+            Instance instance = instance("i-" + state.getName(), state, null);
             instance.setTerminatedAt(NOW.minus(Duration.ofDays(30)).toEpochMilli());
             active.add(instance);
         }
-        seed(active.toArray(new Instance[0]));
+        seed(config(dir, true, true), ACCOUNT, active.toArray(new Instance[0]));
         Ec2Service service = service();
 
         service.pruneTerminatedInstances(NOW.plus(Duration.ofDays(3650)));
@@ -109,7 +116,7 @@ class Ec2TerminatedInstanceRetentionTest {
 
     @Test
     void aTerminatedRecordWithNoTimeIsNeverPrunedForAge() throws Exception {
-        seed(instance("i-untimed", InstanceState.terminated()));
+        seed(config(dir, true, true), ACCOUNT, instance("i-untimed", InstanceState.terminated(), null));
         Ec2Service service = service();
 
         service.pruneTerminatedInstances(NOW.plus(Duration.ofDays(3650)));
@@ -119,8 +126,9 @@ class Ec2TerminatedInstanceRetentionTest {
 
     @Test
     void pruningRemovesEveryAccountsExpiredInstancesAndTheirTags() throws Exception {
-        seed(terminated("i-default", NOW.minus(Duration.ofHours(2))));
-        seedFor(OTHER_ACCOUNT, terminated("i-other", NOW.minus(Duration.ofHours(2))),
+        EmulatorConfig config = config(dir, true, true);
+        seed(config, ACCOUNT, terminated("i-default", NOW.minus(Duration.ofHours(2))));
+        seed(config, OTHER_ACCOUNT, terminated("i-other", NOW.minus(Duration.ofHours(2))),
                 terminated("i-other-fresh", NOW.minus(Duration.ofMinutes(5))));
         Ec2Service service = service();
         service.createTags(REGION, List.of("i-default"), List.of(new Tag("env", "qa")));
@@ -137,23 +145,43 @@ class Ec2TerminatedInstanceRetentionTest {
 
     @Test
     void pruningReleasesTheVolumesAFailedLaunchLeftAttached() throws Exception {
-        seed(terminated("i-gone", NOW.minus(Duration.ofHours(2))));
+        seed(config(dir, true, true), ACCOUNT, terminated("i-gone", NOW.minus(Duration.ofHours(2))));
         seedVolume("vol-left-attached", "i-gone");
         Ec2Service service = service();
 
         service.pruneTerminatedInstances(NOW);
 
-        JsonNode volume = persistedVolume("vol-left-attached");
+        JsonNode volume = persistedRecord(dir, "ec2-volumes.json", "vol-left-attached");
         assertEquals("available", volume.path("state").asText());
         assertEquals(0, volume.path("attachments").size(), "no attachment may point at a removed instance");
     }
 
     @Test
+    void aFailureRemovingOneInstanceDoesNotBlockTheOthersAndIsReportedToTheCaller() throws Exception {
+        seed(config(dir, true, true), ACCOUNT,
+                terminated("i-good-1", NOW.minus(Duration.ofHours(2))),
+                terminated("i-bad", NOW.minus(Duration.ofHours(2))),
+                terminated("i-good-2", NOW.minus(Duration.ofHours(2))));
+        Ec2Service service = spy(service());
+        doThrow(new IllegalStateException("the attached volumes cannot be released")).when(service)
+                .pruneTerminatedInstance(argThat((AccountAwareStorageBackend.AccountEntry<Instance> entry) ->
+                        "i-bad".equals(entry.value().getInstanceId())));
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> service.pruneTerminatedInstances(NOW));
+
+        assertTrue(failure.getMessage().contains("i-bad"), failure.getMessage());
+        assertNull(persisted("i-good-1"), "one record failing must not keep the others from expiring");
+        assertNull(persisted("i-good-2"));
+        assertNotNull(persisted("i-bad"), "the failed record stays, to be tried again on the next sweep");
+    }
+
+    @Test
     void theSchedulerPrunesThroughTheServiceOnEachSweep() throws Exception {
-        seed(terminated("i-swept", NOW.minus(Duration.ofHours(2))), terminated("i-recent", NOW.minusSeconds(60)));
-        EmulatorConfig config = config(true);
-        Ec2Service service = service(config);
-        Ec2TerminatedInstanceScheduler scheduler = new Ec2TerminatedInstanceScheduler(service, config);
+        EmulatorConfig config = config(dir, true, true);
+        seed(config, ACCOUNT, terminated("i-swept", NOW.minus(Duration.ofHours(2))),
+                terminated("i-recent", NOW.minusSeconds(60)));
+        Ec2TerminatedInstanceScheduler scheduler = new Ec2TerminatedInstanceScheduler(service(config), config);
 
         assertTrue(scheduler.active(), "a background sweep exists while EC2 is enabled");
         scheduler.tick(NOW);
@@ -164,14 +192,14 @@ class Ec2TerminatedInstanceRetentionTest {
 
     @Test
     void theSchedulerHasNoBackgroundSweepWhileEc2IsDisabled() {
-        EmulatorConfig config = config(false);
+        EmulatorConfig config = config(dir, true, false);
 
         assertFalse(new Ec2TerminatedInstanceScheduler(service(config), config).active());
     }
 
     @Test
     void markTerminatedStartsTheClockOnceAndKeepsTheFirstTime() {
-        Instance instance = instance("i-clock", InstanceState.running());
+        Instance instance = instance("i-clock", InstanceState.running(), null);
 
         instance.markTerminated(1_000L);
         instance.markTerminated(9_000L);
@@ -183,9 +211,9 @@ class Ec2TerminatedInstanceRetentionTest {
     @Test
     void aFailedLaunchIsWrittenBackToTheStoreWhenItTerminates() {
         List<Instance> written = new ArrayList<>();
-        Ec2ContainerManager manager = manager();
+        Ec2ContainerManager manager = quietManager();
         manager.setPersister(written::add);
-        Instance launching = instance("i-failed-launch", InstanceState.pending());
+        Instance launching = instance("i-failed-launch", InstanceState.pending(), null);
 
         assertTrue(manager.cancelLaunch(launching));
 
@@ -194,8 +222,71 @@ class Ec2TerminatedInstanceRetentionTest {
         assertTrue(written.getFirst().getTerminatedAt() > 0);
     }
 
+    @Test
+    void aWriteThatFailsIsRetriedSoTheStoredStateDoesNotStayStale() {
+        List<String> written = new ArrayList<>();
+        AtomicInteger calls = new AtomicInteger();
+        Ec2ContainerManager manager = quietManager();
+        manager.setPersister(instance -> {
+            if (calls.getAndIncrement() == 0) {
+                throw new IllegalStateException("the store is busy");
+            }
+            written.add(instance.getState().getName());
+        });
+
+        assertTrue(manager.cancelLaunch(instance("i-retried", InstanceState.pending(), null)));
+
+        assertEquals(List.of("terminated"), written, "the first write failed and must be made again");
+    }
+
+    @Test
+    void anOlderSnapshotIsNeverTheLastStateWritten() throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        when(docker.stopContainerCmd(anyString())).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        when(docker.removeContainerCmd(anyString())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+        Ec2ContainerManager manager = manager(config(dir, true, false), docker,
+                mock(ContainerLifecycleManager.class), mock(Ec2PortForwardManager.class));
+        List<String> written = new CopyOnWriteArrayList<>();
+        CountDownLatch stopSnapshotTaken = new CountDownLatch(1);
+        CountDownLatch commitTheStopSnapshot = new CountDownLatch(1);
+        AtomicInteger writes = new AtomicInteger();
+        // A store that, like the write-ahead log, takes its snapshot of the instance first and
+        // commits it later, so a slow writer can commit an older snapshot after a newer one.
+        manager.setPersister(instance -> {
+            String snapshot = instance.getState().getName();
+            if (writes.getAndIncrement() == 0) {
+                stopSnapshotTaken.countDown();
+                try {
+                    commitTheStopSnapshot.await(WAIT_SECONDS, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            written.add(snapshot);
+        });
+        Instance instance = instance("i-race", InstanceState.running(), "container-race");
+        try {
+            manager.stop(instance);
+            assertTrue(stopSnapshotTaken.await(WAIT_SECONDS, TimeUnit.SECONDS), "the stop's write must be waiting");
+            manager.terminate(instance, null);
+            await(() -> written.contains("terminated"), "the termination to be written");
+
+            commitTheStopSnapshot.countDown();
+
+            await(() -> written.size() >= 2 && "terminated".equals(written.getLast()),
+                    () -> "the last write to be the termination, but the writes were " + written);
+        } finally {
+            manager.stop();
+        }
+    }
+
+    private Ec2ContainerManager quietManager() {
+        return manager(config(dir, true, false), mock(DockerClient.class),
+                mock(ContainerLifecycleManager.class), mock(Ec2PortForwardManager.class));
+    }
+
     private Ec2Service service() {
-        return service(config(true));
+        return service(config(dir, true, true));
     }
 
     private Ec2Service service(EmulatorConfig config) {
@@ -204,42 +295,8 @@ class Ec2TerminatedInstanceRetentionTest {
                 StorageFactories.open(config, "persistent"));
     }
 
-    private EmulatorConfig config(boolean enabled) {
-        EmulatorConfig config = StorageFactories.config(dir, ACCOUNT);
-        when(config.services().ec2().mock()).thenReturn(true);
-        when(config.services().ec2().enabled()).thenReturn(enabled);
-        return config;
-    }
-
-    private Ec2ContainerManager manager() {
-        return new Ec2ContainerManager(
-                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class),
-                mock(ContainerLogStreamer.class), mock(ContainerDetector.class),
-                mock(DockerHostResolver.class), mock(DockerClient.class), mock(PortAllocator.class),
-                config(false), mock(Ec2MetadataServer.class), mock(Ec2PortForwardManager.class),
-                mock(RegionResolver.class), mock(ContainerNetworkReachability.class),
-                mock(VpcNetworkManager.class), mock(ContainerReachableEndpoint.class));
-    }
-
-    private void seed(Instance... instances) {
-        seedFor(ACCOUNT, instances);
-    }
-
-    private void seedFor(String account, Instance... instances) {
-        StorageFactory factory = StorageFactories.open(config(true), "persistent");
-        try {
-            AccountAwareStorageBackend<Instance> store = factory.create(
-                    "ec2", "ec2-instances.json", new TypeReference<Map<String, Instance>>() { });
-            for (Instance instance : instances) {
-                store.putForAccount(account, REGION + "::" + instance.getInstanceId(), instance);
-            }
-        } finally {
-            factory.shutdownAll();
-        }
-    }
-
     private void seedVolume(String volumeId, String instanceId) {
-        StorageFactory factory = StorageFactories.open(config(true), "persistent");
+        StorageFactory factory = StorageFactories.open(config(dir, true, true), "persistent");
         try {
             AccountAwareStorageBackend<Volume> store = factory.create(
                     "ec2", "ec2-volumes.json", new TypeReference<Map<String, Volume>>() { });
@@ -259,16 +316,8 @@ class Ec2TerminatedInstanceRetentionTest {
     }
 
     private static Instance terminated(String id, Instant at) {
-        Instance instance = instance(id, InstanceState.terminated());
+        Instance instance = instance(id, InstanceState.terminated(), null);
         instance.setTerminatedAt(at.toEpochMilli());
-        return instance;
-    }
-
-    private static Instance instance(String id, InstanceState state) {
-        Instance instance = new Instance();
-        instance.setInstanceId(id);
-        instance.setRegion(REGION);
-        instance.setState(state);
         return instance;
     }
 
@@ -279,20 +328,6 @@ class Ec2TerminatedInstanceRetentionTest {
     }
 
     private JsonNode persisted(String id) throws IOException {
-        return find("ec2-instances.json", id);
-    }
-
-    private JsonNode persistedVolume(String id) throws IOException {
-        return find("ec2-volumes.json", id);
-    }
-
-    private JsonNode find(String file, String id) throws IOException {
-        JsonNode records = JSON.readTree(Files.readString(dir.resolve(file)));
-        for (Map.Entry<String, JsonNode> entry : records.properties()) {
-            if (entry.getKey().endsWith("::" + id)) {
-                return entry.getValue();
-            }
-        }
-        return null;
+        return persistedRecord(dir, "ec2-instances.json", id);
     }
 }

@@ -17,6 +17,7 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
@@ -144,6 +145,8 @@ public class Ec2ContainerManager {
 
     static int containerBridgeIpAttempts = 30;
     static long containerBridgeIpPollMillis = 500;
+    private static final int PERSIST_ATTEMPTS = 5;
+    private static final long PERSIST_RETRY_MILLIS = 100;
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -830,11 +833,53 @@ public class Ec2ContainerManager {
         this.persister = persister;
     }
 
+    /**
+     * Writes the instance's current state, and narrows the window in which an older state can be
+     * the last one the store commits. A store may take its snapshot of the instance before it
+     * commits it, as the write-ahead log does, so a slow writer can commit an older state after a
+     * newer one. When the state moved on while a write was in flight the instance is written
+     * again, without a lock around the store.
+     *
+     * <p>This is a mitigation, not an ordering guarantee. The check and the corrective write are not
+     * atomic with the store's commit, and they cover only the writes made here: those the request
+     * threads make through the service are not covered.
+     *
+     * <p>A write that fails is retried a few times before it is reported.
+     */
     private void persist(Instance instance) {
+        for (int attempt = 1; attempt <= PERSIST_ATTEMPTS; attempt++) {
+            String writing = stateName(instance);
+            try {
+                persister.accept(instance);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not persist the state of EC2 instance {0} (attempt {1} of {2})",
+                        instance.getInstanceId(), attempt, PERSIST_ATTEMPTS);
+                if (!pause(PERSIST_RETRY_MILLIS)) {
+                    return;
+                }
+                continue;
+            }
+            if (writing.equals(stateName(instance))) {
+                return;
+            }
+        }
+        LOG.errorv("Could not confirm that the current state of EC2 instance {0} reached the store; "
+                + "a later write or the next start will correct it", instance.getInstanceId());
+    }
+
+    private static String stateName(Instance instance) {
+        InstanceState state = instance.getState();
+        return state == null ? "" : state.getName();
+    }
+
+    /** Sleeps; false when the thread was interrupted, which also restores its interrupt flag. */
+    private static boolean pause(long millis) {
         try {
-            persister.accept(instance);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not persist the state of EC2 instance {0}", instance.getInstanceId());
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -1647,6 +1692,11 @@ public class Ec2ContainerManager {
      * removal itself failed would attempt work Docker is bound to refuse with no later retry
      * behind it. A skip is logged. Anything the callback throws is logged and swallowed rather
      * than killing the executor task.
+     *
+     * <p>Every release of the teardown is best effort and independent of the container removal, so
+     * one that fails neither skips the removal nor keeps the instance from terminating. The
+     * instance ends {@code terminated} even when Docker refuses the removal; the callback is then
+     * skipped, and the container is collected on the next start.
      */
     public void terminate(Instance instance, Runnable afterTeardown) {
         String containerId;
@@ -1668,47 +1718,31 @@ public class Ec2ContainerManager {
         }
         executor.submit(() -> {
             // The post-teardown hook's only precondition; see the Javadoc above for why.
-            boolean containerGone = false;
+            boolean containerGone = containerId == null;
             try {
-                portForwardManager.unpublishAll(instance);
-                if (containerId == null) {
-                    // Nothing was ever launched, so there is no container to hold the image.
-                    containerGone = true;
-                }
+                cleanupStep(instance, "port forwards", () -> portForwardManager.unpublishAll(instance));
                 if (containerId != null) {
-                    try {
-                        dockerClient.removeContainerCmd(containerId).withForce(true).exec();
-                        containerGone = true;
-                    } catch (NotFoundException e) {
-                        // already gone
-                        containerGone = true;
-                    } catch (Exception e) {
-                        LOG.warnv("Error removing EC2 container {0}: {1}", containerId, e.getMessage());
-                    }
-                    try {
-                        // iptables/veth teardown lags behind container removal; prevents port-reuse conflicts.
-                        Thread.sleep(500);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
+                    containerGone = removeContainer(containerId);
+                    // iptables/veth teardown lags behind container removal; prevents port-reuse conflicts.
+                    pause(500);
                 }
                 if (firewallManager != null && firewallManager.enabled() && firewallEniId != null) {
-                    firewallManager.unregister(firewallEniId);
+                    cleanupStep(instance, "firewall registration", () -> firewallManager.unregister(firewallEniId));
                 }
                 if (sshHostPort > 0) {
-                    portAllocator.release(sshHostPort);
+                    cleanupStep(instance, "SSH host port", () -> portAllocator.release(sshHostPort));
                 }
-                metadataServer.unregisterContainer(containerIp, instance);
-                metadataServer.unregisterContainer(imdsSourceIp, instance);
-                metadataServer.unregisterInstance(instance);
+                cleanupStep(instance, "metadata registrations", () -> {
+                    metadataServer.unregisterContainer(containerIp, instance);
+                    metadataServer.unregisterContainer(imdsSourceIp, instance);
+                    metadataServer.unregisterInstance(instance);
+                });
                 // Give the address back only now that the container is gone: releasing it while
                 // Docker still holds the endpoint would hand the same IP to the next launch and
                 // have Docker refuse it.
-                vpcNetworkManager.releasePrivateIp(instance.getOwnerId(), instance.getRegion(), instance.getSubnetId(),
-                        instance.getPrivateIpAddress());
-            } catch (RuntimeException e) {
-                LOG.warnv(e, "Error tearing down EC2 instance {0}; marking it terminated anyway",
-                        instance.getInstanceId());
+                cleanupStep(instance, "private address", () -> vpcNetworkManager.releasePrivateIp(
+                        instance.getOwnerId(), instance.getRegion(), instance.getSubnetId(),
+                        instance.getPrivateIpAddress()));
             } finally {
                 // Whatever the teardown managed, the instance must not stay shutting-down: nothing
                 // else would ever finish it, and a leftover container is collected on the next start.
@@ -1728,6 +1762,48 @@ public class Ec2ContainerManager {
                 }
             }
         });
+    }
+
+    /**
+     * @return true when the container is gone, including when it was already absent
+     */
+    private boolean removeContainer(String containerId) {
+        try {
+            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            return true;
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Error removing EC2 container {0}: {1}", containerId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Runs one best-effort release during teardown. Each release is independent of the others, and
+     * above all of the container removal, so one that fails is logged and the rest still run.
+     */
+    private void cleanupStep(Instance instance, String step, Runnable release) {
+        try {
+            release.run();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not release the {0} of EC2 instance {1} during termination; "
+                    + "continuing with the rest", step, instance.getInstanceId());
+        }
+    }
+
+    /**
+     * Stops an instance's container for startup recovery and reports whether it is confirmed
+     * stopped or gone. A Docker error while stopping, or while checking afterwards, is not
+     * confirmation: the container may still be running.
+     */
+    boolean stopAndConfirm(Instance instance) {
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null) {
+            return true;
+        }
+        stopForShutdown(instance);
+        return lifecycleManager.probeContainer(containerId) == ContainerLiveness.NOT_RUNNING;
     }
 
     /**

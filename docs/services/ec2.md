@@ -62,6 +62,8 @@ Every state change the container manager makes in the background is written to t
 | `stopping` | The container is stopped: `stopped` |
 | `terminated`, recorded without a time | The retention clock starts at this startup |
 
+A record is settled as `stopped` only once Docker confirms that its container stopped or is gone. When Docker cannot confirm it (it is unreachable, for one), the record keeps its state and the next start tries again, and an instance that cannot be settled is named in an error in the log. The releases of a termination (port forwards, firewall rules, addresses) are independent of the container removal, so one that fails neither skips it nor keeps the instance from terminating. The sweep that removes expired instances carries on past one that cannot be removed and reports the failure when it ends.
+
 ## Instance Resource Limits
 
 By default, Docker containers launched for EC2 instances are bounded to the CPU and memory limits defined in the instance type catalog (`src/main/resources/ec2/instance-type-catalog.yaml`).

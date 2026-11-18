@@ -1,48 +1,45 @@
 package io.floci.aws.services.ec2;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.docker.ContainerBuilder;
-import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
-import io.floci.aws.core.common.docker.ContainerLogStreamer;
-import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
-import io.floci.aws.core.common.docker.DockerHostResolver;
-import io.floci.aws.core.common.docker.PortAllocator;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
-import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.testing.StorageFactories;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
+import static io.floci.aws.testing.Ec2LifecycleFixtures.ACCOUNT;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.REGION;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.await;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.config;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.instance;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.manager;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.persistedState;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.persistedTerminatedAt;
+import static io.floci.aws.testing.Ec2LifecycleFixtures.seed;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -61,10 +58,7 @@ import static org.mockito.Mockito.when;
  */
 class Ec2LifecycleRecoveryTest {
 
-    private static final String ACCOUNT = "000000000000";
-    private static final String REGION = "us-east-1";
     private static final long WAIT_SECONDS = 10;
-    private static final ObjectMapper JSON = new ObjectMapper();
 
     @TempDir
     Path dir;
@@ -78,13 +72,13 @@ class Ec2LifecycleRecoveryTest {
 
     @Test
     void terminationReachesTheStoreAsTerminatedWithTheTimeItHappened() throws Exception {
-        seed(instance("i-terminate", InstanceState.running(), "container-terminate"));
+        seed(config(dir, false, true), ACCOUNT, instance("i-terminate", InstanceState.running(), "container-terminate"));
         Node node = startNode();
 
         node.service.terminateInstances(REGION, List.of("i-terminate"));
 
         awaitPersisted("i-terminate", "terminated");
-        assertTrue(persistedTerminatedAt("i-terminate") > 0, "the retention clock must be on disk");
+        assertTrue(persistedTerminatedAt(dir, "i-terminate") > 0, "the retention clock must be on disk");
         assertEquals("terminated", describedState(node, "i-terminate"));
         verify(node.docker).removeContainerCmd("container-terminate");
     }
@@ -102,26 +96,26 @@ class Ec2LifecycleRecoveryTest {
 
     @Test
     void anInstanceLeftShuttingDownIsTerminatedOnTheNextStart() throws Exception {
-        seed(instance("i-shutting", InstanceState.shuttingDown(), "container-shutting"));
+        seed(config(dir, false, true), ACCOUNT, instance("i-shutting", InstanceState.shuttingDown(), "container-shutting"));
 
         Node node = startNode();
 
         awaitPersisted("i-shutting", "terminated");
-        assertTrue(persistedTerminatedAt("i-shutting") > 0);
+        assertTrue(persistedTerminatedAt(dir, "i-shutting") > 0);
         assertEquals("terminated", describedState(node, "i-shutting"));
         verify(node.docker, timeout(WAIT_SECONDS * 1000)).removeContainerCmd("container-shutting");
     }
 
     @Test
     void aProcessKilledWhileTearingDownLeavesNothingStuck() throws Exception {
-        seed(instance("i-killed", InstanceState.running(), "container-killed"));
+        seed(config(dir, false, true), ACCOUNT, instance("i-killed", InstanceState.running(), "container-killed"));
         CountDownLatch removing = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        Node first = startNode(remove -> doAnswer(call -> {
+        Node first = startNode(new Options().removing(remove -> doAnswer(call -> {
             removing.countDown();
             release.await(WAIT_SECONDS, TimeUnit.SECONDS);
             return null;
-        }).when(remove).exec());
+        }).when(remove).exec()));
 
         first.service.terminateInstances(REGION, List.of("i-killed"));
         assertTrue(removing.await(WAIT_SECONDS, TimeUnit.SECONDS), "the teardown must be under way");
@@ -131,7 +125,7 @@ class Ec2LifecycleRecoveryTest {
         Node second = startNode();
         try {
             awaitPersisted("i-killed", "terminated");
-            assertTrue(persistedTerminatedAt("i-killed") > 0);
+            assertTrue(persistedTerminatedAt(dir, "i-killed") > 0);
             assertEquals("terminated", describedState(second, "i-killed"));
         } finally {
             release.countDown();
@@ -143,20 +137,20 @@ class Ec2LifecycleRecoveryTest {
 
     @Test
     void aLaunchThatNeverCreatedAContainerEndsTerminatedOnTheNextStart() throws Exception {
-        seed(instance("i-no-container", InstanceState.pending(), null));
+        seed(config(dir, false, true), ACCOUNT, instance("i-no-container", InstanceState.pending(), null));
 
         Node node = startNode();
 
         awaitPersisted("i-no-container", "terminated");
-        assertTrue(persistedTerminatedAt("i-no-container") > 0);
+        assertTrue(persistedTerminatedAt(dir, "i-no-container") > 0);
         assertEquals("terminated", describedState(node, "i-no-container"));
     }
 
     @Test
     void aPendingInstanceWhoseContainerIsRunningIsRunningOnTheNextStart() throws Exception {
-        seed(instance("i-pending-up", InstanceState.pending(), "container-pending-up"));
+        seed(config(dir, false, true), ACCOUNT, instance("i-pending-up", InstanceState.pending(), "container-pending-up"));
 
-        Node node = startNode(null, true);
+        Node node = startNode(new Options().registered());
 
         awaitPersisted("i-pending-up", "running");
         assertEquals("running", describedState(node, "i-pending-up"));
@@ -166,7 +160,7 @@ class Ec2LifecycleRecoveryTest {
 
     @Test
     void aPendingInstanceWhoseContainerIsNotRunningIsStoppedNotDiscarded() throws Exception {
-        seed(instance("i-pending-down", InstanceState.pending(), "container-pending-down"));
+        seed(config(dir, false, true), ACCOUNT, instance("i-pending-down", InstanceState.pending(), "container-pending-down"));
 
         Node node = startNode();
 
@@ -178,7 +172,7 @@ class Ec2LifecycleRecoveryTest {
 
     @Test
     void anInstanceLeftStoppingIsStoppedOnTheNextStart() throws Exception {
-        seed(instance("i-stopping", InstanceState.stopping(), "container-stopping"));
+        seed(config(dir, false, true), ACCOUNT, instance("i-stopping", InstanceState.stopping(), "container-stopping"));
 
         Node node = startNode();
 
@@ -187,57 +181,124 @@ class Ec2LifecycleRecoveryTest {
         verify(node.docker).stopContainerCmd("container-stopping");
     }
 
+    @ParameterizedTest
+    @EnumSource(value = ContainerLiveness.class, names = {"RUNNING", "UNKNOWN"})
+    void aStopThatCannotBeConfirmedLeavesTheInstanceInItsTransitionalState(ContainerLiveness liveness) throws Exception {
+        seed(config(dir, false, true),
+                ACCOUNT,
+                instance("i-pending-unconfirmed", InstanceState.pending(), "container-pending-unconfirmed"),
+                instance("i-stopping-unconfirmed", InstanceState.stopping(), "container-stopping-unconfirmed"));
+
+        Node node = startNode(new Options().liveness(liveness).stopFailing());
+
+        verify(node.docker).stopContainerCmd("container-pending-unconfirmed");
+        verify(node.docker).stopContainerCmd("container-stopping-unconfirmed");
+        assertEquals("pending", persistedState(dir, "i-pending-unconfirmed"),
+                "a container that may still be running must not be recorded as stopped");
+        assertEquals("stopping", persistedState(dir, "i-stopping-unconfirmed"));
+        assertEquals("pending", describedState(node, "i-pending-unconfirmed"));
+        assertEquals("stopping", describedState(node, "i-stopping-unconfirmed"));
+    }
+
+    @Test
+    void anInstanceThatCannotBeSettledDoesNotStopTheOthersBeingSettled() throws Exception {
+        seed(config(dir, false, true),
+                ACCOUNT,
+                instance("i-cannot-settle", InstanceState.stopping(), "container-cannot-settle"),
+                instance("i-settles", InstanceState.shuttingDown(), "container-settles"));
+
+        Node node = startNode(new Options().beforeStartup(spied -> doThrow(new IllegalStateException("docker is unreachable"))
+                .when(spied).stopForShutdown(argThat(candidate -> "i-cannot-settle".equals(candidate.getInstanceId())))));
+
+        awaitPersisted("i-settles", "terminated");
+        assertEquals("stopping", persistedState(dir, "i-cannot-settle"), "it is left as it was, for the next start");
+        assertEquals("stopping", describedState(node, "i-cannot-settle"));
+    }
+
     @Test
     void aTerminatedRecordWrittenWithoutATimeGetsItOnTheNextStart() throws Exception {
         Instance untimed = instance("i-untimed", InstanceState.terminated(), null);
         Instance timed = instance("i-timed", InstanceState.terminated(), null);
         timed.setTerminatedAt(1_700_000_000_000L);
-        seed(untimed, timed);
+        seed(config(dir, false, true), ACCOUNT, untimed, timed);
 
         startNode();
 
-        assertTrue(persistedTerminatedAt("i-untimed") > 0, "an untimed record must start its clock");
-        assertEquals(1_700_000_000_000L, persistedTerminatedAt("i-timed"), "a timed record keeps its time");
+        assertTrue(persistedTerminatedAt(dir, "i-untimed") > 0, "an untimed record must start its clock");
+        assertEquals(1_700_000_000_000L, persistedTerminatedAt(dir, "i-timed"), "a timed record keeps its time");
     }
 
     @Test
-    void aTeardownThatThrowsStillEndsTerminated() throws Exception {
-        seed(instance("i-throws", InstanceState.running(), "container-throws"));
+    void aCleanupStepThatThrowsDoesNotSkipTheContainerRemovalAndTheInstanceEndsTerminated() throws Exception {
+        seed(config(dir, false, true), ACCOUNT, instance("i-throws", InstanceState.running(), "container-throws"));
         Node node = startNode();
         doThrow(new IllegalStateException("port forwards are gone")).when(node.portForwards).unpublishAll(any());
 
         node.service.terminateInstances(REGION, List.of("i-throws"));
 
         awaitPersisted("i-throws", "terminated");
-        assertTrue(persistedTerminatedAt("i-throws") > 0);
+        assertTrue(persistedTerminatedAt(dir, "i-throws") > 0);
+        verify(node.docker).removeContainerCmd("container-throws");
     }
 
     @Test
     void activeInstancesAreLeftAloneByAStart() throws Exception {
-        seed(instance("i-running", InstanceState.running(), null),
+        seed(config(dir, false, true),
+                ACCOUNT,
+                instance("i-running", InstanceState.running(), null),
                 instance("i-stopped", InstanceState.stopped(), "container-stopped"));
 
         Node node = startNode();
 
         assertEquals("running", describedState(node, "i-running"));
         assertEquals("stopped", describedState(node, "i-stopped"));
-        assertEquals("running", persistedState("i-running"));
-        assertEquals("stopped", persistedState("i-stopped"));
+        assertEquals("running", persistedState(dir, "i-running"));
+        assertEquals("stopped", persistedState(dir, "i-stopped"));
     }
 
     private Node startNode() {
-        return startNode(null, false);
+        return startNode(new Options());
     }
 
-    private Node startNode(Consumer<RemoveContainerCmd> removeBehaviour) {
-        return startNode(removeBehaviour, false);
-    }
-
-    private Node startNode(Consumer<RemoveContainerCmd> removeBehaviour,
-                           boolean containersRunning) {
-        Node node = new Node(removeBehaviour, containersRunning);
+    private Node startNode(Options options) {
+        Node node = new Node(options);
         nodes.add(node);
         return node;
+    }
+
+    /** What a test changes about the process it starts; everything else is a quiet mock. */
+    private static final class Options {
+        private Consumer<RemoveContainerCmd> removeBehaviour;
+        private boolean registered;
+        private ContainerLiveness liveness = ContainerLiveness.NOT_RUNNING;
+        private boolean stopFails;
+        private Consumer<Ec2ContainerManager> beforeStartup;
+
+        Options removing(Consumer<RemoveContainerCmd> behaviour) {
+            this.removeBehaviour = behaviour;
+            return this;
+        }
+
+        /** The restore loop re-registers a running container for pending records. */
+        Options registered() {
+            this.registered = true;
+            return this;
+        }
+
+        Options liveness(ContainerLiveness liveness) {
+            this.liveness = liveness;
+            return this;
+        }
+
+        Options stopFailing() {
+            this.stopFails = true;
+            return this;
+        }
+
+        Options beforeStartup(Consumer<Ec2ContainerManager> setup) {
+            this.beforeStartup = setup;
+            return this;
+        }
     }
 
     /** One Floci process over the shared directory: loads the stored records and runs its startup. */
@@ -247,56 +308,30 @@ class Ec2LifecycleRecoveryTest {
         final Ec2ContainerManager manager;
         final Ec2Service service;
 
-        Node(Consumer<RemoveContainerCmd> removeBehaviour, boolean containersRunning) {
+        Node(Options options) {
             RemoveContainerCmd remove = mock(RemoveContainerCmd.class, RETURNS_SELF);
-            if (removeBehaviour != null) {
-                removeBehaviour.accept(remove);
+            if (options.removeBehaviour != null) {
+                options.removeBehaviour.accept(remove);
             }
             when(docker.removeContainerCmd(anyString())).thenReturn(remove);
-            when(docker.stopContainerCmd(anyString())).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
-            EmulatorConfig config = config();
-            Ec2ContainerManager real = new Ec2ContainerManager(
-                    mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class),
-                    mock(ContainerLogStreamer.class), mock(ContainerDetector.class),
-                    mock(DockerHostResolver.class), docker, mock(PortAllocator.class), config,
-                    mock(Ec2MetadataServer.class), portForwards, mock(RegionResolver.class),
-                    mock(ContainerNetworkReachability.class), mock(VpcNetworkManager.class),
-                    mock(ContainerReachableEndpoint.class));
-            manager = spy(real);
-            doReturn(containersRunning).when(manager).restoreMetadataRegistration(any());
-            Ec2ImageCatalog imageCatalog = mock(Ec2ImageCatalog.class);
-            service = new Ec2Service(config, manager, portForwards, mock(AmiImageResolver.class), imageCatalog,
-                    new Ec2InstanceTypeCatalog(), StorageFactories.open(config, "persistent"));
+            StopContainerCmd stop = mock(StopContainerCmd.class, RETURNS_SELF);
+            if (options.stopFails) {
+                doThrow(new IllegalStateException("docker is unreachable")).when(stop).exec();
+            }
+            when(docker.stopContainerCmd(anyString())).thenReturn(stop);
+            ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+            when(lifecycle.probeContainer(anyString())).thenReturn(options.liveness);
+            EmulatorConfig config = config(dir, false, true);
+            manager = spy(manager(config, docker, lifecycle, portForwards));
+            doReturn(options.registered).when(manager).restoreMetadataRegistration(any());
+            if (options.beforeStartup != null) {
+                options.beforeStartup.accept(manager);
+            }
+            service = new Ec2Service(config, manager, portForwards, mock(AmiImageResolver.class),
+                    mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                    StorageFactories.open(config, "persistent"));
             service.restoreMetadataRegistrations();
         }
-    }
-
-    private EmulatorConfig config() {
-        EmulatorConfig config = StorageFactories.config(dir, ACCOUNT);
-        when(config.services().ec2().mock()).thenReturn(false);
-        return config;
-    }
-
-    private void seed(Instance... instances) {
-        StorageFactory factory = StorageFactories.open(config(), "persistent");
-        try {
-            AccountAwareStorageBackend<Instance> store = factory.create(
-                    "ec2", "ec2-instances.json", new TypeReference<Map<String, Instance>>() { });
-            for (Instance instance : instances) {
-                store.put(REGION + "::" + instance.getInstanceId(), instance);
-            }
-        } finally {
-            factory.shutdownAll();
-        }
-    }
-
-    private static Instance instance(String id, InstanceState state, String containerId) {
-        Instance instance = new Instance();
-        instance.setInstanceId(id);
-        instance.setRegion(REGION);
-        instance.setState(state);
-        instance.setDockerContainerId(containerId);
-        return instance;
     }
 
     private static String describedState(Node node, String id) {
@@ -304,52 +339,16 @@ class Ec2LifecycleRecoveryTest {
                 .getState().getName();
     }
 
-    private JsonNode persistedRecord(String id) throws IOException {
-        JsonNode records = JSON.readTree(Files.readString(dir.resolve("ec2-instances.json")));
-        for (Map.Entry<String, JsonNode> entry : records.properties()) {
-            if (entry.getKey().endsWith("::" + id)) {
-                return entry.getValue();
-            }
-        }
-        return null;
-    }
-
-    private String persistedState(String id) throws IOException {
-        JsonNode record = persistedRecord(id);
-        return record == null ? null : record.path("state").path("name").asText();
-    }
-
-    private long persistedTerminatedAt(String id) throws IOException {
-        JsonNode record = persistedRecord(id);
-        return record == null ? -1 : record.path("terminatedAt").asLong();
-    }
-
     private void awaitPersisted(String id, String state) throws Exception {
-        await(() -> {
-            try {
-                return state.equals(persistedState(id));
-            } catch (IOException e) {
-                return false;
-            }
-        }, "the stored record of " + id + " to read " + state + " but it reads " + safePersistedState(id));
+        await(() -> state.equals(readState(id)),
+                () -> "the stored record of " + id + " to read " + state + " but it reads " + readState(id));
     }
 
-    private String safePersistedState(String id) {
+    private String readState(String id) {
         try {
-            return persistedState(id);
+            return persistedState(dir, id);
         } catch (IOException e) {
             return "unreadable: " + e.getMessage();
         }
-    }
-
-    private static void await(BooleanSupplier condition, String description) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WAIT_SECONDS);
-        while (System.nanoTime() < deadline) {
-            if (condition.getAsBoolean()) {
-                return;
-            }
-            Thread.sleep(50);
-        }
-        fail("Timed out waiting for " + description);
     }
 }
