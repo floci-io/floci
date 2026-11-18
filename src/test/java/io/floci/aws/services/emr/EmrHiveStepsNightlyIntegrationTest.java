@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
@@ -51,7 +51,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * one (2.7 GB) and the Spark one (3.5 GB) the first time.
  */
 @QuarkusTest
-@TestProfile(ContainerDataPlaneProfile.class)
+@TestProfile(CloudFormationSettingsProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 class EmrHiveStepsNightlyIntegrationTest {

@@ -92,12 +92,13 @@ import java.util.Map;
  * markers are written whatever the storage mode; the Rekognition file is the only one this profile
  * adds there, and only Rekognition reads it.
  *
- * <p>A class joins only if no other class here calls the service its setting changes, and if the
+ * <p>A class joins if every setting here is either one it relies on or one that never reaches its
+ * requests, if any setting it adds never reaches the requests of a class already here, and if the
  * containers it starts tolerate the longer names the namespace gives them: an EMR cluster's node
  * container name passes the 63-character DNS label limit with it, so its HDFS cannot resolve its
- * datanodes, which is why the {@link ContainerDataPlaneProfile} classes stay apart. A profile that
- * extends this one starts from {@link #containerOverrides()} instead, so these settings stay with the
- * classes they were checked against.
+ * datanodes, which is why the EMR classes on {@link CloudFormationSettingsProfile} stay apart. A
+ * profile that extends this one starts from {@link #containerOverrides()} instead, so these settings
+ * stay with the classes they were checked against.
  */
 public class SidecarContainersProfile implements QuarkusTestProfile {
 
