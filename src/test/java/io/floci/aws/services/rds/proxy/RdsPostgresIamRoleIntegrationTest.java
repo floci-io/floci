@@ -264,6 +264,38 @@ class RdsPostgresIamRoleIntegrationTest {
     }
 
     @Test
+    void rdsReplicationMemberCreatesLogicalSlotOverOrdinarySql() throws Exception {
+        String id = uniqueId();
+        String slot = "slot_" + Long.toString(System.nanoTime(), 36);
+        String create = "SELECT pg_create_logical_replication_slot('" + slot + "', 'pgoutput')";
+        try {
+            int port = createPostgresInstance(id, MASTER, PASSWORD, true);
+            asMaster(port, "CREATE ROLE app_user LOGIN", "GRANT rds_iam TO app_user",
+                    "ALTER SYSTEM SET wal_level = logical");
+            rds("RebootDBInstance").formParam("DBInstanceIdentifier", id).when().post("/").then().statusCode(200);
+            Properties iam = token(port, "app_user");
+
+            try (Connection connection = connect(port, iam);
+                 Statement statement = connection.createStatement()) {
+                SQLException denied = assertThrows(SQLException.class, () -> statement.executeQuery(create));
+                assertEquals("42501", denied.getSQLState());
+            }
+
+            asMaster(port, "GRANT rds_replication TO app_user");
+            try (Connection connection = connect(port, iam);
+                 Statement statement = connection.createStatement()) {
+                try (ResultSet rows = statement.executeQuery(create)) {
+                    assertTrue(rows.next());
+                    assertTrue(rows.getString(1).startsWith("(" + slot + ","), rows.getString(1));
+                }
+                statement.execute("SELECT pg_drop_replication_slot('" + slot + "')");
+            }
+        } finally {
+            deleteInstance(id);
+        }
+    }
+
+    @Test
     void roleLookupIgnoresClientEncodingAndCatalogShadows() throws Exception {
         String id = uniqueId();
         String name = "café\"reader";
