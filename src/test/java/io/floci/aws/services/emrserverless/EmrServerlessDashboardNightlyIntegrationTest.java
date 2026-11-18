@@ -1,5 +1,8 @@
 package io.floci.aws.services.emrserverless;
 
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.PartitionCleanup;
@@ -8,6 +11,7 @@ import io.floci.aws.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -37,8 +41,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * EMR Serverless dashboards open for real: GetDashboardForJobRun's link, while a PySpark run runs in the release's
  * image, opens its driver's Spark UI through Floci on a host of its own, its pages and its REST API naming the run's
- * application, and once the run is cancelled the link reaches nothing and a new one opens Floci's page;
- * GetResourceDashboard's link, while a session is idle, opens its Spark Connect server's Spark UI.
+ * application, and once the run is cancelled the link reaches nothing and a new one opens the Spark History Server of
+ * its kept event logs, which names it too; GetResourceDashboard's link, while a session is idle, opens its Spark
+ * Connect server's Spark UI, and once it has ended, its kept history's.
  *
  * <p>A nightly check: the release's image is 3.7 GB, and the run and the session each start a JVM. It shares the Spark
  * Connect check's profile, so the two run on one Floci.
@@ -69,13 +74,19 @@ class EmrServerlessDashboardNightlyIntegrationTest {
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
+    @Inject
+    ContainerLifecycleManager lifecycleManager;
+
+    @Inject
+    EmulatorConfig config;
+
     @BeforeAll
     static void configure() {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
     @Test
-    void aRunningRunsAndAnIdleSessionsDashboardLinksOpenTheirDriversSparkUi() throws InterruptedException {
+    void aRunsAndASessionsDashboardLinksOpenTheirSparkUiThenTheirKeptHistory() throws InterruptedException {
         // Enabled, the check needs Docker: without a daemon it fails rather than pass having run nothing.
         assertTrue(DockerAvailability.isAvailable(), "the nightly check needs a Docker daemon");
         S3Client s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), ACCOUNT, Region.US_EAST_1);
@@ -96,6 +107,7 @@ class EmrServerlessDashboardNightlyIntegrationTest {
                  "jobDriver": {"sparkSubmit": {"entryPoint": "s3://%s/job.py"}}}
                 """.formatted(UUID.randomUUID(), ROLE, bucket));
         String run = "/applications/" + applicationId + "/jobruns/" + jobRunId;
+        removeHistoryAfter(jobRunId);
         cleanup.register(() -> emrServerless(REGION).when().delete(run));
         await(() -> emrServerless(REGION).when().get(run).then().statusCode(200).extract().path("jobRun.state"),
                 "RUNNING"::equals, Duration.ofMinutes(10), "job run " + jobRunId);
@@ -117,9 +129,12 @@ class EmrServerlessDashboardNightlyIntegrationTest {
         Response ended = open(live + "jobs/");
         assertEquals(404, ended.statusCode(), ended.asString());
         assertTrue(ended.asString().contains("is no longer running"), ended.asString());
-        String page = emrServerless(REGION).when().get(run + "/dashboard").then().statusCode(200)
+        // Its event logs were kept: a new link opens the Spark History Server reading them, once it has started.
+        String history = emrServerless(REGION).when().get(run + "/dashboard").then().statusCode(200)
                 .extract().path("url");
-        assertTrue(page.startsWith("http://localhost:" + PORT + EmrServerlessDashboards.PATH + "?"), page);
+        assertTrue(URI.create(history).getAuthority().contains("-18080.emr-serverless-ui."), history);
+        Response kept = awaitApplications(history, NAME);
+        assertEquals(List.of(NAME), kept.jsonPath().getList("name"), kept.asString());
 
         String sessionId = emrServerless(REGION).body("""
                         {"clientToken": "%s", "executionRoleArn": "%s", "idleTimeoutMinutes": 30}
@@ -127,6 +142,7 @@ class EmrServerlessDashboardNightlyIntegrationTest {
                 .when().post("/applications/" + applicationId + "/sessions")
                 .then().statusCode(200).extract().path("sessionId");
         String session = "/applications/" + applicationId + "/sessions/" + sessionId;
+        removeHistoryAfter(sessionId);
         cleanup.register(() -> emrServerless(REGION).when().delete(session));
         await(() -> emrServerless(REGION).when().get(session).then().statusCode(200).extract()
                 .path("session.state"), "IDLE"::equals, Duration.ofMinutes(5), "session " + sessionId);
@@ -141,6 +157,31 @@ class EmrServerlessDashboardNightlyIntegrationTest {
         await(() -> emrServerless(REGION).when().get(session).then().statusCode(200).extract()
                 .path("session.state"), "TERMINATED"::equals, Duration.ofMinutes(2), "session " + sessionId);
         assertEquals(404, open(sessionUi + "jobs/").statusCode());
+        String sessionHistory = emrServerless(REGION).queryParam("resourceId", sessionId)
+                .queryParam("resourceType", "SESSION")
+                .when().get("/applications/" + applicationId + "/dashboard")
+                .then().statusCode(200).extract().path("url");
+        assertTrue(URI.create(sessionHistory).getAuthority().contains("-18080.emr-serverless-ui."), sessionHistory);
+        Response sessionKept = awaitApplications(sessionHistory, "SparkConnectServer");
+        assertEquals(1, sessionKept.jsonPath().getList("name").size(), sessionKept.asString());
+    }
+
+    // A run's or session's kept history, and the container serving it, which a link left running, go once the test
+    // has: Floci keeps a history for 30 days, past any test.
+    private void removeHistoryAfter(String runId) {
+        cleanup.register(() -> lifecycleManager.removeVolume(EmrServerlessHistories.volume(config, runId)));
+        cleanup.register(() -> lifecycleManager.removeIfExists(ContainerStorageHelper.dockerName(config,
+                "emr-serverless-" + runId + "-history-ui")));
+    }
+
+    // The applications a history's server lists once one of them is named, as it reads the event logs at an interval.
+    private static Response awaitApplications(String url, String named) {
+        Response[] page = new Response[1];
+        await(() -> {
+            page[0] = open(url + "api/v1/applications");
+            return page[0].statusCode() + " " + page[0].asString();
+        }, now -> now.startsWith("200 ") && now.contains(named), Duration.ofMinutes(3), url);
+        return page[0];
     }
 
     // A page of a driver's UI once it shows what is asked for: its link's host answers 503 until the UI listens, and
