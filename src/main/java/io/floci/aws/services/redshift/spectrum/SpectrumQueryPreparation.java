@@ -510,7 +510,7 @@ public class SpectrumQueryPreparation {
                 + ExternalTableMaterializer.quote(binding.schemaName()) + (statement.cascade() ? " CASCADE" : " RESTRICT")
                 + "; " + metadata.purgeSql(binding.schemaName()));
         if (statement.cascade()) {
-            dependents.forEach(views::unbind);
+            dependents.forEach(views::unbindIfCurrent);
         }
         // a concurrent drop and re-create of the name may have bound a newer schema meanwhile
         if (binding.equals(kinesisSchemas.find(session.accountId(), session.clusterKey(), session.databaseName(),

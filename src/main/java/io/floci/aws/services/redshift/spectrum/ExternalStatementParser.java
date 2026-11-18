@@ -20,7 +20,7 @@ public class ExternalStatementParser {
     private static final Pattern SERDE_PROPERTIES = Pattern.compile("(?is)WITH\\s+SERDEPROPERTIES\\s*\\(");
     private static final String NAME = "(\"(?:\"\"|[^\"])+\"|[^.;,\\s\"()]+)";
     private static final Pattern CREATE_TABLE_HEAD = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\s+" + NAME + "\\s*\\.\\s*" + NAME + "\\s*\\(");
-    private static final Pattern CREATE_VIEW = Pattern.compile("(?is)^\\s*CREATE\\s+MATERIALIZED\\s+VIEW\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s+(?:BACKUP\\s+(?:YES|NO)\\s+)?(?:AUTO\\s+REFRESH\\s+(YES|NO)\\s+)?AS\\s+(SELECT\\b.*?)\\s*;?\\s*$");
+    private static final Pattern CREATE_VIEW = Pattern.compile("(?is)^\\s*CREATE\\s+MATERIALIZED\\s+VIEW\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s+(?:BACKUP\\s+(?:YES|NO)\\s+)?(?:AUTO\\s+REFRESH\\s+(YES|NO)\\s+)?AS\\s+((?:SELECT|WITH)\\b.*?)\\s*;?\\s*$");
     private static final Pattern REFRESH_VIEW = Pattern.compile("(?is)^\\s*REFRESH\\s+MATERIALIZED\\s+VIEW\\s+" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?\\s*;?\\s*$");
     private static final Pattern DROP_VIEW = Pattern.compile("(?is)^\\s*DROP\\s+MATERIALIZED\\s+VIEW\\s+(IF\\s+EXISTS\\s+)?" + NAME + "(?:\\s*\\.\\s*" + NAME + ")?(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
     private static final Pattern DROP_TABLE = Pattern.compile("(?is)^\\s*DROP\\s+TABLE\\s+(IF\\s+EXISTS\\s+)?" + NAME + "\\.\\s*" + NAME + "(?:\\s+(CASCADE|RESTRICT))?\\s*;?\\s*$");
@@ -56,18 +56,24 @@ public class ExternalStatementParser {
                     region == null ? null : region.replace("''", "'"), roleArn(kinesis.group(4)),
                     kinesis.group(1) != null));
         }
-        Matcher createView = CREATE_VIEW.matcher(text);
+        // comments are separators here; the view's query is stored and sent again on every refresh
+        String viewText = withoutComments(text);
+        Matcher createView = CREATE_VIEW.matcher(viewText);
         if (createView.matches()) {
+            if (hasStatementSeparator(createView.group(4))) {
+                throw new SpectrumSqlException("42601",
+                        "A materialized view query must be a single statement");
+            }
             return Optional.of(new ExternalStatement.CreateStreamingView(qualifier(createView.group(1), createView.group(2)),
                     objectName(createView.group(1), createView.group(2)), "YES".equalsIgnoreCase(createView.group(3)),
                     createView.group(4)));
         }
-        Matcher refreshView = REFRESH_VIEW.matcher(text);
+        Matcher refreshView = REFRESH_VIEW.matcher(viewText);
         if (refreshView.matches()) {
             return Optional.of(new ExternalStatement.RefreshView(qualifier(refreshView.group(1), refreshView.group(2)),
                     objectName(refreshView.group(1), refreshView.group(2))));
         }
-        Matcher dropView = DROP_VIEW.matcher(text);
+        Matcher dropView = DROP_VIEW.matcher(viewText);
         if (dropView.matches()) {
             return Optional.of(new ExternalStatement.DropView(qualifier(dropView.group(2), dropView.group(3)),
                     objectName(dropView.group(2), dropView.group(3)), dropView.group(1) != null,
@@ -142,6 +148,58 @@ public class ExternalStatementParser {
         Map<String, String> properties = properties(tail);
         return new ExternalStatement.CreateTable(identifier(matcher.group(1)), identifier(matcher.group(2)), columns, partitions,
                 format, location, delimiter, serde, properties, serdeProperties(tail));
+    }
+
+    /** The SQL with each comment outside a quoted string or identifier replaced by a space. */
+    static String withoutComments(String sql) {
+        StringBuilder out = new StringBuilder(sql.length());
+        char quote = 0;
+        int i = 0;
+        while (i < sql.length()) {
+            char c = sql.charAt(i);
+            if (quote != 0) {
+                out.append(c);
+                if (c == quote) {
+                    quote = 0;
+                }
+                i++;
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+                out.append(c);
+                i++;
+            } else if (sql.startsWith("--", i)) {
+                while (i < sql.length() && sql.charAt(i) != '\n') {
+                    i++;
+                }
+                out.append(' ');
+            } else if (sql.startsWith("/*", i)) {
+                int end = sql.indexOf("*/", i + 2);
+                i = end < 0 ? sql.length() : end + 2;
+                out.append(' ');
+            } else {
+                out.append(c);
+                i++;
+            }
+        }
+        return out.toString();
+    }
+
+    /** True when a {@code ;} sits outside a quoted string or identifier. */
+    static boolean hasStatementSeparator(String sql) {
+        char quote = 0;
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                }
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+            } else if (c == ';') {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The schema of {@code first.second}, null for a bare name. */

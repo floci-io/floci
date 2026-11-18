@@ -249,6 +249,31 @@ class KinesisStreamingViewsTest {
     }
 
     @Test
+    void aDropOfAViewThatIsAlreadyGoneDoesNothingWithIfExistsAndFailsWithout() {
+        KinesisViewBinding stale = createView();
+        views.drop(stale, false, false, backend);
+
+        views.drop(stale, true, false, backend);
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> views.drop(stale, false, false, backend));
+
+        assertThat(error.sqlState(), equalTo("42P01"));
+        verify(backend, times(2)).execute(anyString());
+    }
+
+    @Test
+    void aCascadeCleanupLeavesAReplacementOverAnotherStreamBound() {
+        KinesisViewBinding captured = createView();
+        views.unbind(captured);
+        registry.bind(new KinesisViewBinding(ACCOUNT, SESSION.clusterKey(), "dev", "public", "events_mv", "kds",
+                "other", SELECT, Map.of()));
+
+        views.unbindIfCurrent(captured);
+
+        assertThat(views.find(SESSION, null, "events_mv").isPresent(), is(true));
+    }
+
+    @Test
     void theStagingTableStaysWhileAnotherViewReadsTheStream() {
         KinesisViewBinding first = createView();
         views.create(new ExternalStatement.CreateStreamingView(null, "other_mv", false, SELECT), "events", SCHEMA,

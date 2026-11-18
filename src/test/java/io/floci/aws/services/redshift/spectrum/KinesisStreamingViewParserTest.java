@@ -6,6 +6,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class KinesisStreamingViewParserTest {
     private final ExternalStatementParser parser = new ExternalStatementParser();
@@ -49,6 +50,34 @@ class KinesisStreamingViewParserTest {
         assertThat(drop.viewName(), equalTo("my_view"));
         assertThat(drop.ifExists(), is(true));
         assertThat(drop.cascade(), is(true));
+    }
+
+    @Test
+    void aViewQueryMayStartWithACte() {
+        ExternalStatement.CreateStreamingView view = (ExternalStatement.CreateStreamingView) parser.parse(
+                "CREATE MATERIALIZED VIEW v AS WITH s AS (SELECT * FROM kds.t) SELECT * FROM s").orElseThrow();
+
+        assertThat(view.select(), equalTo("WITH s AS (SELECT * FROM kds.t) SELECT * FROM s"));
+    }
+
+    @Test
+    void commentsAreSeparatorsAndDoNotReachTheStoredQuery() {
+        ExternalStatement.RefreshView refresh = (ExternalStatement.RefreshView) parser.parse(
+                "REFRESH /* a */ MATERIALIZED VIEW v /* note */ -- tail").orElseThrow();
+        ExternalStatement.CreateStreamingView view = (ExternalStatement.CreateStreamingView) parser.parse(
+                "CREATE MATERIALIZED VIEW v AS SELECT 'a--b' AS x FROM kds.t -- trailing").orElseThrow();
+
+        assertThat(refresh.viewName(), equalTo("v"));
+        assertThat(view.select(), equalTo("SELECT 'a--b' AS x FROM kds.t"));
+    }
+
+    @Test
+    void aSecondStatementInTheViewQueryIsRefused() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () -> parser.parse(
+                "CREATE MATERIALIZED VIEW v AS SELECT 1 FROM kds.t; DROP TABLE public.x"));
+
+        assertThat(error.sqlState(), equalTo("42601"));
+        assertThat(parser.parse("CREATE MATERIALIZED VIEW v AS SELECT ';' FROM kds.t").isPresent(), is(true));
     }
 
     @Test

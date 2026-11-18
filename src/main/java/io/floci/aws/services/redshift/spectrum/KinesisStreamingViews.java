@@ -81,6 +81,20 @@ public class KinesisStreamingViews {
         registry.unbind(view.accountId(), view.clusterKey(), view.databaseName(), view.bindingName());
     }
 
+    /** Unbinds a view captured earlier, unless a view of the same name over another stream has replaced it. */
+    public void unbindIfCurrent(KinesisViewBinding captured) {
+        synchronized (streamLock(captured.accountId(), captured.clusterKey(), captured.databaseName(),
+                captured.streamSchema(), captured.streamName())) {
+            registry.find(captured.accountId(), captured.clusterKey(), captured.databaseName(),
+                    captured.bindingName()).filter(current -> readsSameStream(current, captured))
+                    .ifPresent(this::unbind);
+        }
+    }
+
+    private static boolean readsSameStream(KinesisViewBinding first, KinesisViewBinding second) {
+        return first.streamSchema().equals(second.streamSchema()) && first.streamName().equals(second.streamName());
+    }
+
     /** The SQL that drops a view's table, for the statement that drops a schema it reads from. */
     static String dropSql(KinesisViewBinding view, boolean ifExists, boolean cascade) {
         return "DROP TABLE " + (ifExists ? "IF EXISTS " : "") + table(view.viewSchema(), view.viewName())
@@ -91,9 +105,20 @@ public class KinesisStreamingViews {
      * Drops a view's table and its binding, and the stream's staging table once no other view reads the stream.
      * Without that, a plain DROP SCHEMA of the stream's schema would keep failing on the leftover table.
      */
-    public void drop(KinesisViewBinding view, boolean ifExists, boolean cascade, BackendSql backend) {
-        synchronized (streamLock(view.accountId(), view.clusterKey(), view.databaseName(), view.streamSchema(),
-                view.streamName())) {
+    public void drop(KinesisViewBinding named, boolean ifExists, boolean cascade, BackendSql backend) {
+        synchronized (streamLock(named.accountId(), named.clusterKey(), named.databaseName(), named.streamSchema(),
+                named.streamName())) {
+            // the binding read before the lock may be gone or replaced by a view of the same name since
+            Optional<KinesisViewBinding> registered = registry.find(named.accountId(), named.clusterKey(),
+                    named.databaseName(), named.bindingName());
+            if (registered.isEmpty() || !readsSameStream(registered.get(), named)) {
+                if (ifExists) {
+                    return;
+                }
+                throw new SpectrumSqlException("42P01", "materialized view \"" + named.viewSchema() + "."
+                        + named.viewName() + "\" does not exist");
+            }
+            KinesisViewBinding view = registered.get();
             boolean lastReader = registry.list(view.accountId(), view.clusterKey(), view.databaseName()).stream()
                     .noneMatch(other -> !other.bindingName().equals(view.bindingName())
                             && other.streamSchema().equals(view.streamSchema())
