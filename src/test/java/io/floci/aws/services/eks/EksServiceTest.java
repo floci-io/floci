@@ -49,6 +49,8 @@ import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.eks.model.StorageConfig;
+import io.floci.aws.services.eks.model.Update;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -916,6 +918,32 @@ class EksServiceTest {
         Cluster deleted = eksService.deleteCluster("to-delete");
         assertEquals(ClusterStatus.DELETING, deleted.getStatus());
         assertTrue(eksService.listClusters().isEmpty());
+    }
+
+    @Test
+    void updateClusterConfigRefusesBadPublicAccessCidrsOnAnIpv4ClusterAndChangesNothing() {
+        EksAddonService addons = mock(EksAddonService.class);
+        Update recorded = new Update("u", "Successful", "EndpointAccessUpdate", List.of(), 0, List.of());
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("cidr-cluster");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        service.createCluster(create);
+        for (String cidr : List.of("10.0.0.0/33", "::/0")) {
+            ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+            vpc.setEndpointPublicAccess(false);
+            vpc.setPublicAccessCidrs(List.of(cidr));
+            AwsException e = assertThrows(AwsException.class, () -> service.updateClusterConfig(
+                    "cidr-cluster", new UpdateClusterConfigRequest(vpc, null, null, null)), cidr);
+            assertEquals("InvalidParameterException", e.getErrorCode(), cidr);
+            ResourcesVpcConfig stored = service.describeCluster("cidr-cluster").getResourcesVpcConfig();
+            assertEquals(Boolean.TRUE, stored.getEndpointPublicAccess(), cidr);
+            assertEquals(List.of("0.0.0.0/0"), stored.getPublicAccessCidrs(), cidr);
+        }
+        verify(addons, never()).recordUpdate(any(), anyString(), any(), any(), any());
     }
 
     @Test
