@@ -59,8 +59,7 @@ targets and HTTP URLs that use a literal private or loopback address.
 | `GetResolver` | Get a resolver by type and field |
 | `UpdateResolver` | Update a resolver |
 | `DeleteResolver` | Delete a resolver |
-| `ListResolvers` | List all resolvers for an API |
-| `ListResolversByType` | List resolvers for a specific type |
+| `ListResolvers` | List the resolvers of a type |
 | `ListResolversByFunction` | List resolvers attached to a specific function |
 
 ### Functions
@@ -88,7 +87,6 @@ targets and HTTP URLs that use a literal private or loopback address.
 | Operation | Description |
 |---|---|
 | `CreateApiKey` | Create an API key |
-| `GetApiKey` | Get an API key by ID |
 | `UpdateApiKey` | Update an API key |
 | `DeleteApiKey` | Delete an API key |
 | `ListApiKeys` | List all API keys for an API |
@@ -107,8 +105,8 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 
 | Operation | Description |
 |---|---|
-| `GetEnvironmentVariables` | Get environment variables for an API |
-| `PutEnvironmentVariables` | Set environment variables for an API |
+| `GetGraphqlApiEnvironmentVariables` | Get environment variables for an API |
+| `PutGraphqlApiEnvironmentVariables` | Set environment variables for an API |
 
 ### Domain Names
 
@@ -120,9 +118,8 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 | `ListDomainNames` | List all domain names |
 | `DeleteDomainName` | Delete a custom domain name |
 | `AssociateApi` | Associate a domain name with a GraphQL API |
-| `GetAssociatedApi` | Get the API associated with a domain name |
+| `GetApiAssociation` | Get the API associated with a domain name |
 | `DisassociateApi` | Disassociate a domain name from a GraphQL API |
-| `ListApiAssociations` | List all associations for an API |
 
 ### Channel Namespaces
 
@@ -138,16 +135,15 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 
 | Operation | Description |
 |---|---|
-| `CreateApiAssociation` | Associate a source API with a merged API |
-| `GetApiAssociation` | Get a merged API association |
-| `DeleteApiAssociation` | Delete a merged API association |
-| `ListApiAssociations` | List all merged API associations |
+| `AssociateSourceGraphqlApi` | Associate a source API with a merged API, from the merged API's side |
+| `AssociateMergedGraphqlApi` | Associate a source API with a merged API, from the source API's side |
+| `GetSourceApiAssociation` | Get a source API association |
+| `UpdateSourceApiAssociation` | Update a source API association's description or merge type |
+| `ListSourceApiAssociations` | List the source API associations of an API |
+| `DisassociateSourceGraphqlApi` | Remove a source API association, from the merged API's side |
+| `DisassociateMergedGraphqlApi` | Remove a source API association, from the source API's side |
 
-### Enhanced Metrics
-
-| Operation | Description |
-|---|---|
-| `GetEnhancedMetricsConfig` | Get the enhanced metrics configuration |
+An API's `enhancedMetricsConfig` is kept with it by `CreateGraphqlApi` and `UpdateGraphqlApi`.
 
 ## Schema Registry
 

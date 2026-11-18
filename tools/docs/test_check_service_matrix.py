@@ -218,23 +218,20 @@ def test_non_tabular_action_sources_cannot_be_disabled(tmp_path, source_entry):
         c.extract_action_counts(root)
 
 
-def test_non_tabular_action_source_cannot_be_removed_silently(tmp_path):
+def test_removing_a_rows_source_leaves_it_checked_by_nothing(tmp_path):
     root = _repo(
         tmp_path,
         ["| [Glue](glue.md) | Query | JSON | 2 |", "| [EC2](ec2.md) | Query | Query | 1 |"],
-        "action_count_sources:\n  glue: services/GlueJsonHandler.java\n"
-        "  ec2: services/Ec2QueryHandler.java\n",
-        {
-            "services/GlueJsonHandler.java": 'case "CreateTable" -> create();\ncase "GetTable" -> get();\n',
-            "services/Ec2QueryHandler.java": 'case "DescribeInstances" -> describe();\n',
-        },
+        "action_count_sources:\n  glue: services/GlueJsonHandler.java\n",
+        {"services/GlueJsonHandler.java": 'case "CreateTable" -> create();\ncase "GetTable" -> get();\n'},
     )
+    md = (root / c.MATRIX_DOC).read_text(encoding="utf-8")
 
-    required = frozenset({"glue", "ec2"})
-    assert c.extract_action_counts(root, required) == {"glue": 2, "ec2": 1}
-    (root / c.REGISTRY).write_text("action_count_sources:\n  glue: services/GlueJsonHandler.java\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="required action count source\\(s\\) missing: ec2"):
-        c.extract_action_counts(root, required)
+    warnings = c.find_unchecked_rows(c.extract_matrix_row_keys(md), c.extract_matrix_action_counts(md),
+                                     set(c.extract_action_counts(root)), {})
+
+    assert len(warnings) == 1
+    assert "nothing checks the count of row 'ec2'" in warnings[0]
 
 
 def test_an_anchored_row_is_counted_from_its_own_dispatcher(tmp_path):
@@ -324,6 +321,9 @@ def test_a_source_without_actions_fails_rather_than_lowering_the_count(tmp_path)
     ("{ sources: [services/SnsJsonHandler.java], exclude_actions: Publish }", "exclude_actions as a list"),
     ("[services/SnsJsonHandler.java]", "needs a source path"),
     ("{ sources: [{ path: services/SnsJsonHandler.java, mode: rst }] }", "'sns' unknown mode: 'rst'"),
+    ("{ sources: [{ path: services/SnsJsonHandler.java, mode: rest, prefix: /v2/ }] }",
+     "a source with unknown key\\(s\\): prefix"),
+    ("{ sources: [services/SnsJsonHandler.java], rename_actions: [Publish] }", "rename_actions as a mapping"),
 ])
 def test_a_malformed_source_entry_is_refused(tmp_path, entry, message):
     root = _repo(
@@ -337,11 +337,140 @@ def test_a_malformed_source_entry_is_refused(tmp_path, entry, message):
         c.extract_action_counts(root)
 
 
-def test_the_registry_checks_every_row_a_dispatcher_counts():
+def test_every_row_of_the_real_matrix_is_checked_or_hand_counted():
     root = c._repo_root()
-    counts = c.extract_action_counts(root, c.REQUIRED_ACTION_COUNT_SOURCES)
+    md = (root / c.MATRIX_DOC).read_text(encoding="utf-8")
 
-    assert c.REQUIRED_ACTION_COUNT_SOURCES <= counts.keys()
+    assert c.find_unchecked_rows(c.extract_matrix_row_keys(md), c.extract_matrix_action_counts(md),
+                                 set(c.extract_action_counts(root)), c.load_hand_counted(root)) == []
+
+
+# --------------------------------------------------------------------------- #
+# Coverage: every row checked or hand-counted
+# --------------------------------------------------------------------------- #
+def test_a_formatted_first_cell_link_still_makes_a_row():
+    # Presence and coverage read the same rows, so a bold link cannot count as documented
+    # while escaping the count checks.
+    md = "## Service Matrix\n\n| **[Glue](glue.md)** | ... | JSON 1.1 | 2 |\n\n## Common Setup\n"
+
+    assert c.extract_matrix_row_keys(md) == ["glue"]
+    assert c.extract_matrix_slugs(md) == {"glue"}
+    assert c.extract_matrix_action_counts(md) == {"glue": 2}
+
+
+def test_a_row_linking_no_page_is_refused():
+    md = (
+        "## Service Matrix\n\n| Service | Endpoint | Protocol | Supported operations |\n|---|---|---|---|\n"
+        "| Glue | ... | JSON 1.1 | 2 |\n\n## Common Setup\n"
+    )
+
+    with pytest.raises(ValueError, match="row 'Glue' links no docs/services page"):
+        c.extract_matrix_row_keys(md)
+
+
+def test_extract_matrix_row_keys_keeps_rows_without_a_count():
+    md = (
+        "## Service Matrix\n\n"
+        "| [S3](s3.md) | ... | REST XML | 58 |\n"
+        "| [API Gateway v2](api-gateway.md#v2) | ... | REST JSON | 53 + data-plane |\n"
+        "| [IoT Data](iot.md) | ... | REST JSON | 11 |\n"
+        "\n## Common Setup\n"
+    )
+
+    assert c.extract_matrix_row_keys(md) == ["s3", "api-gateway#v2", "iot"]
+
+
+def test_an_unchecked_row_needs_a_source_or_a_hand_counted_reason():
+    keys = ["s3", "glue"]
+    counts = {"s3": 58, "glue": 2}
+
+    assert len(c.find_unchecked_rows(keys, counts, {"glue"}, {})) == 1
+    assert c.find_unchecked_rows(keys, counts, {"glue"}, {"s3": "query-string subresources"}) == []
+
+
+def test_a_checked_row_cannot_also_be_hand_counted():
+    warnings = c.find_unchecked_rows(["glue"], {"glue": 2}, {"glue"}, {"glue": "why"})
+
+    assert warnings == [f"row 'glue' is checked, so drop it from hand_counted in {c.REGISTRY}"]
+
+
+def test_a_hand_counted_entry_must_name_a_row():
+    warnings = c.find_unchecked_rows(["glue"], {"glue": 2}, {"glue"}, {"s3": "why"})
+
+    assert warnings == [f"hand_counted row 's3' in {c.REGISTRY} is not a row of {c.MATRIX_DOC}"]
+
+
+def test_two_rows_on_one_link_target_are_refused():
+    # IoT Core and IoT Data both linked iot.md; the second row's count was never read.
+    warnings = c.find_unchecked_rows(["iot", "iot"], {"iot": 83}, {"iot"}, {})
+
+    assert len(warnings) == 1
+    assert "two rows" in warnings[0] and "'iot'" in warnings[0]
+
+
+def test_a_row_without_a_numeric_count_is_refused():
+    warnings = c.find_unchecked_rows(["api-gateway#v2"], {}, set(), {})
+
+    assert warnings == [f"row 'api-gateway#v2' in {c.MATRIX_DOC} has no numeric operation count"]
+
+
+@pytest.mark.parametrize("entry", ["[s3]", "{ s3: '' }", "{ s3: 3 }"])
+def test_a_hand_counted_row_needs_its_reason(tmp_path, entry):
+    root = _repo(tmp_path, ["| [S3](s3.md) | ... | REST XML | 58 |"], f"hand_counted: {entry}\n")
+
+    with pytest.raises(ValueError, match="hand_counted"):
+        c.load_hand_counted(root)
+
+
+def test_route_prefixes_split_one_controller_between_two_rows(tmp_path):
+    # API Gateway serves v1 and, under /v2/, v2 from the same controller.
+    controller = (
+        '@Path("/")\npublic class ApiGatewayController {\n'
+        '    @POST\n    @Path("/restapis")\n    public Response createRestApi() { return null; }\n'
+        '    @POST\n    @Path("/v2/apis")\n    public Response createApi() { return null; }\n'
+        '    @GET\n    @Path("/v2/apis")\n    public Response getApis() { return null; }\n'
+        '}\n'
+    )
+    root = _repo(
+        tmp_path,
+        ["| [API Gateway v1](api-gateway.md) | ... | REST JSON | 1 |",
+         "| [API Gateway v2](api-gateway.md#v2) | ... | REST JSON | 2 |"],
+        "action_count_sources:\n"
+        "  api-gateway:\n    sources:\n"
+        "      - { path: services/ApiGatewayController.java, mode: rest, skip_route_prefix: /v2/ }\n"
+        "  api-gateway#v2:\n    sources:\n"
+        "      - { path: services/ApiGatewayController.java, mode: rest, route_prefix: /v2/ }\n",
+        {"services/ApiGatewayController.java": controller},
+    )
+
+    assert c.extract_action_counts(root) == {"api-gateway": 1, "api-gateway#v2": 2}
+
+
+def test_renames_and_tag_handlers_count_the_actions_a_row_serves(tmp_path):
+    controller = (
+        '@Path("/")\npublic class EksController {\n'
+        '    @POST\n    @Path("/clusters/{name}/node-groups")\n    public Response createNodeGroup() { return null; }\n'
+        '    @GET\n    @Path("/clusters/{name}/provisioned")\n    public Response get() { return null; }\n'
+        '}\n'
+    )
+    root = _repo(
+        tmp_path,
+        ["| [EKS](eks.md) | ... | REST JSON | 6 |"],
+        "action_count_sources:\n  eks:\n    sources:\n"
+        "      - { path: services/EksController.java, mode: rest }\n"
+        "      - { path: services/EksService.java, mode: tag_handler }\n"
+        "    rename_actions:\n"
+        "      CreateNodeGroup: CreateNodegroup\n"
+        "      Get: [GetThing, ListThings]\n",
+        {
+            "services/EksController.java": controller,
+            "services/EksService.java": "public class EksService implements Startable, TagHandler {\n}\n",
+        },
+    )
+
+    assert c.extract_action_counts(root) == {"eks": 6}
+
+
 
 
 def test_extract_matrix_slugs_raises_on_missing_heading():
