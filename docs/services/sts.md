@@ -98,6 +98,14 @@ trade-in token, and the model is what is in hand, so the blank is read as the va
 
 SAML role sessions reject `DurationSeconds` above the target role maximum. Accepted requests retain the shorter assertion expiration.
 
+A SAML role session is named after the assertion's `https://aws.amazon.com/SAML/Attributes/RoleSessionName`
+attribute, which is also the `sts:RoleSessionName` the role's trust policy reads. A value outside
+`[a-zA-Z_0-9+=,.@-]{2,64}` is refused with `InvalidIdentityToken` and the message
+`RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}`. AWS refuses an assertion
+without the attribute; Floci accepts it, names the session after the assertion's subject, and leaves
+`sts:RoleSessionName` out of the request context, so a trust policy that requires a session name
+refuses it.
+
 ## Privileged Root Sessions
 
 `AssumeRoot` returns "short term credentials you can use to perform privileged tasks on a member
@@ -433,7 +441,7 @@ When the token's `iss` names a known Floci issuer, all of the following are enfo
 - `iss` matches that issuer exactly
 - `aud` contains `sts.amazonaws.com`
 - `exp` / `nbf`, with 60s of clock-skew tolerance
-- the role's trust policy: `Principal.Federated` plus the `Condition` block, comparing `<oidcProvider>:sub` and `<oidcProvider>:aud` with exact, **case-sensitive** equality (`StringEquals`, `StringNotEquals`, `StringLike`, and `StringNotLike` are supported)
+- the role's trust policy: `Principal.Federated` plus the `Condition` block, comparing `<oidcProvider>:sub`, `<oidcProvider>:aud` and `sts:RoleSessionName` (the request's `RoleSessionName`) with exact, **case-sensitive** equality (`StringEquals`, `StringNotEquals`, `StringLike`, and `StringNotLike` are supported)
 
 The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a role that does not exist or a trust policy that does not permit the subject returns `AccessDenied` (403).
 

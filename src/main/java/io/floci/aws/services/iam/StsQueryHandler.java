@@ -485,7 +485,8 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
-        WebIdentityOutcome outcome = verifyWebIdentityToken(webIdentityToken, roleName, accountId, roleArn);
+        WebIdentityOutcome outcome = verifyWebIdentityToken(webIdentityToken, roleName, accountId, roleArn,
+                sessionName);
         if (outcome.denial() != null) {
             return outcome.denial();
         }
@@ -572,9 +573,12 @@ public class StsQueryHandler {
         }
     }
 
-    /** Inspects {@code token} and decides whether it may assume {@code roleArn}. */
+    /**
+     * Inspects {@code token} and decides whether it may assume {@code roleArn} as the session
+     * {@code sessionName}, which the trust policy reads as {@code sts:RoleSessionName}.
+     */
     private WebIdentityOutcome verifyWebIdentityToken(String token, String roleName, String roleAccountId,
-                                                      String roleArn) {
+                                                      String roleArn, String sessionName) {
         Optional<String> issuer = tokenVerifier.peekIssuer(token);
         if (issuer.isEmpty()) {
             return config.services().iam().enforcementEnabled()
@@ -620,7 +624,7 @@ public class StsQueryHandler {
                 "aud", claims.audiences());
 
         if (!webIdentityTrustEvaluator.allows(role.get().getAssumeRolePolicyDocument(),
-                oidcProviderArn, issuerKeyPrefix, conditionClaims)) {
+                oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
             LOG.debugv("Trust policy on role {0} denies web identity subject {1}",
                     roleArn, claims.subject());
             return WebIdentityOutcome.deny(accessDenied(roleArn));
@@ -699,7 +703,7 @@ public class StsQueryHandler {
                 "aud", List.of(STS_AUDIENCE),
                 "iss", List.of(verified.issuer()),
                 "sub", List.of(verified.subject()),
-                "namequalifier", List.of(verified.nameQualifier())))) {
+                "namequalifier", List.of(verified.nameQualifier())), verified.roleSessionName())) {
             throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
         }
 
@@ -708,9 +712,14 @@ public class StsQueryHandler {
             return roleDurationError;
         }
 
-        String sessionName = verified.subject().replaceAll("[^A-Za-z0-9+=,.@_-]", "_");
-        if (sessionName.length() > 64) {
-            sessionName = sessionName.substring(0, 64);
+        String sessionName = verified.roleSessionName();
+        // AWS refuses an assertion without the attribute; Floci has always accepted one, naming the
+        // session after its subject, and keeps doing so.
+        if (sessionName == null) {
+            sessionName = verified.subject().replaceAll("[^A-Za-z0-9+=,.@_-]", "_");
+            if (sessionName.length() > 64) {
+                sessionName = sessionName.substring(0, 64);
+            }
         }
         Instant requestedExpiration = clock.instant().plusSeconds(durationSeconds);
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
