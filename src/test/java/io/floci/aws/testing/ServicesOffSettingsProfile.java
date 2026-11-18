@@ -25,12 +25,18 @@ import java.util.Map;
  *   {@code floci.services.servicequotas.standard-on-demand-vcpus=2}, refuses a launch that would run
  *   more than two Standard On-Demand vCPUs. {@code Ec2VcpuAdmissionIntegrationTest} relies on
  *   them.</li>
+ *   <li>{@code floci.services.iot.mqtt.port=}{@value #MQTT_PORT} moves the MQTT broker off the
+ *   shipped 1883, which a developer's running Floci may hold. The test config leaves
+ *   {@code auto-start} off, so the broker listens only once something needs it.
+ *   {@code IotMqttLazyStartupIntegrationTest} and {@code IotMqttWebSocketLazyStartIntegrationTest}
+ *   rely on it: they check what starts it, and stop it before and after each test.</li>
  * </ul>
  *
  * <p>Each is inert for the other classes: none of them calls a service switched off here, files a
- * delegation request as the partner account, restores an S3 object or launches an instance. Their
- * requests go to IAM, CloudFormation for an IAM role, S3, EC2 and Service Quotas, and to the
- * disabled services only from {@code ServiceEnablementIntegrationTest}. It stays apart from
+ * delegation request as the partner account, restores an S3 object, launches an instance or
+ * reaches the MQTT broker. Their requests go to IAM, CloudFormation for an IAM role, S3, EC2,
+ * Service Quotas and IoT, and to the disabled services only from
+ * {@code ServiceEnablementIntegrationTest}. It stays apart from
  * {@link ScopedServiceSettingsProfile}, whose classes call DynamoDB, ECS and FIS.
  *
  * <p>A class joins if it calls none of the services switched off here, if every other setting here
@@ -38,6 +44,9 @@ import java.util.Map;
  * never reaches the requests of a class already here.
  */
 public class ServicesOffSettingsProfile implements QuarkusTestProfile {
+
+    /** The port the MQTT broker listens on once something starts it. */
+    public static final int MQTT_PORT = 18838;
 
     @Override
     public Map<String, String> getConfigOverrides() {
@@ -56,6 +65,7 @@ public class ServicesOffSettingsProfile implements QuarkusTestProfile {
                         "src/test/resources/partner-permission-boundaries.json"),
                 Map.entry("floci.services.s3.restore-completion-delay-seconds", "60"),
                 Map.entry("floci.services.ec2.enforce-vcpu-quotas", "true"),
-                Map.entry("floci.services.servicequotas.standard-on-demand-vcpus", "2"));
+                Map.entry("floci.services.servicequotas.standard-on-demand-vcpus", "2"),
+                Map.entry("floci.services.iot.mqtt.port", Integer.toString(MQTT_PORT)));
     }
 }
