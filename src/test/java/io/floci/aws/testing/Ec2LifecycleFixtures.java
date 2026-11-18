@@ -27,11 +27,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
-import java.util.function.BooleanSupplier;
-import java.util.function.Supplier;
 
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -44,7 +40,6 @@ public final class Ec2LifecycleFixtures {
 
     public static final String ACCOUNT = "000000000000";
     public static final String REGION = "us-east-1";
-    private static final long AWAIT_SECONDS = 10;
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -115,21 +110,5 @@ public final class Ec2LifecycleFixtures {
     public static long persistedTerminatedAt(Path dir, String id) throws IOException {
         JsonNode record = persistedRecord(dir, "ec2-instances.json", id);
         return record == null ? -1 : record.path("terminatedAt").asLong();
-    }
-
-    /** Polls until {@code condition} holds, failing with {@code description} after ten seconds. */
-    public static void await(BooleanSupplier condition, String description) throws InterruptedException {
-        await(condition, () -> description);
-    }
-
-    public static void await(BooleanSupplier condition, Supplier<String> description) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(AWAIT_SECONDS);
-        while (System.nanoTime() < deadline) {
-            if (condition.getAsBoolean()) {
-                return;
-            }
-            Thread.sleep(50);
-        }
-        fail("Timed out waiting for " + description.get());
     }
 }

@@ -34,12 +34,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.floci.aws.testing.Ec2LifecycleFixtures.ACCOUNT;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.REGION;
-import static io.floci.aws.testing.Ec2LifecycleFixtures.await;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.config;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.instance;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.manager;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.persistedRecord;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.seed;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -269,12 +269,15 @@ class Ec2TerminatedInstanceRetentionTest {
             manager.stop(instance);
             assertTrue(stopSnapshotTaken.await(WAIT_SECONDS, TimeUnit.SECONDS), "the stop's write must be waiting");
             manager.terminate(instance, null);
-            await(() -> written.contains("terminated"), "the termination to be written");
+            await().atMost(Duration.ofSeconds(WAIT_SECONDS)).pollInterval(Duration.ofMillis(100))
+                    .untilAsserted(() -> assertTrue(written.contains("terminated"),
+                            () -> "the termination to be written, but the writes were " + written));
 
             commitTheStopSnapshot.countDown();
 
-            await(() -> written.size() >= 2 && "terminated".equals(written.getLast()),
-                    () -> "the last write to be the termination, but the writes were " + written);
+            await().atMost(Duration.ofSeconds(WAIT_SECONDS)).pollInterval(Duration.ofMillis(100))
+                    .untilAsserted(() -> assertTrue(written.size() >= 2 && "terminated".equals(written.getLast()),
+                            () -> "the last write to be the termination, but the writes were " + written));
         } finally {
             manager.stop();
         }

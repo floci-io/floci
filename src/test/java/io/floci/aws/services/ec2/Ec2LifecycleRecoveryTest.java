@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -27,13 +28,13 @@ import java.util.function.Consumer;
 
 import static io.floci.aws.testing.Ec2LifecycleFixtures.ACCOUNT;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.REGION;
-import static io.floci.aws.testing.Ec2LifecycleFixtures.await;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.config;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.instance;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.manager;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.persistedState;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.persistedTerminatedAt;
 import static io.floci.aws.testing.Ec2LifecycleFixtures.seed;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Answers.RETURNS_SELF;
@@ -130,8 +131,9 @@ class Ec2LifecycleRecoveryTest {
         } finally {
             release.countDown();
             // Let the first process finish its teardown before the directory it writes to is removed.
-            await(() -> "terminated".equals(describedState(first, "i-killed")),
-                    "the first process to finish its teardown");
+            await().atMost(Duration.ofSeconds(WAIT_SECONDS)).pollInterval(Duration.ofMillis(100))
+                    .untilAsserted(() -> assertEquals("terminated", describedState(first, "i-killed"),
+                            "the first process to finish its teardown"));
         }
     }
 
@@ -339,9 +341,9 @@ class Ec2LifecycleRecoveryTest {
                 .getState().getName();
     }
 
-    private void awaitPersisted(String id, String state) throws Exception {
-        await(() -> state.equals(readState(id)),
-                () -> "the stored record of " + id + " to read " + state + " but it reads " + readState(id));
+    private void awaitPersisted(String id, String state) {
+        await().atMost(Duration.ofSeconds(WAIT_SECONDS)).pollInterval(Duration.ofMillis(100))
+                .untilAsserted(() -> assertEquals(state, readState(id), "the stored record of " + id));
     }
 
     private String readState(String id) {
