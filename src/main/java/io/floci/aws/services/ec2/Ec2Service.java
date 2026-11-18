@@ -10408,6 +10408,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return matchingLaunchTemplates(region, ids, names, filters);
     }
 
+    /** The caller's stored launch-template ARN, without creating defaults or changing the template. */
+    Optional<String> findLaunchTemplateArn(String region, String name) {
+        return launchTemplates.scan(k -> true).stream()
+                .filter(template -> region.equals(template.getRegion()) && name.equals(template.getLaunchTemplateName()))
+                .findFirst()
+                .map(template -> AwsArnUtils.Arn.of("ec2", region, callerAccountId(),
+                        "launch-template/" + template.getLaunchTemplateId()).toString());
+    }
+
     private List<LaunchTemplate> matchingLaunchTemplates(String region, List<String> ids, List<String> names,
                                                          List<Map.Entry<String, List<String>>> filters) {
         ensureDefaultResources(region);

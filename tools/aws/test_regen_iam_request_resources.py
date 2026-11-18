@@ -2650,3 +2650,31 @@ def test_the_statements_are_built_checked_offline_and_verified_against_aws_and_t
     page["https://example.com/page"] = "a changed page"
     assert r.verify_statements(document, documents) == [
         "https://example.com/page no longer gives what source.json holds for svc:GetThing: run fetch.py"]
+
+
+@pytest.mark.parametrize("operation", ["DeleteWidget", "CreateWidgetVersion"])
+def test_documented_alternate_name_resolves_an_optional_id(operation):
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetId}"}
+    docs = {"WidgetId": "<p>The ID of the widget.</p>",
+            "WidgetName": "<p>The name of the widget.</p> <p>Specify either the widget ID or the widget name, "
+                          "but not both.</p>"}
+    resource = {"type": "widget", "fill": {"WidgetId": "WidgetId"}}
+    models = cluster_model(operation, docs)
+    assert r.with_documented("svc:" + operation, ["widget"], formats, models, [resource]) == [
+        resource, {"type": "widget", "fill": {}, "find": ["WidgetName"], "when": {"WidgetId": [None]}}]
+    # A required id, an ordinary rename, and a create's new name are not alternate selectors.
+    assert r.with_documented("svc:" + operation, ["widget"], formats,
+                             cluster_model(operation, docs, ("WidgetId",)), [resource]) == [resource]
+    docs["WidgetName"] = "<p>The name of the widget.</p>"
+    assert r.with_documented("svc:" + operation, ["widget"], formats,
+                             cluster_model(operation, docs), [resource]) == [resource]
+
+
+def test_create_name_does_not_look_up_an_existing_id():
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetId}"}
+    docs = {"WidgetId": "<p>The ID of the widget.</p>",
+            "WidgetName": "<p>The name of the widget.</p> <p>Specify either the widget ID or the widget name, "
+                          "but not both.</p>"}
+    resource = {"type": "widget", "fill": {"WidgetId": "WidgetId"}}
+    assert r.with_documented("svc:CreateWidget", ["widget"], formats,
+                             cluster_model("CreateWidget", docs), [resource]) == [resource]

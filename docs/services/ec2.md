@@ -1088,6 +1088,12 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 | DeleteLaunchTemplateVersions | Deletes up to 200 numbered versions by template ID or name, with separate success and error items. The default version is retained, and `DryRun` leaves all versions unchanged. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
+
+With IAM enforcement enabled, `DeleteLaunchTemplate`, `CreateLaunchTemplateVersion`,
+`DeleteLaunchTemplateVersions`, and `ModifyLaunchTemplate` resolve a `LaunchTemplateName`
+selector in the caller's account and request region before evaluating the template's
+ID-based ARN. Exact-resource grants and explicit denies apply to both name and ID selectors.
+
 Deleting versions updates `$Latest` to the highest surviving version. New versions receive numbers
 above every previously issued version, including deleted versions, and the counter survives restart.
 
