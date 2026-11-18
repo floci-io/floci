@@ -2,6 +2,9 @@ package io.floci.aws.services.emr;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AppUiHost;
+import io.floci.aws.core.common.AppUiRoute;
+import io.floci.aws.core.common.AppUiRoutes;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.LinkSigner;
 import io.floci.aws.core.common.RegionResolver;
@@ -18,7 +21,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
@@ -29,7 +31,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -46,15 +47,15 @@ import java.util.regex.Pattern;
  * In the docker runner mode, an on-cluster UI that runs on the cluster's primary node, its ResourceManager, an
  * application master through it, its MapReduce JobHistory server, the NodeManager of a primary node that works, the
  * Spark History Server of a cluster with Spark, or the YARN timeline server and the Tez UI of one with Hadoop and Tez,
- * opens for real through {@link EmrAppUiProxy}, on a host of its own under {@link #UI_HOST}, as AWS's are under
- * "emrappui-prod.us-east-1.amazonaws.com" (Management Guide, "View Amazon EMR application history"). A persistent
- * application UI opens the same interfaces while its cluster runs, and, for the 30 days after it ends, its kept
- * history's, served by a container of its own. Any other link opens a page of Floci's own about the cluster
- * ({@link EmrAppUiController}). Either link is valid for {@link #VALIDITY}: the page's is signed with a key of this
- * process, and a proxied interface's host holds a secret this process gave it.
+ * opens for real through Floci's application UI proxy ({@link AppUiRoutes}), on a host of its own under
+ * {@link #UI_HOST}, as AWS's are under "emrappui-prod.us-east-1.amazonaws.com" (Management Guide, "View Amazon EMR
+ * application history"). A persistent application UI opens the same interfaces while its cluster runs, and, for the
+ * 30 days after it ends, its kept history's, served by a container of its own. Any other link opens a page of
+ * Floci's own about the cluster ({@link EmrAppUiController}). Either link is valid for {@link #VALIDITY}: the page's
+ * is signed with a key of this process, and a proxied interface's host holds a secret this process gave it.
  */
 @ApplicationScoped
-public class EmrAppUiService {
+public class EmrAppUiService implements AppUiRoutes {
 
     /** Where Floci serves the page a presigned URL opens. */
     static final String PATH = "/_aws/emr/app-ui";
@@ -72,9 +73,6 @@ public class EmrAppUiService {
     static final String ACTIVE = "ACTIVE";
     /** The label under Floci's host name an on-cluster UI's own host is in. */
     static final String UI_HOST = "emrappui";
-    // A link's secret: 26 characters of base32, 130 random bits, in lower case, as a host name is read without case.
-    private static final int SECRET_LENGTH = 26;
-    private static final String BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
     static final String RESOURCE_MANAGER = "ResourceManager";
     static final String APPLICATION_MASTER = "ApplicationMaster";
     static final String JOB_HISTORY_SERVER = "JobHistoryServer";
@@ -323,9 +321,7 @@ public class EmrAppUiService {
                 clusters.startPrimaryNode(cluster.getId());
             }
         }
-        URI base = URI.create(baseUrl);
-        return new Presigned(base.getScheme() + "://" + secret + "-" + port + "." + UI_HOST + "."
-                + base.getRawAuthority() + landing, ready);
+        return new Presigned(AppUiHost.url(baseUrl, secret, port, UI_HOST, landing), ready);
     }
 
     // Checks, once the link has expired, whether the container serving the cluster's kept history may stop.
@@ -403,11 +399,7 @@ public class EmrAppUiService {
     }
 
     private String secret() {
-        StringBuilder secret = new StringBuilder(SECRET_LENGTH);
-        for (int i = 0; i < SECRET_LENGTH; i++) {
-            secret.append(BASE32.charAt(random.nextInt(BASE32.length())));
-        }
-        return secret.toString();
+        return AppUiHost.newSecret(random);
     }
 
     /**
@@ -423,43 +415,35 @@ public class EmrAppUiService {
     private record Found(ContainerLifecycleManager.EndpointInfo endpoint, Instant at) {
     }
 
-    /**
-     * Where a request to a proxied interface's host goes: the interface's address on the primary node, and each link
-     * to one of the node's interfaces its pages hold, by the node's name, as the browser reaches that interface; else
-     * why it is refused, with its HTTP status.
-     */
-    public record UiRoute(String host, int port, Map<String, String> rewrites, Runnable unreachable, int status,
-                          String refusal) {
+    @Override
+    public String hostLabel() {
+        return UI_HOST;
+    }
 
-        static UiRoute refused(int status, String refusal) {
-            return new UiRoute(null, 0, Map.of(), () -> { }, status, refusal);
-        }
+    @Override
+    public String service() {
+        return "emr";
     }
 
     /**
-     * The route of a request whose {@code Host} is {@code hostHeader}, over {@code scheme}; null where the host is not
-     * a proxied interface's, {@code <secret>-<port>.}{@value #UI_HOST}{@code .<Floci's host>}.
+     * The route of a request whose {@code Host} is {@code hostHeader}, over {@code scheme}: to the interface's address
+     * on the primary node, with each link to one of the node's interfaces its pages hold, by the node's name, made the
+     * browser's; null where the host is not a proxied interface's, {@code <secret>-<port>.}{@value #UI_HOST}{@code
+     * .<Floci's host>}.
      */
-    public UiRoute route(String hostHeader, String scheme) {
-        String host = hostHeader.toLowerCase(Locale.ROOT);
-        int dot = host.indexOf('.');
-        int dash = dot > 0 ? host.lastIndexOf('-', dot) : -1;
-        if (dash != SECRET_LENGTH || !host.startsWith(UI_HOST + ".", dot + 1)) {
+    @Override
+    public AppUiRoute route(String hostHeader, String scheme) {
+        AppUiHost host = AppUiHost.parse(hostHeader, UI_HOST);
+        if (host == null) {
             return null;
         }
-        String secret = host.substring(0, dash);
-        int port;
-        try {
-            port = Integer.parseInt(host.substring(dash + 1, dot));
-        } catch (NumberFormatException e) {
-            return null;
-        }
-        Grant grant = grants.get(secret);
+        int port = host.port();
+        Grant grant = grants.get(host.secret());
         if (grant == null || !clock.instant().isBefore(grant.expires())) {
-            return UiRoute.refused(403, EmrAppUiController.INVALID);
+            return AppUiRoute.refused(403, EmrAppUiController.INVALID);
         }
         if (!grant.ports().contains(port)) {
-            return UiRoute.refused(404, NO_SUCH_INTERFACE);
+            return AppUiRoute.refused(404, NO_SUCH_INTERFACE);
         }
         // A live interface is there only while its cluster runs or waits, and its kept history only once it has ended,
         // for its 30 days: outside them, the port found for it is no longer the cluster's own.
@@ -469,11 +453,11 @@ public class EmrAppUiService {
         boolean up = cluster != null && (EmrClusterLifecycle.RUNNING.equals(cluster.getState())
                 || EmrClusterLifecycle.WAITING.equals(cluster.getState()));
         if (!grant.history() && !up) {
-            return UiRoute.refused(404, String.format(CLUSTER_ENDED, grant.clusterId()));
+            return AppUiRoute.refused(404, String.format(CLUSTER_ENDED, grant.clusterId()));
         }
         if (grant.history() && (cluster == null || up || cluster.getEndDateTime() == null
                 || !now.isBefore(cluster.getEndDateTime().plus(EmrService.HISTORY_KEPT)))) {
-            return UiRoute.refused(404, String.format(HISTORY_GONE, grant.clusterId()));
+            return AppUiRoute.refused(404, String.format(HISTORY_GONE, grant.clusterId()));
         }
         Found found = grant.endpoints().get(port);
         if (found == null || !now.isBefore(found.at().plus(ENDPOINT_RECHECK))) {
@@ -482,20 +466,19 @@ public class EmrAppUiService {
                             : clusters.webInterface(grant.clusterId(), port)).orElse(null);
             if (endpoint == null) {
                 grant.endpoints().remove(port);
-                return UiRoute.refused(503, grant.history() ? HISTORY_NOT_READY : NOT_READY);
+                return AppUiRoute.refused(503, grant.history() ? HISTORY_NOT_READY : NOT_READY);
             }
             found = new Found(endpoint, now);
             grant.endpoints().put(port, found);
         }
         // The node's daemons write links to one another by the node's name, which the browser reaches as each
         // interface's own host, under this one's Floci host and port.
-        String rest = host.substring(dot);
         Map<String, String> rewrites = new LinkedHashMap<>();
         for (int other : grant.ports()) {
-            rewrites.put("http://" + grant.primaryHost() + ":" + other, scheme + "://" + secret + "-" + other + rest);
+            rewrites.put("http://" + grant.primaryHost() + ":" + other, host.origin(scheme, other));
         }
         Found routed = found;
-        return new UiRoute(found.endpoint().host(), found.endpoint().port(), rewrites,
+        return new AppUiRoute(found.endpoint().host(), found.endpoint().port(), rewrites,
                 () -> grant.endpoints().remove(port, routed), 0, null);
     }
 

@@ -80,6 +80,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -90,6 +91,9 @@ import static org.mockito.Mockito.when;
 class EmrServerlessSparkRunnerTest {
 
     private static final String ENDPOINT = "http://floci:4566";
+    // Where Floci reaches the driver's Spark UI once its container runs.
+    private static final ContainerLifecycleManager.EndpointInfo DRIVER_UI =
+            new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 41040);
     // A cluster's storage, its HDFS running on its primary node.
     private static final SparkJobRunner.Storage STORAGE = new SparkJobRunner.Storage(
             "floci-aws-emr-j-2AXXXXXXGAPLF-home", "floci-aws-emr-j-2AXXXXXXGAPLF-mnt")
@@ -130,6 +134,8 @@ class EmrServerlessSparkRunnerTest {
                 "--conf", "spark.hadoop.aws.glue.endpoint=http://floci:4566",
                 "--conf", "spark.hadoop.hive.metastore.glue.catalogid=123456789012",
                 "--conf", "spark.hadoop.aws.region=eu-west-1",
+                "--conf", "spark.ui.enabled=true",
+                "--conf", "spark.ui.killEnabled=false",
                 "--conf", "spark.executor.cores=4",
                 "--conf", "spark.sql.shuffle.partitions=8",
                 "--conf", "spark.executor.cores=2",
@@ -156,7 +162,7 @@ class EmrServerlessSparkRunnerTest {
                 job(List.of("s3://bucket/jobs/app.jar"), Map.of()), ENDPOINT);
 
         assertEquals("--conf", arguments.get(arguments.size() - 3));
-        assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(arguments.size() - 2));
+        assertEquals("spark.ui.killEnabled=false", arguments.get(arguments.size() - 2));
         assertEquals("s3://bucket/jobs/app.jar", arguments.get(arguments.size() - 1));
     }
 
@@ -358,6 +364,8 @@ class EmrServerlessSparkRunnerTest {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(builder.newContainer(anyString())).thenReturn(spec);
+        // A network the job names is the one it resolves to.
+        when(builder.resolveDockerNetwork(Optional.of("floci-network"))).thenReturn(Optional.of("floci-network"));
 
         runner(builder).run(job(Duration.ZERO), progress);
 
@@ -408,6 +416,50 @@ class EmrServerlessSparkRunnerTest {
         assertTrue(on > 0 && arguments.indexOf("spark.ui.enabled=false") > on);
         // Its kill links, which any container on the network reaches, the driver's container turns off.
         assertFalse(arguments.contains("spark.ui.killEnabled=false"));
+    }
+
+    @Test
+    void aServerlessSparkRunsDriverHasItsUiOnAndAStepsDoesNot() {
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job(List.of("s3://bucket/jobs/app.jar"),
+                Map.of("spark.ui.enabled", "false")), ENDPOINT);
+
+        // Floci's comes before the run's own, which wins: the release's image turns it off.
+        int on = arguments.indexOf("spark.ui.enabled=true");
+        assertTrue(on > 0 && arguments.indexOf("spark.ui.enabled=false") > on);
+        // Its kill links, which any container on the network reaches, are off unless the run turns them on.
+        assertTrue(arguments.indexOf("spark.ui.killEnabled=false") > on);
+        assertFalse(EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT)
+                .contains("spark.ui.enabled=true"));
+        assertFalse(EmrServerlessSparkRunner.servesDriverUi(stepJob(Map.of())));
+    }
+
+    @Test
+    void onTheHostsNetworkADriverServesNoUiForFloci() {
+        SparkJobRunner.Job job = job(List.of("s3://bucket/jobs/app.jar"), Map.of());
+
+        // Every driver's UI would be on the host's port, another run's among them.
+        assertFalse(EmrServerlessSparkRunner.servesDriverUi(job.onNetwork("host")));
+        assertFalse(EmrServerlessSparkRunner.servesDriverUi(job.onNetwork("container:floci")));
+        assertTrue(EmrServerlessSparkRunner.servesDriverUi(job.onNetwork(null)));
+        assertFalse(EmrServerlessSparkRunner.sparkSubmitArguments(job.onNetwork("host"), ENDPOINT)
+                .contains("spark.ui.enabled=true"));
+    }
+
+    @Test
+    void aServerlessSparkRunsDriverPublishesItsUiOnTheLoopbackInterfaceFoundWhileItRuns() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        EmrServerlessSparkRunner runner = runner(builder);
+        SparkJobRunner.Job job = job(List.of("s3://bucket/jobs/app.jar"), Map.of());
+        List<Optional<ContainerLifecycleManager.EndpointInfo>> seen = new ArrayList<>();
+        doAnswer(started -> seen.add(runner.driverUi(job.runId()))).when(progress).started();
+
+        runner.run(job, progress);
+
+        verify(spec).withLoopbackPortBinding(SparkExecutors.DRIVER_UI_PORT, 0);
+        assertEquals(List.of(Optional.of(DRIVER_UI)), seen);
+        assertEquals(Optional.empty(), runner.driverUi(job.runId()));
     }
 
     @Test
@@ -2302,6 +2354,8 @@ class EmrServerlessSparkRunnerTest {
     private EmrServerlessSparkRunner runner(ContainerBuilder builder) {
         when(lifecycle.getDockerClient()).thenReturn(docker);
         when(lifecycle.create(any())).thenReturn("driver");
+        when(lifecycle.startCreated(eq("driver"), any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                "driver", Map.of(SparkExecutors.DRIVER_UI_PORT, DRIVER_UI)));
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenReturn(false);
         when(docker.inspectContainerCmd("driver").exec().getState().getExitCodeLong()).thenReturn(0L);
         when(awsEnv.flociEndpoint()).thenReturn(ENDPOINT);
