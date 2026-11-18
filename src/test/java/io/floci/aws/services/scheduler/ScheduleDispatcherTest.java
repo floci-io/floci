@@ -2,6 +2,7 @@ package io.floci.aws.services.scheduler;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.scheduler.model.DeadLetterConfig;
 import io.floci.aws.services.scheduler.model.RetryPolicy;
 import io.floci.aws.services.scheduler.model.Schedule;
@@ -50,7 +51,8 @@ class ScheduleDispatcherTest {
         when(config.services()).thenReturn(servicesCfg);
         when(config.baseUrl()).thenReturn("http://localhost:4566");
 
-        dispatcher = new ScheduleDispatcher(schedulerService, invoker, sqsService, config);
+        dispatcher = new ScheduleDispatcher(schedulerService, invoker, sqsService, config,
+                new RegionResolver("us-east-1", "000000000000"));
     }
 
     private Schedule newSchedule(String name, String expression, String state) {

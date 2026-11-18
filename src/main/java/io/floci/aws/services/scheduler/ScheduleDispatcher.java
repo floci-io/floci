@@ -3,6 +3,7 @@ package io.floci.aws.services.scheduler;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.services.scheduler.SchedulerExpressionParser.Kind;
 import io.floci.aws.services.scheduler.model.DeadLetterConfig;
@@ -71,7 +72,7 @@ public class ScheduleDispatcher implements Resettable {
     private final ScheduleInvoker invoker;
     private final SqsService sqsService;
     private final String baseUrl;
-    private final String defaultRegion;
+    private final RegionResolver regionResolver;
     private final long tickIntervalSeconds;
     private final boolean enabled;
     private final ScheduledExecutorService executor;
@@ -83,12 +84,13 @@ public class ScheduleDispatcher implements Resettable {
     public ScheduleDispatcher(SchedulerService schedulerService,
                               ScheduleInvoker invoker,
                               SqsService sqsService,
-                              EmulatorConfig config) {
+                              EmulatorConfig config,
+                              RegionResolver regionResolver) {
         this.schedulerService = schedulerService;
         this.invoker = invoker;
         this.sqsService = sqsService;
         this.baseUrl = config.baseUrl();
-        this.defaultRegion = config.defaultRegion();
+        this.regionResolver = regionResolver;
         this.tickIntervalSeconds = config.services().scheduler().tickIntervalSeconds();
         this.enabled = config.services().scheduler().enabled()
                 && config.services().scheduler().invocationEnabled();
@@ -370,7 +372,7 @@ public class ScheduleDispatcher implements Resettable {
     }
 
     private String regionOf(Schedule schedule) {
-        return ScheduleInvoker.regionOf(schedule, defaultRegion);
+        return regionResolver.regionOf(schedule.getArn());
     }
 
     private record Occurrence(String scheduleArn, Instant scheduledAt) {
