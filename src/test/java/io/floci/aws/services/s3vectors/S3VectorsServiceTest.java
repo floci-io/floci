@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.s3vectors.model.VectorBucket;
 import io.floci.aws.services.s3vectors.model.VectorIndex;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +20,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -42,6 +45,45 @@ class S3VectorsServiceTest {
                 return AccountAwareStorageBackend.inMemory("000000000000");
             }
         };
+    }
+
+    /**
+     * IAM's lookup reads the tags of the vector bucket or the index the ARN names, an index's own and not its bucket's,
+     * as a replace leaves them, and nothing for another account's, another Region's or an unknown one.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheBucketOrTheIndexTheArnNames() {
+        VectorBucket bucket = service.createVectorBucket("bucket", null, Map.of("team", "data"), REGION);
+        VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "cosine", List.of(), null,
+                Map.of("team", "web"), REGION);
+        service.replaceIndexTags("bucket", "index", Map.of("team", "ops"), REGION);
+        String bucketArn = bucket.getVectorBucketArn();
+        String indexArn = index.getIndexArn();
+
+        assertEquals("s3vectors", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(bucketArn));
+        assertEquals(Map.of("team", "ops"), service.storedTags(indexArn));
+        assertTrue(service.storedTags(bucketArn.replace("000000000000", "111122223333")).isEmpty());
+        assertTrue(service.storedTags(indexArn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(bucketArn + "/index/missing").isEmpty());
+        assertTrue(service.storedTags(bucketArn.replace("bucket/bucket", "bucket/missing")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:s3:::bucket").isEmpty());
+    }
+
+    /** A bucket stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareBucketInPlace() {
+        InMemoryStorage<String, VectorBucket> raw = new InMemoryStorage<>();
+        S3VectorsService legacyState = new S3VectorsService(
+                new InMemoryStorageFactory("000000000000").withStore("s3vectors.json", raw),
+                new RegionResolver(REGION, "000000000000"), Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+        VectorBucket legacy = new VectorBucket("legacy", "arn:aws:s3vectors:us-east-1:000000000000:bucket/legacy",
+                Map.of("sseType", "AES256"));
+        legacy.setTags(Map.of("team", "data"));
+        raw.put(REGION + "::legacy", legacy);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(legacy.getVectorBucketArn()));
+        assertEquals(Set.of(REGION + "::legacy"), raw.keys());
     }
 
     @Test
