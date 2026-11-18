@@ -40,6 +40,8 @@ class CloudFrontDistributionConfigMembersTest {
             "//*[local-name()='Logging']/*[local-name()='Prefix']";
     private static final String WEB_ACL_ID =
             "//*[local-name()='WebACLId']";
+    private static final String CONNECTION_MODE =
+            "//*[local-name()='DistributionConfig']/*[local-name()='ConnectionMode']";
 
     private final CloudFrontService cloudFrontService;
 
@@ -343,5 +345,70 @@ class CloudFrontDistributionConfigMembersTest {
         given().when().get(API + id + "/config").then()
                 .statusCode(200)
                 .body(hasXPath(WEB_ACL_ID, equalTo("")));
+    }
+
+    @Test
+    void connectionModeRoundTripsThroughCreateUpdateAndDistributionReads() {
+        String originId = "origin-connection-mode-" + UUID.randomUUID();
+        String created = given()
+                .contentType(ContentType.XML)
+                .body(distributionConfigBody(originId, "<ConnectionMode>tenant-only</ConnectionMode>"))
+        .when()
+            .post(DISTRIBUTIONS)
+        .then()
+            .statusCode(201)
+            .body(hasXPath(CONNECTION_MODE, equalTo("tenant-only")))
+            .extract().asString();
+        String id = XmlParser.extractFirst(created, "Id", null);
+
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath("//*[local-name()='ConnectionMode']", equalTo("tenant-only")));
+        given().when().get(API + id).then()
+                .statusCode(200)
+                .body(hasXPath(CONNECTION_MODE, equalTo("tenant-only")));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath(summaryConnectionMode(id), equalTo("tenant-only")));
+
+        updateDistribution(id, distributionConfigBody(originId, "<ConnectionMode>tenant-only</ConnectionMode>"))
+            .statusCode(200)
+            .body(hasXPath(CONNECTION_MODE, equalTo("tenant-only")));
+    }
+
+    @Test
+    void connectionModeIsLeftOutWhenTheRequestOmitsIt() {
+        // No published sentence says which mode an omitted ConnectionMode reads back as, so
+        // the member is reported only when the caller set it.
+        String id = postDistribution(distributionConfigBody(
+                "origin-no-connection-mode-" + UUID.randomUUID(), ""));
+
+        given().when().get(API + id + "/config").then()
+                .statusCode(200)
+                .body(hasXPath("count(//*[local-name()='ConnectionMode'])", equalTo("0")));
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath("count(" + summaryConnectionMode(id) + ")", equalTo("0")));
+    }
+
+    @Test
+    void connectionModeOutsideItsEnumerationIsRefused() {
+        given()
+                .contentType(ContentType.XML)
+                .body(distributionConfigBody("origin-bad-connection-mode-" + UUID.randomUUID(),
+                        "<ConnectionMode>shared</ConnectionMode>"))
+        .when()
+            .post(DISTRIBUTIONS)
+        .then()
+            .statusCode(400)
+            .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidArgument")))
+            .body(hasXPath("//*[local-name()='Message']",
+                    equalTo("The ConnectionMode specified is not valid.")));
+    }
+
+    private static String summaryConnectionMode(String id) {
+        return "//*[local-name()='DistributionSummary']"
+                + "[*[local-name()='Id' and text()='" + id + "']]"
+                + "/*[local-name()='ConnectionMode']";
     }
 }

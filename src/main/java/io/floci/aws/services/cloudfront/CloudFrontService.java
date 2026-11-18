@@ -90,6 +90,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             "TLSv1.2_2025", "TLSv1.3_2025");
     /** The values {@code SSLSupportMethod} admits, the enumeration its shape declares. */
     private static final Set<String> SSL_SUPPORT_METHODS = Set.of("sni-only", "vip", "static-ip");
+    /** The values {@code ConnectionMode} admits, the enumeration its shape declares. */
+    private static final Set<String> CONNECTION_MODES = Set.of("direct", "tenant-only");
     /**
      * The forms a member declared {@code boolean} can carry, XML giving such a value as
      * {@code true}, {@code false}, {@code 1} or {@code 0}.
@@ -245,6 +247,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
         validateOriginAccessControls(dist.getConfig());
+        validateConnectionMode(dist.getConfig());
         validateViewerCertificateSettings(dist.getConfig(), DistributionWrite.CREATE);
         applyDefaultCertificateProtocolVersion(dist.getConfig());
         return whileCertificatesHeld(dist.getConfig(), () -> {
@@ -282,6 +285,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
         validateOriginAccessControls(updated.getConfig());
+        validateConnectionMode(updated.getConfig());
         validateViewerCertificateSettings(updated.getConfig(), DistributionWrite.UPDATE);
         applyDefaultCertificateProtocolVersion(updated.getConfig());
         return whileCertificatesHeld(updated.getConfig(), () -> {
@@ -375,6 +379,23 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The CloudFrontDefaultCertificate specified is not valid.", 400);
         }
         return parsed;
+    }
+
+    /**
+     * {@code ConnectionMode} is held to the enumeration its shape declares, {@code direct} or
+     * {@code tenant-only}. The member has no code of its own, so a value outside the set reads as
+     * the {@code InvalidArgument} this service already answers a member outside its shape with, as
+     * {@code SSLSupportMethod} does. An omitted mode is kept omitted: no published sentence says
+     * which mode such a distribution reads back as, nor what a {@code tenant-only} distribution
+     * does with a viewer certificate it leaves out, so neither is filled in here.
+     */
+    private static void validateConnectionMode(DistributionConfig config) {
+        if (config == null || config.getConnectionMode() == null) {
+            return;
+        }
+        if (!CONNECTION_MODES.contains(config.getConnectionMode())) {
+            throw new AwsException("InvalidArgument", "The ConnectionMode specified is not valid.", 400);
+        }
     }
 
     /**

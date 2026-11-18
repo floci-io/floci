@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.cloudfront.CloudFrontService;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.KeyGroup;
@@ -21,6 +22,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.xml.HasXPath.hasXPath;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -379,5 +381,69 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
                   }
                 }
                 """.formatted(comment, alias, bucket);
+    }
+
+    @Test
+    void createStackCarriesTheConnectionModeOntoTheDistribution() {
+        String stackName = "cfn-cloudfront-tenant-only-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Resources": {
+                    "Dist": {
+                      "Type": "AWS::CloudFront::Distribution",
+                      "Properties": {
+                        "DistributionConfig": {
+                          "Enabled": true,
+                          "ConnectionMode": "tenant-only",
+                          "Origins": [{
+                            "Id": "origin",
+                            "DomainName": "origin.example.com",
+                            "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}
+                          }],
+                          "DefaultCacheBehavior": {
+                            "TargetOriginId": "origin",
+                            "ViewerProtocolPolicy": "redirect-to-https"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "DistId": {"Value": {"Ref": "Dist"}}
+                  }
+                }
+                """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+
+        String described = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        String distributionId = XmlParser.extractFirst(described, "OutputValue", null);
+
+        given()
+        .when()
+            .get("/2020-05-31/distribution/" + distributionId)
+        .then()
+            .statusCode(200)
+            .body(hasXPath("//*[local-name()='DistributionConfig']/*[local-name()='ConnectionMode']",
+                    equalTo("tenant-only")));
     }
 }
