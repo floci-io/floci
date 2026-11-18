@@ -108,7 +108,9 @@ public class DocDbContainerManager {
                                       String region) {
         LOG.infov("Starting DocumentDB container for cluster: {0}", clusterId);
 
-        String containerName = ContainerStorageHelper.resourceName(config, "docdb", null, clusterId);
+        String accountId = regionResolver.getAccountId();
+        String containerName = ContainerStorageHelper.resourceName(config, "docdb", null, clusterId,
+                accountId, region);
         lifecycleManager.removeIfExists(containerName);
 
         List<String> envVars = List.of(
@@ -122,7 +124,7 @@ public class DocDbContainerManager {
                 .withLogRotation()
                 .withEnv(envVars)
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "docdb", clusterId, regionResolver.getAccountId(), region));
+                        "docdb", clusterId, accountId, region));
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(MONGO_PORT);
@@ -139,7 +141,8 @@ public class DocDbContainerManager {
 
         DocDbContainerHandle handle = new DocDbContainerHandle(
                 info.containerId(), clusterId, endpoint.host(), endpoint.port());
-        activeContainers.put(clusterId, handle);
+        // Docker IDs remain unique across accounts, regions, and same-named cluster replacements.
+        activeContainers.put(info.containerId(), handle);
 
         String shortId = info.containerId().length() >= 8
                 ? info.containerId().substring(0, 8)
@@ -160,8 +163,9 @@ public class DocDbContainerManager {
         if (handle == null) {
             return;
         }
-        activeContainers.remove(handle.getClusterId());
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+        DocDbContainerHandle active = activeContainers.remove(handle.getContainerId());
+        lifecycleManager.stopAndRemove(handle.getContainerId(),
+                active == null ? handle.getLogStream() : active.getLogStream());
     }
 
     public void stopAll() {
