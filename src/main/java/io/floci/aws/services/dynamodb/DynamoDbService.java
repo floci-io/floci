@@ -1651,8 +1651,8 @@ public class DynamoDbService {
         }
 
         // Order by the full (possibly composite) sort key, comparing each attribute in key-schema
-        // order (floci-io/floci#1675), then, on an index, by the table key, which is what
-        // tells apart items whose index keys tie.
+        // order (floci-io/floci#1675). On an index, items whose index keys tie follow the hash of
+        // their table key, and the table key itself settles a tie of that hash.
         List<String> orderKeyNames = new ArrayList<>(sortKeyNames);
         if (accessPath.isIndex()) {
             orderKeyNames.add(table.getPartitionKeyName());
@@ -1660,7 +1660,11 @@ public class DynamoDbService {
                 orderKeyNames.add(table.getSortKeyName());
             }
         }
-        Comparator<JsonNode> keyOrder = (a, b) -> compareKeyAttributes(a, b, orderKeyNames);
+        Comparator<JsonNode> sortKeyOrder = (a, b) -> compareKeyAttributes(a, b, sortKeyNames);
+        Comparator<JsonNode> keyOrder = accessPath.isIndex()
+                ? sortKeyOrder.thenComparing(DynamoDbKeyHash.indexTieOrder(table, accessPath))
+                        .thenComparing((a, b) -> compareKeyAttributes(a, b, orderKeyNames))
+                : sortKeyOrder;
         int direction = Boolean.FALSE.equals(scanIndexForward) ? -1 : 1;
         if (!orderKeyNames.isEmpty()) {
             results = new ArrayList<>(results);
