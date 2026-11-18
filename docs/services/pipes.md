@@ -14,6 +14,9 @@
 | `ListPipes` | List all pipes with optional filtering by state and prefix |
 | `StartPipe` | Start a stopped pipe |
 | `StopPipe` | Stop a running pipe |
+| `TagResource` | Add tags to a pipe |
+| `UntagResource` | Remove tags from a pipe |
+| `ListTagsForResource` | List the tags of a pipe |
 
 ## Configuration
 

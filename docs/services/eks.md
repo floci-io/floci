@@ -69,6 +69,7 @@ or list operations. Resource tags are not retained for post-deletion policy cond
 | `DescribeFargateProfile` | Describe a Fargate profile by cluster and name |
 | `ListFargateProfiles` | List Fargate profile names for a cluster |
 | `DeleteFargateProfile` | Delete a Fargate profile |
+| `ListIdentityProviderConfigs` | List a cluster's identity provider configs, always empty since none can be associated |
 | `TagResource` | Add tags to a cluster |
 | `UntagResource` | Remove tags from a cluster |
 | `ListTagsForResource` | List tags on a cluster |

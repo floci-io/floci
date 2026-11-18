@@ -182,6 +182,70 @@ def test_extract_actions_dedupes_across_sources(tmp_path: Path):
     assert r.extract_actions(entry) == ["Foo", "Bar", "Baz"]
 
 
+ROUTED_CONTROLLER = """
+@Path("/2015-03-31")
+public class FunctionsController {
+    @GET
+    @Path("/functions")
+    public Response listFunctions() { return ok(); }
+
+    @Path("/v2/functions/{name}")
+    @DELETE
+    public Response deleteV2Function() { return ok(); }
+
+    @POST @Path("/v2/functions")
+    public Response createV2Function() { return ok(); }
+
+    @Path("/locator")
+    public Object helper() { return this; }
+
+    @PUT
+    public Response putRoot() { return ok(); }
+}
+"""
+
+
+def test_extract_rest_routes_join_the_class_and_method_paths():
+    # @Path before or after the verb, or on the verb's own line; a method without one
+    # takes the class path, and a sub-resource locator's @Path is not carried over.
+    assert r._extract_raw_rest_routes(ROUTED_CONTROLLER) == [
+        ("ListFunctions", "/2015-03-31/functions"),
+        ("DeleteV2Function", "/2015-03-31/v2/functions/{name}"),
+        ("CreateV2Function", "/2015-03-31/v2/functions"),
+        ("PutRoot", "/2015-03-31"),
+    ]
+
+
+def test_extract_rest_actions_filters_by_route_prefix():
+    assert r.extract_rest_actions(ROUTED_CONTROLLER, route_prefix="/2015-03-31/v2/") == [
+        "DeleteV2Function", "CreateV2Function"]
+    assert r.extract_rest_actions(ROUTED_CONTROLLER, skip_route_prefix="/2015-03-31/v2/") == [
+        "ListFunctions", "PutRoot"]
+
+
+@pytest.mark.parametrize("declaration,expected", [
+    ("public class BatchTagHandler implements TagHandler {", list(r.TAG_HANDLER_ACTIONS)),
+    ("public class EksService implements Startable,\n        TagHandler {", list(r.TAG_HANDLER_ACTIONS)),
+    ("public class EksService implements Startable {\n    private TagHandler tags;", []),
+    # Lambda and CloudWatch Logs tag through routes of their own, so /tags never serves them.
+    ("@ApplicationScoped\n@TaggingApiOnly\npublic class LambdaTagHandler implements TagHandler {", []),
+])
+def test_extract_tag_handler_actions(declaration, expected):
+    assert r.extract_tag_handler_actions(declaration) == expected
+
+
+def test_a_rename_to_a_list_stands_for_each_action(tmp_path: Path):
+    src = tmp_path / "LayerController.java"
+    src.write_text('@Path("/")\npublic class LayerController {\n    @GET\n    public Response listLayers() { return ok(); }\n}\n')
+    entry = r.ServiceEntry(
+        service="lambda",
+        doc=tmp_path / "lambda.md",
+        sources=[r.Source(path=src, mode="rest")],
+        rename_actions={"ListLayers": ["ListLayers", "GetLayerVersionByArn"]},
+    )
+    assert r.extract_actions(entry) == ["ListLayers", "GetLayerVersionByArn"]
+
+
 def test_extract_map_entry_keys():
     src = """
         private static final Map<String, String> EMPTY_LIST_RESULTS = Map.ofEntries(
