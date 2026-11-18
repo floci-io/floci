@@ -4,8 +4,8 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.IamEnforcedServiceSettingsProfile;
 import io.floci.aws.testing.PartitionCleanup;
-import io.floci.aws.testing.RdsIamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
-@TestProfile(RdsIamEnforcementProfile.class)
+@TestProfile(IamEnforcedServiceSettingsProfile.class)
 class RdsResourceIamIntegrationTest {
     private static final String ACCOUNT = "000000000000";
 
