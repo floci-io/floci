@@ -16213,14 +16213,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 if (requestedIp != null) {
                     requireRequestedPrivateIpFree(region, subnetId, requestedIp);
                 }
-                // Secondaries are folded and checked before the primary is allocated, so a refused one
-                // leaves no lease behind on the VPC network. Their range is not checked, as before.
+                // Secondaries are folded and validated before the primary is allocated, so a refused one
+                // leaves no lease behind on the VPC network.
                 Set<String> secondaries = new LinkedHashSet<>();
                 for (String extra : privateIpAddresses == null ? List.<String>of() : privateIpAddresses) {
                     if (extra == null || extra.isBlank()) {
                         continue;
                     }
-                    String ip = canonicalIpv4(extra).orElse(extra);
+                    String ip = validateRequestedPrivateIp(extra, subnet, null, 1);
                     if (!ip.equals(requestedIp) && secondaries.add(ip)) {
                         requireRequestedPrivateIpFree(region, subnetId, ip);
                     }
