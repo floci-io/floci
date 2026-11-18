@@ -65,6 +65,21 @@ class BedrockApplicationInferenceProfileIntegrationTest {
     }
 
     @Test
+    void directCreateReportsItemCapBeforeMalformedItems() {
+        String tags = "[{\"key\":\"bad?key\",\"value\":\"ml\"},"
+                + String.join(",", Collections.nCopies(200, "{\"key\":\"team\",\"value\":\"ml\"}")) + "]";
+        given().contentType("application/json")
+                .body("""
+                        {"inferenceProfileName":"oversized-tags",
+                         "modelSource":{"copyFrom":"%s"},"tags":%s}
+                        """.formatted(MODEL_ARN, tags))
+                .when().post("/inference-profiles")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("tags must have at most 200 items."));
+    }
+
+    @Test
     void tagResourceRequiresAndValidatesTagsWithoutChangingApplicationProfileTags() {
         String name = "tag-resource-validation-" + UUID.randomUUID();
         String arn = given().contentType("application/json").body("""

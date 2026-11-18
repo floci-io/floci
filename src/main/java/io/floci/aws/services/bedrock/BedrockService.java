@@ -1150,10 +1150,7 @@ public class BedrockService implements ResourceProvider {
         if (tagsNode == null || !tagsNode.isArray()) {
             return tags;
         }
-        if (tagsNode.size() > TAG_LIST_MAX) {
-            throw new AwsException("ValidationException",
-                    "tags must have at most " + TAG_LIST_MAX + " items.", 400);
-        }
+        validateTagListSize(tagsNode, "ValidationException", "tags");
         for (JsonNode tag : tagsNode) {
             JsonNode key = tag.get("key");
             JsonNode value = tag.get("value");
@@ -1162,6 +1159,13 @@ public class BedrockService implements ResourceProvider {
             }
         }
         return tags;
+    }
+
+    public static void validateTagListSize(JsonNode tagsNode, String errorCode, String propertyName) {
+        if (tagsNode.size() > TAG_LIST_MAX) {
+            throw new AwsException(errorCode,
+                    propertyName + " must have at most " + TAG_LIST_MAX + " items.", 400);
+        }
     }
 
     private static AwsException tooManyTags(String resourceArn, int total) {
