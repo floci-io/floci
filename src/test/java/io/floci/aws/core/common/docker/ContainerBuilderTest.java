@@ -274,6 +274,33 @@ class ContainerBuilderTest {
     }
 
     @Test
+    void embeddedDnsServerIpReachableOnIsTheResolverWithEmbeddedDnsHandsFirst() {
+        TestFixture fixture = new TestFixture();
+        assertEquals(Optional.empty(), fixture.builder.embeddedDnsServerIpReachableOn(Optional.empty()));
+
+        when(fixture.embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.17.0.1"));
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withEmbeddedDns()
+                .build();
+
+        // Floci running natively listens on the Docker bridge, which every network routes to.
+        assertEquals(Optional.of(spec.dnsServers().getFirst()),
+                fixture.builder.embeddedDnsServerIpReachableOn(Optional.of("app-network")));
+    }
+
+    @Test
+    void embeddedDnsServerIpReachableOnNeedsFlocisOwnNetworkWhenFlociRunsInAContainer() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
+        when(fixture.currentContainerNetworkResolver.resolveNetworkName()).thenReturn(Optional.of("floci-net"));
+
+        assertEquals(Optional.of("172.18.0.4"), fixture.builder.embeddedDnsServerIpReachableOn(Optional.empty()));
+        assertEquals(Optional.of("172.18.0.4"),
+                fixture.builder.embeddedDnsServerIpReachableOn(Optional.of("floci-net")));
+        assertEquals(Optional.empty(), fixture.builder.embeddedDnsServerIpReachableOn(Optional.of("app-network")));
+    }
+
+    @Test
     void withEmbeddedDns_preservesExplicitResolversWithoutAddingFallbacks() {
         TestFixture fixture = new TestFixture();
         when(fixture.embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));

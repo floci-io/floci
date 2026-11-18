@@ -137,6 +137,9 @@ public class EksClusterManager
     // Tar entry extracted at /etc; the archive path creates /etc/rancher/k3s, which does not
     // exist yet in a created-but-not-started k3s container.
     private static final String REGISTRIES_TAR_ENTRY = "rancher/k3s/registries.yaml";
+    // The resolv.conf k3s hands its pods (--resolv-conf), extracted at /etc as registries.yaml is.
+    static final String POD_RESOLV_CONF_TAR_ENTRY = "rancher/k3s/floci-resolv.conf";
+    static final String POD_RESOLV_CONF_PATH = "/etc/" + POD_RESOLV_CONF_TAR_ENTRY;
     // k3s applies every manifest in its server manifests directory at startup, and again whenever
     // one changes on disk, so dropping the file in before the container starts is enough to get the
     // MutatingWebhookConfiguration registered. The directory sits under the cluster's named data
@@ -834,6 +837,7 @@ public class EksClusterManager
         String webhookLocalFile = null;
         SigningKeyFiles signingKeyFiles = null;
         String auditPolicyLocalFile = null;
+        String podResolvConf = null;
         ContainerSpec spec;
         String containerId;
         try {
@@ -968,6 +972,10 @@ public class EksClusterManager
             }
 
             List<String> callerArgs = resolveCallerArgs(cluster);
+            podResolvConf = podResolvConf(callerArgs);
+            if (podResolvConf != null) {
+                serverArgs.add("--resolv-conf=" + POD_RESOLV_CONF_PATH);
+            }
             if (!callerArgs.isEmpty()) {
                 serverArgs.addAll(callerArgs);
             }
@@ -1042,6 +1050,12 @@ public class EksClusterManager
         deferGuestSetup(containerId, false);
         ContainerInfo info;
         try {
+            if (podResolvConf != null) {
+                // Part of the start: k3s would hand its pods a resolver file that is not there, and no pod could start.
+                RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
+                        POD_RESOLV_CONF_TAR_ENTRY, podResolvConf.getBytes(StandardCharsets.UTF_8), 0644,
+                        RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
+            }
             info = lifecycleManager.startCreated(containerId, spec);
         } catch (Exception e) {
             abandonGuestSetup(containerId, "its container could not be started");
@@ -2038,6 +2052,25 @@ public class EksClusterManager
         wrappedCmd.add("floci-k3s");
         wrappedCmd.addAll(serverArgs);
         return wrappedCmd;
+    }
+
+    /**
+     * The resolv.conf k3s hands its pods, naming only Floci's embedded DNS server, or null when k3s keeps
+     * its own choice: embedded DNS is off, not running or not reachable from the cluster's Docker network,
+     * or the caller set the kubelet's resolv-conf.
+     * k3s otherwise reads the node's /etc/resolv.conf, which on a user-defined Docker network names only
+     * Docker's loopback resolver 127.0.0.11. k3s refuses a loopback-only file and writes one naming a
+     * public resolver instead, so CoreDNS never asks Floci and names only Floci holds do not resolve.
+     * Floci's public fallback resolvers stay out of the file: CoreDNS picks among its upstreams at random,
+     * so one of them would answer some lookups of Floci's names. Floci forwards every other name itself.
+     */
+    private String podResolvConf(List<String> callerArgs) {
+        if (!config.services().eks().embeddedDns() || EksClusterArgs.setsKubeletResolvConf(callerArgs)) {
+            return null;
+        }
+        return containerBuilder.embeddedDnsServerIpReachableOn(config.services().eks().dockerNetwork())
+                .map(dnsServerIp -> "nameserver " + dnsServerIp + "\n")
+                .orElse(null);
     }
 
     /**
