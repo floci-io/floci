@@ -30,6 +30,7 @@
 | `GetDefaultKeyReplicationRegions` | The Regions the account replicates a new key to |
 | `EnableDefaultKeyReplicationRegions` | Replicate every new key to the Regions named |
 | `DisableDefaultKeyReplicationRegions` | Stop replicating every new key to the Regions named |
+| `GetCertificateSigningRequest` | The certificate signing request a key pair signs |
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
@@ -288,7 +289,24 @@
   to start or stop: the reference does not publish the answer for that case, so the
   request is refused with `ConflictException`, which is the code the service uses for a
   request that conflicts with the state of a key.
-- **Not yet emulated:** the certificate signing request.
+- **The certificate signing request of a key pair:** `GetCertificateSigningRequest` answers
+  with a request the key pair signs, over the subject the request names and with the digest
+  it names. The answer is the PEM of the request, base64 encoded, which is what the
+  reference's own answer carries, so a caller that decodes it holds the file the
+  `-----BEGIN CERTIFICATE REQUEST-----` and `-----END CERTIFICATE REQUEST-----` markers are
+  in. The key has to be a key pair the service holds the private half of: a key that is not
+  a key pair has no public half to certify, a key pair the service holds no private half of
+  has nothing to sign with, and a key that is disabled does no work. The reference
+  publishes no table of the keys this operation takes, so the rules here are this service's
+  own: the usage and the mode of use of the key are not narrowed, and the reference's own
+  flows are both served, the one that signs with a key pair of the digital signature usage
+  whose mode of use is `Sign` and the one that signs with a key pair of the TR-34 usage
+  whose modes of use are `Unwrap` and `Decrypt`. The signature algorithm is the one the
+  key's own algorithm gives with that digest, so an RSA key signs with an RSA algorithm and
+  an elliptic curve one with an ECDSA algorithm. The subject's members are written in the
+  order the reference's own request writes them, the most general member first: the
+  country, the state or province, the city, the organization, the organization unit, the
+  common name and the email address.
 
 ## Configuration
 

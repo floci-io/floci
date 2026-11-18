@@ -191,3 +191,25 @@ create_key() {
     assert_success
     [ "$(json_get "$output" '.MpaTeamAssociation.AssociationState')" = "DELETE_PENDING" ]
 }
+
+@test "Payment Cryptography control plane: a key pair signs a certificate signing request" {
+    local arn
+    arn=$(aws_cmd payment-cryptography create-key \
+        --key-attributes 'KeyAlgorithm=RSA_2048,KeyClass=ASYMMETRIC_KEY_PAIR,KeyUsage=TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE,KeyModesOfUse={Sign=true,Verify=true}' \
+        --exportable \
+        --query 'Key.KeyArn' --output text)
+    [ -n "$arn" ]
+
+    run aws_cmd payment-cryptography get-certificate-signing-request \
+        --key-identifier "$arn" \
+        --signing-algorithm SHA256 \
+        --certificate-subject 'CommonName=floci payment cryptography,Organization=Floci'
+    assert_success
+
+    # The answer is the PEM of the request, base64 encoded, as the reference's own answer
+    # carries it, so it is decoded before it is read.
+    local encoded
+    encoded=$(json_get "$output" '.CertificateSigningRequest')
+    [[ -n "$encoded" ]]
+    [[ "$(printf '%s' "$encoded" | base64 -d)" == *"BEGIN CERTIFICATE REQUEST"* ]]
+}
