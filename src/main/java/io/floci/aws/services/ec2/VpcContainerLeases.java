@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
@@ -25,8 +26,9 @@ import java.util.function.Supplier;
  *
  * <p>Leases live in memory: a container kept running across a restart takes its address back with
  * {@link #reclaim}. A container Docker could not be shown to be gone keeps its address, and is looked at again
- * whenever the service is asked whether it holds a subnet or VPC. Without Docker-backed VPC networks, or for a subnet
- * EC2 does not know, a container keeps the network it was created on.
+ * whenever the service is asked whether it holds a subnet or VPC: in the background, so the DeleteSubnet or DeleteVpc
+ * that asked answers from memory without waiting for the daemon, and a later one sees the address given back. Without
+ * Docker-backed VPC networks, or for a subnet EC2 does not know, a container keeps the network it was created on.
  */
 public final class VpcContainerLeases {
 
@@ -39,6 +41,8 @@ public final class VpcContainerLeases {
     private final Map<String, Lease> leases = new ConcurrentHashMap<>();
     /** Containers whose removal Docker did not confirm, whose addresses wait for another look. */
     private final Set<String> unconfirmed = ConcurrentHashMap.newKeySet();
+    /** Whether a background look at {@link #unconfirmed} is running, so asking again starts no second one. */
+    private final AtomicBoolean rechecking = new AtomicBoolean();
 
     /**
      * @param ec2    EC2, which leases the addresses; null leaves every container on its own network
@@ -175,25 +179,40 @@ public final class VpcContainerLeases {
         return Optional.ofNullable(containerId == null ? null : leases.get(containerId));
     }
 
-    /** Whether a live container of the account holds an address in the subnet. */
+    /**
+     * Whether a live container of the account holds an address in the subnet, from memory. A container whose removal
+     * was not confirmed still counts until a background look finds it gone.
+     */
     public boolean holdsSubnet(String accountId, String region, String subnetId) {
-        recheckUnconfirmed();
+        recheckUnconfirmedInBackground();
         return leases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
                 && lease.region().equals(region) && lease.subnetId().equals(subnetId));
     }
 
-    /** Whether a live container of the account is on the VPC's network. */
+    /** Whether a live container of the account is on the VPC's network, from memory, as {@link #holdsSubnet}. */
     public boolean holdsVpc(String accountId, String region, String vpcId) {
-        recheckUnconfirmed();
+        recheckUnconfirmedInBackground();
         return leases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
                 && lease.region().equals(region) && lease.vpcId().equals(vpcId));
     }
 
-    /** Gives back the addresses of containers whose removal was not confirmed and that Docker no longer has. */
-    private void recheckUnconfirmed() {
-        for (String containerId : List.copyOf(unconfirmed)) {
-            releaseIfGone(containerId);
+    /**
+     * Gives back, on a virtual thread, the addresses of containers whose removal was not confirmed and that Docker no
+     * longer has. One look runs at a time: a daemon that does not answer holds one thread, not one per question.
+     */
+    private void recheckUnconfirmedInBackground() {
+        if (unconfirmed.isEmpty() || !rechecking.compareAndSet(false, true)) {
+            return;
         }
+        Thread.ofVirtual().name("vpc-lease-recheck").start(() -> {
+            try {
+                for (String containerId : List.copyOf(unconfirmed)) {
+                    releaseIfGone(containerId);
+                }
+            } finally {
+                rechecking.set(false);
+            }
+        });
     }
 
     private String vpcOf(String region, String subnetId) {

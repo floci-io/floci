@@ -6,11 +6,16 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.services.ec2.model.Subnet;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -23,6 +28,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -71,7 +77,7 @@ class VpcContainerLeasesTest {
     }
 
     @Test
-    void anAddressDockerCouldNotConfirmFreeIsGivenBackOnceTheContainerIsGone() {
+    void anAddressDockerCouldNotConfirmFreeIsGivenBackOnceTheContainerIsGone() throws Exception {
         when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
                 .thenReturn(Optional.of("10.0.1.20"));
         assertEquals("10.0.1.20", leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "r1")
@@ -91,7 +97,54 @@ class VpcContainerLeasesTest {
         assertTrue(leases.holdsVpc(ACCOUNT, REGION, "vpc-1"), "a container still present keeps the address");
 
         inspect.set(new NotFoundException("gone"));
-        assertFalse(leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"));
-        verify(ec2).releaseVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.20");
+        awaitTrue(() -> !leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"),
+                "the address should be given back once a background look finds the container gone");
+        verify(ec2, timeout(5_000)).releaseVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.20");
+    }
+
+    // Catches: DeleteSubnet and DeleteVpc waiting on a daemon that does not answer, because the
+    // dependency check inspected each unconfirmed container on the request thread.
+    @Test
+    @Timeout(30)
+    void aDaemonThatDoesNotAnswerLeavesTheDependencyCheckAnsweringFromMemory() throws Exception {
+        when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
+                .thenReturn(Optional.of("10.0.1.20"));
+        leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "r1");
+        CountDownLatch daemonAnswers = new CountDownLatch(1);
+        AtomicInteger inspects = new AtomicInteger();
+        // The removal's own look fails at once; every later one hangs until the daemon answers.
+        when(docker.inspectContainerCmd("c1").exec()).thenAnswer(invocation -> {
+            if (inspects.getAndIncrement() == 0) {
+                throw new IllegalStateException("daemon down");
+            }
+            daemonAnswers.await();
+            throw new NotFoundException("gone");
+        });
+        leases.releaseIfGone("c1");
+        try {
+            long start = System.nanoTime();
+            for (int i = 0; i < 5; i++) {
+                assertTrue(leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"), "still held until Docker answers");
+                assertTrue(leases.holdsVpc(ACCOUNT, REGION, "vpc-1"));
+            }
+            long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(tookMillis < 1_000, "the checks should not wait on Docker, took " + tookMillis + " ms");
+            awaitTrue(() -> inspects.get() == 2, "one background look should be running");
+            Thread.sleep(200);
+            assertEquals(2, inspects.get(), "asking again while a look runs starts no second one");
+        } finally {
+            daemonAnswers.countDown();
+        }
+
+        awaitTrue(() -> !leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"),
+                "the address should be given back once Docker says the container is gone");
+    }
+
+    private static void awaitTrue(BooleanSupplier condition, String message) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!condition.getAsBoolean()) {
+            assertTrue(System.nanoTime() < deadline, message);
+            Thread.sleep(20);
+        }
     }
 }
