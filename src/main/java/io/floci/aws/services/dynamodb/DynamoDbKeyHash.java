@@ -11,9 +11,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.ToIntFunction;
 
 /** The hash DynamoDB places and orders keys by: MD5 over "Outliers" and the bytes of the key values. */
 final class DynamoDbKeyHash {
@@ -39,6 +41,24 @@ final class DynamoDbKeyHash {
         Map<JsonNode, byte[]> hashes = new IdentityHashMap<>();
         return Comparator.comparing(item -> hashes.computeIfAbsent(item, ignored -> of(item, hashed)),
                 Arrays::compareUnsigned);
+    }
+
+    /** DynamoDB gives an on-demand table and its indexes 4 partitions, and a table provisioned at 1 unit 1. */
+    static int partitionCount(TableDefinition table) {
+        return "PAY_PER_REQUEST".equals(table.getBillingMode()) ? 4 : 1;
+    }
+
+    /**
+     * Finds the partition of an item, each partition holding an equal range of the hash. A key value
+     * is hashed once, as a scan meets the same partition key again and again.
+     */
+    static ToIntFunction<JsonNode> partitionLocator(List<String> keyNames, int partitions) {
+        if (partitions == 1) {
+            return item -> 0;
+        }
+        Map<List<JsonNode>, Integer> known = new HashMap<>();
+        return item -> known.computeIfAbsent(Arrays.asList(keyNames.stream().map(item::get).toArray(JsonNode[]::new)),
+                ignored -> (of(item, keyNames)[0] & 0xFF) * partitions / 256);
     }
 
     static byte[] of(JsonNode item, List<String> keyNames) {

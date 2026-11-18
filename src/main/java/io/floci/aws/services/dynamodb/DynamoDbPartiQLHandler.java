@@ -149,9 +149,7 @@ class DynamoDbPartiQLHandler {
     private static DynamoDbWriteCapacity.Cost readCapacity(Stmt.Select stmt, TableDefinition table,
                                                            DynamoDbAccessPath accessPath, Page page,
                                                            boolean consistentRead) {
-        double units = page.readBytes().stream()
-                .mapToDouble(bytes -> NativeDynamoDbJsonHandler.readCapacityUnits(bytes, consistentRead))
-                .sum();
+        double units = NativeDynamoDbJsonHandler.readCapacityUnits(page.readBytes(), consistentRead);
         if (!accessPath.isIndex()) {
             return new DynamoDbWriteCapacity.Cost(units, Map.of(), Map.of());
         }
@@ -243,8 +241,7 @@ class DynamoDbPartiQLHandler {
             List<JsonNode> matching = partialProjection
                     ? matchingIndexView(result.items(), scanFilters, accessPath, table)
                     : result.items();
-            return new Page(matching, result.lastEvaluatedKey(), List.of(result.scannedBytes()),
-                    result.scannedItems());
+            return new Page(matching, result.lastEvaluatedKey(), result.readBytes(), result.scannedItems());
         }
         if (accessPath.kind() == DynamoDbAccessPath.Kind.TABLE && skName == null
                 && skCond == null && filterConds.isEmpty()) {
