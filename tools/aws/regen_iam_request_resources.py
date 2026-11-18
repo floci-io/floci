@@ -1005,6 +1005,18 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
         opened = current is not None and current.get("fill") == {} and "made" not in current
         fill = dict(current["fill"]) if current else {}
         unfilled = [v for v in variables if v not in fill]
+        # An optional id and name documented as mutually exclusive selectors name the same stored resource.
+        # Keep the id path, and resolve the name only when that id is absent (EC2 launch templates).
+        if not creating and len(variables) == 1 and not unfilled and kind_of(variables[0]) == "id":
+            selector = fill[variables[0]]
+            optional = optional_members(models, name)
+            names = [path for path, fact in facts.items()
+                     if path in optional and not fact["nested"] and not fact["path"].endswith("[]")
+                     and doc_kind(fact["lead"]) == "name" and doc_names(fact["lead"], kind, formats)
+                     and "either" in (_member_documentation(models, name, path) or "").lower()
+                     and "but not both" in (_member_documentation(models, name, path) or "").lower()]
+            if selector in optional and len(names) == 1:
+                resources.append({"type": kind, "fill": {}, "find": names, "when": {selector: [None]}})
         if len(unfilled) != 1:
             continue
         variable = unfilled[0]
@@ -1031,6 +1043,9 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                         and not (creating and said != kind_of(variable) and kind_of(variable) != "identifier"):
                     candidates.append(("fill", fact["path"]))
                 elif len(variables) == 1 and not fact["path"].endswith("[]"):
+                    # A create asking for "A name for" its new resource does not select an existing id.
+                    if creating and made == stem(kind) and fact["lead"].startswith("a name for "):
+                        continue
                     candidates.append(("find", fact["path"]))
             elif aliased != effective and related(aliased, kind_stem) and compatible(field, variable):
                 candidates.append(("fill", fact["path"]))
