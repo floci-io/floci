@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.bedrock.BedrockService;
@@ -170,6 +171,23 @@ class BedrockCfnProvisionerTest {
 
             assertEquals("ValidationError", error.getErrorCode(), tagsJson);
         }
+        verifyNoInteractions(bedrock);
+    }
+
+    @Test
+    void oversizedTagsReportTheItemCapBeforeMalformedItems() {
+        ObjectNode properties = mapper.createObjectNode().put("InferenceProfileName", "example");
+        properties.putObject("ModelSource").put("CopyFrom", SOURCE);
+        ArrayNode tags = properties.putArray("Tags");
+        tags.addObject().put("Key", "bad?key").put("Value", "ml");
+        for (int i = 0; i < 200; i++) {
+            tags.addObject().put("Key", "team").put("Value", "ml");
+        }
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> provisioner.provision(resource(), properties, context()));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(TYPE + " Tags must have at most 200 items.", error.getMessage());
         verifyNoInteractions(bedrock);
     }
 

@@ -415,12 +415,14 @@ public class BedrockController {
     }
 
     private static Map<String, String> applicationProfileTags(JsonNode tags) {
+        Map<String, String> parsed = BedrockService.parseTagList(tags);
         BedrockTagValidator.validate(tags, "key", "value", "ValidationException", "tags");
-        return BedrockService.parseTagList(tags);
+        return parsed;
     }
 
     private static Map<String, String> bedrockTagResourceTags(JsonNode tags) {
+        Map<String, String> parsed = BedrockService.parseTagList(tags);
         BedrockTagValidator.validateRequired(tags, "key", "value", "ValidationException", "tags");
-        return BedrockService.parseTagList(tags);
+        return parsed;
     }
 }

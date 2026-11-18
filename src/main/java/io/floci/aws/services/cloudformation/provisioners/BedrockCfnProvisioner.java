@@ -103,6 +103,7 @@ public class BedrockCfnProvisioner implements CfnResourceProvisioner {
         if (resolved == null || !resolved.isArray()) {
             throw new AwsException("ValidationError", TYPE + " Tags must be an array.", 400);
         }
+        BedrockService.validateTagListSize(resolved, "ValidationError", TYPE + " Tags");
         BedrockTagValidator.validate(resolved, "Key", "Value", "ValidationError",
                 TYPE + " Tags");
         Map<String, String> tags = new LinkedHashMap<>();
