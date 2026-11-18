@@ -17,6 +17,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageJson;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
@@ -34,6 +35,7 @@ import io.floci.aws.services.elasticache.model.ElastiCacheSnapshot;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
+import io.floci.aws.services.elasticache.model.LogDeliveryConfiguration;
 import io.floci.aws.services.elasticache.model.ReplicationGroup;
 import io.floci.aws.services.elasticache.model.ReplicationGroupSettings;
 import io.floci.aws.services.elasticache.model.ReplicationGroupStatus;
@@ -105,6 +107,7 @@ public class ElastiCacheService implements ResourceProvider {
     private final EmulatorConfig config;
     private final KmsService kmsService;
     private final Ec2Service ec2Service;
+    private final CloudWatchLogsService logsService;
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     /**
@@ -170,8 +173,10 @@ public class ElastiCacheService implements ResourceProvider {
                               Ec2Service ec2Service,
                               RegionResolver regionResolver,
                               KmsService kmsService,
+                              CloudWatchLogsService logsService,
                               ElastiCacheProvisioningIds provisioningIds) {
         this.kmsService = kmsService;
+        this.logsService = logsService;
         this.provisioningIds = provisioningIds;
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
@@ -224,7 +229,22 @@ public class ElastiCacheService implements ResourceProvider {
             ReplicationGroupSettings settings,
             Map<String, String> tags,
             List<String> userGroupIds,
-            List<String> securityGroupIds) {
+            List<String> securityGroupIds,
+            List<LogDeliveryConfiguration> logDeliveryConfigurations) {
+
+        public CreateReplicationGroupRequest(String replicationGroupId, String description, AuthMode authMode,
+                                             String authToken, String region, String engine, String engineVersion,
+                                             String cacheNodeType, String cacheParameterGroupName,
+                                             String cacheSubnetGroupName, String clusterMode, Integer numNodeGroups,
+                                             Integer replicasPerNodeGroup, Integer numCacheClusters,
+                                             Boolean automaticFailoverEnabled, Boolean multiAzEnabled, Integer port,
+                                             ReplicationGroupSettings settings, Map<String, String> tags,
+                                             List<String> userGroupIds, List<String> securityGroupIds) {
+            this(replicationGroupId, description, authMode, authToken, region, engine, engineVersion, cacheNodeType,
+                    cacheParameterGroupName, cacheSubnetGroupName, clusterMode, numNodeGroups, replicasPerNodeGroup,
+                    numCacheClusters, automaticFailoverEnabled, multiAzEnabled, port, settings, tags, userGroupIds,
+                    securityGroupIds, List.of());
+        }
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
@@ -602,6 +622,15 @@ public class ElastiCacheService implements ResourceProvider {
         }
     }
 
+    /** AWS settles a configuration naming a CloudWatch Logs group that does not exist to an error. */
+    private LogDeliveryConfiguration settleLogDelivery(LogDeliveryConfiguration configuration, String region) {
+        if ("cloudwatch-logs".equals(configuration.destinationType())
+                && !logsService.logGroupExists(configuration.logGroup(), region)) {
+            return configuration.failed("Destination log group " + configuration.logGroup() + " does not exist.");
+        }
+        return configuration;
+    }
+
     private void applyCommonAttributes(ReplicationGroup group, CreateReplicationGroupRequest request,
                                        ReplicationGroupSettings resolvedSettings) {
         group.setEngine(engineFor(request));
@@ -617,6 +646,8 @@ public class ElastiCacheService implements ResourceProvider {
         group.setCacheParameterGroupName(request.cacheParameterGroupName());
         group.setCacheSubnetGroupName(request.cacheSubnetGroupName());
         group.setSecurityGroupIds(request.securityGroupIds());
+        group.setLogDeliveryConfigurations(request.logDeliveryConfigurations().stream()
+                .map(c -> settleLogDelivery(c, request.region())).toList());
         group.setAutomaticFailoverEnabled(Boolean.TRUE.equals(request.automaticFailoverEnabled()));
         group.setMultiAzEnabled(Boolean.TRUE.equals(request.multiAzEnabled()));
         group.setSnapshotWindow(ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
