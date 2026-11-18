@@ -6,7 +6,9 @@ import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
 import io.floci.aws.services.dsql.model.DsqlCluster;
 import org.junit.jupiter.api.Test;
 
+import java.sql.SQLException;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -16,6 +18,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -24,7 +27,10 @@ import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** How the data plane treats a cluster whose database is still starting when Floci stops. */
+/**
+ * How the data plane treats a cluster whose database is still starting when Floci stops, and one
+ * whose server refuses it.
+ */
 class DsqlDataPlaneTest {
 
     private final DsqlDatabases databases = mock(DsqlDatabases.class);
@@ -105,6 +111,42 @@ class DsqlDataPlaneTest {
         shutdown.get().get(10, TimeUnit.SECONDS);
         assertEquals(List.of(false), shutdownReturnedWhenDropped, "the deletion finished before Floci stopped");
         assertEquals(0, gone.getCount());
+    }
+
+    /** A start the server refuses, as it refuses a wrong superuser password, leaves the cluster not ready. */
+    @Test
+    void aStartTheServerRefusesLeavesTheClusterNotReady() throws Exception {
+        DsqlDataPlane plane = new DsqlDataPlane(config("memory"), databases, endpoint);
+        DsqlCluster cluster = cluster();
+        when(databases.start(cluster)).thenThrow(new SQLException("password authentication failed", "28P01"));
+        CountDownLatch reported = new CountDownLatch(1);
+
+        plane.provision(cluster, ready -> {
+            readies.add(ready);
+            reported.countDown();
+        });
+
+        assertTrue(reported.await(10, TimeUnit.SECONDS));
+        assertEquals(List.of(false), readies, "so the cluster is FAILED");
+        verify(endpoint, never()).register(any(), any());
+    }
+
+    /**
+     * A FAILED cluster whose server refuses the deletion is deleted anyway once its backend names
+     * what may remain there, as AWS deletes a FAILED cluster.
+     */
+    @Test
+    void aFailedClusterWhoseServerRefusesTheDeletionIsDeletedAnyway() throws Exception {
+        DsqlDataPlane plane = new DsqlDataPlane(config("memory"), databases, endpoint);
+        DsqlCluster cluster = cluster();
+        when(databases.rolesToDrop(cluster)).thenThrow(new SQLException("password authentication failed", "28P01"));
+        when(databases.leftoversOfFailed(cluster)).thenReturn(Optional.of("database dsql_abcdefghijklmnopqrstuvwxyz"));
+        CountDownLatch gone = new CountDownLatch(1);
+
+        plane.deprovision(cluster, true, roles -> { }, gone::countDown);
+
+        assertTrue(gone.await(10, TimeUnit.SECONDS), "the deletion finishes");
+        verify(databases, never()).stop(any(), anyBoolean());
     }
 
     /**

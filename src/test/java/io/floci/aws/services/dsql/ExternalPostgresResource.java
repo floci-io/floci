@@ -18,23 +18,18 @@ public final class ExternalPostgresResource implements QuarkusTestResourceLifecy
     private static final Logger LOG = Logger.getLogger(ExternalPostgresResource.class);
 
     public static final String PASSWORD = "floci-test";
-    /** A resource argument: the password Floci is configured with, when it should not be the server's. */
-    public static final String FLOCI_PASSWORD = "flociPassword";
 
     private ExternalPostgresServer server;
-    private String flociPassword = PASSWORD;
-
-    @Override
-    public void init(Map<String, String> initArgs) {
-        flociPassword = initArgs.getOrDefault(FLOCI_PASSWORD, PASSWORD);
-    }
 
     @Override
     public Map<String, String> start() {
-        Map<String, String> overrides = new HashMap<>(new DsqlDatabasesProfile().getConfigOverrides());
+        Map<String, String> overrides = new HashMap<>();
+        // A real data plane for each cluster, its endpoint on an ephemeral port.
+        overrides.put("floci.services.dsql.mock", "false");
+        overrides.put("floci.services.dsql.port", "0");
         overrides.put("floci.services.dsql.backend", "external");
         overrides.put("floci.services.dsql.external.host", "127.0.0.1");
-        overrides.put("floci.services.dsql.external.password", flociPassword);
+        overrides.put("floci.services.dsql.external.password", PASSWORD);
         int port;
         try {
             server = ExternalPostgresServer.start("floci-dsql-external", PASSWORD, "POSTGRES_PASSWORD=" + PASSWORD,
