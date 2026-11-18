@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SesTemplateServiceTest {
 
     private static final String REGION = "us-east-1";
+    private static final String ACCOUNT = "000000000000";
     private SesTemplateService service;
 
     @BeforeEach
@@ -51,7 +52,7 @@ class SesTemplateServiceTest {
 
     @Test
     void create_thenGet_roundTrips() {
-        EmailTemplate created = service.createTemplate(template("welcome"), REGION);
+        EmailTemplate created = service.createTemplate(template("welcome"), REGION, ACCOUNT);
         assertNotNull(created.getCreatedTimestamp());
         assertNotNull(created.getLastUpdatedTimestamp());
 
@@ -61,19 +62,103 @@ class SesTemplateServiceTest {
 
     @Test
     void create_rejectsDuplicate() {
-        service.createTemplate(template("welcome"), REGION);
-        assertThrows(AwsException.class, () -> service.createTemplate(template("welcome"), REGION));
+        service.createTemplate(template("welcome"), REGION, ACCOUNT);
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(template("welcome"), REGION, ACCOUNT));
+        assertEquals("AlreadyExists", e.getErrorCode());
+        assertEquals("Template welcome already exists for account id " + ACCOUNT, e.getMessage());
+    }
+
+    // probed: the subject is asked for first, and a blank one counts as missing
+    @ParameterizedTest
+    @MethodSource("templatesWithoutSubject")
+    void createAndUpdate_requireASubject(String subject, String text, String html) {
+        service.createTemplate(template("stored"), REGION, ACCOUNT);
+        AwsException onCreate = assertThrows(AwsException.class,
+                () -> service.createTemplate(new EmailTemplate("fresh", subject, text, html), REGION, ACCOUNT));
+        assertEquals("InvalidParameterValue", onCreate.getErrorCode());
+        assertEquals("The subject must be specified.", onCreate.getMessage());
+        AwsException onUpdate = assertThrows(AwsException.class,
+                () -> service.updateTemplate(new EmailTemplate("stored", subject, text, html), REGION));
+        assertEquals("InvalidParameterValue", onUpdate.getErrorCode());
+        assertEquals("The subject must be specified.", onUpdate.getMessage());
+    }
+
+    static Stream<Arguments> templatesWithoutSubject() {
+        return Stream.of(
+                Arguments.of(null, null, null),
+                Arguments.of(null, "t", null),
+                Arguments.of(null, null, "<p>h</p>"),
+                Arguments.of(null, "t", "<p>h</p>"),
+                Arguments.of("", "t", null),
+                Arguments.of(" ", "t", null),
+                Arguments.of(null, " ", null));
+    }
+
+    // probed: a part counts only when it has a character that is not whitespace
+    @ParameterizedTest
+    @MethodSource("templatesWithoutParts")
+    void createAndUpdate_requireOnePart(String text, String html) {
+        service.createTemplate(template("stored"), REGION, ACCOUNT);
+        AwsException onCreate = assertThrows(AwsException.class,
+                () -> service.createTemplate(new EmailTemplate("fresh", "S", text, html), REGION, ACCOUNT));
+        assertEquals("InvalidParameterValue", onCreate.getErrorCode());
+        assertEquals("Template must specify at least one of the parts.", onCreate.getMessage());
+        AwsException onUpdate = assertThrows(AwsException.class,
+                () -> service.updateTemplate(new EmailTemplate("stored", "S", text, html), REGION));
+        assertEquals("InvalidParameterValue", onUpdate.getErrorCode());
+        assertEquals("Template must specify at least one of the parts.", onUpdate.getMessage());
+        assertEquals("text body", service.getTemplate("stored", REGION).getTextPart());
+    }
+
+    static Stream<Arguments> templatesWithoutParts() {
+        return Stream.of(
+                Arguments.of(null, null),
+                Arguments.of("", null),
+                Arguments.of(" ", null),
+                Arguments.of(null, "\n"),
+                Arguments.of(" ", ""));
+    }
+
+    // probed: the content is checked before the name is looked up, on both operations
+    @Test
+    void contentIsCheckedBeforeTheTemplateIsLookedUp() {
+        service.createTemplate(template("stored"), REGION, ACCOUNT);
+        AwsException duplicate = assertThrows(AwsException.class,
+                () -> service.createTemplate(new EmailTemplate("stored", "S", null, null), REGION, ACCOUNT));
+        assertEquals("Template must specify at least one of the parts.", duplicate.getMessage());
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.updateTemplate(new EmailTemplate("ghost", "S", null, null), REGION));
+        assertEquals("Template must specify at least one of the parts.", unknown.getMessage());
+    }
+
+    // probed: an empty part beside a real one is accepted and read back as no part, on both operations
+    @Test
+    void emptyPartIsStoredAsNoPart() {
+        service.createTemplate(new EmailTemplate("html-only", "S", "", "<p>h</p>"), REGION, ACCOUNT);
+        assertNull(service.getTemplate("html-only", REGION).getTextPart());
+        service.updateTemplate(new EmailTemplate("html-only", "S", "t", ""), REGION);
+        EmailTemplate updated = service.getTemplate("html-only", REGION);
+        assertEquals("t", updated.getTextPart());
+        assertNull(updated.getHtmlPart());
+    }
+
+    // probed: a whitespace-only part beside a real one is kept as written
+    @Test
+    void whitespaceOnlyPartBesideARealOneIsKept() {
+        service.createTemplate(new EmailTemplate("blank-text", "S", " ", "<p>h</p>"), REGION, ACCOUNT);
+        assertEquals(" ", service.getTemplate("blank-text", REGION).getTextPart());
     }
 
     @Test
     void create_rejectsBlankName() {
-        assertThrows(AwsException.class, () -> service.createTemplate(template(" "), REGION));
+        assertThrows(AwsException.class, () -> service.createTemplate(template(" "), REGION, ACCOUNT));
     }
 
     @Test
     void create_rejectsEmptyBody() {
         assertThrows(AwsException.class,
-                () -> service.createTemplate(new EmailTemplate("empty", null, null, null), REGION));
+                () -> service.createTemplate(new EmailTemplate("empty", null, null, null), REGION, ACCOUNT));
     }
 
     @Test
@@ -83,7 +168,7 @@ class SesTemplateServiceTest {
 
     @Test
     void update_preservesCreatedTimestamp_missingThrows() {
-        EmailTemplate created = service.createTemplate(template("welcome"), REGION);
+        EmailTemplate created = service.createTemplate(template("welcome"), REGION, ACCOUNT);
 
         EmailTemplate update = template("welcome");
         update.setSubject("Updated");
@@ -96,7 +181,7 @@ class SesTemplateServiceTest {
 
     @Test
     void delete_removesTemplate_missingThrows() {
-        service.createTemplate(template("welcome"), REGION);
+        service.createTemplate(template("welcome"), REGION, ACCOUNT);
         service.deleteTemplate("welcome", REGION);
         assertThrows(AwsException.class, () -> service.getTemplate("welcome", REGION));
         assertThrows(AwsException.class, () -> service.deleteTemplate("welcome", REGION));
@@ -107,7 +192,7 @@ class SesTemplateServiceTest {
         SesTemplateService ticking = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(),
                 new SecureRandom(), new MutableClock());
 
-        Instant created = ticking.createTemplate(template("welcome"), REGION).getCreatedTimestamp();
+        Instant created = ticking.createTemplate(template("welcome"), REGION, ACCOUNT).getCreatedTimestamp();
         ticking.updateTemplate(template("welcome"), REGION);
 
         EmailTemplate stored = ticking.getTemplate("welcome", REGION);
@@ -120,9 +205,9 @@ class SesTemplateServiceTest {
         SesTemplateService ticking = new SesTemplateService(new InMemoryStorage<>(), new ObjectMapper(),
                 new SecureRandom(), new MutableClock());
         for (String name : List.of("a", "b", "c", "d", "e")) {
-            ticking.createTemplate(template(name), REGION);
+            ticking.createTemplate(template(name), REGION, ACCOUNT);
         }
-        ticking.createTemplate(template("other"), "eu-west-1");
+        ticking.createTemplate(template("other"), "eu-west-1", ACCOUNT);
 
         List<String> names = ticking.listTemplates(REGION).stream()
                 .map(EmailTemplate::getTemplateName).toList();
@@ -131,7 +216,7 @@ class SesTemplateServiceTest {
 
     @Test
     void findAndSave_supportFacadeTagging() {
-        service.createTemplate(template("welcome"), REGION);
+        service.createTemplate(template("welcome"), REGION, ACCOUNT);
         assertTrue(service.find("ghost", REGION).isEmpty());
 
         EmailTemplate found = service.find("welcome", REGION).orElseThrow();
@@ -146,7 +231,7 @@ class SesTemplateServiceTest {
 
     @Test
     void tagOps_lifecycle_notFoundMessage() {
-        service.createTemplate(template("welcome"), REGION);
+        service.createTemplate(template("welcome"), REGION, ACCOUNT);
         service.tag("welcome", REGION, List.of(new Tag("team", "floci"), new Tag("env", "dev")));
         assertEquals(2, service.listTags("welcome", REGION).size());
 
@@ -413,7 +498,7 @@ class SesTemplateServiceTest {
     // probed: a whitespace-only text part beside an HTML part is still written as a part
     @Test
     void renderTestTemplate_whitespaceOnlyPartStaysAPart() {
-        service.createTemplate(new EmailTemplate("blank-text", "S", " ", "<p>x</p>"), REGION);
+        service.createTemplate(new EmailTemplate("blank-text", "S", " ", "<p>x</p>"), REGION, ACCOUNT);
         String mime = service.renderTestTemplate("blank-text", "{}", REGION, "000000000000");
         assertTrue(mime.contains("Content-Type: multipart/alternative; "));
         assertTrue(mime.contains("Content-Type: text/plain; charset=UTF-8\r\n"
@@ -424,7 +509,7 @@ class SesTemplateServiceTest {
     // probed: a part whose variables render to nothing, or to whitespace, is written empty
     @Test
     void renderTestTemplate_partRenderingToNothingStaysAPart() {
-        service.createTemplate(new EmailTemplate("empty-html", "S", "t", "{{h}}"), REGION);
+        service.createTemplate(new EmailTemplate("empty-html", "S", "t", "{{h}}"), REGION, ACCOUNT);
         String empty = service.renderTestTemplate("empty-html", "{\"h\": \"\"}", REGION, "000000000000");
         assertTrue(empty.contains("Content-Type: text/html; charset=UTF-8\r\n"
                 + "Content-Transfer-Encoding: 7bit\r\n\r\n\r\n--"));
@@ -438,7 +523,7 @@ class SesTemplateServiceTest {
     void renderTestTemplate_showsASampleUnsubscribeLink() {
         service.createTemplate(new EmailTemplate("unsub", "U",
                 "u={{amazonSESUnsubscribeUrl}} t={{{amazonSESUnsubscribeUrl}}} s={{ amazonSESUnsubscribeUrl }}",
-                null), REGION);
+                null), REGION, ACCOUNT);
         String mime = service.renderTestTemplate("unsub", "{}", REGION, "000000000000");
         assertTrue(mime.endsWith("\r\n\r\nu=http://unsubscribe.example.com t=http://unsubscribe.example.com"
                 + " s=http://unsubscribe.example.com"));

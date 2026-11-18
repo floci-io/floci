@@ -558,7 +558,7 @@ public class SesQueryHandler {
 
     private Response handleCreateTemplate(MultivaluedMap<String, String> params, String region) {
         EmailTemplate template = readTemplateParams(params);
-        templateService.createTemplate(template, region);
+        templateService.createTemplate(template, region, regionResolver.getAccountId());
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("CreateTemplate", AwsNamespaces.SES)).build();
     }
 

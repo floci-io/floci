@@ -84,13 +84,14 @@ public class SesTemplateService implements SesTaggable {
         this.clock = clock;
     }
 
-    public EmailTemplate createTemplate(EmailTemplate template, String region) {
+    public EmailTemplate createTemplate(EmailTemplate template, String region, String accountId) {
         validateTemplate(template);
+        dropEmptyParts(template);
         SesTags.validate(template.getTags());
         String key = templateKey(region, template.getTemplateName());
         if (templateStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExists",
-                    "Template " + template.getTemplateName() + " already exists.", 400);
+                    "Template " + template.getTemplateName() + " already exists for account id " + accountId, 400);
         }
         Instant now = Instant.now(clock);
         template.setCreatedTimestamp(now);
@@ -114,6 +115,7 @@ public class SesTemplateService implements SesTaggable {
 
     public EmailTemplate updateTemplate(EmailTemplate template, String region) {
         validateTemplate(template);
+        dropEmptyParts(template);
         String key = templateKey(region, template.getTemplateName());
         EmailTemplate existing = templateStore.get(key)
                 .orElseThrow(() -> new AwsException("TemplateDoesNotExist",
@@ -176,12 +178,28 @@ public class SesTemplateService implements SesTaggable {
             throw new AwsException("InvalidTemplate", "Template is required.", 400);
         }
         validateTemplateName(template.getTemplateName());
-        boolean hasSubject = template.getSubject() != null && !template.getSubject().isBlank();
+        // SES asks for the subject first, then for a part, and a blank value counts as missing.
+        if (template.getSubject() == null || template.getSubject().isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The subject must be specified.", 400);
+        }
         boolean hasText = template.getTextPart() != null && !template.getTextPart().isBlank();
         boolean hasHtml = template.getHtmlPart() != null && !template.getHtmlPart().isBlank();
-        if (!hasSubject && !hasText && !hasHtml) {
-            throw new AwsException("InvalidTemplate",
-                    "Template must have at least a subject, text, or html part.", 400);
+        if (!hasText && !hasHtml) {
+            throw new AwsException("InvalidParameterValue",
+                    "Template must specify at least one of the parts.", 400);
+        }
+    }
+
+    /**
+     * SES stores an empty part as no part: a template sent with {@code Text: ""} beside an HTML
+     * part reads back without {@code Text}. A whitespace-only part beside another one is kept.
+     */
+    private static void dropEmptyParts(EmailTemplate template) {
+        if (template.getTextPart() != null && template.getTextPart().isEmpty()) {
+            template.setTextPart(null);
+        }
+        if (template.getHtmlPart() != null && template.getHtmlPart().isEmpty()) {
+            template.setHtmlPart(null);
         }
     }
 
