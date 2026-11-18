@@ -5,15 +5,18 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.SparkConnectEndpoint;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrSession;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static io.floci.aws.services.emr.EmrServiceFixture.REGION;
@@ -51,6 +54,40 @@ class EmrSessionsTest {
         assertEquals(60, read.getSessionIdleTimeoutInMinutes());
         assertEquals(RELEASE, read.getReleaseLabel());
         assertEquals("notebook", read.getName());
+    }
+
+    /**
+     * IAM's lookup reads the tags a session started with, by the ARN it records, and nothing for an unknown session,
+     * a session named under another cluster, or another account's ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsTheSessionStartedWith() {
+        String clusterId = sessionCluster();
+        EmrSession started = service.startSession(clusterId,
+                new EmrSessions.Request("tagged", null, null, null, null, null, Map.of("team", "data")));
+        String arn = started.getArn();
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertTrue(service.storedTags(arn.replace(started.getId(), "is-UNKNOWN000000")).isEmpty());
+        assertTrue(service.storedTags(arn.replace(clusterId, "j-OTHERCLUSTER")).isEmpty());
+        assertTrue(service.storedTags(arn.replace("000000000000", "111122223333")).isEmpty());
+    }
+
+    /** A session stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareSessionInPlace() {
+        InMemoryStorage<String, EmrSession> raw = new InMemoryStorage<>();
+        EmrService legacyState = EmrServiceFixture.on(new InMemoryStorageFactory("000000000000")
+                .withStore("emr-sessions.json", raw)).service;
+        EmrSession legacy = new EmrSession();
+        legacy.setId("is-LEGACY000000");
+        legacy.setClusterId("j-LEGACY");
+        legacy.setArn("arn:aws:elasticmapreduce:us-east-1:000000000000:cluster/j-LEGACY/session/is-LEGACY000000");
+        legacy.setTags(Map.of("team", "data"));
+        raw.put("is-LEGACY000000", legacy);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(legacy.getArn()));
+        assertEquals(Set.of("is-LEGACY000000"), raw.keys());
     }
 
     @Test
