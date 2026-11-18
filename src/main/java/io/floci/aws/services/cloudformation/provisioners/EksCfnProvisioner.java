@@ -8,12 +8,15 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eks.EksService;
+import io.floci.aws.services.eks.model.AccessConfig;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.KubernetesNetworkConfig;
 import io.floci.aws.services.eks.model.LogSetup;
 import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
+import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -21,10 +24,12 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 /**
@@ -49,6 +54,8 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     /** Every attribute {@code publishNodegroup} writes for a nodegroup. */
     private static final List<String> NODEGROUP_ATTRIBUTES = List.of("Id", "ClusterName", "NodegroupName", "Arn");
     private static final String SNAPSHOT_ATTR = CfnRollback.EKS_CLUSTER_UPDATE_SNAPSHOT_ATTR;
+    /** The cluster properties updateInPlace applies through UpdateClusterConfig, besides Tags. */
+    private static final Set<String> CLUSTER_APPLIED = Set.of("ResourcesVpcConfig", "Logging", "AccessConfig");
     private static final String NODEGROUP_SNAPSHOT_ATTR = CfnRollback.EKS_NODEGROUP_UPDATE_SNAPSHOT_ATTR;
     // The tag keys the last deployment resolved, reserved ones included, as Ec2Tags.recordKeys records
     // them, so an update removes only those and keeps a tag added outside the stack.
@@ -233,25 +240,37 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The update AWS makes for the properties it does not replace on: the cluster keeps its name.
-     * EksService has no UpdateClusterVersion or UpdateClusterConfig, so the one mutable property
-     * floci honors is Tags, and a change to any other property is accepted with a warning.
+     * Tags, Logging, AccessConfig.AuthenticationMode and the endpoint access members of ResourcesVpcConfig
+     * are applied, and only when the template's value differs from the live cluster's. EksService has no
+     * UpdateClusterVersion, so a changed Version is accepted with a warning and not applied; a changed subnet or
+     * security group list fails the resource, as the UpdateClusterConfig API refuses it.
      */
     private void updateInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Cluster live,
                                PropertyChanges changes) {
-        warnIgnoredChanges("cluster", live.getName(), changes);
+        warnIgnoredChanges("cluster", live.getName(), changes, CLUSTER_APPLIED);
         updateTagsInPlace(r, props, ctx, live.getArn(), live.getTags(), live.getName(), TAG_KEYS_ATTR, SNAPSHOT_ATTR,
-                () -> publish(r, live), true);
+                () -> publish(r, live), true, snapshot -> {
+                    snapshot.put("name", live.getName());
+                    // Read just before the apply, so the snapshot holds what the apply starts from.
+                    snapshotConfig(snapshot, currentOr(live));
+                }, () -> {
+                    UpdateClusterConfigRequest configRequest = configRequest(props, ctx, changes, currentOr(live));
+                    if (configRequest != null) {
+                        eksService.updateClusterConfig(live.getName(), configRequest);
+                    }
+                });
     }
 
     /**
      * Nothing create-only changed on the in-place path, so every other property the engine reports
      * as added, changed or dropped is one EksService has no call to apply: it is accepted with a
-     * warning. Tags are applied by {@link #updateTagsInPlace}.
+     * warning. Tags are applied by {@link #updateTagsInPlace}, and {@code applied} names the others the caller applies.
      */
-    private static void warnIgnoredChanges(String kind, String name, PropertyChanges changes) {
+    private static void warnIgnoredChanges(String kind, String name, PropertyChanges changes, Set<String> applied) {
         List<String> ignored = new ArrayList<>();
         for (PropertyChanges.PropertyChange change : changes.byName().values()) {
-            if (change.kind() != PropertyChanges.Kind.UNCHANGED && !"Tags".equals(change.name())) {
+            if (change.kind() != PropertyChanges.Kind.UNCHANGED && !"Tags".equals(change.name())
+                    && !applied.contains(change.name())) {
                 ignored.add(change.name());
             }
         }
@@ -269,6 +288,18 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     private void updateTagsInPlace(StackResource r, JsonNode props, ProvisionContext ctx, String arn,
                                    Map<String, String> currentTags, String name, String keysAttr,
                                    String snapshotAttr, Runnable publish, boolean warnReserved) {
+        updateTagsInPlace(r, props, ctx, arn, currentTags, name, keysAttr, snapshotAttr, publish, warnReserved,
+                snapshot -> { }, () -> { });
+    }
+
+    /**
+     * As above, with {@code snapshotExtra} adding what the rollback restores and {@code applyExtra} running
+     * with the tag convergence when the update is applied.
+     */
+    private void updateTagsInPlace(StackResource r, JsonNode props, ProvisionContext ctx, String arn,
+                                   Map<String, String> currentTags, String name, String keysAttr,
+                                   String snapshotAttr, Runnable publish, boolean warnReserved,
+                                   Consumer<ObjectNode> snapshotExtra, Runnable applyExtra) {
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         Map<String, String> desired = ReservedTags.stripReservedTags(templateTags);
         Map<String, String> liveTags = currentTags == null ? Map.of() : currentTags;
@@ -281,10 +312,12 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         }
         ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("arn", arn);
+        snapshotExtra.accept(snapshot);
         Ec2Tags.snapshotOwned(snapshot, owned, desired, liveTags, r.getAttributes().get(keysAttr));
         publish.run();
         r.getAttributes().put(snapshotAttr, snapshot.toString());
         CfnRollback.guarded(r, ctx, false, () -> { }, () -> restore(r, snapshot, keysAttr), () -> {
+            applyExtra.run();
             converge(arn, desired, Ec2Tags.touched(owned, desired));
             Ec2Tags.recordKeys(r, keysAttr, templateTags);
         });
@@ -306,6 +339,94 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * The UpdateClusterConfig request for the families whose changed template value differs from the live
+     * cluster, or null when none does. A member the template dropped is read as its AWS default: public access
+     * on, private access off, every address allowed and no log type exported; floci applies that default itself.
+     * A dropped AuthenticationMode asks for nothing, as a mode cannot be moved back. The subnet and security
+     * group lists go along unchanged, so the service refuses a different one.
+     */
+    private UpdateClusterConfigRequest configRequest(JsonNode props, ProvisionContext ctx, PropertyChanges changes,
+                                                     Cluster live) {
+        ResourcesVpcConfig vpc = null;
+        Logging logging = null;
+        AccessConfig access = null;
+        ResourcesVpcConfig current = live.getResourcesVpcConfig();
+        if (changed(changes, "ResourcesVpcConfig") && current != null) {
+            ResourcesVpcConfig desired = createSetting(props, "ResourcesVpcConfig", ctx, new TypeReference<>() { });
+            boolean publicAccess = desired == null || desired.getEndpointPublicAccess() == null
+                    || desired.getEndpointPublicAccess();
+            boolean privateAccess = desired != null && Boolean.TRUE.equals(desired.getEndpointPrivateAccess());
+            List<String> cidrs = desired == null || desired.getPublicAccessCidrs() == null
+                    ? List.of("0.0.0.0/0") : desired.getPublicAccessCidrs();
+            boolean listsDiffer = desired != null && (differs(desired.getSubnetIds(), current.getSubnetIds())
+                    || differs(desired.getSecurityGroupIds(), current.getSecurityGroupIds()));
+            if (listsDiffer || publicAccess != Boolean.TRUE.equals(current.getEndpointPublicAccess())
+                    || privateAccess != Boolean.TRUE.equals(current.getEndpointPrivateAccess())
+                    || differs(cidrs, current.getPublicAccessCidrs())) {
+                vpc = new ResourcesVpcConfig();
+                vpc.setEndpointPublicAccess(publicAccess);
+                vpc.setEndpointPrivateAccess(privateAccess);
+                vpc.setPublicAccessCidrs(cidrs);
+                vpc.setSubnetIds(desired == null ? null : desired.getSubnetIds());
+                vpc.setSecurityGroupIds(desired == null ? null : desired.getSecurityGroupIds());
+            }
+        }
+        if (changed(changes, "Logging")) {
+            Logging enabled = logging(props, ctx);
+            List<String> on = enabled == null ? List.of() : enabled.getClusterLogging().get(0).getTypes();
+            if (!new HashSet<>(on).equals(EksService.enabledLogTypes(live.getLogging()))) {
+                List<String> off = new ArrayList<>(EksService.ALL_LOG_TYPES);
+                off.removeAll(on);
+                List<LogSetup> entries = new ArrayList<>();
+                if (!on.isEmpty()) {
+                    entries.add(new LogSetup(on, true));
+                }
+                if (!off.isEmpty()) {
+                    entries.add(new LogSetup(off, false));
+                }
+                logging = new Logging(entries);
+            }
+        }
+        if (changed(changes, "AccessConfig")) {
+            AccessConfig desired = createSetting(props, "AccessConfig", ctx, new TypeReference<>() { });
+            AccessConfig liveAccess = live.getAccessConfig();
+            if (desired != null && desired.authenticationMode() != null && (liveAccess == null
+                    || !desired.authenticationMode().equals(liveAccess.authenticationMode()))) {
+                access = new AccessConfig(desired.authenticationMode(), null);
+            }
+        }
+        return vpc == null && logging == null && access == null ? null
+                : new UpdateClusterConfigRequest(vpc, logging, access, null);
+    }
+
+    private static boolean changed(PropertyChanges changes, String name) {
+        return !changes.unchanged().contains(name) && changes.kindOf(name) != null;
+    }
+
+    private static boolean differs(List<String> desired, List<String> live) {
+        return desired != null && !new HashSet<>(desired).equals(new HashSet<>(live == null ? List.of() : live));
+    }
+
+    /** The cluster as it is now, or {@code live} when it cannot be read again. */
+    private Cluster currentOr(Cluster live) {
+        Cluster current = liveCluster(live.getName());
+        return current == null ? live : current;
+    }
+
+    private static void snapshotConfig(ObjectNode snapshot, Cluster live) {
+        ResourcesVpcConfig vpc = live.getResourcesVpcConfig();
+        if (vpc != null) {
+            snapshot.set("endpoint", MAPPER.valueToTree(vpc));
+        }
+        if (live.getLogging() != null) {
+            snapshot.set("logging", MAPPER.valueToTree(live.getLogging()));
+        }
+        if (live.getAccessConfig() != null && live.getAccessConfig().authenticationMode() != null) {
+            snapshot.put("authenticationMode", live.getAccessConfig().authenticationMode());
+        }
+    }
+
+    /**
      * Drives the tags of a cluster or nodegroup to {@code tags}: the one path an update and its rollback take.
      */
     private void converge(String arn, Map<String, String> tags, Collection<String> managedKeys) {
@@ -323,6 +444,13 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         List<String> touched = new ArrayList<>();
         snapshot.path("touched").forEach(key -> touched.add(key.asText()));
         converge(CfnRollback.snapshotText(snapshot, "arn"), CfnRollback.snapshotTags(snapshot), touched);
+        String name = CfnRollback.snapshotText(snapshot, "name");
+        if (name != null && (snapshot.has("endpoint") || snapshot.has("logging") || snapshot.has("authenticationMode"))) {
+            eksService.restoreClusterConfig(name,
+                    snapshot.has("endpoint") ? MAPPER.convertValue(snapshot.get("endpoint"), ResourcesVpcConfig.class) : null,
+                    snapshot.has("logging") ? MAPPER.convertValue(snapshot.get("logging"), Logging.class) : null,
+                    snapshot.has("authenticationMode") ? snapshot.get("authenticationMode").asText() : null);
+        }
         Ec2Tags.restoreRecord(r, keysAttr, snapshot);
     }
 
@@ -494,7 +622,7 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      */
     private void updateNodegroupInPlace(StackResource r, JsonNode props, ProvisionContext ctx, Nodegroup live,
                                         PropertyChanges changes) {
-        warnIgnoredChanges("nodegroup", live.getNodegroupName(), changes);
+        warnIgnoredChanges("nodegroup", live.getNodegroupName(), changes, Set.of());
         updateTagsInPlace(r, props, ctx, live.getNodegroupArn(), live.getTags(), live.getNodegroupName(),
                 NODEGROUP_TAG_KEYS_ATTR, NODEGROUP_SNAPSHOT_ATTR, () -> publishNodegroup(r, live), false);
     }

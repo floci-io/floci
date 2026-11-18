@@ -1186,6 +1186,29 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    /**
+     * Puts back values an update changed, with no AWS rules applied: a stack rollback may move the
+     * authentication mode backwards, which UpdateClusterConfig refuses.
+     */
+    public synchronized void restoreClusterConfig(String name, ResourcesVpcConfig endpoint, Logging logging,
+                                                  String authenticationMode) {
+        Cluster cluster = requireClusterInRequestRegion(name);
+        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster), current -> {
+            if (endpoint != null && current.getResourcesVpcConfig() != null) {
+                current.getResourcesVpcConfig().setEndpointPublicAccess(endpoint.getEndpointPublicAccess());
+                current.getResourcesVpcConfig().setEndpointPrivateAccess(endpoint.getEndpointPrivateAccess());
+                current.getResourcesVpcConfig().setPublicAccessCidrs(endpoint.getPublicAccessCidrs());
+            }
+            if (logging != null) {
+                current.setLogging(logging);
+            }
+            if (authenticationMode != null && current.getAccessConfig() != null) {
+                current.setAccessConfig(new AccessConfig(authenticationMode,
+                        current.getAccessConfig().bootstrapClusterCreatorAdminPermissions()));
+            }
+        });
+    }
+
     /** The log types a {@link Logging} setting enables; empty for a null setting. */
     public static Set<String> enabledLogTypes(Logging logging) {
         Set<String> enabled = new HashSet<>();
