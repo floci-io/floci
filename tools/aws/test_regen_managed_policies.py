@@ -207,6 +207,24 @@ def test_check_fails_on_a_hand_edit(dataset: Path, vendored: Path, capsys):
     assert "differ from a fresh generation" in capsys.readouterr().out
 
 
+def test_a_failing_check_names_what_the_dataset_adds_removes_and_changes(dataset: Path, vendored: Path, capsys):
+    policies = json.loads((dataset / "aws/managed_policies.json").read_text())["policies"]
+    policies = [p for p in policies if p["name"] != "AmazonEC2RoleforSSM"] + [policy("BrandNewPolicy")]
+    (dataset / "aws/managed_policies.json").write_text(json.dumps({"policies": policies}))
+    (dataset / "aws/managedpolicies/BrandNewPolicy.json").write_text(
+        json.dumps({"name": "BrandNewPolicy", "document": NEW_POLICY}))
+    (dataset / "aws/managedpolicies/AmazonS3ReadOnlyAccess.json").write_text(
+        json.dumps({"name": "AmazonS3ReadOnlyAccess", "document": NEW_POLICY}))
+
+    assert m.main(["--check", "--dataset", str(dataset), "--resources", str(vendored)]) == 1
+
+    out = capsys.readouterr().out
+    assert "1 added, 1 removed, 1 changed" in out
+    assert "added: BrandNewPolicy" in out
+    assert "removed: AmazonEC2RoleforSSM" in out
+    assert "changed: AmazonS3ReadOnlyAccess" in out
+
+
 def test_check_without_the_dataset_verifies_shape_only(tmp_path: Path, vendored: Path, capsys):
     assert m.main(["--check", "--dataset", str(tmp_path / "absent"), "--resources", str(vendored)]) == 0
     assert "shape verified only" in capsys.readouterr().out

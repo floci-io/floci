@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -292,6 +293,34 @@ def self_check(resources: Path) -> list[str]:
     return problems
 
 
+def drift_summary(vendored: tuple[list[dict], dict, dict], fresh: tuple[list[dict], dict, dict],
+                  dataset: Path) -> str:
+    """What a fresh generation changes, so a failing check says whether the dataset moved on or the
+    vendored files were edited: the policies it adds and removes, and how many it changes."""
+    old_names = {entry["name"] for entry in vendored[0]}
+    new_names = {entry["name"] for entry in fresh[0]}
+    added, removed = sorted(new_names - old_names), sorted(old_names - new_names)
+    changed = sorted(name for name in old_names & new_names
+                     if vendored[1].get(name) != fresh[1].get(name) or vendored[2].get(name) != fresh[2].get(name))
+    commit = dataset_commit(dataset)
+    lines = [f"  dataset {dataset}" + (f" at {commit}" if commit else "")
+             + f": {len(added)} added, {len(removed)} removed, {len(changed)} changed"]
+    for label, names in (("added", added), ("removed", removed), ("changed", changed)):
+        if names:
+            lines.append(f"  {label}: {', '.join(names[:5])}" + (f" and {len(names) - 5} more" if len(names) > 5 else ""))
+    return "\n".join(lines)
+
+
+def dataset_commit(dataset: Path) -> str | None:
+    """The short commit of the iam-dataset checkout, or None when it is not a git checkout."""
+    try:
+        result = subprocess.run(["git", "-C", str(dataset), "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored files differ from a fresh generation")
@@ -324,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         if stale:
             print(f"error: {', '.join(stale)} under {rel} differ from a fresh generation. "
                   "Run 'make aws-data-sync' and commit the result.")
+            print(drift_summary(read_vendored(args.resources), (catalog, documents, versions), args.dataset))
             return 1
         print(f"{rel}: managed-policy catalog is up to date ({len(catalog)} policies)")
         return 0

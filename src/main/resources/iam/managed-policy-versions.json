@@ -20,14 +20,14 @@
     "updateDate": "2026-06-11T00:57:11Z"
   },
   "AIDevOpsChannelAccessPolicy": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2026-08-26T21:07:07Z",
-    "updateDate": "2026-08-26T21:07:07Z"
+    "updateDate": "2026-10-26T22:17:07Z"
   },
   "AIDevOpsConstellationAccessPolicy": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2026-08-05T16:27:17Z",
-    "updateDate": "2026-08-05T16:27:17Z"
+    "updateDate": "2026-10-13T20:37:07Z"
   },
   "AIDevOpsOperatorAppAccessPolicy": {
     "defaultVersionId": "v10",
@@ -345,9 +345,9 @@
     "updateDate": "2026-02-12T18:00:41Z"
   },
   "AWSApplicationMigrationFSxProxyPolicy": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2026-05-31T13:12:00Z",
-    "updateDate": "2026-08-09T12:17:24Z"
+    "updateDate": "2026-10-25T09:47:07Z"
   },
   "AWSApplicationMigrationFSxProxyVPCPolicy": {
     "defaultVersionId": "v1",
@@ -605,9 +605,9 @@
     "updateDate": "2026-09-21T19:07:08Z"
   },
   "AWSBillingReadOnlyAccess": {
-    "defaultVersionId": "v28",
+    "defaultVersionId": "v29",
     "createDate": "2020-08-27T20:08:00Z",
-    "updateDate": "2026-07-30T22:12:29Z"
+    "updateDate": "2026-10-26T17:07:07Z"
   },
   "AWSBillingServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -1003,6 +1003,11 @@
     "createDate": "2015-02-11T17:14:00Z",
     "updateDate": "2015-09-28T19:50:38Z"
   },
+  "AWSContinuumCollectorServiceRolePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-16T01:07:08Z",
+    "updateDate": "2026-10-16T01:07:08Z"
+  },
   "AWSControlTowerAccountServiceRolePolicy": {
     "defaultVersionId": "v11",
     "createDate": "2023-06-05T22:04:00Z",
@@ -1129,24 +1134,24 @@
     "updateDate": "2024-04-01T17:21:47Z"
   },
   "AWSDeadlineCloud-UserAccessFarms": {
-    "defaultVersionId": "v7",
+    "defaultVersionId": "v8",
     "createDate": "2024-04-01T16:54:00Z",
-    "updateDate": "2026-05-29T20:27:22Z"
+    "updateDate": "2026-10-09T16:37:07Z"
   },
   "AWSDeadlineCloud-UserAccessFleets": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2024-04-01T17:01:00Z",
-    "updateDate": "2026-05-29T21:27:30Z"
+    "updateDate": "2026-10-09T16:47:08Z"
   },
   "AWSDeadlineCloud-UserAccessJobs": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2024-04-01T17:05:00Z",
-    "updateDate": "2024-10-07T18:24:52Z"
+    "updateDate": "2026-10-09T17:07:08Z"
   },
   "AWSDeadlineCloud-UserAccessQueues": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2024-04-01T17:10:00Z",
-    "updateDate": "2024-10-07T18:25:13Z"
+    "updateDate": "2026-10-09T16:57:07Z"
   },
   "AWSDeadlineCloud-WorkerHost": {
     "defaultVersionId": "v4",
@@ -1494,14 +1499,14 @@
     "updateDate": "2026-09-09T13:47:07Z"
   },
   "AWSElasticLoadBalancingClassicServiceRolePolicy": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2017-09-19T22:36:00Z",
-    "updateDate": "2019-10-07T23:04:27Z"
+    "updateDate": "2026-10-12T19:07:07Z"
   },
   "AWSElasticLoadBalancingServiceRolePolicy": {
-    "defaultVersionId": "v14",
+    "defaultVersionId": "v15",
     "createDate": "2017-09-19T22:19:00Z",
-    "updateDate": "2026-02-12T17:58:08Z"
+    "updateDate": "2026-10-13T19:47:07Z"
   },
   "AWSElementalMediaConnectCreateBridge": {
     "defaultVersionId": "v1",
@@ -1653,6 +1658,11 @@
     "createDate": "2022-10-26T15:33:00Z",
     "updateDate": "2026-02-12T17:58:33Z"
   },
+  "AWSFinOpsAgentServiceRolePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-20T16:07:08Z",
+    "updateDate": "2026-10-20T16:07:08Z"
+  },
   "AWSFinSpaceServiceRolePolicy": {
     "defaultVersionId": "v2",
     "createDate": "2023-05-12T16:42:00Z",
@@ -1789,9 +1799,9 @@
     "updateDate": "2026-08-05T19:42:25Z"
   },
   "AWSIPAMServiceRolePolicy": {
-    "defaultVersionId": "v12",
+    "defaultVersionId": "v13",
     "createDate": "2021-11-30T19:08:00Z",
-    "updateDate": "2026-09-09T18:17:08Z"
+    "updateDate": "2026-10-15T15:57:07Z"
   },
   "AWSIQContractServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -1927,16 +1937,6 @@
     "defaultVersionId": "v4",
     "createDate": "2020-02-20T21:21:00Z",
     "updateDate": "2020-06-25T17:01:56Z"
-  },
-  "AWSIoTEventsFullAccess": {
-    "defaultVersionId": "v1",
-    "createDate": "2019-01-10T22:51:57Z",
-    "updateDate": "2019-01-10T22:51:57Z"
-  },
-  "AWSIoTEventsReadOnlyAccess": {
-    "defaultVersionId": "v2",
-    "createDate": "2019-01-10T22:50:00Z",
-    "updateDate": "2019-09-23T17:22:04Z"
   },
   "AWSIoTFleetHubFederationAccess": {
     "defaultVersionId": "v5",
@@ -2264,9 +2264,9 @@
     "updateDate": "2025-01-08T21:22:06Z"
   },
   "AWSManagedSettingsAdminAccess": {
-    "defaultVersionId": "v8",
+    "defaultVersionId": "v9",
     "createDate": "2026-07-22T01:27:00Z",
-    "updateDate": "2026-09-30T22:27:07Z"
+    "updateDate": "2026-10-22T22:57:07Z"
   },
   "AWSManagedSettingsReadOnlyAccess": {
     "defaultVersionId": "v3",
@@ -2354,24 +2354,29 @@
     "updateDate": "2025-08-01T15:19:07Z"
   },
   "AWSMarketplaceSellerFullAccess": {
-    "defaultVersionId": "v33",
+    "defaultVersionId": "v34",
     "createDate": "2019-07-02T20:40:00Z",
-    "updateDate": "2026-08-12T16:47:10Z"
+    "updateDate": "2026-10-22T17:47:07Z"
   },
   "AWSMarketplaceSellerOfferManagement": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2024-11-19T00:41:00Z",
-    "updateDate": "2026-03-31T16:57:09Z"
+    "updateDate": "2026-10-27T00:47:06Z"
   },
   "AWSMarketplaceSellerProductsFullAccess": {
-    "defaultVersionId": "v15",
+    "defaultVersionId": "v16",
     "createDate": "2019-07-02T21:06:00Z",
-    "updateDate": "2026-02-19T19:12:10Z"
+    "updateDate": "2026-10-22T17:47:07Z"
   },
   "AWSMarketplaceSellerProductsReadOnly": {
     "defaultVersionId": "v7",
     "createDate": "2019-07-02T21:40:00Z",
     "updateDate": "2026-02-12T18:01:38Z"
+  },
+  "AWSMarketplaceSubsidiaryAuthorizationServiceRolePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-26T17:27:07Z",
+    "updateDate": "2026-10-26T17:27:07Z"
   },
   "AWSMcpServiceActionsFullAccess": {
     "defaultVersionId": "v3",
@@ -2604,14 +2609,14 @@
     "updateDate": "2026-02-14T00:57:09Z"
   },
   "AWSPartnerCentralFullAccess": {
-    "defaultVersionId": "v14",
+    "defaultVersionId": "v15",
     "createDate": "2024-11-18T23:33:00Z",
-    "updateDate": "2026-03-12T17:12:13Z"
+    "updateDate": "2026-10-17T11:37:08Z"
   },
   "AWSPartnerCentralMarketingManagement": {
-    "defaultVersionId": "v4",
+    "defaultVersionId": "v5",
     "createDate": "2025-12-01T00:34:00Z",
-    "updateDate": "2026-02-14T00:57:08Z"
+    "updateDate": "2026-10-16T02:27:07Z"
   },
   "AWSPartnerCentralOpportunityManagement": {
     "defaultVersionId": "v10",
@@ -3119,9 +3124,9 @@
     "updateDate": "2026-06-11T23:42:19Z"
   },
   "AWSSecurityAgentWebAppPolicy": {
-    "defaultVersionId": "v9",
+    "defaultVersionId": "v10",
     "createDate": "2026-02-05T23:19:00Z",
-    "updateDate": "2026-10-06T17:27:07Z"
+    "updateDate": "2026-10-12T16:17:07Z"
   },
   "AWSSecurityHubFullAccess": {
     "defaultVersionId": "v9",
@@ -3414,9 +3419,9 @@
     "updateDate": "2026-07-31T17:12:23Z"
   },
   "AWSSupportServiceRolePolicy": {
-    "defaultVersionId": "v59",
+    "defaultVersionId": "v60",
     "createDate": "2018-04-19T18:04:00Z",
-    "updateDate": "2026-08-19T17:37:19Z"
+    "updateDate": "2026-10-26T21:37:07Z"
   },
   "AWSSystemsManagerAccountDiscoveryServicePolicy": {
     "defaultVersionId": "v3",
@@ -3569,14 +3574,14 @@
     "updateDate": "2026-04-27T19:27:10Z"
   },
   "AWSTransformInfrastructureExecutorAccessBatch": {
-    "defaultVersionId": "v3",
+    "defaultVersionId": "v4",
     "createDate": "2026-07-20T20:12:00Z",
-    "updateDate": "2026-09-02T21:27:07Z"
+    "updateDate": "2026-10-22T21:47:06Z"
   },
   "AWSTransformInfrastructureExecutorAccessEC2": {
-    "defaultVersionId": "v3",
+    "defaultVersionId": "v4",
     "createDate": "2026-07-20T20:12:00Z",
-    "updateDate": "2026-09-02T21:27:07Z"
+    "updateDate": "2026-10-22T21:17:07Z"
   },
   "AWSTransformLandingZoneAgentPolicy": {
     "defaultVersionId": "v3",
@@ -3599,14 +3604,14 @@
     "updateDate": "2026-03-04T21:12:11Z"
   },
   "AWSTransformSecurityAgentExecutorAccess": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2026-06-30T21:27:00Z",
-    "updateDate": "2026-07-28T15:42:11Z"
+    "updateDate": "2026-10-22T22:07:07Z"
   },
   "AWSTransformServerMigrationAgentPolicy": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2026-08-06T15:27:00Z",
-    "updateDate": "2026-09-01T10:37:08Z"
+    "updateDate": "2026-10-11T08:47:08Z"
   },
   "AWSTrustedAdvisorPriorityFullAccess": {
     "defaultVersionId": "v1",
@@ -4519,9 +4524,9 @@
     "updateDate": "2026-02-12T18:01:05Z"
   },
   "AmazonECSInfrastructureRolePolicyForManagedInstances": {
-    "defaultVersionId": "v12",
+    "defaultVersionId": "v13",
     "createDate": "2025-09-26T18:04:00Z",
-    "updateDate": "2026-09-15T17:57:08Z"
+    "updateDate": "2026-10-22T21:27:07Z"
   },
   "AmazonECSInfrastructureRolePolicyForServiceConnectTransportLayerSecurity": {
     "defaultVersionId": "v4",
@@ -4574,9 +4579,9 @@
     "updateDate": "2024-10-30T20:18:13Z"
   },
   "AmazonEKSBlockStoragePolicyV2": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2026-05-11T16:27:15Z",
-    "updateDate": "2026-05-11T16:27:15Z"
+    "updateDate": "2026-10-26T23:27:07Z"
   },
   "AmazonEKSClusterPolicy": {
     "defaultVersionId": "v10",
@@ -4644,9 +4649,9 @@
     "updateDate": "2024-10-14T21:12:40Z"
   },
   "AmazonEKSServiceRolePolicy": {
-    "defaultVersionId": "v28",
+    "defaultVersionId": "v29",
     "createDate": "2020-02-21T20:10:00Z",
-    "updateDate": "2026-10-01T16:27:08Z"
+    "updateDate": "2026-10-22T16:37:07Z"
   },
   "AmazonEKSVPCResourceController": {
     "defaultVersionId": "v1",
@@ -5169,9 +5174,9 @@
     "updateDate": "2017-12-01T23:14:32Z"
   },
   "AmazonLaunchWizardFullAccessV2": {
-    "defaultVersionId": "v2",
+    "defaultVersionId": "v3",
     "createDate": "2023-09-01T17:14:00Z",
-    "updateDate": "2026-08-18T19:27:25Z"
+    "updateDate": "2026-10-20T16:37:07Z"
   },
   "AmazonLexChannelsAccess": {
     "defaultVersionId": "v1",
@@ -5633,6 +5638,11 @@
     "createDate": "2019-09-05T18:19:00Z",
     "updateDate": "2021-07-02T02:17:25Z"
   },
+  "AmazonQuickSuiteAccessPolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-19T23:57:07Z",
+    "updateDate": "2026-10-19T23:57:07Z"
+  },
   "AmazonRDSBetaServiceRolePolicy": {
     "defaultVersionId": "v9",
     "createDate": "2018-05-02T19:41:00Z",
@@ -6089,9 +6099,9 @@
     "updateDate": "2026-04-08T20:27:08Z"
   },
   "AmazonSageMakerClusterInstanceRolePolicy": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2023-11-29T15:11:26Z",
-    "updateDate": "2023-11-29T15:11:26Z"
+    "updateDate": "2026-10-16T20:17:08Z"
   },
   "AmazonSageMakerCoreServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -6287,6 +6297,16 @@
     "defaultVersionId": "v6",
     "createDate": "2024-12-04T13:21:00Z",
     "updateDate": "2026-02-12T18:03:21Z"
+  },
+  "AmazonSageMakerTrainingSessionAccess": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-13T00:37:07Z",
+    "updateDate": "2026-10-13T00:37:07Z"
+  },
+  "AmazonSageMakerTrainingSessionFullAccess": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-13T00:37:08Z",
+    "updateDate": "2026-10-13T00:37:08Z"
   },
   "AmazonSecurityLakeAdministrator": {
     "defaultVersionId": "v2",
@@ -6509,9 +6529,9 @@
     "updateDate": "2026-09-25T20:17:08Z"
   },
   "AnthropicLimitedAccess": {
-    "defaultVersionId": "v8",
+    "defaultVersionId": "v9",
     "createDate": "2026-04-01T04:57:00Z",
-    "updateDate": "2026-10-02T16:37:08Z"
+    "updateDate": "2026-10-15T18:37:08Z"
   },
   "AnthropicReadOnlyAccess": {
     "defaultVersionId": "v4",
@@ -6553,10 +6573,15 @@
     "createDate": "2018-08-09T20:22:00Z",
     "updateDate": "2018-08-13T22:31:21Z"
   },
-  "AssuranceServiceRolePolicy": {
+  "AssuranceOperatorPolicy": {
     "defaultVersionId": "v1",
+    "createDate": "2026-10-21T15:17:07Z",
+    "updateDate": "2026-10-21T15:17:07Z"
+  },
+  "AssuranceServiceRolePolicy": {
+    "defaultVersionId": "v2",
     "createDate": "2026-08-26T21:07:08Z",
-    "updateDate": "2026-08-26T21:07:08Z"
+    "updateDate": "2026-10-20T15:37:08Z"
   },
   "AuroraDsqlServiceLinkedRolePolicy": {
     "defaultVersionId": "v6",
@@ -6649,9 +6674,9 @@
     "updateDate": "2026-08-06T10:12:23Z"
   },
   "Billing": {
-    "defaultVersionId": "v30",
+    "defaultVersionId": "v31",
     "createDate": "2016-11-10T17:33:00Z",
-    "updateDate": "2026-07-30T22:12:16Z"
+    "updateDate": "2026-10-26T17:07:08Z"
   },
   "BudgetsServiceRolePolicy": {
     "defaultVersionId": "v1",
@@ -6809,9 +6834,9 @@
     "updateDate": "2022-11-27T13:23:49Z"
   },
   "CloudWatchFullAccessV2": {
-    "defaultVersionId": "v17",
+    "defaultVersionId": "v18",
     "createDate": "2023-08-01T11:32:00Z",
-    "updateDate": "2026-09-22T16:57:08Z"
+    "updateDate": "2026-10-20T18:57:07Z"
   },
   "CloudWatchInternetMonitorFullAccess": {
     "defaultVersionId": "v1",
@@ -6894,9 +6919,9 @@
     "updateDate": "2026-09-22T01:47:08Z"
   },
   "CloudWatchOmniSpaceAccessPolicy": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2026-09-22T01:47:07Z",
-    "updateDate": "2026-09-22T01:47:07Z"
+    "updateDate": "2026-10-14T22:17:08Z"
   },
   "CloudWatchOpenSearchDashboardAccess": {
     "defaultVersionId": "v3",
@@ -6924,9 +6949,9 @@
     "updateDate": "2020-03-06T19:26:01Z"
   },
   "CloudwatchApplicationInsightsServiceLinkedRolePolicy": {
-    "defaultVersionId": "v25",
+    "defaultVersionId": "v26",
     "createDate": "2018-12-01T16:22:00Z",
-    "updateDate": "2024-07-25T16:24:03Z"
+    "updateDate": "2026-10-09T16:27:08Z"
   },
   "ComprehendDataAccessRolePolicy": {
     "defaultVersionId": "v1",
@@ -7129,9 +7154,9 @@
     "updateDate": "2023-11-28T03:05:37Z"
   },
   "ElasticLoadBalancingFullAccess": {
-    "defaultVersionId": "v9",
+    "defaultVersionId": "v10",
     "createDate": "2018-09-20T20:42:00Z",
-    "updateDate": "2026-02-23T18:57:07Z"
+    "updateDate": "2026-10-09T19:27:08Z"
   },
   "ElasticLoadBalancingReadOnly": {
     "defaultVersionId": "v3",
@@ -7294,9 +7319,9 @@
     "updateDate": "2023-12-13T21:20:21Z"
   },
   "IVSReadOnlyAccess": {
-    "defaultVersionId": "v7",
+    "defaultVersionId": "v8",
     "createDate": "2023-12-05T18:00:00Z",
-    "updateDate": "2026-09-25T19:47:08Z"
+    "updateDate": "2026-10-26T19:37:07Z"
   },
   "IVSRecordToS3": {
     "defaultVersionId": "v1",
@@ -7444,9 +7469,9 @@
     "updateDate": "2024-06-10T19:59:40Z"
   },
   "PartnerCentralAccountManagementUserRoleAssociation": {
-    "defaultVersionId": "v1",
+    "defaultVersionId": "v2",
     "createDate": "2023-11-10T02:03:40Z",
-    "updateDate": "2023-11-10T02:03:40Z"
+    "updateDate": "2026-10-16T01:27:08Z"
   },
   "PartnerCentralIncentiveBenefitManagement": {
     "defaultVersionId": "v4",
@@ -7644,14 +7669,14 @@
     "updateDate": "2026-08-26T22:47:07Z"
   },
   "SageMakerStudioAdminIAMDefaultExecutionPolicy": {
-    "defaultVersionId": "v25",
+    "defaultVersionId": "v27",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-10-08T18:57:07Z"
+    "updateDate": "2026-10-15T21:47:07Z"
   },
   "SageMakerStudioAdminIAMPermissiveExecutionPolicy": {
-    "defaultVersionId": "v22",
+    "defaultVersionId": "v24",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-10-08T18:57:08Z"
+    "updateDate": "2026-10-15T21:47:07Z"
   },
   "SageMakerStudioAdminProjectUserRolePolicy": {
     "defaultVersionId": "v6",
@@ -7698,6 +7723,11 @@
     "createDate": "2025-02-14T00:22:00Z",
     "updateDate": "2026-02-12T18:00:54Z"
   },
+  "SageMakerStudioDataAppsAccessRolePolicy": {
+    "defaultVersionId": "v1",
+    "createDate": "2026-10-13T21:57:08Z",
+    "updateDate": "2026-10-13T21:57:08Z"
+  },
   "SageMakerStudioDomainExecutionRolePolicy": {
     "defaultVersionId": "v23",
     "createDate": "2024-11-20T21:56:00Z",
@@ -7729,14 +7759,14 @@
     "updateDate": "2026-02-12T18:00:59Z"
   },
   "SageMakerStudioProjectProvisioningRolePolicy": {
-    "defaultVersionId": "v83",
+    "defaultVersionId": "v84",
     "createDate": "2024-11-20T21:58:00Z",
-    "updateDate": "2026-09-22T21:57:07Z"
+    "updateDate": "2026-10-12T16:17:08Z"
   },
   "SageMakerStudioProjectRoleMachineLearningPolicy": {
-    "defaultVersionId": "v44",
+    "defaultVersionId": "v45",
     "createDate": "2024-11-20T21:55:00Z",
-    "updateDate": "2026-09-14T20:37:08Z"
+    "updateDate": "2026-10-14T19:37:07Z"
   },
   "SageMakerStudioProjectUserRolePermissionsBoundary": {
     "defaultVersionId": "v19",
@@ -7759,14 +7789,14 @@
     "updateDate": "2026-03-31T21:12:16Z"
   },
   "SageMakerStudioUserIAMDefaultExecutionPolicy": {
-    "defaultVersionId": "v30",
+    "defaultVersionId": "v31",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-10-08T15:17:08Z"
+    "updateDate": "2026-10-14T19:37:08Z"
   },
   "SageMakerStudioUserIAMPermissiveExecutionPolicy": {
-    "defaultVersionId": "v25",
+    "defaultVersionId": "v26",
     "createDate": "2025-08-18T17:19:00Z",
-    "updateDate": "2026-10-08T17:57:08Z"
+    "updateDate": "2026-10-14T19:37:08Z"
   },
   "SecretsManagerReadWrite": {
     "defaultVersionId": "v6",
@@ -7889,9 +7919,9 @@
     "updateDate": "2023-03-30T02:45:07Z"
   },
   "ViewOnlyAccess": {
-    "defaultVersionId": "v46",
+    "defaultVersionId": "v47",
     "createDate": "2016-11-10T17:20:00Z",
-    "updateDate": "2026-09-30T20:27:08Z"
+    "updateDate": "2026-10-14T18:07:08Z"
   },
   "WAFLoggingServiceRolePolicy": {
     "defaultVersionId": "v2",
