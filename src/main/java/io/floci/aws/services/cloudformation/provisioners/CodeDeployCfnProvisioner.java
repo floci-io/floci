@@ -94,7 +94,7 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        String explicitName = written(props, "ApplicationName", ctx);
+        String explicitName = ctx.resolveOptionalWritten(props, "ApplicationName");
         boolean hasExplicitName = explicitName != null;
         String priorPhysicalId = ctx.priorPhysicalId();
 
@@ -120,7 +120,7 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.reusesPriorEntity(name) && !stub) {
             updateTagsInPlace(r, ctx, name, tags);
         } else {
-            codeDeployService.createApplication(ctx.region(), name, written(props, "ComputePlatform", ctx),
+            codeDeployService.createApplication(ctx.region(), name, ctx.resolveOptionalWritten(props, "ComputePlatform"),
                     toTagList(tags));
         }
         Ec2Tags.recordKeys(r, TAG_KEYS_ATTR, tags);
@@ -129,16 +129,6 @@ public class CodeDeployCfnProvisioner implements CfnResourceProvisioner {
             r.getAttributes().remove("Arn");
         }
         ReplacementCleanup.record(r, ctx, attributesBefore);
-    }
-
-    /**
-     * A property's value, or null when it is absent or resolves to nothing: the engine resolves
-     * {@code AWS::NoValue} to blank. A blank written into the template is kept, so CodeDeploy rejects
-     * it as on AWS rather than the provisioner silently generating a name or defaulting the platform.
-     */
-    private static String written(JsonNode props, String name, ProvisionContext ctx) {
-        String value = ctx.resolveOptional(props, name);
-        return value == null || (value.isBlank() && !props.get(name).isTextual()) ? null : value;
     }
 
     /**

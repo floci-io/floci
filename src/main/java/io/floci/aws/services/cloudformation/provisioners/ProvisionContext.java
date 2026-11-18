@@ -196,16 +196,25 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
     }
 
     /**
-     * Resolves an optional integer property, or null when it is absent or explicitly null. One an
-     * intrinsic resolves to nothing stays null too: the engine resolves {@code AWS::NoValue} to blank,
-     * which is how the common {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A value
+     * Resolves an optional property, or null when it is absent, explicitly null, or an intrinsic
+     * resolves it to nothing: the engine resolves {@code AWS::NoValue} to blank, which is how the
+     * common {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A blank written into the
+     * template is kept, for the caller to reject as AWS would. A {@code Ref} to a parameter whose
+     * value is blank cannot be told apart from {@code AWS::NoValue} here, so it is null as well.
+     */
+    public String resolveOptionalWritten(JsonNode props, String name) {
+        String value = resolveOptional(props, name);
+        return value == null || (value.isBlank() && !props.get(name).isTextual()) ? null : value;
+    }
+
+    /**
+     * Resolves an optional integer property, or null where {@link #resolveOptionalWritten} is. A value
      * written into the template has to be an integer, a literal blank included, as CloudFormation's
-     * schema type check requires. A {@code Ref} to a parameter whose value is blank cannot be told
-     * apart from {@code AWS::NoValue} here, so it stays null as well.
+     * schema type check requires.
      */
     public Integer resolveOptionalInt(JsonNode props, String name) {
-        String value = resolveOptional(props, name);
-        if (value == null || (value.isBlank() && !props.get(name).isTextual())) {
+        String value = resolveOptionalWritten(props, name);
+        if (value == null) {
             return null;
         }
         try {
