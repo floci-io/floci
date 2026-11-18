@@ -25,6 +25,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
@@ -41,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -245,7 +247,13 @@ class EmrDockerRunnerDockerIntegrationTest {
                 driverLogs.get(0));
     }
 
+    /**
+     * It runs the most here: a cluster of four nodes, its primary node running the Spark History Server and the YARN
+     * timeline server too, then a Spark step, a shrink and a copy step. It takes about 100 s on a CI runner and up to
+     * 147 s on a slow one, past the two-minute default, so it has a limit of its own.
+     */
     @Test
+    @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void aClustersCoreAndTaskNodesRunItsExecutorsAndAShrinkKeepsItsHdfsData() {
         put("side/nodes.py", """
                 import socket
@@ -277,7 +285,7 @@ class EmrDockerRunnerDockerIntegrationTest {
         emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
                 + core + "\",\"InstanceCount\":1}]}").then().statusCode(200);
         String leaving = ContainerStorageHelper.dockerName(config, "emr-" + clusterId + "-node-1-2");
-        await("core node " + leaving + " to go").atMost(Duration.ofMinutes(5)).pollInterval(Duration.ofSeconds(1))
+        await("core node " + leaving + " to go").atMost(Duration.ofMinutes(2)).pollInterval(Duration.ofSeconds(1))
                 .until(() -> gone(leaving));
         assertEquals("COMPLETED", runStep("command-runner.jar", "s3-dist-cp", "--src", "hdfs:///kept/",
                 "--dest", s3Uri("kept/")));
