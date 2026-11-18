@@ -785,6 +785,20 @@ class PaymentCryptographyTest {
         assertThat(deleted.enabled()).isFalse();
     }
 
+    @Test
+    void aDeletedKeyIsRestored() {
+        Key created = createAesKey();
+        client.deleteKey(k -> k.keyIdentifier(created.keyArn()));
+
+        Key restored = client.restoreKey(k -> k.keyIdentifier(created.keyArn())).key();
+
+        assertThat(restored.keyState()).isEqualTo(KeyState.CREATE_COMPLETE);
+        // The reference's own restore example answers with a key that is disabled: it is
+        // StartKeyUsage that enables a key again.
+        assertThat(restored.enabled()).isFalse();
+        assertThat(restored.deletePendingTimestamp()).isNull();
+    }
+
     /** A listing names the state of the keys it wants, and the service answers with those keys alone. */
     @Test
     void theKeysAreListedByTheirState() {

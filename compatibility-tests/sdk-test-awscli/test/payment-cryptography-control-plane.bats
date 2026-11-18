@@ -118,6 +118,7 @@ create_key() {
     assert_failure
     [[ "$output" == *"ValidationException"* ]]
 }
+
 @test "Payment Cryptography control plane: a key is stopped and started again" {
     KEY_ARN=$(create_key AES_256)
     [ -n "$KEY_ARN" ]
@@ -131,6 +132,26 @@ create_key() {
     assert_success
     [ "$(json_get "$output" '.Key.Enabled')" = "true" ]
     [ -n "$(json_get "$output" '.Key.UsageStartTimestamp')" ]
+}
+
+@test "Payment Cryptography control plane: a deleted key is restored" {
+    KEY_ARN=$(create_key AES_256)
+    [ -n "$KEY_ARN" ]
+
+    run aws_cmd payment-cryptography delete-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "DELETE_PENDING" ]
+
+    run aws_cmd payment-cryptography get-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "DELETE_PENDING" ]
+
+    run aws_cmd payment-cryptography restore-key --key-identifier "$KEY_ARN"
+    assert_success
+    [ "$(json_get "$output" '.Key.KeyState')" = "CREATE_COMPLETE" ]
+    # The reference's own restore example answers with a key that is disabled: it is
+    # start-key-usage that enables a key again.
+    [ "$(json_get "$output" '.Key.Enabled')" = "false" ]
 }
 
 @test "Payment Cryptography control plane: a key pair is created with the usage its derived keys have" {

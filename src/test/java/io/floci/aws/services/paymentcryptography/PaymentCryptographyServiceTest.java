@@ -311,7 +311,7 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyIsGoneUnderTheNameItWasSavedUnder() {
+    void aDeletedKeyIsFoundUnderTheNameItIsSavedUnderNow() {
         InMemoryStorage<String, PaymentCryptographyKey> store = new InMemoryStorage<>();
         PaymentCryptographyService old = serviceOverLegacyStore(store);
         PaymentCryptographyKey key = createKey("us-east-1");
@@ -320,7 +320,9 @@ class PaymentCryptographyServiceTest {
         old.deleteKey(key);
 
         assertNull(store.get(key.getKeyId()).orElse(null),
-                "the key is gone under the name it was saved under too");
+                "the key is still under the name that was replaced");
+        assertEquals("DELETE_PENDING",
+                old.findKey("us-east-1", key.getArn()).getKeyState());
     }
 
     @Test
@@ -369,13 +371,14 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyTakesItsAliasesWithIt() {
+    void aDeletedKeyKeepsItsAliasesWhileItIsPending() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.createAlias("alias/team/card-key", key);
         service.deleteKey(key);
 
-        assertNull(service.findKey("us-east-1", key.getArn()));
-        assertNull(service.findAlias("us-east-1", "alias/team/card-key"));
+        assertEquals("DELETE_PENDING", service.findKey("us-east-1", key.getArn()).getKeyState());
+        assertNotNull(service.findAlias("us-east-1", "alias/team/card-key"),
+                "the alias went with a key that is still there");
     }
 
     @Test
@@ -390,15 +393,135 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyDoesNotComeBackWhenItIsTagged() {
+    void aDeletedKeyKeepsItsTagsWhileItIsPending() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.tag(key, Map.of("owner", "team"));
+        service.deleteKey(key);
+
+        assertEquals("team", service.listTags(key).get("owner"));
+        assertEquals("DELETE_PENDING", service.findKey("us-east-1", key.getArn()).getKeyState());
+    }
+
+
+    @Test
+    void aScheduledDeletionCarriesTheMomentItTakesEffect() {
+        // The reference says the pending timestamp is the date and time after which the key
+        // is deleted, and that the waiting period is seven days unless the request names
+        // one.
+        PaymentCryptographyKey key = createKey("us-east-1");
+        long before = Instant.now().getEpochSecond();
+
+        PaymentCryptographyKey pending = service.deleteKey(key);
+
+        assertEquals("DELETE_PENDING", pending.getKeyState());
+        assertFalse(pending.isEnabled(), "a key that is pending deletion is enabled");
+        assertTrue(pending.getDeletePendingTimestamp() >= before + 7 * 86_400L
+                        && pending.getDeletePendingTimestamp() <= Instant.now().getEpochSecond()
+                                + 7 * 86_400L,
+                "the pending timestamp is not the moment the deletion takes effect");
+    }
+    @Test
+    void aDeletedKeyIsRestored() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.deleteKey(key);
 
-        AwsException gone = assertThrows(AwsException.class,
-                () -> service.tag(key, Map.of("owner", "team")));
-        assertEquals("ResourceNotFoundException", gone.getErrorCode());
-        assertNull(service.findKey("us-east-1", key.getKeyId()),
-                "the key is in the store again after it was deleted");
+        PaymentCryptographyKey restored = service.restoreKey(key);
+
+        assertEquals("CREATE_COMPLETE", restored.getKeyState());
+        assertEquals(0, restored.getDeletePendingTimestamp(),
+                "a restored key is still pending deletion");
+        assertEquals("CREATE_COMPLETE", service.findKey("us-east-1", key.getArn()).getKeyState());
+    }
+
+    @Test
+    void aRestoredKeyIsDisabledUntilItsUseIsStartedAgain() {
+        // The reference's own restore example answers with a key that is disabled, and says
+        // that two members change: the state and the pending timestamp. It is StartKeyUsage
+        // that enables a key again.
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.stopKeyUsage(key);
+        long stoppedAt = service.findKey("us-east-1", key.getArn()).getUsageStopTimestamp();
+        service.deleteKey(key);
+
+        PaymentCryptographyKey restored = service.restoreKey(key);
+
+        assertFalse(restored.isEnabled(), "a restored key is enabled");
+        assertEquals("CREATE_COMPLETE", restored.getKeyState());
+        assertEquals(stoppedAt, restored.getUsageStopTimestamp(),
+                "a restored key lost the moment it stopped");
+
+        PaymentCryptographyKey started = service.startKeyUsage(key);
+        assertTrue(started.isEnabled(), "a key that was started again is disabled");
+        assertEquals(0, started.getUsageStopTimestamp(),
+                "a key in use still carries the moment it stopped");
+    }
+
+    @Test
+    void aKeyThatIsNotPendingDeletionIsNotRestored() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.restoreKey(key));
+        assertEquals("ConflictException", conflict.getErrorCode());
+    }
+
+    @Test
+    void aReplicaCarriesThePendingDeletionOfItsPrimary() {
+        // A replica is a copy of its primary, so a key that is pending deletion is pending
+        // deletion in every region it replicates into, and it says when the deletion takes
+        // effect there as well.
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+
+        PaymentCryptographyKey pending = service.deleteKey(key);
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        assertEquals("DELETE_PENDING", replica.getKeyState());
+        assertEquals(pending.getDeletePendingTimestamp(), replica.getDeletePendingTimestamp(),
+                "a replica that is pending deletion carries no moment the deletion takes effect");
+        assertFalse(replica.isEnabled(), "a replica of a key that is pending deletion is enabled");
+    }
+
+    @Test
+    void aRestoredKeyIsRestoredInEveryRegionItReplicatesInto() {
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+        service.deleteKey(key);
+
+        service.restoreKey(key);
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+        assertEquals("CREATE_COMPLETE", replica.getKeyState());
+        assertEquals(0, replica.getDeletePendingTimestamp(),
+                "a replica of a restored key is still pending deletion");
+        assertFalse(replica.isEnabled(), "a replica of a restored key is enabled");
+    }
+
+    @Test
+    void aReplicaIsNotRestoredApartFromItsPrimary() {
+        // A replica is read-only, so the deletion is cancelled on the primary: a replica
+        // that was restored on its own would be usable while the key it is a copy of is
+        // still pending deletion.
+        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
+        service.deleteKey(key);
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.restoreKey(replica));
+        assertEquals("ValidationException", refused.getErrorCode());
+
+        assertEquals("DELETE_PENDING", replica.getKeyState(),
+                "a replica that was refused is no longer pending deletion");
+        assertEquals("DELETE_PENDING",
+                service.findKey("us-east-1", key.getKeyId()).getKeyState());
+    }
+
+    @Test
+    void aKeyThatIsAlreadyPendingDeletionIsNotDeletedAgain() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.deleteKey(key);
+
+        AwsException conflict = assertThrows(AwsException.class,
+                () -> service.deleteKey(key));
+        assertEquals("ConflictException", conflict.getErrorCode());
     }
 
     /** The policy that grants different permissions to different accounts. */
@@ -475,18 +598,15 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyHasNoResourcePolicy() {
+    void aKeyPendingDeletionKeepsItsResourcePolicy() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY);
         service.deleteKey(key);
 
-        AwsException gone = assertThrows(AwsException.class,
-                () -> service.resourcePolicy(key));
-        assertEquals("ResourceNotFoundException", gone.getErrorCode());
-
-        AwsException deleted = assertThrows(AwsException.class,
-                () -> service.putResourcePolicy(key, PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY));
-        assertEquals("ResourceNotFoundException", deleted.getErrorCode());
+        // The key is still there while its deletion is pending, so the policy it carries is
+        // still there too.
+        assertEquals(PaymentCryptographyTestFixtures.CROSS_ACCOUNT_POLICY,
+                service.resourcePolicy(key).policy());
     }
 
     @Test
@@ -510,17 +630,19 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aDeletedKeyIsNotStartedOrStopped() {
+    void aKeyPendingDeletionIsNotStartedOrStopped() {
         PaymentCryptographyKey key = createKey("us-east-1");
         service.deleteKey(key);
 
+        // The deletion is under way, so the use of the key is not the caller's to change:
+        // the reference does not publish the answer, so the service refuses the request.
         AwsException start = assertThrows(AwsException.class,
                 () -> service.startKeyUsage(key));
-        assertEquals("ResourceNotFoundException", start.getErrorCode());
+        assertEquals("ConflictException", start.getErrorCode());
 
         AwsException stop = assertThrows(AwsException.class,
                 () -> service.stopKeyUsage(key));
-        assertEquals("ResourceNotFoundException", stop.getErrorCode());
+        assertEquals("ConflictException", stop.getErrorCode());
     }
 
     @Test
@@ -681,10 +803,11 @@ class PaymentCryptographyServiceTest {
     @Test
     void theKeysAreListedByTheirState() {
         createKey("us-east-1");
-        createKey("us-east-1");
+        PaymentCryptographyKey deleted = createKey("us-east-1");
+        service.deleteKey(deleted);
 
-        assertEquals(2, service.listKeys("us-east-1", "CREATE_COMPLETE").size());
-        assertEquals(0, service.listKeys("us-east-1", "DELETE_PENDING").size());
+        assertEquals(1, service.listKeys("us-east-1", "CREATE_COMPLETE").size());
+        assertEquals(1, service.listKeys("us-east-1", "DELETE_PENDING").size());
         assertEquals(0, service.listKeys("us-east-1", "CREATE_IN_PROGRESS").size());
     }
 
@@ -1393,24 +1516,6 @@ class PaymentCryptographyServiceTest {
         assertNull(service.findAlias("us-west-2", "alias/team/card-key"),
                 "the alias of the removed replica is still there");
         assertEquals(0, service.listAliases("us-west-2", null).size());
-    }
-
-    @Test
-    void theAliasesOfAReplicaGoWithThePrimary() {
-        // A replica shares the identifier of its primary, so the aliases that name the
-        // replica are the aliases of the key, and they go when the key goes.
-        PaymentCryptographyKey key = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
-        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
-        service.createAlias("alias/team/card-key", replica);
-        PaymentCryptographyKey primary = service.findKey("us-east-1", key.getKeyId());
-        service.createAlias("alias/team/primary-key", primary);
-
-        service.deleteKey(primary);
-
-        assertNull(service.findAlias("us-west-2", "alias/team/card-key"),
-                "the alias of the replica is still there");
-        assertNull(service.findAlias("us-east-1", "alias/team/primary-key"),
-                "the alias of the primary is still there");
     }
 
     @Test

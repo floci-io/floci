@@ -65,6 +65,7 @@ public class PaymentCryptographyJsonHandler {
             case "GetKey" -> () -> getKey(request, region);
             case "ListKeys" -> () -> listKeys(request, region);
             case "DeleteKey" -> () -> deleteKey(request, region);
+            case "RestoreKey" -> () -> restoreKey(request, region);
             case "StartKeyUsage" -> () -> startKeyUsage(request, region);
             case "StopKeyUsage" -> () -> stopKeyUsage(request, region);
             case "CreateAlias" -> () -> createAlias(request, region);
@@ -181,14 +182,24 @@ public class PaymentCryptographyJsonHandler {
     }
 
     /**
-     * Deletes a key and answers with the key, as the reference does.
+     * Schedules a key for deletion and answers with the key, as the reference does.
      *
-     * <p>The waiting period the reference offers is read, and the key is
-     * deleted at once all the same: the service deletes a key the moment it
-     * is asked to.
+     * <p>The waiting period is the one the request names, or the reference's default of
+     * seven days. The model settles the range, so a period outside it is refused before
+     * the key is touched.
      */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
-        PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
+        int days = request.hasNonNull("DeleteKeyInDays")
+                ? request.path("DeleteKeyInDays").asInt() : 7;
+        PaymentCryptographyKey key = service.deleteKey(
+                requiredKey(request, region, KEY_IDENTIFIER), days);
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** Cancels the scheduled deletion of a key. */
+    private Map<String, Object> restoreKey(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.restoreKey(
+                requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of("Key", keyObject(key));
     }
 
