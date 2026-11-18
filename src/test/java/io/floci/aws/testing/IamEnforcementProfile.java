@@ -33,6 +33,11 @@ import java.util.Map;
  *   exercise the RDS paths they share unmocked. {@code DocDbClusterSnapshotIntegrationTest},
  *   {@code DocDbLegacyRecordArnIntegrationTest}, {@code DocDbRegionScopedIdentifierIntegrationTest}
  *   and {@code DocDbTagConcurrencyTest} rely on it.</li>
+ *   <li>{@code floci.services.iam.partner-permission-boundaries-path} names
+ *   {@code src/test/resources/partner-permission-boundaries.json}, which registers one permissions
+ *   boundary for the delegation partner account {@code 000000000001}.
+ *   {@code DelegationRoleBoundaryEnforcementIntegrationTest} relies on it, to see the condition key a
+ *   delegated role write publishes.</li>
  * </ul>
  *
  * <p>SCP enforcement is inert for every other class. An SCP only applies to a member account of an
@@ -41,15 +46,18 @@ import java.util.Map;
  * account of its own and removing it as it ends, so the SCP lookup finds no ceiling for any account
  * the others use and their decisions are the ones IAM enforcement alone makes.
  *
- * <p>The region and DocumentDB settings are inert for the other classes: no other class here sends a
- * region no partition publishes, and none calls DocumentDB. The DocumentDB classes sign every request
- * with the {@code test} root stand-in, or call the service directly, and never act as a role, so
- * IAM enforcement passes them through.
+ * <p>The region, DocumentDB and partner settings are inert for the other classes: no other class
+ * here sends a region no partition publishes, none calls DocumentDB, and none files a delegation
+ * request as the partner account, the only request the registration reaches. The DocumentDB
+ * classes sign every request with the {@code test} root stand-in, or call the service directly, and
+ * never act as a role, so IAM enforcement passes them through.
  *
  * <p>A class joins if it tests what IAM enforcement decides, or if it signs every request as the
- * {@code test} root stand-in without a role and no other class here calls the service its own
- * setting changes. An unsigned request is refused here. A profile that extends this one starts from
- * {@link #enforcementOverrides()}, so the other classes' settings stay with them.
+ * {@code test} root stand-in without a role, and in either case if every other setting here is
+ * either one it relies on or one that never reaches its requests, and any setting it adds never
+ * reaches the requests of a class already here. An unsigned request is refused here. A profile that
+ * extends this one starts from {@link #enforcementOverrides()}, so the other classes' settings stay
+ * with them.
  */
 public class IamEnforcementProfile implements QuarkusTestProfile {
 
@@ -58,6 +66,8 @@ public class IamEnforcementProfile implements QuarkusTestProfile {
         Map<String, String> overrides = new HashMap<>(enforcementOverrides());
         overrides.put("floci.partitions.allow-unknown-regions", "true");
         overrides.put("floci.services.docdb.mock", "true");
+        overrides.put("floci.services.iam.partner-permission-boundaries-path",
+                "src/test/resources/partner-permission-boundaries.json");
         return overrides;
     }
 
