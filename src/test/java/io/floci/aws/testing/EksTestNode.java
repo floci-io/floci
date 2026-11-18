@@ -13,8 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * The k3s node of a cluster that a Docker integration test starts through {@link EksClusterManager}, with
- * {@code kubectl} and other commands run in it.
+ * The k3s node of a cluster that a Docker integration test starts, through {@link EksClusterManager} or the EKS API,
+ * with {@code kubectl} and other commands run in it.
  */
 public final class EksTestNode {
 
@@ -57,6 +57,11 @@ public final class EksTestNode {
         return node;
     }
 
+    /** The node of {@code cluster}, which was started some other way, such as through the EKS API. */
+    public static EksTestNode of(DockerClient dockerClient, EksClusterManager eksClusterManager, Cluster cluster) {
+        return new EksTestNode(dockerClient, eksClusterManager, cluster);
+    }
+
     /** The node's container, as the cluster names it now. */
     public String containerId() {
         return cluster.getContainerId();
@@ -70,8 +75,7 @@ public final class EksTestNode {
 
     /** Applies {@code yaml} with {@code kubectl apply}. */
     public void apply(String yaml) {
-        ContainerExec.Result applied = exec("sh", "-c", "cat << 'EOF' | kubectl apply -f -\n" + yaml + "\nEOF");
-        assertEquals(0, applied.exitCode(), "kubectl apply failed: " + applied.stderr());
+        execOutput("sh", "-c", "cat << 'EOF' | kubectl apply -f -\n" + yaml + "\nEOF");
     }
 
     /**
@@ -86,14 +90,30 @@ public final class EksTestNode {
                                 "jsonpath={.status.containerStatuses[0].state}").stdout()));
     }
 
+    /** Runs {@code kubectl} with {@code args}, which must succeed, and returns what it printed to stdout, trimmed. */
+    public String kubectlOutput(String... args) {
+        return execOutput(kubectlCommand(args));
+    }
+
+    /** Runs {@code command}, which must succeed, and returns what it printed to stdout, trimmed. */
+    public String execOutput(String... command) {
+        ContainerExec.Result result = exec(command);
+        assertEquals(0, result.exitCode(), () -> String.join(" ", command) + " failed: " + result.summary());
+        return result.stdout().trim();
+    }
+
     public ContainerExec.Result kubectl(String... args) {
-        String[] command = new String[args.length + 1];
-        command[0] = "kubectl";
-        System.arraycopy(args, 0, command, 1, args.length);
-        return exec(command);
+        return exec(kubectlCommand(args));
     }
 
     public ContainerExec.Result exec(String... command) {
         return ContainerExec.run(dockerClient, containerId(), command, 30).throwIfTimedOut(containerId());
+    }
+
+    private static String[] kubectlCommand(String... args) {
+        String[] command = new String[args.length + 1];
+        command[0] = "kubectl";
+        System.arraycopy(args, 0, command, 1, args.length);
+        return command;
     }
 }
