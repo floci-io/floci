@@ -706,6 +706,23 @@ public class ContainerLifecycleManager {
         stopAndRemoveStrict(containerId, logStream, stopTimeoutSeconds, false);
     }
 
+    /**
+     * Stops and removes a container, reporting whether Docker confirmed it gone, for a caller that
+     * holds something of the container's, such as a link-local address, that must not be handed on
+     * while the container survives. A failure is logged rather than thrown, and the log stream is
+     * left open, as {@link #stopAndRemoveStrict(String, Closeable)} leaves it.
+     */
+    public boolean stopAndConfirmRemoved(String containerId, Closeable logStream, int stopTimeoutSeconds,
+                                         boolean removeAnonymousVolumes) {
+        try {
+            stopAndRemoveStrict(containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Container {0} was not confirmed removed: {1}", containerId, e.getMessage());
+            return false;
+        }
+    }
+
     /** Strict teardown that can also reclaim the container's anonymous volumes. */
     public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
                                      boolean removeAnonymousVolumes) {

@@ -197,6 +197,10 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             try {
                 credentials = roleCredentials.provision(executionId, buildId, project.getServiceRole(),
                         accountOf(project), network);
+            } catch (CodeBuildRoleCredentials.RoleNotFoundException e) {
+                completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR", e.getMessage());
+                finishFailed(build);
+                return;
             } catch (RuntimeException e) {
                 completePhaseWithError(build, "PROVISIONING", "FAILED", "FAULT_ERROR", e.getMessage());
                 throw e;
@@ -429,7 +433,11 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             roleCredentials.revoke(executionId);
             boolean containerGone = true;
             if (containerId != null && runningContainers.remove(executionId, containerId)) {
-                containerGone = stopAndConfirmRemoved(containerId, logHandle);
+                containerGone = lifecycleManager.stopAndConfirmRemoved(containerId, logHandle, 5, false);
+                // A failed removal leaves the log stream open for a retry, and a build has none.
+                if (!containerGone && logHandle != null) {
+                    try { logHandle.close(); } catch (Exception ignored) {}
+                }
             } else if (logHandle != null) {
                 try { logHandle.close(); } catch (Exception ignored) {}
             }
@@ -525,24 +533,6 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             return Files.readString(yaml);
         }
         throw new AwsException("InvalidInputException", "No buildspec found in source or request", 400);
-    }
-
-    /**
-     * Stops and removes the build's container, reporting whether it is really gone. The strict
-     * teardown keeps the log stream open for a retry there is none of here, so it is closed either way.
-     */
-    private boolean stopAndConfirmRemoved(String containerId, Closeable logHandle) {
-        try {
-            lifecycleManager.stopAndRemoveStrict(containerId, logHandle);
-            return true;
-        } catch (RuntimeException e) {
-            LOG.warnv("Build container {0} was not removed: {1}; its link-local address stays reserved",
-                    containerId, e.getMessage());
-            if (logHandle != null) {
-                try { logHandle.close(); } catch (Exception ignored) {}
-            }
-            return false;
-        }
     }
 
     /** The account the project is in, which its role is looked up and its session minted in. */

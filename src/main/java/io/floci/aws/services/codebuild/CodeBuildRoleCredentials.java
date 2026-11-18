@@ -34,17 +34,14 @@ import java.util.concurrent.TimeoutException;
  * session is handed as keys instead, and the build still runs as its role.
  *
  * <p>The role's trust policy is not evaluated: like an ECS task's, the session is minted for any
- * role that exists. A role that does not exist mints nothing, and the build runs as builds ran
- * before they had a role, with the placeholder keys, as an ECS task whose role cannot be resolved
- * starts without credentials; a network whose endpoint cannot be served hands the session as keys.
+ * role that exists. A role that does not exist mints nothing, and the build fails before its first
+ * command, as CodeBuild cannot assume it; a network whose endpoint cannot be served hands the
+ * session as keys.
  */
 @ApplicationScoped
 public class CodeBuildRoleCredentials {
 
     static final String RELATIVE_URI = "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI";
-    /** What a build was handed before it had a role of its own, and still is when its role does not exist. */
-    static final Map<String, String> PLACEHOLDER_KEYS = Map.of(
-            "AWS_ACCESS_KEY_ID", "test", "AWS_SECRET_ACCESS_KEY", "test");
     private static final Logger LOG = Logger.getLogger(CodeBuildRoleCredentials.class);
     private static final String SESSION_PREFIX = "AWSCodeBuild-";
     private static final long SERVER_START_SECONDS = 30;
@@ -69,15 +66,14 @@ public class CodeBuildRoleCredentials {
      *
      * @param buildArn the build's ARN, which owns the session and its address until {@link #releaseAddress}
      * @param network  the Docker network the build's container joins, empty for the default bridge
+     * @throws RoleNotFoundException when the role names no role in the account; nothing is minted
      */
     public BuildCredentials provision(String buildArn, String buildId, String roleArn, String accountId,
                                       Optional<String> network) {
         String sessionName = SESSION_PREFIX + buildId.substring(buildId.indexOf(':') + 1);
         Optional<String> path = sessions.issue(buildArn, roleArn, accountId, sessionName, Instant.now());
         if (path.isEmpty()) {
-            LOG.warnv("Build {0}: its project's service role {1} was not found in account {2}, so the build "
-                    + "runs with the placeholder keys and no role", buildId, roleArn, accountId);
-            return new BuildCredentials(PLACEHOLDER_KEYS, null);
+            throw new RoleNotFoundException("CodeBuild is not authorized to perform: sts:AssumeRole on " + roleArn);
         }
         Optional<String> endpointNetwork = network.filter(ContainerSpec::acceptsLinkLocalIps);
         if (endpointNetwork.isPresent()) {
@@ -128,5 +124,12 @@ public class CodeBuildRoleCredentials {
      * link-local address on the network, null on the default bridge.
      */
     public record BuildCredentials(Map<String, String> env, String linkLocalAddress) {
+    }
+
+    /** A project's service role that names no role in the project's account. */
+    public static final class RoleNotFoundException extends RuntimeException {
+        RoleNotFoundException(String message) {
+            super(message);
+        }
     }
 }

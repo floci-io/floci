@@ -10,6 +10,7 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.services.codebuild.model.Build;
+import io.floci.aws.services.codebuild.model.BuildPhase;
 import io.floci.aws.services.codebuild.model.Project;
 import io.floci.aws.services.codebuild.model.ProjectEnvironment;
 import io.floci.aws.services.codebuild.model.ProjectSource;
@@ -25,15 +26,16 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.io.Closeable;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -122,20 +124,22 @@ class CodeBuildRunnerServiceRoleTest {
     }
 
     @Test
-    void aBuildWhoseRoleIsNotFoundRunsWithThePlaceholderKeysAsBefore() throws Exception {
+    void aBuildWhoseRoleIsNotFoundFailsInProvisioning() throws Exception {
         Fixture fixture = fixture(Optional.of(NETWORK), false, List.of());
 
         fixture.run();
 
         Build build = fixture.build();
-        assertEquals("SUCCEEDED", build.getBuildStatus(), () -> phases(build).toString());
-        List<String> env = fixture.env();
-        assertEquals(Optional.of("test"), value(env, "AWS_ACCESS_KEY_ID"));
-        assertEquals(Optional.of("test"), value(env, "AWS_SECRET_ACCESS_KEY"));
-        assertEquals(Optional.empty(), value(env, "AWS_SESSION_TOKEN"));
-        assertEquals(Optional.empty(), value(env, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"));
+        assertEquals("FAILED", build.getBuildStatus(), () -> phases(build).toString());
+        BuildPhase failed = build.getPhases().stream()
+                .filter(phase -> "FAILED".equals(phase.getPhaseStatus()))
+                .findFirst().orElseThrow(() -> new AssertionError("no failed phase in " + phases(build)));
+        assertEquals("PROVISIONING", failed.getPhaseType());
+        assertEquals("CLIENT_ERROR", failed.getContexts().getFirst().get("statusCode"));
+        assertEquals("CodeBuild is not authorized to perform: sts:AssumeRole on " + ROLE_ARN,
+                failed.getContexts().getFirst().get("message"));
         verify(fixture.iam(), never()).registerEcsTaskRoleSession(any());
-        verify(fixture.specBuilder(), never()).withLinkLocalIp(anyString());
+        verify(fixture.lifecycle(), never()).createAndStart(any());
     }
 
     private static List<String> phases(Build build) {
@@ -223,13 +227,10 @@ class CodeBuildRunnerServiceRoleTest {
     private record Fixture(CodeBuildRunner runner, Build build, Project project, ContainerBuilder.Builder specBuilder,
                            ContainerLifecycleManager lifecycle, IamService iam) {
 
-        void run() throws InterruptedException {
+        void run() {
             runner.startBuild("us-east-1", build, project, null);
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-            while (!Boolean.TRUE.equals(build.getBuildComplete()) && System.nanoTime() < deadline) {
-                Thread.sleep(20);
-            }
-            assertTrue(Boolean.TRUE.equals(build.getBuildComplete()), "build did not finish: " + phases(build));
+            await("build finished").atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(20))
+                    .until(() -> Boolean.TRUE.equals(build.getBuildComplete()));
         }
 
         @SuppressWarnings("unchecked")

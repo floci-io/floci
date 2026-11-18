@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -127,7 +128,7 @@ class CodeBuildServiceRoleDockerIntegrationTest {
     }
 
     @AfterEach
-    void removeWhatTheTestMade() throws InterruptedException {
+    void removeWhatTheTestMade() {
         if (!ran) {
             return;
         }
@@ -155,16 +156,13 @@ class CodeBuildServiceRoleDockerIntegrationTest {
      * The runner removes the build's container after it has reported the build complete, so a
      * network removed at once still has that endpoint.
      */
-    private void awaitNoContainerOn(String networkId) throws InterruptedException {
-        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
-        while (System.nanoTime() < deadline) {
-            Map<String, ?> containers =
-                    dockerClient.inspectNetworkCmd().withNetworkId(networkId).exec().getContainers();
-            if (containers == null || containers.isEmpty()) {
-                return;
-            }
-            Thread.sleep(200);
-        }
+    private void awaitNoContainerOn(String networkId) {
+        await("no container on the build's network").atMost(Duration.ofSeconds(30))
+                .pollInterval(Duration.ofMillis(200)).until(() -> {
+                    Map<String, ?> containers =
+                            dockerClient.inspectNetworkCmd().withNetworkId(networkId).exec().getContainers();
+                    return containers == null || containers.isEmpty();
+                });
     }
 
     @Test
@@ -206,8 +204,8 @@ class CodeBuildServiceRoleDockerIntegrationTest {
         assertEquals("granted listed", result("granted.txt").strip());
         assertTrue(result("other.txt").contains("AccessDenied"), () -> result("other.txt"));
 
-        assertTrue(answersNothingWithin(relativeUri, Duration.ofSeconds(10)),
-                "the build's relative URI still answers credentials after the build ended");
+        // The build's relative URI answers no credentials once the build has ended.
+        awaitAnswersNothing(relativeUri, Duration.ofSeconds(10));
     }
 
     private void createProject(String roleArn) {
@@ -249,16 +247,12 @@ class CodeBuildServiceRoleDockerIntegrationTest {
                 .then().statusCode(200).extract().jsonPath().getString("build.id");
     }
 
-    private JsonPath awaitBuild(String buildId) throws InterruptedException {
-        long deadline = System.nanoTime() + Duration.ofMinutes(8).toNanos();
-        while (true) {
-            JsonPath build = codeBuild("BatchGetBuilds").body(Map.of("ids", List.of(buildId))).post("/")
-                    .then().statusCode(200).extract().jsonPath().setRootPath("builds[0]");
-            if (build.getBoolean("buildComplete") || System.nanoTime() > deadline) {
-                return build;
-            }
-            Thread.sleep(500);
-        }
+    private JsonPath awaitBuild(String buildId) {
+        return await("build " + buildId + " complete").atMost(Duration.ofMinutes(8))
+                .pollInterval(Duration.ofMillis(500))
+                .until(() -> codeBuild("BatchGetBuilds").body(Map.of("ids", List.of(buildId))).post("/")
+                                .then().statusCode(200).extract().jsonPath().setRootPath("builds[0]"),
+                        build -> build.getBoolean("buildComplete"));
     }
 
     /** A CodeBuild call signed as the account's administrator, whom IAM enforcement lets do anything. */
@@ -289,23 +283,13 @@ class CodeBuildServiceRoleDockerIntegrationTest {
      * initialised again in the app's class loader, where its pick differs. The runner revokes the
      * session after it has reported the build complete, hence the window.
      */
-    private boolean answersNothingWithin(String relativeUri, Duration window) throws InterruptedException {
+    private void awaitAnswersNothing(String relativeUri, Duration window) {
         HttpClient client = HttpClient.newHttpClient();
         int port = config.services().ecs().taskRoleCredentials().port();
         HttpRequest request = HttpRequest.newBuilder(
                 URI.create("http://127.0.0.1:" + port + relativeUri)).GET().build();
-        long deadline = System.nanoTime() + window.toNanos();
-        while (System.nanoTime() < deadline) {
-            try {
-                if (client.send(request, HttpResponse.BodyHandlers.discarding()).statusCode() == 404) {
-                    return true;
-                }
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-            Thread.sleep(200);
-        }
-        return false;
+        await("the build's relative URI answers 404").atMost(window).pollInterval(Duration.ofMillis(200))
+                .until(() -> client.send(request, HttpResponse.BodyHandlers.discarding()).statusCode() == 404);
     }
 
     private static <T> List<T> iterableToList(Iterator<T> iterator) {
