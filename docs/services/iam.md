@@ -3930,6 +3930,26 @@ Four deviations to be aware of:
   service-linked mark comes from the action that minted the role rather than from its path. Such
   a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
 
+## Service-linked role refusals
+
+A service-linked role is immutable, and this package refuses eleven actions on one. Only one of
+those refusals is recorded, and it is worded differently from the rest: `UpdateRole` changing
+`MaxSessionDuration` answers `UnmodifiableEntity` 400 with `<roleName> is an AWS service linked
+role, max session duration cannot be changed.`, recorded 2026-10-29, where the clause names the
+change refused rather than the service the role is linked to.
+
+The other ten keep this package's own sentence, `Role <name> is a service-linked role for
+<principal>; request the change through that service.` Nothing records them, the clause AWS would
+write for each cannot be inferred from the one that is recorded, and AWS may not refuse all of them
+this way at all, so inventing ten clauses would put words in AWS's mouth. A recording for any of
+them moves that action alone. The same guard stands on one path no IAM action reaches, the policy
+replacement an IAM Identity Center permission set provisions a role through, which is why ten
+actions carry the sentence where eleven call sites test the mark.
+
+The description is not one of the eleven: AWS documents it as editable on any role, and both
+`UpdateRole` carrying only a description and `UpdateRoleDescription` are taken here, with the guard
+standing on the duration.
+
 ## Partitions
 
 IAM is global, so its ARNs take the partition of the region a request is signed for:

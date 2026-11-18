@@ -1525,11 +1525,40 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * TagRole's reference says the role "can be a regular role or a service-linked role".
      * Within the IAM API, {@link #deleteServiceLinkedRole} is the only way to remove such a role.
      */
+    /**
+     * The refusal AWS was recorded answering for the one change this package guards on
+     * {@code UpdateRole}: {@code <roleName> is an AWS service linked role, max session duration
+     * cannot be changed.}, 400 {@code UnmodifiableEntity}, recorded 2026-10-29 with the role's own
+     * name substituted and the rest fixed. AWS words the clause after the change it refuses rather
+     * than after the service the role is linked to, which is what tells a caller what to stop
+     * asking for.
+     *
+     * <p>The other ten actions this package guards carry no recording of their own and keep
+     * {@link #requireNotServiceLinked}'s sentence, which is this emulator's own: the clause AWS
+     * would write for each of them is not a thing that can be inferred from this one, and some of
+     * those actions may not be refused by AWS at all. {@code docs/services/iam.md} says so rather
+     * than leaving ten invented clauses behind. The same guard also stands on
+     * {@link #replaceRolePolicies}, which no IAM action reaches, so it is not one of the ten.
+     */
+    private static void requireMaxSessionDurationChangeable(IamRole role, String roleName) {
+        refuseIfServiceLinked(role, () -> roleName
+                + " is an AWS service linked role, max session duration cannot be changed.");
+    }
+
     private static void requireNotServiceLinked(IamRole role, String roleName) {
+        refuseIfServiceLinked(role, () -> "Role " + roleName + " is a service-linked role for "
+                + linkedServicePrincipal(role) + "; request the change through that service.");
+    }
+
+    /**
+     * The one place the mark is tested, each caller naming the sentence its own site answers, so a
+     * change to what counts as service-linked or to how it is refused is made once. The sentence is
+     * built only once the mark is there, since the linked service is read off a path only such a
+     * role carries.
+     */
+    private static void refuseIfServiceLinked(IamRole role, Supplier<String> refusal) {
         if (role.isServiceLinkedRole()) {
-            throw new AwsException("UnmodifiableEntity",
-                    "Role " + roleName + " is a service-linked role for " + linkedServicePrincipal(role)
-                            + "; request the change through that service.", 400);
+            throw new AwsException("UnmodifiableEntity", refusal.get(), 400);
         }
     }
 
@@ -1691,7 +1720,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             if (maxSessionDuration > 0) {
-                requireNotServiceLinked(role, roleName);
+                requireMaxSessionDurationChangeable(role, roleName);
             }
             if (description != null) {
                 role.setDescription(description);
