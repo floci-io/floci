@@ -121,9 +121,12 @@ class Route53ResolverIntegrationTest {
                     .statusCode(200).body("ResolverDNSSECConfig.Id", equalTo(id));
             dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
                     + "\",\"Validation\":\"USE_LOCAL_RESOURCE_SETTING\"}")
-                    .statusCode(400).body("__type", equalTo("InvalidParameterException"));
+                    .statusCode(200)
+                    .body("ResolverDNSSECConfig.Id", equalTo(id))
+                    .body("ResolverDNSSECConfig.ValidationStatus", equalTo("USE_LOCAL_RESOURCE_SETTING"));
             dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
-                    .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus", equalTo("ENABLED"));
+                    .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus",
+                            equalTo("USE_LOCAL_RESOURCE_SETTING"));
             dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
                     + "\",\"Validation\":\"DISABLE\"}")
                     .statusCode(200)
@@ -131,17 +134,11 @@ class Route53ResolverIntegrationTest {
                     .body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"));
             dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
                     .statusCode(200).body("ResolverDNSSECConfig.ValidationStatus", equalTo("DISABLED"));
-            given().contentType(CONTENT_TYPE)
-                    .header("X-Amz-Target", "Route53Resolver.GetResolverDnssecConfig")
-                    .header("Authorization", AUTH_HEADER.replace("us-east-1", "us-west-2"))
-                    .body("{\"ResourceId\":\"" + vpc + "\"}")
-                    .when().post("/").then().statusCode(400)
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}",
+                    AUTH_HEADER.replace("us-east-1", "us-west-2")).statusCode(400)
                     .body("__type", equalTo("ResourceNotFoundException"));
-            given().contentType(CONTENT_TYPE)
-                    .header("X-Amz-Target", "Route53Resolver.GetResolverDnssecConfig")
-                    .header("Authorization", AUTH_HEADER.replace("AKID", "000000000077"))
-                    .body("{\"ResourceId\":\"" + vpc + "\"}")
-                    .when().post("/").then().statusCode(400)
+            dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}",
+                    AUTH_HEADER.replace("AKID", "000000000077")).statusCode(400)
                     .body("__type", equalTo("ResourceNotFoundException"));
         } finally {
             ec2Ok("DeleteVpc", "VpcId", vpc);
@@ -161,9 +158,13 @@ class Route53ResolverIntegrationTest {
     }
 
     private static ValidatableResponse dnssec(String action, String body) {
+        return dnssec(action, body, AUTH_HEADER);
+    }
+
+    private static ValidatableResponse dnssec(String action, String body, String authorization) {
         return given().contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "Route53Resolver." + action)
-                .header("Authorization", AUTH_HEADER).body(body)
+                .header("Authorization", authorization).body(body)
                 .when().post("/").then();
     }
 

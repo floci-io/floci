@@ -603,19 +603,26 @@ public class Route53ResolverService {
     public synchronized ObjectNode updateResolverDnssecConfig(JsonNode request, String region, String accountId) {
         String resourceId = requireText(request, "ResourceId", INVALID_PARAMETER);
         String validation = requireText(request, "Validation", INVALID_PARAMETER);
-        requireEnum(validation, "Validation", List.of("ENABLE", "DISABLE"), INVALID_PARAMETER);
+        requireEnum(validation, "Validation", List.of("ENABLE", "DISABLE", "USE_LOCAL_RESOURCE_SETTING"),
+                INVALID_PARAMETER);
         if (ec2Service != null && ec2Service.describeVpcs(region, List.of(resourceId), Map.of()).isEmpty()) {
             throw new AwsException("ResourceNotFoundException", "VPC not found: " + resourceId, 400);
         }
         String key = region + "::" + resourceId;
-        ObjectNode config = dnssecConfigStore.get(key).orElseGet(() -> {
+        ObjectNode config = dnssecConfigStore.get(key).map(ObjectNode::deepCopy).orElseGet(() -> {
             ObjectNode created = objectMapper.createObjectNode();
             created.put("Id", "rdsc-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
             created.put("OwnerId", accountId);
             created.put("ResourceId", resourceId);
             return created;
         });
-        config.put("ValidationStatus", "ENABLE".equals(validation) ? "ENABLED" : "DISABLED");
+        String validationStatus = switch (validation) {
+            case "ENABLE" -> "ENABLED";
+            case "DISABLE" -> "DISABLED";
+            case "USE_LOCAL_RESOURCE_SETTING" -> "USE_LOCAL_RESOURCE_SETTING";
+            default -> throw new IllegalStateException("Unexpected DNSSEC validation: " + validation);
+        };
+        config.put("ValidationStatus", validationStatus);
         dnssecConfigStore.put(key, config);
         return config.deepCopy();
     }
