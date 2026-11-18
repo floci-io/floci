@@ -28,7 +28,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -38,7 +37,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -161,66 +159,6 @@ class ExternalDsqlBackendTest {
     }
 
     @Test
-    void aServerNotYetAcceptingConnectionsIsWaitedFor() throws SQLException {
-        Connection server = mock(Connection.class);
-        AtomicInteger attempts = new AtomicInteger();
-
-        Connection opened = ExternalDsqlBackend.awaitServer(() -> {
-            if (attempts.incrementAndGet() < 3) {
-                throw new SQLException("the database system is starting up", "57P03");
-            }
-            return server;
-        }, Duration.ofSeconds(10), Duration.ofMillis(1), "db.example:5432");
-
-        assertSame(server, opened);
-        assertEquals(3, attempts.get());
-    }
-
-    @Test
-    void aRefusedLoginIsNotRetried() {
-        AtomicInteger attempts = new AtomicInteger();
-        long started = System.nanoTime();
-
-        SQLException refused = assertThrows(SQLException.class, () -> ExternalDsqlBackend.awaitServer(() -> {
-            attempts.incrementAndGet();
-            throw new SQLException("password authentication failed for user \"postgres\"", "28P01");
-        }, Duration.ofSeconds(90), Duration.ofMillis(250), "db.example:5432"));
-
-        assertEquals("28P01", refused.getSQLState());
-        assertEquals(1, attempts.get());
-        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5), "it fails at once");
-    }
-
-    @Test
-    void aServerThatNeverAnswersFailsAtTheDeadlineWithItsLastError() {
-        AtomicInteger attempts = new AtomicInteger();
-        SQLException last = new SQLException("Connection refused", "08001");
-
-        SQLException refused = assertThrows(SQLException.class, () -> ExternalDsqlBackend.awaitServer(() -> {
-            attempts.incrementAndGet();
-            throw last;
-        }, Duration.ofMillis(100), Duration.ofMillis(10), "db.example:5432"));
-
-        assertEquals("The external PostgreSQL server db.example:5432 did not let Floci in within 0 s: Connection"
-                + " refused", refused.getMessage());
-        assertEquals("08001", refused.getSQLState());
-        assertSame(last, refused.getCause());
-        assertTrue(attempts.get() > 1, "it was tried again");
-    }
-
-    @Test
-    void aZeroTimeoutStillTriesOnce() {
-        AtomicInteger attempts = new AtomicInteger();
-
-        assertThrows(SQLException.class, () -> ExternalDsqlBackend.awaitServer(() -> {
-            attempts.incrementAndGet();
-            throw new SQLException("Connection refused", "08001");
-        }, Duration.ZERO, ExternalDsqlBackend.READY_INTERVAL, "db.example:5432"));
-
-        assertEquals(1, attempts.get());
-    }
-
-    @Test
     void aServerThatAcceptsButNeverAnswersDoesNotHoldACallForever() throws Exception {
         // A listening socket that is never accepted from: TCP connects, and no reply ever comes, as from
         // a paused sidecar.
@@ -250,7 +188,6 @@ class ExternalDsqlBackendTest {
     @Test
     void theStartWaitsAsLongAsTheDockerBackendDoes() {
         assertEquals(Duration.ofSeconds(90), ExternalDsqlBackend.READY_TIMEOUT);
-        assertEquals(Duration.ofMillis(250), ExternalDsqlBackend.READY_INTERVAL);
     }
 
     @Test

@@ -7,7 +7,7 @@ import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.PortBinding;
 import com.github.dockerjava.api.model.Ports;
-import io.floci.aws.services.dsql.dataplane.DockerDsqlBackend;
+import io.floci.aws.services.dsql.dataplane.DsqlDatabases;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.TestDockerClients;
 
@@ -51,7 +51,7 @@ public final class ExternalPostgresServer implements AutoCloseable {
      * Starts a container named {@code name} plus a random suffix, with {@code env} besides
      * {@code POSTGRES_USER=postgres}, and waits until {@code postgres} logs in with
      * {@code password} (empty where the server trusts its connections), through the readiness loop
-     * the Docker backend waits for a cluster's database with.
+     * the DSQL backends wait for a server with.
      */
     public static ExternalPostgresServer start(String name, String password, String... env)
             throws DockerUnavailableException, SQLException, InterruptedException {
@@ -80,8 +80,8 @@ public final class ExternalPostgresServer implements AutoCloseable {
             InspectContainerResponse inspected = dockerClient.inspectContainerCmd(containerId).exec();
             int port = Integer.parseInt(
                     inspected.getNetworkSettings().getPorts().getBindings().get(exposed)[0].getHostPortSpec());
-            DockerDsqlBackend.awaitReady(() -> DriverManager.getConnection(jdbcUrl(port, "postgres"), "postgres",
-                    password), READY_TIMEOUT);
+            DsqlDatabases.awaitConnection(() -> DriverManager.getConnection(jdbcUrl(port, "postgres"), "postgres",
+                    password), READY_TIMEOUT, DsqlDatabases.READY_INTERVAL, false, "The test's PostgreSQL").close();
             return new ExternalPostgresServer(dockerClient, containerId, port);
         } catch (DockerUnavailableException | SQLException | InterruptedException | RuntimeException e) {
             close(dockerClient, containerId, e);

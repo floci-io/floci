@@ -22,7 +22,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -59,7 +58,6 @@ public class ExternalDsqlBackend implements DsqlBackend {
 
     /** As long as {@link DockerDsqlBackend} waits for a cluster's container. */
     static final Duration READY_TIMEOUT = Duration.ofSeconds(90);
-    static final Duration READY_INTERVAL = Duration.ofMillis(250);
     /** The longest one login to the server may take. */
     static final Duration LOGIN_TIMEOUT = Duration.ofSeconds(10);
     /**
@@ -113,8 +111,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
         boolean createdConnect = false;
         boolean createdDatabase = false;
         String where = host() + ":" + external().port();
-        try (Connection server = awaitServer(() -> connect(external().database()), readyTimeout, READY_INTERVAL,
-                where)) {
+        try (Connection server = DsqlDatabases.awaitConnection(() -> connect(external().database()),
+                readyTimeout, DsqlDatabases.READY_INTERVAL, true, "The external PostgreSQL server " + where)) {
             requireSupportedVersion(server, where);
             // Nothing is changed unless every object already there is one Floci created for this cluster.
             Ownership owner = roleOwnership(server, names.owner(), marker);
@@ -466,46 +464,6 @@ public class ExternalDsqlBackend implements DsqlBackend {
             terminate.setLong(1, SESSION_END_WAIT.toMillis());
             terminate.setString(2, names.database());
             terminate.execute();
-        }
-    }
-
-    /** Opens a connection to the server. */
-    @FunctionalInterface
-    interface ServerConnector {
-        Connection open() throws SQLException;
-    }
-
-    /**
-     * A connection from {@code connector}, tried again every {@code interval} until {@code timeout}
-     * has passed, so a server still starting, as a sidecar started with Floci may be, is waited for.
-     * It is tried at least once. A refused login (SQLSTATE class 28) is thrown at once: waiting
-     * would not change a wrong password.
-     */
-    static Connection awaitServer(ServerConnector connector, Duration timeout, Duration interval, String where)
-            throws SQLException {
-        Instant deadline = Instant.now().plus(timeout);
-        while (true) {
-            SQLException last;
-            try {
-                return connector.open();
-            } catch (SQLException e) {
-                if (e.getSQLState() != null && e.getSQLState().startsWith("28")) {
-                    throw e;
-                }
-                last = e;
-            }
-            if (Instant.now().plus(interval).isAfter(deadline)) {
-                throw new SQLException("The external PostgreSQL server " + where + " did not let Floci in within "
-                        + timeout.toSeconds() + " s: " + last.getMessage(), last.getSQLState(), last);
-            }
-            try {
-                Thread.sleep(interval.toMillis());
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                SQLException stopped = new SQLException("Interrupted while waiting for " + where, interrupted);
-                stopped.addSuppressed(last);
-                throw stopped;
-            }
         }
     }
 
