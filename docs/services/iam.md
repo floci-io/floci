@@ -1317,6 +1317,51 @@ The generator's only modeled error, `ReportGenerationLimitExceeded`, reports con
 for the account and stays unreachable here: a job is complete the moment it is created, so two can
 never overlap.
 
+### A service namespace that names no service
+
+`ServiceNamespace` and `ServiceNamespaces` are patterned `^[\w-]*$`, so a word-shaped value such as
+`amazon-s3` satisfies everything the model declares and still names no AWS service. AWS checks the
+value against its own namespaces and refuses what it does not publish, where this emulator used to
+answer 200 with an empty policy list per namespace asked for, telling a caller the identity reaches
+nothing rather than that the question was wrong.
+
+The two operations that take one word it differently, and both are recorded against a real account
+on 2026-11-03, each `InvalidInput` 400 with a sender fault:
+
+- `ListPoliciesGrantingServiceAccess` answers `Invalid service namespace: [<namespace>]`, the
+  brackets being AWS's own. The recording covers one rejected value; several are rendered inside
+  the one pair of brackets, which is this emulator's reading of a sentence AWS writes for the
+  plural.
+- `GetServiceLastAccessedDetailsWithEntities` answers `Service namepace <namespace> is either
+  invalid or unsupported.` The misspelling of `namespace` is AWS's and is kept: a client matching
+  the message has to match what the service sends.
+
+The catalog is the vendored one generated from AWS's Service Reference index, read through
+`AwsServiceNamespaces.isPublished`, so nothing hand-maintains a second list. The check runs after
+the declared constraints, which is the order this package refuses request inputs in: a value that
+breaks the published pattern `[\w-]*` is answered that pattern, and only a well-formed value
+reaches the catalog.
+
+Both members are vendored for that to hold. `ServiceNamespace` always was.
+`ListPoliciesGrantingServiceAccess` carried no entry for `ServiceNamespaces` at all, so nothing
+held its members to anything, and a value with a space in it used to reach the catalog check and be
+answered `InvalidInput` where AWS answers `ValidationError`. The member is read now, each value
+held to `serviceNamespaceType` and the list to its own bounds of 1 to 200, which also moves two
+answers that were this emulator's own: a request carrying no namespace is the required member the
+model declares rather than `InvalidInput` and a sentence AWS writes nowhere, and a list over 200 is
+the model's bound rather than a check beside it.
+
+A namespace the job itself reports is readable on `GetServiceLastAccessedDetailsWithEntities`
+whether the catalog publishes it or not, which is why the job is read before the namespace is
+judged, and why a job id naming nothing is answered as a missing job rather than as a bad
+namespace. Which of the two a request breaking both is answered is recorded nowhere. The catalog is vendored, so it is as new as the last regeneration, where a policy may grant
+a service published after it: `GenerateServiceLastAccessedDetails` keeps the namespaces the
+policies name, so the report would list that service and a request for its entities would then be
+refused, which is this emulator disagreeing with itself. Nothing else is exempt: a namespace the
+job does not report and the catalog does not publish is still refused, and the list operation,
+which takes namespaces as input rather than reporting them, holds every value to the catalog. A
+service published after the vendored index is a regeneration away, not a runtime lookup.
+
 ### Multi-Factor Authentication
 
 | Action | Description |
