@@ -25,7 +25,7 @@ import static org.hamcrest.Matchers.equalTo;
  *
  * <p>Its profile leaves passthrough off and the default model unset, so this class also checks that
  * a model id with no mapping is refused before any backend call. It stays apart from
- * {@code BedrockProxyBackendProfile}, which the other proxy classes share: that profile turns
+ * {@code SidecarContainersProfile}, which the other proxy classes share: that profile turns
  * passthrough on, and a one-second timeout there would also close the upstreams that
  * {@code BedrockProxyCancellationIntegrationTest} stalls before their headers, so those tests
  * would pass without a disconnect closing them.

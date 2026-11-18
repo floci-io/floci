@@ -2,9 +2,9 @@ package io.floci.aws.services.dsql.dataplane;
 
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.dsql.DsqlClusterFixture;
-import io.floci.aws.services.dsql.DsqlDatabasesProfile;
 import io.floci.aws.services.dsql.DsqlWireClient;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -52,7 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * another connection holds.
  */
 @QuarkusTest
-@TestProfile(DsqlDatabasesProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Tag("docker")
 class DsqlTransactionAgeIntegrationTest {

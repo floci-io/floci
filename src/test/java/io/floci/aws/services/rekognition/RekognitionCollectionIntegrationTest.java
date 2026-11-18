@@ -3,11 +3,12 @@ package io.floci.aws.services.rekognition;
 import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.core.SdkBytes;
@@ -31,7 +32,6 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -39,16 +39,23 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.*;
 
+/**
+ * Rekognition collections, faces and searches. The collections are kept on disk, under
+ * {@code floci.storage.persistent-path}, by the persistent Rekognition storage that
+ * {@link SidecarContainersProfile} turns on.
+ */
 @QuarkusTest
-@TestProfile(RekognitionCollectionIntegrationTest.PersistentCollectionsProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 class RekognitionCollectionIntegrationTest {
-    private static final String STORAGE_PATH = "target/rekognition-collections-it";
 
     @TestHTTPResource
     URI endpoint;
 
     @Inject
     ServiceConfigAccess serviceConfigAccess;
+
+    @ConfigProperty(name = "floci.storage.persistent-path")
+    String persistentPath;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -65,7 +72,7 @@ class RekognitionCollectionIntegrationTest {
             CreateCollectionResponse created = client.createCollection(r -> r.collectionId(id));
             try {
                 assertEquals("persistent", serviceConfigAccess.storageMode("rekognition"));
-                assertTrue(Files.exists(Path.of(STORAGE_PATH, "rekognition-collections.json")));
+                assertTrue(Files.exists(Path.of(persistentPath, "rekognition-collections.json")));
                 assertEquals(200, created.statusCode());
                 assertThrows(ResourceAlreadyExistsException.class, () -> client.createCollection(r -> r.collectionId(id)));
                 DescribeCollectionResponse described = client.describeCollection(r -> r.collectionId(id));
@@ -192,13 +199,5 @@ class RekognitionCollectionIntegrationTest {
 
     private RekognitionClient client(Region region, String account) {
         return AwsTestClients.create(RekognitionClient.builder(), account, region, endpoint);
-    }
-
-    public static class PersistentCollectionsProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.storage.services.rekognition.mode", "persistent",
-                    "floci.storage.persistent-path", STORAGE_PATH);
-        }
     }
 }

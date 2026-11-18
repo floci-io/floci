@@ -11,7 +11,7 @@ public class SidecarSpectrumLakeFormationProfile extends SidecarContainersProfil
 
     @Override
     public Map<String, String> getConfigOverrides() {
-        Map<String, String> overrides = new HashMap<>(super.getConfigOverrides());
+        Map<String, String> overrides = new HashMap<>(containerOverrides());
         overrides.put("floci.services.redshift.spectrum-lake-formation-enforcement", "true");
         return overrides;
     }

@@ -46,7 +46,7 @@ class AppSyncHttpDataSourceSidecarIntegrationTest {
     public static class EnforcedSidecars extends SidecarContainersProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
-            Map<String, String> overrides = new HashMap<>(super.getConfigOverrides());
+            Map<String, String> overrides = new HashMap<>(containerOverrides());
             overrides.put("floci.services.iam.enforcement-enabled", "true");
             overrides.put("floci.auth.validate-signatures", "true");
             return overrides;
