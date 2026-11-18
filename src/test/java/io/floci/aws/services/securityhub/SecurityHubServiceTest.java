@@ -4,11 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.securityhub.model.SecurityHubState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -45,6 +47,52 @@ class SecurityHubServiceTest {
         assertTrue(state.isEnabled());
         assertEquals("STANDARD_CONTROL", state.getControlFindingGenerator());
         assertEquals(Map.of("env", "test"), service.tagsForResource(REGION, service.hubArn(REGION)));
+    }
+
+    /**
+     * IAM's lookup reads the tags of the hub or the configuration policy the ARN names, as the tag calls leave them,
+     * and nothing for another account's, another Region's or an unknown policy, or an ARN of another service.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheHubOrThePolicyTheArnNames() throws Exception {
+        AccountAwareStorageBackend<SecurityHubState> store = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        SecurityHubService administrator = new SecurityHubService(store, new RegionResolver(REGION, ACCOUNT_ID),
+                mock(OrganizationsService.class));
+        administrator.enableSecurityHub(REGION, objectMapper.readTree("{\"Tags\": {\"team\": \"web\"}}"));
+        SecurityHubState state = store.get(REGION).orElseThrow();
+        state.setAdminAccountId(ACCOUNT_ID);
+        store.put(REGION, state);
+        String policyId = administrator.createConfigurationPolicy(REGION, objectMapper.readTree("""
+                {"Name": "tagged", "ConfigurationPolicy": {"SecurityHub": {"ServiceEnabled": true}},
+                 "Tags": {"team": "web", "env": "dev"}}
+                """));
+        String hub = administrator.hubArn(REGION);
+        String policy = administrator.policyArn(REGION, policyId);
+        administrator.tagResource(REGION, hub, Map.of("team", "data"));
+        administrator.tagResource(REGION, policy, Map.of("team", "ops"));
+        administrator.untagResource(REGION, policy, List.of("env"));
+
+        assertEquals("securityhub", administrator.namespace());
+        assertEquals(Map.of("team", "data"), administrator.storedTags(hub));
+        assertEquals(Map.of("team", "ops"), administrator.storedTags(policy));
+        assertTrue(administrator.storedTags(hub.replace(ACCOUNT_ID, "111122223333")).isEmpty());
+        assertTrue(administrator.storedTags(hub.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(administrator.storedTags(policy.replace(policyId, "missing")).isEmpty());
+        assertTrue(administrator.storedTags("arn:aws:guardduty:us-east-1:222222222222:detector/abc").isEmpty());
+    }
+
+    /** A hub stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareHubInPlace() throws Exception {
+        InMemoryStorage<String, SecurityHubState> raw = new InMemoryStorage<>();
+        SecurityHubService legacyState = new SecurityHubService(new AccountAwareStorageBackend<>(raw, null, ACCOUNT_ID),
+                new RegionResolver(REGION, ACCOUNT_ID), mock(OrganizationsService.class));
+        legacyState.enableSecurityHub(REGION, objectMapper.readTree("{\"Tags\": {\"team\": \"data\"}}"));
+        raw.put(REGION, raw.get(ACCOUNT_ID + "/" + REGION).orElseThrow());
+        raw.delete(ACCOUNT_ID + "/" + REGION);
+
+        assertEquals(Map.of("team", "data"), legacyState.storedTags(legacyState.hubArn(REGION)));
+        assertEquals(Set.of(REGION), raw.keys());
     }
 
     @Test

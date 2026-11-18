@@ -934,6 +934,38 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Security Hub holds on the hub a request names, as TagResource
+     * leaves them, so an allow on one team's tag lets the caller describe that team's hub and not another's. An
+     * account has one hub a Region, so the two are in two Regions.
+     */
+    @Test
+    void aSecurityHubResourceTagConditionReadsTheTagsOfTheHub() {
+        String taggedRegion = "ca-central-1";
+        String otherRegion = "sa-east-1";
+        securityHub(taggedRegion, "web");
+        securityHub(otherRegion, "web");
+        String taggedHub = "arn:aws:securityhub:" + taggedRegion + ":" + ACCOUNT + ":hub/default";
+        given().header("Authorization", auth(ADMIN, taggedRegion, "securityhub")).contentType("application/json")
+                .body("{\"Tags\":{\"team\":\"data\"}}")
+                .post("/tags/{arn}", taggedHub).then().statusCode(200);
+        String user = user("route-hub-tags");
+
+        policy(user, onTeam("Allow", "securityhub:DescribeHub", "data"));
+        as(user, taggedRegion, "securityhub").get("/accounts").then().statusCode(200);
+        refused(as(user, otherRegion, "securityhub").get("/accounts").then(), "securityhub:DescribeHub");
+    }
+
+    /**
+     * Security Hub enabled for the administrator in {@code region}, its hub tagged with the team. Floci serves no
+     * DisableSecurityHub, so each Region a test enables it in is one no other test uses.
+     */
+    private void securityHub(String region, String team) {
+        given().header("Authorization", auth(ADMIN, region, "securityhub")).contentType("application/json")
+                .body("{\"EnableDefaultStandards\":false,\"Tags\":{\"team\":\"" + team + "\"}}").post("/accounts")
+                .then().statusCode(200);
+    }
+
+    /**
      * A GuardDuty request naming its detector in its path is checked on that detector, the ARN GuardDuty gives it,
      * and one naming none as its action on {@code *}: a caller with no grant is refused, a grant scoped to the
      * detector lets {@code GetDetector} read it, a request naming another detector is refused, and a deny on the
