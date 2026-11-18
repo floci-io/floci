@@ -146,7 +146,6 @@ AWS::CloudWatch::Alarm	EvaluateLowSampleCountPercentile	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationCriteria	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluationWindow	accepted and ignored
 AWS::CloudWatch::Alarm	ExtendedStatistic	accepted and ignored
-AWS::CloudWatch::Alarm	Metrics	accepted and ignored
 AWS::CloudWatch::Alarm	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ThresholdMetricId	accepted and ignored
 AWS::CloudWatch::Alarm	WarmUpConfiguration	accepted and ignored

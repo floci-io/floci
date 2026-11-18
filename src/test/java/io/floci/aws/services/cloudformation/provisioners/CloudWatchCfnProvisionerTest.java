@@ -209,6 +209,37 @@ class CloudWatchCfnProvisionerTest {
                 "NONE".equals(expected) ? isNull() : eq(new BigInteger(expected)));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "[{\"Id\": \"m1\", \"Expression\": \"1 + 1\"}]|60|REFUSED",
+            "[{\"Id\": \"m1\", \"Expression\": \"1 + 1\"}]|NONE|STORED",
+            "[]|60|STORED"})
+    void anIntervalWithMetricsInTheTemplateIsRefusedOnCreateAndUpdate(String metricsJson, String interval,
+            String expected) {
+        StackResource r = new StackResource();
+        r.setLogicalId("Alarm");
+        r.setResourceType("AWS::CloudWatch::Alarm");
+        r.setAttributes(new HashMap<>());
+        JsonNode props = props("""
+                {"AlarmName": "a", "Metrics": %s%s}
+                """.formatted(metricsJson, "NONE".equals(interval) ? "" : ", \"EvaluationInterval\": " + interval));
+
+        if ("REFUSED".equals(expected)) {
+            for (ProvisionContext context : List.of(ctx, ctx.withPriorPhysicalId("a"))) {
+                AwsException refused = assertThrows(AwsException.class, () -> provisioner.provision(r, props, context));
+                assertEquals("InvalidParameterCombination", refused.getErrorCode());
+                assertEquals("EvaluationInterval cannot be specified for alarms configured with MetricName or "
+                        + "Metrics.", refused.getMessage());
+            }
+            verify(metrics, never()).putMetricAlarm(any(), anyString(), any());
+            return;
+        }
+        provisioner.provision(r, props, ctx);
+
+        verify(metrics).putMetricAlarm(any(MetricAlarm.class), eq(REGION),
+                "NONE".equals(interval) ? isNull() : eq(new BigInteger(interval)));
+    }
+
     @Test
     void deleteReachesTheService() {
         provisioner.delete("AWS::CloudWatch::Alarm", "cpu-high", REGION);

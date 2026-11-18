@@ -433,7 +433,8 @@ public class CloudWatchMetricsService {
      */
     public synchronized void putMetricAlarm(MetricAlarm alarm, String region, BigInteger evaluationInterval) {
         if (evaluationInterval != null) {
-            rejectEvaluationInterval(alarm, evaluationInterval);
+            rejectEvaluationInterval(alarm.getAlarmName(), evaluationInterval,
+                    alarm.getMetricName() != null || !alarm.getMetrics().isEmpty());
         }
         boolean created = alarmStore.get(region + "::" + alarm.getAlarmName()).isEmpty();
         putAlarm(alarm, region);
@@ -442,13 +443,18 @@ public class CloudWatchMetricsService {
         }
     }
 
-    private static void rejectEvaluationInterval(MetricAlarm alarm, BigInteger interval) {
-        List<String> violations = Stream.of(alarmNameViolation(alarm.getAlarmName()), rangeViolation(interval))
+    /**
+     * Refuses an {@code EvaluationInterval} as {@code PutMetricAlarm} does: by the alarm name, then the range, then
+     * the alarm's configuration. Public for the CloudFormation provisioner, which does not keep a template's
+     * {@code Metrics} on the alarm it passes to {@link #putMetricAlarm(MetricAlarm, String, BigInteger)}.
+     */
+    public static void rejectEvaluationInterval(String alarmName, BigInteger interval, boolean metricConfigured) {
+        List<String> violations = Stream.of(alarmNameViolation(alarmName), rangeViolation(interval))
                 .filter(Objects::nonNull).toList();
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationError(violations);
         }
-        if (alarm.getMetricName() != null || !alarm.getMetrics().isEmpty()) {
+        if (metricConfigured) {
             throw CloudWatchMetricsException.invalidParameterCombination(
                     "EvaluationInterval cannot be specified for alarms configured with MetricName or Metrics.");
         }

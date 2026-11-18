@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** PutMetricAlarm refuses {@code EvaluationInterval} on a MetricName alarm, so a stack that sets it rolls back. */
+/** An {@code EvaluationInterval} on a MetricName or Metrics alarm is refused, so a stack that sets it rolls back. */
 @QuarkusTest
 class CloudWatchPutMetricAlarmEvaluationIntervalIntegrationTest {
 
@@ -123,6 +123,30 @@ class CloudWatchPutMetricAlarmEvaluationIntervalIntegrationTest {
         assertTrue(cfn.describeStackEvents(r -> r.stackName(stack)).stackEvents().stream()
                 .anyMatch(e -> "CREATE_FAILED".equals(e.resourceStatusAsString())
                         && e.resourceStatusReason().contains(reason)), "no CREATE_FAILED event with: " + reason);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "[{\"Id\":\"e1\",\"Expression\":\"1\"}]|ROLLBACK_COMPLETE",
+            "{\"Fn::If\":[\"On\",[{\"Id\":\"e1\",\"Expression\":\"1\"}],{\"Ref\":\"AWS::NoValue\"}]}|ROLLBACK_COMPLETE",
+            "{\"Fn::If\":[\"Off\",[{\"Id\":\"e1\",\"Expression\":\"1\"}],{\"Ref\":\"AWS::NoValue\"}]}|CREATE_COMPLETE"})
+    void anIntervalWithMetricsRollsTheStackBackUnlessTheMetricsResolveToNoValue(String metrics, String expected) {
+        String name = "stack-metrics-interval-" + suffix;
+        String stack = "metrics-interval-" + suffix;
+        boolean refused = "ROLLBACK_COMPLETE".equals(expected);
+
+        CfnStackWaits.StackState state = deploy(stack, """
+                {"Conditions": {"On": {"Fn::Equals": ["a", "a"]}, "Off": {"Fn::Equals": ["a", "b"]}},
+                 "Resources": {"Alarm": {"Type": "AWS::CloudWatch::Alarm", "Properties": {
+                   "AlarmName": "%s", "EvaluationPeriods": 1, "Threshold": 1, "EvaluationInterval": 60,
+                   "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+                   "Metrics": %s}}}}""".formatted(name, metrics));
+
+        assertEquals(expected, state.status(), state.reason());
+        assertEquals(refused ? 0 : 1, cloudWatch.describeAlarms(r -> r.alarmNames(name)).metricAlarms().size());
+        if (refused) {
+            assertTrue(CfnStackWaits.failedResourceReason(stack).contains(COMBINATION));
+        }
     }
 
     @Test

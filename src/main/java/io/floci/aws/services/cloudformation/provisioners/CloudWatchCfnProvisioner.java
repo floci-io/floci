@@ -80,7 +80,11 @@ public class CloudWatchCfnProvisioner implements CfnResourceProvisioner {
         addAlarmActions(props, "OKActions", ctx, alarm.getOkActions());
         addAlarmActions(props, "InsufficientDataActions", ctx, alarm.getInsufficientDataActions());
 
-        cloudWatchMetricsService.putMetricAlarm(alarm, ctx.region(), evaluationInterval(props, ctx));
+        BigInteger interval = evaluationInterval(props, ctx);
+        if (interval != null && declaresMetrics(props)) {
+            CloudWatchMetricsService.rejectEvaluationInterval(name, interval, true);
+        }
+        cloudWatchMetricsService.putMetricAlarm(alarm, ctx.region(), interval);
         // Ref returns the alarm name; Fn::GetAtt Arn returns the alarm ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", alarm.getAlarmArn());
@@ -96,6 +100,11 @@ public class CloudWatchCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError", "Value of property EvaluationInterval must be an integer.", 400);
         }
         return new BigInteger(value.trim());
+    }
+
+    /** Whether the template sets a non-empty {@code Metrics} (the engine has dropped {@code AWS::NoValue} by now). */
+    private static boolean declaresMetrics(JsonNode props) {
+        return props != null && props.path("Metrics").size() > 0;
     }
 
     private void addAlarmActions(JsonNode props, String field, ProvisionContext ctx, List<String> target) {
