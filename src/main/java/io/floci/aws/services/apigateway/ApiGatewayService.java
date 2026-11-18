@@ -1220,12 +1220,12 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         Authorizer authorizer = new Authorizer();
         authorizer.setId(authorizerId);
         authorizer.setName((String) request.get("name"));
-        authorizer.setType((String) request.get("type"));
+        authorizer.setType(validateAuthorizerType((String) request.get("type")));
         authorizer.setAuthorizerUri((String) request.get("authorizerUri"));
         authorizer.setIdentitySource((String) request.get("identitySource"));
         authorizer.setAuthorizerResultTtlInSeconds(String.valueOf(request.getOrDefault("authorizerResultTtlInSeconds", "300")));
-        validateRequestAuthorizerIdentitySource(authorizer.getType(), authorizer.getIdentitySource(),
-                authorizer.getAuthorizerResultTtlInSeconds());
+        validateAuthorizerIdentitySource(authorizer.getType(), authorizer.getIdentitySource(),
+                authorizer.getAuthorizerResultTtlInSeconds(), false);
         // COGNITO_USER_POOLS authorizers carry the pool ARNs; keep them so get-authorizer reflects them.
         if (request.get("providerARNs") instanceof List<?> arns) {
             List<String> providerArns = new ArrayList<>();
@@ -1296,6 +1296,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         String newAuthorizerUri = authorizer.getAuthorizerUri();
         String newIdentitySource = authorizer.getIdentitySource();
         String newTtl = authorizer.getAuthorizerResultTtlInSeconds();
+        boolean identityOrTypePatched = false;
         List<String> newProviderArns = authorizer.getProviderARNs() == null
                 ? null : new ArrayList<>(authorizer.getProviderARNs());
         if (patchOperations != null) {
@@ -1320,11 +1321,13 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             if ("/name".equals(path)) {
                 newName = value;
             } else if ("/type".equals(path)) {
-                newType = value;
+                newType = validateAuthorizerType(value);
+                identityOrTypePatched = true;
             } else if ("/authorizerUri".equals(path)) {
                 newAuthorizerUri = value;
             } else if ("/identitySource".equals(path)) {
                 newIdentitySource = remove ? null : value;
+                identityOrTypePatched = true;
             } else if (providerArns) {
                 newProviderArns = newProviderArns == null ? new ArrayList<>() : newProviderArns;
                 if (remove) {
@@ -1348,18 +1351,59 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             }
         }
         }
-        validateRequestAuthorizerIdentitySource(newType, newIdentitySource, newTtl);
-        authorizer.setName(newName);
-        authorizer.setType(newType);
-        authorizer.setAuthorizerUri(newAuthorizerUri);
-        authorizer.setIdentitySource(newIdentitySource);
-        authorizer.setAuthorizerResultTtlInSeconds(newTtl);
-        authorizer.setProviderARNs(newProviderArns);
-        authorizerStore.put(authorizerKey(region, apiId, authorizerId), authorizer);
+        validateAuthorizerIdentitySource(newType, newIdentitySource, newTtl, identityOrTypePatched);
+        return writeAuthorizer(region, apiId, authorizer, newName, newType, newAuthorizerUri,
+                newIdentitySource, newTtl, newProviderArns);
+    }
+
+    /** The authorizer types AWS accepts; a missing type is left to the caller, as create always did. */
+    private static String validateAuthorizerType(String type) {
+        if (type != null && !List.of("TOKEN", "REQUEST", "COGNITO_USER_POOLS").contains(type)) {
+            throw new AwsException("BadRequestException",
+                    "Authorizer type must be TOKEN, REQUEST or COGNITO_USER_POOLS", 400);
+        }
+        return type;
+    }
+
+    /**
+     * Writes back an authorizer exactly as a stack update's snapshot held it, a null URI included,
+     * which a patch cannot express. For the stack rollback only.
+     */
+    public void restoreAuthorizer(String region, String apiId, Authorizer snapshot) {
+        writeAuthorizer(region, apiId, getAuthorizer(region, apiId, snapshot.getId()), snapshot.getName(),
+                snapshot.getType(), snapshot.getAuthorizerUri(), snapshot.getIdentitySource(),
+                snapshot.getAuthorizerResultTtlInSeconds(),
+                snapshot.getProviderARNs() == null ? null : new ArrayList<>(snapshot.getProviderARNs()));
+    }
+
+    private Authorizer writeAuthorizer(String region, String apiId, Authorizer authorizer, String name,
+                                       String type, String authorizerUri, String identitySource, String ttl,
+                                       List<String> providerArns) {
+        authorizer.setName(name);
+        authorizer.setType(type);
+        authorizer.setAuthorizerUri(authorizerUri);
+        authorizer.setIdentitySource(identitySource);
+        authorizer.setAuthorizerResultTtlInSeconds(ttl);
+        authorizer.setProviderARNs(providerArns);
+        authorizerStore.put(authorizerKey(region, apiId, authorizer.getId()), authorizer);
         return authorizer;
     }
 
-    private static void validateRequestAuthorizerIdentitySource(String type, String identitySource, String ttl) {
+    /**
+     * Checks the identity source of an authorizer's final values: AWS requires it for REQUEST when
+     * caching is on, and for TOKEN and COGNITO_USER_POOLS. Create does not enforce the second rule
+     * yet, and a patch enforces it only when it has an op on {@code /identitySource} or {@code /type}
+     * ({@code requiredForTokenAndCognito}), so an authorizer created without one can still be renamed.
+     */
+    private static void validateAuthorizerIdentitySource(String type, String identitySource, String ttl,
+                                                         boolean requiredForTokenAndCognito) {
+        if (requiredForTokenAndCognito && ("TOKEN".equals(type) || "COGNITO_USER_POOLS".equals(type))) {
+            if (identitySource == null || identitySource.isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "Identity source is required for a " + type + " authorizer", 400);
+            }
+            return;
+        }
         if (!"REQUEST".equals(type)) {
             return;
         }

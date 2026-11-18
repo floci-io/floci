@@ -638,7 +638,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         addIfChanged(ops, "/name", live.getName(), name);
         addIfChanged(ops, "/type", live.getType(), type);
         if (uri != null) {
-            // The patch has no remove for the URI, so an authorizer that had none keeps the one set.
+            // The patch has no remove for the URI: a drop keeps it, and a rollback writes it back whole.
             addIfChanged(ops, "/authorizerUri", live.getAuthorizerUri(), uri);
         }
         addIfChanged(ops, "/identitySource", live.getIdentitySource(), identitySource);
@@ -676,13 +676,17 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         }
         String region = snapshot.path("region").asText();
         String apiId = snapshot.path("apiId").asText();
-        Authorizer live = apiGatewayService.getAuthorizer(region, apiId, snapshot.path("authorizerId").asText());
         List<String> arns = new ArrayList<>();
         snapshot.path("providerARNs").forEach(arn -> arns.add(arn.asText()));
-        applyAuthorizer(region, apiId, live, CfnRollback.snapshotText(snapshot, "name"),
-                CfnRollback.snapshotText(snapshot, "type"), CfnRollback.snapshotText(snapshot, "authorizerUri"),
-                CfnRollback.snapshotText(snapshot, "identitySource"),
-                CfnRollback.snapshotText(snapshot, "authorizerResultTtlInSeconds"), arns);
+        Authorizer prior = new Authorizer();
+        prior.setId(snapshot.path("authorizerId").asText());
+        prior.setName(CfnRollback.snapshotText(snapshot, "name"));
+        prior.setType(CfnRollback.snapshotText(snapshot, "type"));
+        prior.setAuthorizerUri(CfnRollback.snapshotText(snapshot, "authorizerUri"));
+        prior.setIdentitySource(CfnRollback.snapshotText(snapshot, "identitySource"));
+        prior.setAuthorizerResultTtlInSeconds(CfnRollback.snapshotText(snapshot, "authorizerResultTtlInSeconds"));
+        prior.setProviderARNs(arns);
+        apiGatewayService.restoreAuthorizer(region, apiId, prior);
         resource.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
         return true;
     }

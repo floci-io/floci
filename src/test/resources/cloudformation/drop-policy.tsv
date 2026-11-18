@@ -1,6 +1,6 @@
 AWS::ApiGateway::Authorizer	AuthorizerResultTtlInSeconds	default:300
 AWS::ApiGateway::Authorizer	AuthorizerUri	keep:the patch cannot remove it
-AWS::ApiGateway::Authorizer	IdentitySource	clear	the field reads back absent
+AWS::ApiGateway::Authorizer	IdentitySource	clear	the field reads back absent; a drop from a TOKEN or COGNITO_USER_POOLS authorizer fails, as AWS requires it there
 AWS::ApiGateway::Authorizer	Name	keep:required by AWS
 AWS::ApiGateway::Authorizer	ProviderARNs	clear	the field reads back empty
 AWS::ApiGateway::Authorizer	RestApiId	create-only	a drop fails: the rest api is not found
