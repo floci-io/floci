@@ -2,12 +2,15 @@ package io.floci.aws.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudmap.CloudMapService;
 import io.floci.aws.services.cloudmap.model.Instance;
 import io.floci.aws.services.cloudmap.model.Namespace;
+import io.floci.aws.services.cloudmap.model.Service;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.EcsRegisteredInstances;
@@ -15,10 +18,12 @@ import io.floci.aws.services.ecs.model.EcsServiceModel;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.EcsTaskAddress;
 import io.floci.aws.services.ecs.model.NetworkBinding;
+import io.floci.aws.services.ecs.model.ServiceConnectServiceResource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
@@ -27,6 +32,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * Bridges ECS services to Cloud Map: when an ECS service declares a {@code serviceRegistries}
@@ -39,6 +46,9 @@ import java.util.Set;
  * <p>
  * {@code serviceRegistries} is stored as raw maps, since nothing else in ECS acts on it. The
  * three members read here are the ones AWS uses to place the instance.
+ * <p>
+ * It also creates and deletes the Cloud Map services behind a Service Connect configuration's
+ * endpoints, in the namespace the ECS service joined.
  */
 @ApplicationScoped
 public class EcsServiceDiscoveryRegistrar {
@@ -49,6 +59,18 @@ public class EcsServiceDiscoveryRegistrar {
     private final EcsContainerManager containerManager;
     // taskArn → the instance registered for it, persisted so it can be released after a restart
     private final AccountAwareStorageBackend<EcsRegisteredInstances> ledger;
+    // namespace ARN → held while a service's Service Connect discovery names are checked and taken
+    private final StripedLocks serviceConnectNamespaceLocks = new StripedLocks(256);
+
+    /** The tag ECS puts on the Cloud Map services it creates for Service Connect (measured on AWS). */
+    static final String ECS_MANAGED_TAG = "AmazonECSManaged";
+    /** A discovery name ECS takes: up to 64 lowercase letters, numbers, underscores and hyphens, no hyphen first. */
+    private static final Pattern DISCOVERY_NAME = Pattern.compile("[a-z0-9_][a-z0-9_-]{0,63}");
+    /** ECS's answer for a discovery name outside {@link #DISCOVERY_NAME} (measured on AWS). */
+    static final String INVALID_DISCOVERY_NAME = "The discovery name that you provided is invalid. This must be "
+            + "unique within the AWS Cloud Map namespace. Up to 64 characters are allowed. The characters can "
+            + "include lowercase letters, numbers, underscores (_), and hyphens (-). A hyphen can\u2019t be the "
+            + "first character.";
 
     @Inject
     public EcsServiceDiscoveryRegistrar(CloudMapService cloudMapService, EcsContainerManager containerManager,
@@ -216,12 +238,192 @@ public class EcsServiceDiscoveryRegistrar {
 
     /** The ARN of the Region's Cloud Map namespace that a name or ARN gives; null when there is none. */
     public String namespaceArn(String nameOrArn, String region) {
+        Namespace namespace = namespace(nameOrArn, region);
+        return namespace == null ? null : namespace.getArn();
+    }
+
+    /** The Region's Cloud Map namespace that a name or ARN gives; null when there is none. */
+    private Namespace namespace(String nameOrArn, String region) {
         for (Namespace namespace : cloudMapService.listNamespaces(region)) {
             if (nameOrArn.equals(namespace.getName()) || nameOrArn.equals(namespace.getArn())) {
-                return namespace.getArn();
+                return namespace;
             }
         }
         return null;
+    }
+
+    /**
+     * The names of the Cloud Map services a Service Connect configuration gives the service {@code serviceArn},
+     * in its order: each {@code services[]} entry's {@code discoveryName}, or its {@code portName} when it has
+     * none, and for a client configuration, with no entries, the one Cloud Map service ECS creates for the
+     * client ({@link #clientDiscoveryName}). None for a configuration that leaves Service Connect off.
+     */
+    public static List<String> discoveryNames(Map<String, Object> configuration, String serviceArn) {
+        if (configuration == null || !Boolean.TRUE.equals(configuration.get("enabled"))) {
+            return List.of();
+        }
+        List<String> names = new ArrayList<>();
+        if (configuration.get("services") instanceof List<?> services) {
+            for (Object entry : services) {
+                if (entry instanceof Map<?, ?> service) {
+                    Object name = service.get("discoveryName") instanceof String discoveryName
+                            && !discoveryName.isBlank() ? discoveryName : service.get("portName");
+                    if (name instanceof String named && !named.isBlank()) {
+                        names.add(named);
+                    }
+                }
+            }
+        }
+        return names.isEmpty() && serviceArn != null ? List.of(clientDiscoveryName(serviceArn)) : names;
+    }
+
+    /**
+     * The Cloud Map service ECS creates for a Service Connect client, which offers no endpoint:
+     * {@code aws-ecs-sc.client.<UUID>.<service name>}, as measured on AWS. How AWS derives the UUID isn't
+     * documented (it is none of the name-based UUIDs of the service's ARN or names); Floci derives one from
+     * the service's ARN, so the service keeps it across updates.
+     */
+    static String clientDiscoveryName(String serviceArn) {
+        return "aws-ecs-sc.client." + UUID.nameUUIDFromBytes(serviceArn.getBytes(StandardCharsets.UTF_8)) + "."
+                + serviceArn.substring(serviceArn.lastIndexOf('/') + 1);
+    }
+
+    /**
+     * Refuses, with {@code errorCode}, a Service Connect configuration ECS refuses before it looks in the
+     * namespace, with ECS's messages (measured on AWS): a {@code discoveryName} outside the naming rule, or a
+     * name its entries give more than once. CreateService answers {@code ClientException} and UpdateService
+     * {@code InvalidParameterException}.
+     */
+    public static void validateDiscoveryNames(Map<String, Object> configuration, String errorCode) {
+        if (configuration == null || !Boolean.TRUE.equals(configuration.get("enabled"))
+                || !(configuration.get("services") instanceof List<?> services)) {
+            return;
+        }
+        for (Object entry : services) {
+            if (entry instanceof Map<?, ?> service && service.get("discoveryName") instanceof String name
+                    && !DISCOVERY_NAME.matcher(name).matches()) {
+                throw new AwsException(errorCode, INVALID_DISCOVERY_NAME, 400);
+            }
+        }
+        Set<String> seen = new HashSet<>();
+        Set<String> twice = new LinkedHashSet<>();
+        for (String name : discoveryNames(configuration, null)) {
+            if (!seen.add(name)) {
+                twice.add(name);
+            }
+        }
+        if (!twice.isEmpty()) {
+            throw new AwsException(errorCode,
+                    "The following discoveryNames are defined more than once: " + List.copyOf(twice) + ".", 400);
+        }
+    }
+
+    /**
+     * Refuses, with {@code errorCode}, discovery names {@code namespace} cannot take for a service holding
+     * {@code current}: one a Cloud Map service in the namespace already has that is not among {@code current},
+     * since "all discovery names must be unique within a namespace". Names compare as Cloud Map compares them,
+     * without case in a DNS namespace.
+     */
+    private void checkDiscoveryNames(List<ServiceConnectServiceResource> current, List<String> discoveryNames,
+                                     Namespace namespace, String region, String errorCode) {
+        Set<String> own = new HashSet<>();
+        current.forEach(resource -> own.add(resource.discoveryArn()));
+        for (String name : discoveryNames) {
+            cloudMapService.findServiceByName(name, namespace.getId(), region)
+                    .filter(existing -> !own.contains(existing.getArn()))
+                    .ifPresent(existing -> {
+                        throw nameTaken(existing, namespace, errorCode);
+                    });
+        }
+    }
+
+    /**
+     * ECS's answer for a discovery name the namespace already holds (measured on AWS): its own, naming the
+     * namespace, when another ECS service's endpoint holds it, and otherwise Cloud Map's refusal of its
+     * CreateService call, with the details the SDK adds to it.
+     */
+    private static AwsException nameTaken(Service existing, Namespace namespace, String errorCode) {
+        boolean ecsManaged = existing.getTags() != null && "true".equals(existing.getTags().get(ECS_MANAGED_TAG));
+        return new AwsException(errorCode, ecsManaged ? "SC service is already used by " + namespace.getArn()
+                : cloudMapServiceExists(), 400);
+    }
+
+    private static String cloudMapServiceExists() {
+        return "Service already exists. (Service: ServiceDiscovery, Status Code: 400, Request ID: "
+                + UUID.randomUUID() + ") (SDK Attempt Count: 1)";
+    }
+
+    /**
+     * Brings the Cloud Map services behind a service's Service Connect endpoints in line with
+     * {@code discoveryNames}: a name {@code current} already holds keeps its Cloud Map service, a new
+     * one gets a Cloud Map service created in the namespace, and one {@code current} holds that is no
+     * longer named has its Cloud Map service deleted. The names are checked first, under a lock for
+     * the namespace, so a refusal creates nothing and two ECS services cannot take one name at once; a
+     * creation that still fails, as when a Cloud Map CreateService took the name in between, deletes
+     * what this call created and leaves {@code current} as it was. A refusal carries {@code errorCode}. The
+     * Cloud Map services are of type HTTP, with no DNS records: Service Connect "doesn't use or create DNS
+     * hosted zones in Amazon Route 53". Each is described "Managed by" the ECS service {@code serviceArn} and
+     * tagged {@code AmazonECSManaged}, as ECS creates them (measured on AWS).
+     *
+     * @return the resources for {@code discoveryNames}, in their order; none without a namespace
+     */
+    public List<ServiceConnectServiceResource> syncServiceConnectServices(
+            List<ServiceConnectServiceResource> current, List<String> discoveryNames, String namespaceArn,
+            String region, String serviceArn, String errorCode) {
+        Namespace namespace = namespaceArn == null ? null : namespace(namespaceArn, region);
+        List<ServiceConnectServiceResource> resources = new ArrayList<>();
+        if (namespace != null && !discoveryNames.isEmpty()) {
+            synchronized (serviceConnectNamespaceLocks.lockFor(namespace.getArn())) {
+                checkDiscoveryNames(current, discoveryNames, namespace, region, errorCode);
+                List<ServiceConnectServiceResource> created = new ArrayList<>();
+                for (String name : discoveryNames) {
+                    // The check let through only a name that is free or held by one of current's.
+                    Service existing = cloudMapService.findServiceByName(name, namespace.getId(), region)
+                            .orElse(null);
+                    if (existing == null) {
+                        try {
+                            existing = cloudMapService.createService(name, namespace.getId(), null,
+                                    "Managed by " + serviceArn, null, null, null, null,
+                                    Map.of(ECS_MANAGED_TAG, "true"), region);
+                        } catch (AwsException e) {
+                            deleteServiceConnectServices(created);
+                            throw "ServiceAlreadyExists".equals(e.getErrorCode())
+                                    ? new AwsException(errorCode, cloudMapServiceExists(), 400) : e;
+                        }
+                        created.add(new ServiceConnectServiceResource(name, existing.getArn()));
+                    }
+                    resources.add(new ServiceConnectServiceResource(name, existing.getArn()));
+                }
+            }
+        }
+        Set<String> kept = new HashSet<>();
+        resources.forEach(resource -> kept.add(resource.discoveryArn()));
+        deleteServiceConnectServices(current.stream()
+                .filter(resource -> !kept.contains(resource.discoveryArn())).toList());
+        return resources;
+    }
+
+    /**
+     * Deletes the Cloud Map services behind Service Connect endpoints a service no longer offers.
+     * One already gone is skipped; one Cloud Map refuses to delete, because instances were registered
+     * in it through the Cloud Map API, is left in place, and its name stays taken.
+     */
+    public void deleteServiceConnectServices(List<ServiceConnectServiceResource> resources) {
+        for (ServiceConnectServiceResource resource : resources) {
+            String id = serviceIdOf(resource.discoveryArn());
+            if (id == null) {
+                continue;
+            }
+            try {
+                cloudMapService.deleteService(id);
+            } catch (AwsException e) {
+                if ("ServiceNotFound".equals(e.getErrorCode())) {
+                    continue;
+                }
+                LOG.warnv("Could not delete Cloud Map service {0} of Service Connect endpoint {1}: {2}",
+                        id, resource.discoveryName(), e.getMessage());
+            }
+        }
     }
 
     public boolean hasRegistries(EcsServiceModel svc) {
@@ -370,16 +572,21 @@ public class EcsServiceDiscoveryRegistrar {
         if (registryArn == null || registryArn.isBlank()) {
             return null;
         }
-        String serviceId = AwsArnUtils.resourceIfArnFor(registryArn, "servicediscovery")
+        String serviceId = serviceIdOf(registryArn);
+        if (serviceId == null) {
+            LOG.warnv("Ignoring an ECS service registry whose registryArn names no Cloud Map service: {0}",
+                    registryArn);
+        }
+        return serviceId;
+    }
+
+    /** The service id in a Cloud Map service ARN, {@code ...:service/srv-xxxxxxxx}; null for any other value. */
+    private static String serviceIdOf(String serviceArn) {
+        String serviceId = AwsArnUtils.resourceIfArnFor(serviceArn, "servicediscovery")
                 .filter(resource -> resource.startsWith("service/"))
                 .map(resource -> resource.substring("service/".length()))
                 .orElse("");
-        if (serviceId.isEmpty() || serviceId.contains("/")) {
-            LOG.warnv("Ignoring an ECS service registry whose registryArn names no Cloud Map service: {0}",
-                    registryArn);
-            return null;
-        }
-        return serviceId;
+        return serviceId.isEmpty() || serviceId.contains("/") ? null : serviceId;
     }
 
     /** ECS registers a task under its task id, so a replacement task supersedes its predecessor. */
