@@ -61,6 +61,9 @@ import java.util.Map;
  *   {@code floci.services.bedrock-runtime.proxy.passthrough=true} passes the model id through
  *   unmapped, so a call gets as far as that URL.
  *   {@code BedrockProxyInvalidUrlIntegrationTest} relies on all three.</li>
+ *   <li>{@code floci.services.glue.runner-mode=docker} runs a Spark job's script through the Docker
+ *   runner rather than simulating the run. {@code GlueScriptRunIntegrationTest} relies on it, with
+ *   the container replaced by a mock runner.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes. Each one is read by a single service: the
@@ -68,7 +71,7 @@ import java.util.Map;
  * Neptune cluster creation, Route53 VPC association and authorization, CloudFront origin fetches,
  * Cognito app client validation, the Scheduler dispatcher, the RDS Data API and Aurora auto-pause,
  * Firehose delivery, the Lambda runtime image resolver, the IoT MQTT broker, EC2, SageMaker
- * training jobs and Bedrock Runtime. Each class is the only one here that calls its service, so no
+ * training jobs, Bedrock Runtime and Glue job runs. Each class is the only one here that calls its service, so no
  * override reaches another class. Route53 and RDS do look VPCs and subnets up in EC2, but only
  * read what EC2 has stored, which does not change with EC2 mocked or not.
  *
@@ -110,7 +113,8 @@ public class IndependentServiceSettingsProfile implements QuarkusTestProfile {
                 Map.entry("floci.services.sagemaker.gpu.enabled", "true"),
                 Map.entry("floci.services.bedrock-runtime.backend", "proxy"),
                 Map.entry("floci.services.bedrock-runtime.proxy.url", "not a valid url"),
-                Map.entry("floci.services.bedrock-runtime.proxy.passthrough", "true")));
+                Map.entry("floci.services.bedrock-runtime.proxy.passthrough", "true"),
+                Map.entry("floci.services.glue.runner-mode", "docker")));
         overrides.putAll(new YamlConfigSource("runtime-images", """
                 floci:
                   services:

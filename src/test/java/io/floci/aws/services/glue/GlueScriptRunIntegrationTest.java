@@ -1,18 +1,18 @@
 package io.floci.aws.services.glue;
 
+import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -28,14 +28,10 @@ import static org.mockito.Mockito.when;
  * reports how it ended: what a run keeps of its account and Region on the thread that runs its script.
  */
 @QuarkusTest
-@TestProfile(GlueScriptRunIntegrationTest.DockerRunnerProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class GlueScriptRunIntegrationTest {
 
-    public static class DockerRunnerProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.glue.runner-mode", "docker");
-        }
+    private record CreatedJob(String region, String name) {
     }
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
@@ -46,6 +42,7 @@ class GlueScriptRunIntegrationTest {
     DockerGlueScriptRunner runner;
 
     private final List<Boolean> cancelledSeen = new CopyOnWriteArrayList<>();
+    private final List<CreatedJob> createdJobs = new CopyOnWriteArrayList<>();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -61,6 +58,14 @@ class GlueScriptRunIntegrationTest {
             cancelledSeen.add(progress.cancelled());
             return GlueScriptRunner.Outcome.exitedWith(0);
         });
+    }
+
+    @AfterEach
+    void deleteCreatedJobs() {
+        for (CreatedJob job : createdJobs) {
+            call(job.region(), "DeleteJob", "{ \"JobName\": \"" + job.name() + "\" }").statusCode(200);
+        }
+        createdJobs.clear();
     }
 
     private static ValidatableResponse call(String region, String action, String body) {
@@ -88,12 +93,13 @@ class GlueScriptRunIntegrationTest {
         return state;
     }
 
-    private static String startRun(String region, String command) {
+    private String startRun(String region, String command) {
         String jobName = "script-job-" + UUID.randomUUID().toString().substring(0, 8);
         call(region, "CreateJob", """
                 { "Name": "%s", "Role": "%s",
                   "Command": { "Name": "%s", "ScriptLocation": "%s" } }
                 """.formatted(jobName, ROLE, command, SCRIPT)).statusCode(200);
+        createdJobs.add(new CreatedJob(region, jobName));
         return jobName;
     }
 
