@@ -7,6 +7,7 @@ import io.floci.aws.config.ContainerCaBundle;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.lambda.LambdaLayerService;
 import io.floci.aws.services.lambda.LambdaLogDestinations;
@@ -88,6 +89,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
 
     private final KubernetesApiClient client;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
     private final RuntimeApiServerFactory runtimeApiServerFactory;
     private final ImageResolver imageResolver;
     private final KubernetesFlociAddressResolver addressResolver;
@@ -108,6 +110,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     @Inject
     public KubernetesPodLauncher(KubernetesApiClient client,
                                  EmulatorConfig config,
+                                 RegionResolver regionResolver,
                                  RuntimeApiServerFactory runtimeApiServerFactory,
                                  ImageResolver imageResolver,
                                  KubernetesFlociAddressResolver addressResolver,
@@ -119,6 +122,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                                  PreSignedUrlGenerator presignGenerator) {
         this.client = client;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.runtimeApiServerFactory = runtimeApiServerFactory;
         this.imageResolver = imageResolver;
         this.addressResolver = addressResolver;
@@ -175,7 +179,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
 
             String shortId = UUID.randomUUID().toString().replace("-", "").substring(0, 8);
             podName = LambdaPodSpecFactory.podName(fn.getFunctionName(), shortId);
-            String region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), config.defaultRegion());
+            String region = regionResolver.regionOf(fn.getFunctionArn());
             String accountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
             String cwLogGroup = LambdaLogDestinations.logGroup(fn);
             String cwLogStream = logStreamer.logStreamName(fn, shortId);

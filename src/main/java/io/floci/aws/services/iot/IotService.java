@@ -1799,7 +1799,7 @@ public class IotService {
      * action that failed, with the original payload as published.
      */
     private void executeTopicRule(IotTopicRule rule, String topic, byte[] originalPayload, byte[] document) {
-        String ruleRegion = AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion());
+        String ruleRegion = regionResolver.regionOf(rule.getRuleArn());
         List<ObjectNode> failures = new ArrayList<>();
         for (JsonNode action : storedJson(rule.getRuleName(), rule.getActionsJson())) {
             String type = actionType(action);

@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.docker.ContainerRejectedException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
@@ -82,15 +83,18 @@ public class RdsQueryHandler {
     private final DocDbQueryHandler docDbQueryHandler;
     private final NeptuneQueryHandler neptuneQueryHandler;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
 
     @Inject
     public RdsQueryHandler(RdsService service, RdsExportTaskService exportTaskService, EmulatorConfig config,
-                           DocDbQueryHandler docDbQueryHandler, NeptuneQueryHandler neptuneQueryHandler) {
+                           RegionResolver regionResolver, DocDbQueryHandler docDbQueryHandler,
+                           NeptuneQueryHandler neptuneQueryHandler) {
         this.exportTaskService = exportTaskService;
         this.docDbQueryHandler = docDbQueryHandler;
         this.neptuneQueryHandler = neptuneQueryHandler;
         this.service = service;
         this.config = config;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -3369,8 +3373,7 @@ public class RdsQueryHandler {
             xml.start("Endpoint")
                .elem("Address", ep.address())
                .elem("Port", ep.port())
-               .elem("HostedZoneId", AwsRegionFacts.rdsHostedZoneId(
-                       AwsArnUtils.regionOrDefault(i.getDbInstanceArn(), config.defaultRegion()))
+               .elem("HostedZoneId", AwsRegionFacts.rdsHostedZoneId(regionResolver.regionOf(i.getDbInstanceArn()))
                        .orElse(UNSOURCED_RDS_HOSTED_ZONE_ID))
                .end("Endpoint");
         }
@@ -3613,8 +3616,7 @@ public class RdsQueryHandler {
             xml.elem("Endpoint", ep.address())
                .elem("Port", ep.port());
         }
-        xml.elem("HostedZoneId", AwsRegionFacts.rdsHostedZoneId(
-                AwsArnUtils.regionOrDefault(c.getDbClusterArn(), config.defaultRegion()))
+        xml.elem("HostedZoneId", AwsRegionFacts.rdsHostedZoneId(regionResolver.regionOf(c.getDbClusterArn()))
                 .orElse(UNSOURCED_RDS_HOSTED_ZONE_ID));
         if (readerEp != null) {
             xml.elem("ReaderEndpoint", readerEp.address());
@@ -3736,8 +3738,7 @@ public class RdsQueryHandler {
         if (groupName == null || groupName.isBlank() || "default".equalsIgnoreCase(groupName)) {
             return fallbackSubnetGroup(instance, "default", "default subnet group");
         }
-        return service.getDbSubnetGroup(
-                groupName, AwsArnUtils.regionOrDefault(instance.getDbInstanceArn(), config.defaultRegion()));
+        return service.getDbSubnetGroup(groupName, regionResolver.regionOf(instance.getDbInstanceArn()));
     }
 
     private DbSubnetGroup fallbackSubnetGroup(DbInstance instance, String name, String description) {

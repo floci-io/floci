@@ -1661,7 +1661,7 @@ class EksClusterManagerTest {
                     Mockito.mock(ContainerBuilder.class), lifecycleManager,
                     Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
                     dockerHostResolver, registryManager, config,
-                    Mockito.mock(RegionResolver.class));
+                    new RegionResolver("us-east-1", "000000000000"));
         }
 
         private Cluster demoCluster() {

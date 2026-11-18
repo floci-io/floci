@@ -10,6 +10,7 @@ import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsConfigSource;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.lambda.LambdaLayerFixtures;
 import io.floci.aws.services.lambda.LambdaLayerService;
@@ -80,6 +81,7 @@ class KubernetesPodLauncherTest {
 
     private KubernetesApiClient apiClient;
     private EmulatorConfig config;
+    private final RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
     private RuntimeApiServerFactory runtimeApiServerFactory;
     private RuntimeApiServer runtimeApiServer;
     private ImageResolver imageResolver;
@@ -141,7 +143,7 @@ class KubernetesPodLauncherTest {
 
         apiClient = new KubernetesApiClient(
                 URI.create(client.getConfiguration().getMasterUrl()), trustAllHttpClient(), null);
-        launcher = new KubernetesPodLauncher(apiClient, config, runtimeApiServerFactory, imageResolver,
+        launcher = new KubernetesPodLauncher(apiClient, config, regionResolver, runtimeApiServerFactory, imageResolver,
                 addressResolver, awsEnv, layerService, new LambdaPodSpecFactory(config),
                 logStreamer, s3Service, presignGenerator);
     }
@@ -157,7 +159,7 @@ class KubernetesPodLauncherTest {
         LambdaLayerService layers = LambdaLayerFixtures.accountScopedService(
                 defaultAccount, region, Map.of(defaultAccount, defaultLayer, owner, ownerLayer));
         KubernetesPodLauncher backgroundLauncher = new KubernetesPodLauncher(
-                apiClient, config, runtimeApiServerFactory, imageResolver, addressResolver, awsEnv,
+                apiClient, config, regionResolver, runtimeApiServerFactory, imageResolver, addressResolver, awsEnv,
                 layers, new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
         LambdaFunction fn = function();
         fn.setAccountId(account);
@@ -373,7 +375,7 @@ class KubernetesPodLauncherTest {
         // instead of going back to the pool for another environment.
         KubernetesApiClient failingApiClient = spy(apiClient);
         doThrow(new RuntimeException("kube api down")).when(failingApiClient).deletePod(anyString(), anyString());
-        KubernetesPodLauncher failingLauncher = new KubernetesPodLauncher(failingApiClient, config,
+        KubernetesPodLauncher failingLauncher = new KubernetesPodLauncher(failingApiClient, config, regionResolver,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
                 new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
         markPodPhaseInBackground("floci-lambda-my-fn-", "Failed");
@@ -523,7 +525,7 @@ class KubernetesPodLauncherTest {
             }
             return invocation.callRealMethod();
         }).when(flakyApiClient).listPods(anyString(), anyMap());
-        KubernetesPodLauncher retryingLauncher = new KubernetesPodLauncher(flakyApiClient, config,
+        KubernetesPodLauncher retryingLauncher = new KubernetesPodLauncher(flakyApiClient, config, regionResolver,
                 runtimeApiServerFactory, imageResolver, addressResolver, awsEnv, layerService,
                 new LambdaPodSpecFactory(config), logStreamer, s3Service, presignGenerator);
 

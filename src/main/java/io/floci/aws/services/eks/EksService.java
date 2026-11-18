@@ -417,8 +417,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 continue;
             }
             // The cluster's own region, from its ARN: the issuer must match the one create mints there.
-            String issuer = oidcService.newIssuerUrl(
-                    AwsArnUtils.regionOrDefault(cluster.getArn(), config.defaultRegion()));
+            String issuer = oidcService.newIssuerUrl(regionResolver.regionOf(cluster.getArn()));
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
             oidcService.ensureKeyForAccount(accountId, clusterKey(cluster), issuer);
             putClusterForAccount(accountId, cluster);
@@ -665,11 +664,11 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private void migrateLegacyKeys() {
         migrateLegacyEntries(storage, this::clusterKey);
         migrateLegacyEntries(nodeGroupStorage, group -> group.getClusterName() == null ? null
-                : nodeGroupKey(clusterKey(AwsArnUtils.regionOrDefault(group.getNodegroupArn(), config.defaultRegion()),
+                : nodeGroupKey(clusterKey(regionResolver.regionOf(group.getNodegroupArn()),
                         group.getClusterName()), group.getNodegroupName()));
         migrateLegacyEntries(fargateProfileStorage, profile -> profile.getClusterName() == null ? null
-                : fargateProfileKey(clusterKey(AwsArnUtils.regionOrDefault(profile.getFargateProfileArn(),
-                        config.defaultRegion()), profile.getClusterName()), profile.getFargateProfileName()));
+                : fargateProfileKey(clusterKey(regionResolver.regionOf(profile.getFargateProfileArn()),
+                        profile.getClusterName()), profile.getFargateProfileName()));
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
             Cluster cluster = entry.value();
             if (cluster.getName() != null && cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null) {
