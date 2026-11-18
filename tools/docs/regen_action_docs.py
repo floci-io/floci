@@ -49,6 +49,11 @@ PLACEHOLDER = "-"
 SWITCH_CASE_RE = re.compile(r"^\s*case\s+([^{};]+?)\s*->", re.MULTILINE)
 SWITCH_LABEL_RE = re.compile(r'"([A-Z][a-z][A-Za-z0-9]*)"')
 
+# `Map.entry("ActionName", ...)` keys, for a handler that answers a fixed set of actions
+# from a lookup table instead of a switch arm each (Lightsail's empty-list answers). The
+# key has the same PascalCase head as a switch label.
+MAP_ENTRY_KEY_RE = re.compile(r'\bMap\.entry\(\s*"([A-Z][a-z][A-Za-z0-9]*)"')
+
 # REST controllers: a JAX-RS verb annotation followed by the public method it decorates,
 # inside a class that carries a class-level @Path. The action is ucfirst(methodName),
 # corrected per-service via rename_actions / exclude_actions (method names are not
@@ -65,7 +70,7 @@ COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\*)")
 @dataclass(frozen=True)
 class Source:
     path: Path
-    mode: str  # 'switch' | 'rest'
+    mode: str  # 'switch' | 'rest' | 'map_entries'
 
 
 @dataclass(frozen=True)
@@ -91,6 +96,11 @@ def extract_switch_actions(java_source: str) -> list[str]:
     for arm in SWITCH_CASE_RE.finditer(java_source):
         out.extend(m.group(1) for m in SWITCH_LABEL_RE.finditer(arm.group(1)))
     return out
+
+
+def extract_map_entry_actions(java_source: str) -> list[str]:
+    """Action names keying `Map.entry("X", ...)` pairs, in source order."""
+    return MAP_ENTRY_KEY_RE.findall(java_source)
 
 
 CLASS_EXTENDS_RE = re.compile(r"public\s+(?:abstract\s+)?class\s+\w+\s+extends\s+([A-Za-z0-9_]+)")
@@ -154,6 +164,8 @@ def extract_actions(entry: ServiceEntry) -> list[str]:
             raw = extract_switch_actions(text)
         elif source.mode == "rest":
             raw = extract_rest_actions(text, source.path)
+        elif source.mode == "map_entries":
+            raw = extract_map_entry_actions(text)
         else:
             raise ValueError(f"unknown mode: {source.mode!r}")
         for name in raw:
