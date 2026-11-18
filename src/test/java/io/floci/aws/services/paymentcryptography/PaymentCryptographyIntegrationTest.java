@@ -612,6 +612,34 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
+        // The team's ARN is kept as the request names it: the emulator has no Multi-Party
+        // Approval service to check it against.
+        String team = "arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha";
+        String association = """
+                {"Action":"IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"}""";
+
+        call("AssociateMpaTeam", """
+                {"Action":"IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE","MpaTeamArn":"%s"}""".formatted(team))
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.Action", equalTo("IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"))
+                    .body("MpaTeamAssociation.MpaTeamArn", equalTo(team))
+                    .body("MpaTeamAssociation.AssociationState", equalTo("ACTIVE"));
+
+        call("GetMpaTeamAssociation", association)
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.MpaTeamArn", equalTo(team));
+
+        call("DisassociateMpaTeam", association)
+                .then().statusCode(200)
+                    .body("MpaTeamAssociation.AssociationState", equalTo("DELETE_PENDING"));
+
+        call("GetMpaTeamAssociation", association)
+                .then().statusCode(400)
+                    .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
     void aReplicationRegionOfAnotherPartitionIsRefused() {
         // A key is replicated within the partition it is in, as the reference says, so a
         // Region of another partition is refused.

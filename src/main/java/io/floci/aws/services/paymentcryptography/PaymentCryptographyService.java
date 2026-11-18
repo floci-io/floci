@@ -16,6 +16,7 @@ import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.paymentcryptography.crypto.DukptCrypto;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyMpaTeamAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -84,6 +85,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
 
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
+    private final StorageBackend<String, PaymentCryptographyMpaTeamAssociation> mpaTeamStore;
 
     /** The key exchange: the forms a key may leave in, and the certificates that carry them. */
     private final PaymentCryptographyKeyExchange exchange;
@@ -104,6 +106,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                         new TypeReference<>() {}),
                 storageFactory.create(STORAGE_KEY, "payment-cryptography-settings.json",
                         new TypeReference<Map<String, List<String>>>() {}),
+                storageFactory.create(STORAGE_KEY, "payment-cryptography-mpa-teams.json",
+                        new TypeReference<>() {}),
                 regionResolver,
                 new SecureRandom(),
                 requestContext,
@@ -115,8 +119,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver,
                                 PaymentCryptographyRequestContext requestContext) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, new SecureRandom(),
-                requestContext, new CertificateGenerator(), Clock.systemUTC());
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                new SecureRandom(), requestContext, new CertificateGenerator(), Clock.systemUTC());
     }
 
     /**
@@ -128,8 +132,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, new SecureRandom(),
-                new PaymentCryptographyRequestContext(), new CertificateGenerator(), Clock.systemUTC());
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                new SecureRandom(), new PaymentCryptographyRequestContext(),
+                new CertificateGenerator(), Clock.systemUTC());
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
@@ -137,8 +142,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 RegionResolver regionResolver,
                                 SecureRandom secureRandom,
                                 PaymentCryptographyRequestContext requestContext) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, secureRandom,
-                requestContext, new CertificateGenerator(), Clock.systemUTC());
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                secureRandom, requestContext, new CertificateGenerator(), Clock.systemUTC());
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
@@ -148,13 +153,14 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 PaymentCryptographyRequestContext requestContext,
                                 CertificateGenerator certificates,
                                 Clock clock) {
-        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, secureRandom,
-                requestContext, certificates, clock);
+        this(keyStore, aliasStore, new InMemoryStorage<>(), new InMemoryStorage<>(), regionResolver,
+                secureRandom, requestContext, certificates, clock);
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 StorageBackend<String, List<String>> settingsStore,
+                                StorageBackend<String, PaymentCryptographyMpaTeamAssociation> mpaTeamStore,
                                 RegionResolver regionResolver,
                                 SecureRandom secureRandom,
                                 PaymentCryptographyRequestContext requestContext,
@@ -163,6 +169,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.settingsStore = settingsStore;
+        this.mpaTeamStore = mpaTeamStore;
         this.regionResolver = regionResolver;
         this.exchange = new PaymentCryptographyKeyExchange(this, certificates, clock);
         this.secureRandom = secureRandom;
@@ -837,6 +844,78 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         return current;
     }
 
+    // ---- multi-party approval ------------------------------------------------
+
+    /**
+     * Associates a Multi-Party Approval team with a protected operation.
+     *
+     * <p>An operation has one association, so a second one replaces the first. The team's
+     * ARN is stored as the request names it: there is no MPA service here to check it
+     * against, and an ARN the model accepts names a team the emulator cannot see.
+     *
+     * <p>The store holds the association, and the caller gets a copy of it, so what the
+     * caller holds is a snapshot that a later change of the stored association does not
+     * reach.
+     */
+    public synchronized PaymentCryptographyMpaTeamAssociation associateMpaTeam(
+            String region, String action, String mpaTeamArn) {
+        PaymentCryptographyMpaTeamAssociation association =
+                new PaymentCryptographyMpaTeamAssociation(action, region, mpaTeamArn, "ACTIVE");
+        mpaTeamStore.put(storageKey(region, action), association);
+        return copyOf(association);
+    }
+
+    /**
+     * The MPA team associated with a protected operation.
+     *
+     * <p>The store holds the association and the object it holds is mutable, so the read
+     * takes a copy of it while it holds the lock: what the caller holds is a snapshot, and
+     * a removal that runs after the read does not change it.
+     */
+    public synchronized PaymentCryptographyMpaTeamAssociation mpaTeamAssociation(
+            String region, String action) {
+        PaymentCryptographyMpaTeamAssociation association =
+                mpaTeamStore.get(storageKey(region, action)).orElse(null);
+        if (association == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "No MPA team is associated with " + action, 400);
+        }
+        return copyOf(association);
+    }
+
+    /**
+     * Removes the association between an MPA team and a protected operation.
+     *
+     * <p>The answer carries the association as it was, its state now {@code DELETE_PENDING},
+     * and the association is gone from the store. The state belongs to that answer alone:
+     * the stored association is not changed, so a lookup that overlaps the removal answers
+     * with the association that is there or with the resource the reference cannot find.
+     */
+    public synchronized PaymentCryptographyMpaTeamAssociation disassociateMpaTeam(
+            String region, String action) {
+        PaymentCryptographyMpaTeamAssociation association = mpaTeamAssociation(region, action);
+        mpaTeamStore.delete(storageKey(region, action));
+        return new PaymentCryptographyMpaTeamAssociation(association.getAction(),
+                association.getRegion(), association.getMpaTeamArn(), "DELETE_PENDING");
+    }
+
+    /**
+     * A copy of an association.
+     *
+     * <p>The store holds the association and the object it holds is mutable, so what a
+     * caller gets is a copy: what the caller holds is a snapshot, and a change of the
+     * stored association does not reach it.
+     *
+     * @param association the association to copy
+     * @return the copy
+     */
+    private static PaymentCryptographyMpaTeamAssociation copyOf(
+            PaymentCryptographyMpaTeamAssociation association) {
+        return new PaymentCryptographyMpaTeamAssociation(association.getAction(),
+                association.getRegion(), association.getMpaTeamArn(),
+                association.getAssociationState());
+    }
+
     // ---- the key exchange ----------------------------------------------------
 
     /**
@@ -1416,6 +1495,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         keyStore.clear();
         settingsStore.clear();
         aliasStore.clear();
+        mpaTeamStore.clear();
     }
 
     /** The key store, for the tests. */

@@ -7,6 +7,7 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyMpaTeamAssociation;
 import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1103,6 +1110,32 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void anImportedKeyIsReplicatedToTheRegionsTheRequestNames() {
+        // The model gives an import the same replication regions a creation does, so a key
+        // that comes in can be replicated as soon as it lands.
+        PaymentCryptographyKey protection = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE));
+        PaymentCryptographyKey key = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE));
+        String block = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock", Map.of(
+                "WrappingKeyIdentifier", protection.getKeyId(),
+                "WrappedKeyBlock", block), "", true, Map.of(), List.of("us-west-2"));
+
+        assertEquals("PRIMARY", imported.getMultiRegionKeyType());
+        assertEquals("us-east-1", imported.getPrimaryRegion());
+        assertEquals(List.of("us-west-2"), imported.getReplicationRegions());
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", imported.getKeyId());
+        assertNotNull(replica, "the key was not replicated");
+        assertEquals("REPLICA", replica.getMultiRegionKeyType());
+        assertEquals(imported.getKeyMaterialHex(), replica.getKeyMaterialHex());
+    }
+
+    @Test
     void aKeyIsCreatedInEveryRegionItIsReplicatedTo() {
         PaymentCryptographyKey primary = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
 
@@ -1652,30 +1685,101 @@ class PaymentCryptographyServiceTest {
                 "WrappedKeyBlock", block), "", true, Map.of());
     }
 
+    /** The ARN of a Multi-Party Approval team, for the tests that need one. */
+    private static final String MPA_TEAM =
+            "arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha";
+
+    /** The ARN of another team of the same account, for the test that replaces one. */
+    private static final String MPA_TEAM_OTHER =
+            "arn:aws:mpa:us-east-1:000000000000:approval-team/team-beta";
+
+    /** The operation the reference protects, and the model names. */
+    private static final String MPA_OPERATION = "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE";
+
     @Test
-    void anImportedKeyIsReplicatedToTheRegionsTheRequestNames() {
-        // The model gives an import the same replication regions a creation does, so a key
-        // that comes in can be replicated as soon as it lands.
-        PaymentCryptographyKey protection = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
-                "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
-                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE));
-        PaymentCryptographyKey key = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
-                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
-                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE));
-        String block = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+    void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
+        // The reference associates a team with the import of a root public key
+        // certificate, and the model names that operation.
+        PaymentCryptographyMpaTeamAssociation association =
+                service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
 
-        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock", Map.of(
-                "WrappingKeyIdentifier", protection.getKeyId(),
-                "WrappedKeyBlock", block), "", true, Map.of(), List.of("us-west-2"));
+        assertEquals(MPA_OPERATION, association.getAction());
+        assertEquals(MPA_TEAM, association.getMpaTeamArn());
+        assertEquals("ACTIVE", association.getAssociationState());
 
-        assertEquals("PRIMARY", imported.getMultiRegionKeyType());
-        assertEquals("us-east-1", imported.getPrimaryRegion());
-        assertEquals(List.of("us-west-2"), imported.getReplicationRegions());
+        PaymentCryptographyMpaTeamAssociation read =
+                service.mpaTeamAssociation("us-east-1", MPA_OPERATION);
+        assertEquals(MPA_TEAM, read.getMpaTeamArn());
 
-        PaymentCryptographyKey replica = service.findKey("us-west-2", imported.getKeyId());
-        assertNotNull(replica, "the key was not replicated");
-        assertEquals("REPLICA", replica.getMultiRegionKeyType());
-        assertEquals(imported.getKeyMaterialHex(), replica.getKeyMaterialHex());
+        PaymentCryptographyMpaTeamAssociation removed =
+                service.disassociateMpaTeam("us-east-1", MPA_OPERATION);
+        assertEquals("DELETE_PENDING", removed.getAssociationState());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.mpaTeamAssociation("us-east-1", MPA_OPERATION));
+        assertEquals("ResourceNotFoundException", refused.getErrorCode());
+    }
+
+    @Test
+    void theRemovalDoesNotChangeTheAssociationALookupHolds() {
+        // The state DELETE_PENDING belongs to the answer of the removal alone: the store
+        // holds the association, and what a lookup holds is a snapshot of it, so the
+        // removal does not reach what an earlier lookup was given.
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
+
+        PaymentCryptographyMpaTeamAssociation read =
+                service.mpaTeamAssociation("us-east-1", MPA_OPERATION);
+        service.disassociateMpaTeam("us-east-1", MPA_OPERATION);
+
+        assertEquals("ACTIVE", read.getAssociationState(),
+                "the removal changed the association a lookup holds");
+    }
+
+    @Test
+    void aLookupThatOverlapsTheRemovalNeverSeesTheRemovalPending() throws Exception {
+        // A lookup that overlaps the removal answers with the association that is there or
+        // with the resource the reference cannot find, and never with the state the removal
+        // answers with.
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 200; round++) {
+                service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
+                CountDownLatch start = new CountDownLatch(1);
+                List<String> seen = new CopyOnWriteArrayList<>();
+
+                Future<?> removal = pool.submit(() -> {
+                    awaitQuietly(start);
+                    service.disassociateMpaTeam("us-east-1", MPA_OPERATION);
+                });
+                Future<?> lookup = pool.submit(() -> {
+                    awaitQuietly(start);
+                    try {
+                        seen.add(service.mpaTeamAssociation("us-east-1", MPA_OPERATION)
+                                .getAssociationState());
+                    } catch (AwsException refused) {
+                        seen.add(refused.getErrorCode());
+                    }
+                });
+
+                start.countDown();
+                removal.get(10, TimeUnit.SECONDS);
+                lookup.get(10, TimeUnit.SECONDS);
+
+                assertFalse(seen.contains("DELETE_PENDING"),
+                        "a lookup saw the removal pending: " + seen);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /** Waits for the latch, and lets an interruption end the wait. */
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Test
@@ -1693,6 +1797,28 @@ class PaymentCryptographyServiceTest {
 
         PaymentCryptographyKey after = service.findKey("us-west-2", key.getKeyId());
         assertNull(after.getTags().get("owner"), "the tag was not taken away");
+    }
+
+    @Test
+    void aSecondTeamReplacesTheFirst() {
+        // A protected operation has one team, so a second association replaces the first.
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM_OTHER);
+
+        PaymentCryptographyMpaTeamAssociation read =
+                service.mpaTeamAssociation("us-east-1", MPA_OPERATION);
+        assertEquals(MPA_TEAM_OTHER, read.getMpaTeamArn());
+    }
+
+    @Test
+    void aTeamIsTheOneOfItsOwnRegion() {
+        // The association belongs to the account and the Region, so the team of one Region
+        // is not the team of another.
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.mpaTeamAssociation("us-west-2", MPA_OPERATION));
+        assertEquals("ResourceNotFoundException", refused.getErrorCode());
     }
 
     /** The attributes of a key with that algorithm and usage. */
