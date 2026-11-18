@@ -6,6 +6,7 @@ import com.github.dockerjava.transport.DockerHttpClient;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.function.Predicate;
 
 /**
@@ -67,21 +68,37 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
     private final int maxAttempts;
     private final long backoffMillis;
     private final Predicate<Request> replayable;
+    /**
+     * One limit across a call's attempts and backoffs (see {@link DockerRetry#call(int, long, Duration,
+     * DockerRetry.DockerCall)}), the Docker call timeout, so retries cannot stretch a call to several
+     * times it; null for none.
+     */
+    private final Duration callDeadline;
 
     public RetryingDockerHttpClient(DockerHttpClient delegate) {
-        this(delegate, MAX_ATTEMPTS, BACKOFF_MS);
+        this(delegate, (Duration) null);
+    }
+
+    /** @param callDeadline the longest a call may take across its attempts, or null for no limit */
+    public RetryingDockerHttpClient(DockerHttpClient delegate, Duration callDeadline) {
+        this(delegate, MAX_ATTEMPTS, BACKOFF_MS, RetryingDockerHttpClient::isReplayable, callDeadline);
     }
 
     RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis) {
-        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable);
+        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable, null);
+    }
+
+    RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis, Duration callDeadline) {
+        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable, callDeadline);
     }
 
     private RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis,
-                                     Predicate<Request> replayable) {
+                                     Predicate<Request> replayable, Duration callDeadline) {
         this.delegate = delegate;
         this.maxAttempts = maxAttempts;
         this.backoffMillis = backoffMillis;
         this.replayable = replayable;
+        this.callDeadline = callDeadline;
     }
 
     /**
@@ -91,13 +108,19 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
      * replayed.
      */
     static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate) {
-        return forContainerWaits(delegate, MAX_ATTEMPTS, BACKOFF_MS);
+        return forContainerWaits(delegate, null);
+    }
+
+    /** As {@link #forContainerWaits(DockerHttpClient)}, with one limit across a wait's attempts. */
+    static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate, Duration callDeadline) {
+        return new RetryingDockerHttpClient(delegate, MAX_ATTEMPTS, BACKOFF_MS,
+                request -> isReplayable(request) && isContainerWait(request), callDeadline);
     }
 
     static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate, int maxAttempts,
                                                       long backoffMillis) {
         return new RetryingDockerHttpClient(delegate, maxAttempts, backoffMillis,
-                request -> isReplayable(request) && isContainerWait(request));
+                request -> isReplayable(request) && isContainerWait(request), null);
     }
 
     @Override
@@ -105,7 +128,7 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         if (!replayable.test(request)) {
             return delegate.execute(request);
         }
-        return DockerRetry.call(maxAttempts, backoffMillis, () -> delegate.execute(request));
+        return DockerRetry.call(maxAttempts, backoffMillis, callDeadline, () -> delegate.execute(request));
     }
 
     /**
