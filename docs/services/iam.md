@@ -449,6 +449,69 @@ violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
 `src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
 generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
+### What a malformed policy ARN answers
+
+`PolicyArn` is `arnType` on every operation that takes one, 20 to 2048 characters and no pattern,
+so the declared check refuses a shorter value and nothing holds the rest to parsing as an ARN. What
+AWS answers beyond that length is recorded rather than published, and it is two sentences rather
+than one, both `ValidationError` with a 400 and a sender fault.
+
+- Attaching names the value: `ARN <value> is not valid.` Recorded on `AttachRolePolicy` for a bare
+  policy name on 2026-11-03, and on `AttachUserPolicy`, `AttachGroupPolicy` and `AttachRolePolicy`
+  for a value that is no ARN at all on 2026-11-06.
+- Everything else answers `Invalid ARN:  Could not be parsed!`, which is wholly fixed: the slot the
+  value would fill renders empty, so two spaces follow the colon and the request's value never
+  appears in it. Recorded on the three `Detach*Policy` operations on 2026-11-06, on
+  `ListEntitiesForPolicy` on 2026-11-03 and on `GetPolicy` on 2026-10-29.
+
+The remaining operations that take the member, the tag and version families among them, carry no
+recording and answer the parse sentence with those eight: one member read by one parser answers one
+way, and the attach side is the exception the recordings name. That is this emulator's reading
+under the standing decision rather than a measurement. A value that parses as an ARN and names no
+policy is unchanged by all of this, still the 404 `NoSuchEntity` each operation already answered.
+
+An older recording disagrees about the attach side and is no longer followed. LocalStack's
+AWS-validated snapshots have `AttachUserPolicy` and `AttachRolePolicy` answering the parse sentence
+for a 21-character value that is no ARN and for a bare policy name, validated 2025-03-06 and
+2025-06-19, where all three 2026 recordings have the attach side naming the value. Two
+AWS-validated sources disagree on one operation and one class of input, seventeen months apart, so
+the reading here is that AWS reworded that side between them and the newer recordings are what this
+emulator follows. A recording that shows otherwise moves this paragraph and `IamArnShapes`.
+
+`PolicySourceArn`, which the two principal simulators resolve an entity from, carries the same type
+and one more recorded case: a value of `*` answers `InvalidInput` 400, `Invalid Entity Arn: * does
+not clearly define entity type and name.`, where the member's declared minimum is 20 and that value
+is one character, so AWS's entity parse runs ahead of its length check for it. Recorded on
+`SimulatePrincipalPolicy` on 2026-11-03. `GetContextKeysForPrincipalPolicy` takes the same member
+through the same resolver and answers it the same way, which is a reading rather than a recording.
+A value that clears 20 characters and parses as no ARN keeps the sentence its own capture settled,
+`Invalid ARN provided in the request: <value>`, and a value under 20 keeps the declared length.
+### What a policy ARN that names nothing answers
+
+IAM answers two sentences for a managed policy ARN it cannot resolve, both 404 `NoSuchEntity`, and
+they are not interchangeable: the operation decides which one it gives. `Policy <arn> was not
+found.` says the ARN names nothing. `Policy <arn> does not exist or is not attachable.` says it
+names nothing this call could attach, and AWS answers it for both of its own cases on purpose, so a
+caller cannot tell an absent policy from an unattachable one.
+
+Recorded against a real account: `GetPolicy` and `TagPolicy` answer the first, on 2026-10-26, as do
+`DetachUserPolicy`, `DetachGroupPolicy` and `DetachRolePolicy`, on 2026-10-29, including for a
+policy that exists and is not attached, where this emulator used to add a clause naming the user,
+group or role. `ListEntitiesForPolicy` answers the second, on 2026-10-25, and so do
+`CreatePolicyVersion`, `GetPolicyVersion` and `ListPolicyVersions`, on 2026-10-29, with
+`GetPolicyVersion` naming the version inside the same sentence: `Policy <arn> version <id> does not
+exist or is not attachable.` The attach operations answer the second as well, which is where an
+AWS-managed name under the wrong path lands.
+
+The operations no recording covers answer with their own family, which is this emulator's reading
+rather than a measurement. `UntagPolicy` and `ListPolicyTags` read with `TagPolicy`, and
+`DeletePolicyVersion`, `SetDefaultPolicyVersion` and a permissions boundary that names no policy
+read with the attach family. `DeletePolicy` reads with `GetPolicy`. One case stays as it was
+because nothing records it and no family settles it: a version id that names nothing on a policy
+that exists keeps `Policy version <id> does not exist.`, which is about the version rather than the
+ARN. A recording for any of those moves that operation alone, the sentences being sited per
+operation in `IamService.PolicyNotFound`.
+
 ### Permission Boundaries
 
 | Action | Description |
@@ -575,6 +638,27 @@ documentation says "this operation does not return tags, even though they are an
 returned object", even though the `InstanceProfile` shape itself carries no such exclusion note.
 Tags on a role embedded in `InstanceProfileList` are always omitted, matching `GetInstanceProfile`'s
 own documented role subset.
+
+### What the instance profile pair refuses
+
+An instance profile holds one role, and both halves of that are recorded against a real account on
+2026-10-29.
+
+Adding a second role is `LimitExceeded` 409 with `Cannot exceed quota for
+InstanceSessionsPerInstanceProfile: 1`. The quota name is what tells an operator or a quota-aware
+client which of the operation's limits fired, and it is that one: AWS publishes no
+roles-per-instance-profile quota by any name, and this package used to answer prose instead of the
+`Cannot exceed quota for <name>: <n>` form it already writes for nine other quotas.
+
+Removing a role the profile does not hold is `NoSuchEntity` 404 with `Role <roleName> in Instance
+Profile <instanceProfileName> cannot be found.`, where this package removed nothing and answered
+200. A role that was deleted while the profile still lists it is a different case and is still
+removable, which is what the profile's own list decides.
+
+The two CloudFormation paths that detach a role read the profile's list and then remove what it
+named, so a pairing some other caller detaches in between is tolerated there rather than failing a
+stack delete or an update part way; a profile that has itself gone still ends the delete where it
+always did.
 
 ### Access Keys
 
@@ -1254,6 +1338,51 @@ The generator's only modeled error, `ReportGenerationLimitExceeded`, reports con
 for the account and stays unreachable here: a job is complete the moment it is created, so two can
 never overlap.
 
+### A service namespace that names no service
+
+`ServiceNamespace` and `ServiceNamespaces` are patterned `^[\w-]*$`, so a word-shaped value such as
+`amazon-s3` satisfies everything the model declares and still names no AWS service. AWS checks the
+value against its own namespaces and refuses what it does not publish, where this emulator used to
+answer 200 with an empty policy list per namespace asked for, telling a caller the identity reaches
+nothing rather than that the question was wrong.
+
+The two operations that take one word it differently, and both are recorded against a real account
+on 2026-11-03, each `InvalidInput` 400 with a sender fault:
+
+- `ListPoliciesGrantingServiceAccess` answers `Invalid service namespace: [<namespace>]`, the
+  brackets being AWS's own. The recording covers one rejected value; several are rendered inside
+  the one pair of brackets, which is this emulator's reading of a sentence AWS writes for the
+  plural.
+- `GetServiceLastAccessedDetailsWithEntities` answers `Service namepace <namespace> is either
+  invalid or unsupported.` The misspelling of `namespace` is AWS's and is kept: a client matching
+  the message has to match what the service sends.
+
+The catalog is the vendored one generated from AWS's Service Reference index, read through
+`AwsServiceNamespaces.isPublished`, so nothing hand-maintains a second list. The check runs after
+the declared constraints, which is the order this package refuses request inputs in: a value that
+breaks the published pattern `[\w-]*` is answered that pattern, and only a well-formed value
+reaches the catalog.
+
+Both members are vendored for that to hold. `ServiceNamespace` always was.
+`ListPoliciesGrantingServiceAccess` carried no entry for `ServiceNamespaces` at all, so nothing
+held its members to anything, and a value with a space in it used to reach the catalog check and be
+answered `InvalidInput` where AWS answers `ValidationError`. The member is read now, each value
+held to `serviceNamespaceType` and the list to its own bounds of 1 to 200, which also moves two
+answers that were this emulator's own: a request carrying no namespace is the required member the
+model declares rather than `InvalidInput` and a sentence AWS writes nowhere, and a list over 200 is
+the model's bound rather than a check beside it.
+
+A namespace the job itself reports is readable on `GetServiceLastAccessedDetailsWithEntities`
+whether the catalog publishes it or not, which is why the job is read before the namespace is
+judged, and why a job id naming nothing is answered as a missing job rather than as a bad
+namespace. Which of the two a request breaking both is answered is recorded nowhere. The catalog is vendored, so it is as new as the last regeneration, where a policy may grant
+a service published after it: `GenerateServiceLastAccessedDetails` keeps the namespaces the
+policies name, so the report would list that service and a request for its entities would then be
+refused, which is this emulator disagreeing with itself. Nothing else is exempt: a namespace the
+job does not report and the catalog does not publish is still refused, and the list operation,
+which takes namespaces as input rather than reporting them, holds every value to the catalog. A
+service published after the vendored index is a regeneration away, not a runtime lookup.
+
 ### Multi-Factor Authentication
 
 | Action | Description |
@@ -1320,6 +1449,35 @@ hold reports that user instead.
 
 Hardware TOTP tokens and FIDO security keys are not modeled, so `ListMFADevices` returns only
 virtual devices where AWS would return every type.
+
+#### What a refused device answers
+
+Every MFA refusal here is the sentence AWS was recorded answering, and the sentences are not shared
+between the two services.
+
+`EnableMFADevice` and `ResyncMFADevice` answer `InvalidAuthenticationCode` 403 with
+`Authentication code for device is not valid.`, wholly fixed text, recorded 2026-11-05, and the
+refusal leaves the device as it found it: a refused enable leaves an unassigned device unassigned,
+and a refused resync leaves the assignment it requires in place, since resync is for a device that
+is already the user's. A second virtual device at the same path and
+name is `EntityAlreadyExists` 409 with `MFA device already exists.`, recorded the same day, where
+this emulator used to name the entity type and describe the collision.
+
+`GetSessionToken` answers a failed claim 403 `AccessDenied` in one of two sentences, by which half
+of the claim failed, both wholly fixed and neither echoing the serial or the code:
+
+- a serial no device of the caller's answers to, `MultiFactorAuthentication failed, unable to
+  validate MFA code.  Please verify your MFA serial number is valid and associated with this
+  user.`, recorded 2026-10-29. The two consecutive spaces after `MFA code.` are AWS's own.
+- a code the device did not produce, or produced for a step already spent,
+  `MultiFactorAuthentication failed with invalid MFA one time pass code. `, recorded 2026-11-13.
+  That sentence ends in a single space, which is also AWS's own.
+
+A caller cannot tell the two apart from the code or the status, so the sentence is the only signal,
+which is why it is held byte for byte here. `AssumeRole` takes the same pair through the same seam
+and carries no recording of its own, so it answers the same two sentences, which is a reading
+rather than a measurement. A request naming one member and not the other is read as the half it
+left out: no code is a code that cannot validate, no serial a device nothing can be looked up by.
 
 #### What a device affects
 
@@ -3310,13 +3468,19 @@ floci populates:
   workgroups and snapshots, DynamoDB for its tables and their indexes (the table's tags), ECR for its
   repositories, Redshift for its clusters, snapshots, parameter groups, subnet groups, snapshot copy grants,
   snapshot schedules, event subscriptions and integrations, SSM for its parameters, documents and associations,
-  EMR for its clusters, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its instances,
-  permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource shares,
-  Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for its
-  scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
+  EMR for its clusters and sessions, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its
+  instances, permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource
+  shares, Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for
+  its scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
   instances, ACM for its certificates, Firehose for its delivery streams, Cognito for its user pools and identity
-  pools, OpenSearch for its domains, Signer for its signing profiles, and Access Analyzer for its analyzers. Tag keys
-  differing only in case are one condition key holding every value.
+  pools, OpenSearch for its domains, Signer for its signing profiles, Access Analyzer for its analyzers, Managed Service
+  for Apache Flink for its applications, S3 Vectors for its vector buckets and indexes, Timestream for InfluxDB for its
+  DB instances, DB clusters, parameter groups and backups, CloudTrail for its trails, Budgets for its budgets and budget
+  actions, AWS FIS for its experiment templates, experiments and actions, CodePipeline for its pipelines, webhooks and
+  custom action types, DataSync for its agents, locations and tasks, Global Accelerator for its accelerators, listeners
+  and endpoint groups, EMR Serverless for its applications, job runs and sessions, EMR on EKS for its virtual clusters,
+  job runs, managed endpoints, job templates and security configurations, and Cost Explorer for its anomaly monitors and
+  subscriptions. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

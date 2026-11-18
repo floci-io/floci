@@ -86,7 +86,7 @@ public abstract class MinuteMetricsPublisher<T> {
         try {
             targets = collectTargets(now);
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Collecting {0} metric targets failed; this minute's samples are dropped", namespace);
+            LOG.warnv(e, "Collecting {0} metric targets failed; this minute''s samples are dropped", namespace);
             return;
         }
         for (T target : targets) {

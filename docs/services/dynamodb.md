@@ -40,11 +40,17 @@ operations keep their existing resource builders, including batch, transaction a
 | `BatchGetItem` | Read up to 100 items across tables |
 | `TransactWriteItems` | ACID write transaction |
 | `TransactGetItems` | ACID read transaction |
+| `ExecuteStatement` | Run one PartiQL `SELECT`, `INSERT`, `UPDATE` or `DELETE` statement |
+| `BatchExecuteStatement` | Run several PartiQL statements, each answered or failed on its own |
+| `ExecuteTransaction` | Run PartiQL statements as one transaction, all reads or all writes |
 | `DescribeTimeToLive` | Get TTL configuration |
 | `UpdateTimeToLive` | Enable/disable TTL on a table |
 | `TagResource` | Tag a table |
 | `UntagResource` | Remove tags |
 | `ListTagsOfResource` | List tags |
+| `PutResourcePolicy` | Attach or replace a table's resource-based policy, optionally only at an `ExpectedRevisionId` |
+| `GetResourcePolicy` | Get a table's resource-based policy and its revision ID |
+| `DeleteResourcePolicy` | Delete a table's resource-based policy, optionally only at an `ExpectedRevisionId` |
 | `DescribeContinuousBackups` | Get the point-in-time recovery status and restore window |
 | `UpdateContinuousBackups` | Enable or disable point-in-time recovery |
 | `UpdateContributorInsights` | Enable or disable CloudWatch Contributor Insights on a table or global secondary index |

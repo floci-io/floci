@@ -242,8 +242,9 @@ public class StsQueryHandler {
      * GetSessionToken include MFA information, you can check for MFA in individual API operations
      * made by the credentials". A call that names either member is a claim of MFA and has to make
      * it good; what answers a claim that fails is the access denied AWS documents for the case,
-     * "an incorrect MFA code causes the API to return an access denied error", carrying the
-     * sentence the IAM actions already write for a code that does not match.
+     * "an incorrect MFA code causes the API to return an access denied error", in the two
+     * sentences {@link #mfaRefusal} carries, one for a serial that is not the caller's and one for
+     * a code that does not match the device it names.
      *
      * <p>The claim is read through the request's own holder rather than taken here, because the
      * policy for this call was evaluated before the operation ran and had to see the same device,
@@ -259,9 +260,27 @@ public class StsQueryHandler {
                 iamService.requestMfaClaim(requestContext, callerAccessKeyId(), serialNumber, tokenCode);
         if (claim.failed()) {
             return new MfaOutcome(null, AwsQueryResponse.error("AccessDenied",
-                    "Invalid MFA one time pass code.", AwsNamespaces.STS, 403));
+                    mfaRefusal(claim.failure()), AwsNamespaces.STS, 403));
         }
         return new MfaOutcome(claim.authenticatedAt(), null);
+    }
+
+    /**
+     * The sentence a failed MFA claim earns, which AWS words by which half of the claim failed.
+     * Both are 403 {@code AccessDenied} with a sender fault, both are wholly fixed text, and
+     * neither echoes the serial or the code: a caller is told which half to look at and nothing
+     * about the values it sent. Recorded on {@code GetSessionToken} against a real account, the
+     * serial half on 2026-10-29 and the code half on 2026-11-13, and each carries whitespace AWS
+     * itself emits, two spaces inside the first and a trailing space on the second.
+     *
+     * <p>{@code AssumeRole} takes the same pair through this seam and carries no recording of its
+     * own, so it answers the same two sentences, which is a reading rather than a measurement.
+     */
+    private static String mfaRefusal(RequestMfaClaim.Failure failure) {
+        return failure == RequestMfaClaim.Failure.SERIAL
+                ? "MultiFactorAuthentication failed, unable to validate MFA code.  "
+                        + "Please verify your MFA serial number is valid and associated with this user."
+                : "MultiFactorAuthentication failed with invalid MFA one time pass code. ";
     }
 
     /** The MFA a call authenticated, or the refusal it earned. */

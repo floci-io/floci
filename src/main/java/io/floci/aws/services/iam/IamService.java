@@ -919,7 +919,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamUser createUser(String userName, String path, String permissionsBoundaryArn) {
         if (permissionsBoundaryArn != null) {
-            permissionsBoundaryArn = requirePolicy(permissionsBoundaryArn).getArn();
+            permissionsBoundaryArn =
+                    requirePolicy(permissionsBoundaryArn, PolicyNotFound.ATTACHABLE).getArn();
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(users, IamUser::getUserName, userName)) {
@@ -1824,10 +1825,53 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return policy;
     }
 
+    /**
+     * The two sentences IAM answers for a managed policy ARN it cannot resolve. They are not
+     * interchangeable and the operation decides which it answers, each recorded against a real
+     * account: {@code GetPolicy} and {@code TagPolicy} answer {@link #PLAIN}, recorded 2026-10-26,
+     * as do the three detach operations, recorded 2026-10-29, while the attach family answers
+     * {@link #ATTACHABLE}, recorded on {@code ListEntitiesForPolicy} 2026-10-25 and on
+     * {@code CreatePolicyVersion}, {@code GetPolicyVersion} and {@code ListPolicyVersions}
+     * 2026-10-29. The clause is what tells the two apart: one says the ARN names nothing, the
+     * other that it names nothing this call could attach, and AWS answers the second for both of
+     * its own cases deliberately, so a caller cannot tell them apart either.
+     *
+     * <p>The operations no recording covers answer with their own family, which is this emulator's
+     * reading rather than a measurement: the tag readers with {@code TagPolicy}, the remaining
+     * version operations and a permissions boundary with the attach family.
+     * {@code docs/services/iam.md} records which is which and what a later recording moves.
+     */
+    private enum PolicyNotFound {
+
+        /** {@code Policy <arn> was not found.} */
+        PLAIN("Policy %s was not found."),
+
+        /** {@code Policy <arn> does not exist or is not attachable.} */
+        ATTACHABLE("Policy %s does not exist or is not attachable.");
+
+        private final String template;
+
+        PolicyNotFound(String template) {
+            this.template = template;
+        }
+
+        AwsException of(String policyArn) {
+            return new AwsException("NoSuchEntity", template.formatted(policyArn), 404);
+        }
+
+        /** {@code GetPolicyVersion} names the version inside the same sentence. */
+        AwsException of(String policyArn, String versionId) {
+            return new AwsException("NoSuchEntity",
+                    template.formatted(policyArn + " version " + versionId), 404);
+        }
+    }
+
     private IamPolicy requirePolicy(String policyArn) {
-        return resolvePolicy(policyArn)
-                .orElseThrow(() -> new AwsException("NoSuchEntity",
-                        "Policy " + policyArn + " does not exist.", 404));
+        return requirePolicy(policyArn, PolicyNotFound.PLAIN);
+    }
+
+    private IamPolicy requirePolicy(String policyArn, PolicyNotFound notFound) {
+        return resolvePolicy(policyArn).orElseThrow(() -> notFound.of(policyArn));
     }
 
     /**
@@ -1878,7 +1922,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private String requireBoundaryPolicy(String permissionsBoundaryArn) {
         return registeredPartnerBoundary(permissionsBoundaryArn)
-                ? permissionsBoundaryArn : requirePolicy(permissionsBoundaryArn).getArn();
+                ? permissionsBoundaryArn
+                : requirePolicy(permissionsBoundaryArn, PolicyNotFound.ATTACHABLE).getArn();
     }
 
     private int managedPolicyAttachmentCount(String policyArn) {
@@ -1973,7 +2018,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * succeed. Attachments are tracked on the principals, so this scans them for the given ARN.
      */
     public PolicyEntities listEntitiesForPolicy(String policyArn) {
-        String canonicalArn = requirePolicy(policyArn).getArn();
+        String canonicalArn = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE).getArn();
         List<IamRole> attachedRoles = roles.scan(k -> true).stream()
                 .filter(r -> r.getAttachedPolicyArns().contains(canonicalArn))
                 .toList();
@@ -2117,7 +2162,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamPolicyDocuments.checkManagedPolicy(document);
         }
         rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
         Map<String, PolicyVersion> versions = policy.getVersions();
         PolicyVersion version;
         synchronized (versions) {
@@ -2159,7 +2204,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public PolicyVersion getPolicyVersion(String policyArn, String versionId) {
-        IamPolicy policy = requirePolicy(policyArn);
+        IamPolicy policy = resolvePolicy(policyArn)
+                .orElseThrow(() -> PolicyNotFound.ATTACHABLE.of(policyArn, versionId));
         PolicyVersion version = policy.getVersions().get(versionId);
         if (version == null) {
             throw new AwsException("NoSuchEntity",
@@ -2170,7 +2216,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void deletePolicyVersion(String policyArn, String versionId) {
         rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
         if (versionId.equals(policy.getDefaultVersionId())) {
             throw new AwsException("DeleteConflict",
                     "Cannot delete the default version of a policy.", 409);
@@ -2187,7 +2233,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public List<PolicyVersion> listPolicyVersions(String policyArn) {
-        Map<String, PolicyVersion> versions = requirePolicy(policyArn).getVersions();
+        Map<String, PolicyVersion> versions =
+                requirePolicy(policyArn, PolicyNotFound.ATTACHABLE).getVersions();
         synchronized (versions) {
             return new ArrayList<>(versions.values());
         }
@@ -2195,7 +2242,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void setDefaultPolicyVersion(String policyArn, String versionId) {
         rejectIfAwsManaged(policyArn);
-        IamPolicy policy = getPolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
         Map<String, PolicyVersion> versions = policy.getVersions();
         synchronized (versions) {
             if (!versions.containsKey(versionId)) {
@@ -2237,7 +2284,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void attachUserPolicy(String userName, String policyArn) {
         IamUser user = getUser(userName);
-        IamPolicy policy = requirePolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
         if (!user.getAttachedPolicyArns().contains(policy.getArn())) {
             user.getAttachedPolicyArns().add(policy.getArn());
             users.put(userName, user);
@@ -2249,8 +2296,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamUser user = getUser(userName);
         String canonicalArn = canonicalPolicyArn(policyArn);
         if (!user.getAttachedPolicyArns().remove(canonicalArn)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy " + policyArn + " is not attached to user " + userName + ".", 404);
+            throw PolicyNotFound.PLAIN.of(policyArn);
         }
         users.put(userName, user);
         decrementCustomerManagedPolicyAttachmentCount(canonicalArn);
@@ -2269,7 +2315,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void attachGroupPolicy(String groupName, String policyArn) {
         IamGroup group = getGroup(groupName);
-        IamPolicy policy = requirePolicy(policyArn);
+        IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
         if (!group.getAttachedPolicyArns().contains(policy.getArn())) {
             group.getAttachedPolicyArns().add(policy.getArn());
             groups.put(groupName, group);
@@ -2281,8 +2327,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamGroup group = getGroup(groupName);
         String canonicalArn = canonicalPolicyArn(policyArn);
         if (!group.getAttachedPolicyArns().remove(canonicalArn)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy " + policyArn + " is not attached to group " + groupName + ".", 404);
+            throw PolicyNotFound.PLAIN.of(policyArn);
         }
         groups.put(groupName, group);
         decrementCustomerManagedPolicyAttachmentCount(canonicalArn);
@@ -2304,7 +2349,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
             requireNotServiceLinked(role, roleName);
-            IamPolicy policy = requirePolicy(policyArn);
+            IamPolicy policy = requirePolicy(policyArn, PolicyNotFound.ATTACHABLE);
             if (!role.getAttachedPolicyArns().contains(policy.getArn())) {
                 role.getAttachedPolicyArns().add(policy.getArn());
                 roles.put(roleName, role);
@@ -2320,8 +2365,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             requireNotServiceLinked(role, roleName);
             String canonicalArn = canonicalPolicyArn(policyArn);
             if (!role.getAttachedPolicyArns().remove(canonicalArn)) {
-                throw new AwsException("NoSuchEntity",
-                        "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
+                throw PolicyNotFound.PLAIN.of(policyArn);
             }
             roles.put(roleName, role);
             decrementCustomerManagedPolicyAttachmentCount(canonicalArn);
@@ -2344,10 +2388,14 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
-            List<String> desired = policyArns.stream().map(this::requirePolicy)
+            // These are attachments, so they read with the attach family rather than with the
+            // default: a replacement that cannot find one of them is the same answer an attach
+            // would have given, which is what the boundary and the counts below already choose.
+            List<String> desired = policyArns.stream()
+                    .map(arn -> requirePolicy(arn, PolicyNotFound.ATTACHABLE))
                     .map(IamPolicy::getArn).distinct().toList();
             if (boundaryArn != null) {
-                boundaryArn = requirePolicy(boundaryArn).getArn();
+                boundaryArn = requirePolicy(boundaryArn, PolicyNotFound.ATTACHABLE).getArn();
             }
             Map<String, String> checkedInline = new LinkedHashMap<>();
             for (Map.Entry<String, String> entry : inlinePolicies.entrySet()) {
@@ -2363,7 +2411,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             for (String arn : desired) {
                 if (!role.getAttachedPolicyArns().contains(arn)) {
-                    incrementCustomerManagedPolicyAttachmentCount(requirePolicy(arn));
+                    incrementCustomerManagedPolicyAttachmentCount(
+                            requirePolicy(arn, PolicyNotFound.ATTACHABLE));
                 }
             }
             Set<String> changedInline = new HashSet<>(role.getInlinePolicies().keySet());
@@ -2870,8 +2919,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (roleNames) {
             if (!roleNames.contains(roleName)) {
                 if (!roleNames.isEmpty()) {
+                    // The quota name is what says which of the operation's limits fired, and it is
+                    // this one rather than a roles-per-profile quota, which AWS publishes nowhere.
                     throw new AwsException("LimitExceeded",
-                            "An instance profile can contain at most 1 role.", 409);
+                            "Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1", 409);
                 }
                 roleNames.add(roleName);
                 instanceProfiles.put(instanceProfileName, profile);
@@ -2882,10 +2933,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void removeRoleFromInstanceProfile(String instanceProfileName, String roleName) {
         validateRoleName(roleName);
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        // Tolerates an already-deleted role, so guard only what is still there.
+        // Tolerates an already-deleted role that the profile still lists, so guard only what is
+        // still there; what the profile never held is a different case and AWS refuses it.
         roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
-        profile.getRoleNames().remove(roleName);
-        instanceProfiles.put(instanceProfileName, profile);
+        List<String> roleNames = profile.getRoleNames();
+        // Whether the pairing is there and the removal of it are one decision, taken on the
+        // monitor the attach path holds, so a concurrent attach cannot land between them.
+        synchronized (roleNames) {
+            if (!roleNames.remove(roleName)) {
+                throw new AwsException("NoSuchEntity", "Role " + roleName + " in Instance Profile "
+                        + instanceProfileName + " cannot be found.", 404);
+            }
+            instanceProfiles.put(instanceProfileName, profile);
+        }
     }
 
     public List<InstanceProfile> listInstanceProfilesForRole(String roleName) {
@@ -4445,7 +4505,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (mfaDeviceLock) {
             if (virtualMfaDevices.get(serialNumber).isPresent()) {
                 throw new AwsException("EntityAlreadyExists",
-                        "MFADevice entity at the same path and name already exists.", 409);
+                        "MFA device already exists.", 409);
             }
             virtualMfaDevices.put(serialNumber, device);
         }
@@ -4619,8 +4679,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void requireConsecutiveCodes(VirtualMfaDevice device, String code1, String code2, int driftSteps) {
         if (!VirtualMfaCodes.matchesConsecutiveCodes(device.getBase32Seed(), code1, code2,
                 driftSteps, Instant.now())) {
+            // Recorded on EnableMFADevice and ResyncMFADevice, 2026-11-05, wholly fixed text.
             throw new AwsException("InvalidAuthenticationCode",
-                    "Invalid MFA one time pass code.", 403);
+                    "Authentication code for device is not valid.", 403);
         }
     }
 
@@ -4673,27 +4734,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return RequestMfaClaim.NONE;
         }
         if (serialNumber == null || tokenCode == null) {
-            return new RequestMfaClaim(true, null);
+            // Which half is missing decides the sentence: no code is a code that cannot validate,
+            // and no serial is a device nothing can be looked up by.
+            return tokenCode == null ? RequestMfaClaim.invalidCode() : RequestMfaClaim.unknownSerial();
         }
         Optional<String> userName = mfaUserName(accessKeyId);
         if (userName.isEmpty()) {
-            return new RequestMfaClaim(true, holdsKey(accessKeyId) ? null : clock.instant());
+            return holdsKey(accessKeyId)
+                    ? RequestMfaClaim.unknownSerial()
+                    : RequestMfaClaim.authenticated(clock.instant());
         }
         synchronized (mfaDeviceLock) {
             Optional<VirtualMfaDevice> device = virtualMfaDevices.get(serialNumber)
                     .filter(candidate -> userName.get().equals(candidate.getUserName()));
             if (device.isEmpty()) {
-                return new RequestMfaClaim(true, null);
+                return RequestMfaClaim.unknownSerial();
             }
             OptionalLong step = Totp.matchingStep(device.get().getBase32Seed(), tokenCode,
                     ENABLE_DRIFT_STEPS, Instant.now());
             Long spent = device.get().getLastUsedTotpStep();
             if (step.isEmpty() || (spent != null && step.getAsLong() <= spent)) {
-                return new RequestMfaClaim(true, null);
+                return RequestMfaClaim.invalidCode();
             }
             device.get().setLastUsedTotpStep(step.getAsLong());
             virtualMfaDevices.put(serialNumber, device.get());
-            return new RequestMfaClaim(true, clock.instant());
+            return RequestMfaClaim.authenticated(clock.instant());
         }
     }
 

@@ -1714,7 +1714,7 @@ public class CloudFormationService implements ResourceProvider {
                     current.resolveNodeOmittingNoValue(props));
         } catch (RuntimeException e) {
             LOG.warnv("Resolved create-only values of {0} ({1}) could not be compared; the update adds no "
-                    + "replacement beyond the engine's own decision: {2}", logicalId, resourceType, e.getMessage());
+                    + "replacement beyond the engine''s own decision: {2}", logicalId, resourceType, e.getMessage());
             return false;
         }
     }

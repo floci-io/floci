@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.AccessConfig;
 import io.floci.aws.services.eks.model.Cluster;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -277,6 +279,51 @@ class EmrContainersServiceTest {
         JsonNode cleared = service.describeVirtualCluster(clusterId).get("virtualCluster");
         assertFalse(cleared.has("schedulerConfiguration"));
         assertFalse(cleared.has("schedulerStatus"));
+    }
+
+    /**
+     * IAM's lookup reads the tags of the virtual cluster, job run or job template the ARN names, as the tag calls
+     * leave them, and nothing for another account's, another Region's, an unknown or another service's ARN.
+     */
+    @Test
+    void storedTagsAreTheTagsOfTheResourceTheArnNames() {
+        // A job run that takes an hour, so it is still running when it is tagged.
+        EmrContainersService service = service(3600);
+        String clusterId = virtualCluster(service, EKS_CLUSTER);
+        String clusterArn = service.describeVirtualCluster(clusterId).at("/virtualCluster/arn").textValue();
+        service.tagResource(clusterArn, Map.of("team", "data", "env", "dev"));
+        service.untagResource(clusterArn, List.of("env"));
+        String runArn = startJobRun(service, clusterId).get("arn").textValue();
+        service.tagResource(runArn, Map.of("team", "ops"));
+        String templateArn = service.createJobTemplate(json("""
+                {"name": "tagged", "clientToken": "%s", "tags": {"team": "web"}, "jobTemplateData": {
+                   "executionRoleArn": "%s", "releaseLabel": "%s",
+                   "jobDriver": {"sparkSubmitJobDriver": {"entryPoint": "s3://bucket/pi.py"}}}}
+                """.formatted(UUID.randomUUID(), ROLE, RELEASE))).get("arn").textValue();
+
+        assertEquals("emr-containers", service.namespace());
+        assertEquals(Map.of("team", "data"), service.storedTags(clusterArn));
+        assertEquals(Map.of("team", "ops"), service.storedTags(runArn));
+        assertEquals(Map.of("team", "web"), service.storedTags(templateArn));
+        assertTrue(service.storedTags(clusterArn.replace(ACCOUNT_ID, "111122223333")).isEmpty());
+        assertTrue(service.storedTags(clusterArn.replace(REGION, "us-west-2")).isEmpty());
+        assertTrue(service.storedTags(clusterArn.replace(clusterId, "0000000000000000000000000")).isEmpty());
+        assertTrue(service.storedTags("arn:aws:emr-serverless:us-east-1:000000000000:/applications/abc").isEmpty());
+    }
+
+    /** A virtual cluster stored before storage was account-aware is read in place: the lookup migrates nothing. */
+    @Test
+    void storedTagsReadAPreAccountAwareVirtualClusterInPlace() {
+        InMemoryStorage<String, ObjectNode> raw = new InMemoryStorage<>();
+        EmrContainersService service = service(0, REGION, List.of(new AccountAwareStorageBackend<>(raw, null,
+                ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(
+                ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(
+                ACCOUNT_ID)));
+        String arn = "arn:aws:emr-containers:us-east-1:000000000000:/virtualclusters/legacy0000000000000000000";
+        raw.put(arn, json("{\"arn\": \"" + arn + "\", \"tags\": {\"team\": \"data\"}}"));
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Set.of(arn), raw.keys());
     }
 
     @Test

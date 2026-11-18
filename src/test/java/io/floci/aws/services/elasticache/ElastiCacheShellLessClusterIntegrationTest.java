@@ -1,6 +1,7 @@
 package io.floci.aws.services.elasticache;
 
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -35,9 +36,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Cluster-mode flags reach the nodes as container arguments with the shell-less backend, and the
  * cluster forms and serves from them. Key slots: {@code bar} is 5061, the first of two shards, and
  * {@code foo} is 12182, the second.
+ *
+ * <p>The shell-less backend comes from {@link IndependentServiceSettingsProfile}, with the default
+ * Valkey image. KiviDB, the shell-less image the single-node tests use, has no
+ * {@code --cluster-announce-client-ipv4} flag, which Floci passes to every cluster-mode node, so it
+ * cannot form a Floci cluster yet; Valkey takes the same container arguments and shows that the
+ * cluster-mode flags arrive and the cluster forms.
  */
 @QuarkusTest
-@TestProfile(ShellLessClusterProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElastiCacheShellLessClusterIntegrationTest {
 

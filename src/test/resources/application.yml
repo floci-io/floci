@@ -137,6 +137,7 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     resource-namespace: ""
+    pool-gauge-interval-seconds: 0  # no pool gauge lines in test output
 
   services:
     ssm:

@@ -1037,7 +1037,7 @@ public final class S3CopySimulator {
                         onStatusChange.accept(status);
                     }
                     if (status != 'E') {
-                        LOG.warnv("backend returned unexpected transaction status {0} instead of 'E' after abort query", status);
+                        LOG.warnv("backend returned unexpected transaction status {0} instead of ''E'' after abort query", status);
                         return false;
                     }
                     return true;

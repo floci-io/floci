@@ -1386,6 +1386,14 @@ public interface EmulatorConfig {
     interface FisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Whether the {@code aws:fis:inject-api-*} actions take any service namespace instead of only the
+         * {@code ec2} and {@code kinesis} ones AWS supports, so they can inject errors into the other services Floci
+         * emulates ({@code FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE}).
+         */
+        @WithDefault("false")
+        boolean injectApiAnyService();
     }
 
     interface Route53ServiceConfig {
@@ -4430,6 +4438,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("300")
         int imagePullTimeoutSeconds();
+
+        /**
+         * Seconds between the log lines that report how busy the Docker connection pools are: each
+         * pool's leased, available and pending connections against its limit, its open long-lived
+         * streams by kind, and the docker-java stream threads. A line is written only while a pool is in
+         * use, so an idle emulator logs nothing. 0 turns the lines off.
+         */
+        @WithDefault("60")
+        int poolGaugeIntervalSeconds();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

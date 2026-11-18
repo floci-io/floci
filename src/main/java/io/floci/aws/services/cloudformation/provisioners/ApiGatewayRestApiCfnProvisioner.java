@@ -57,6 +57,9 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
      * after the update commits, or a rollback, deletes the right one.
      */
     private static final String LOCATIONS_ATTR = "__FlociApiGatewayLocations";
+    /** Where a {@link Location} names an authorizer, in place of the HTTP method. */
+    private static final String AUTHORIZER_KIND = "AUTHORIZER";
+    private static final String AUTHORIZER_SNAPSHOT_ATTR = CfnRollback.APIGW_AUTHORIZER_UPDATE_SNAPSHOT_ATTR;
     private static final String VPC_ENDPOINT_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
 
     private final ApiGatewayService apiGatewayService;
@@ -91,8 +94,9 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * A Resource or Method can sit on an API outside the stack, where no RestApi delete cascades to
-     * it, so each removes its own entity, found through the location recorded for it. Deployment,
-     * Stage and Authorizer have no delete of their own yet.
+     * it, so each removes its own entity, found through the location recorded for it. Deployment
+     * and Stage have no delete of their own yet. An Authorizer is deleted at the API recorded for it; one
+     * created before its location was recorded is not deleted.
      */
     @Override
     public void delete(StackResource resource, String region) {
@@ -129,7 +133,10 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void deleteLocation(String physicalId, Location location, String region) {
-        if (location.httpMethod() == null) {
+        if (location.authorizer()) {
+            CfnDeletes.safeDelete("API authorizer", physicalId, () -> apiGatewayService.deleteAuthorizer(
+                    region, location.restApiId(), location.resourceId()), "NotFoundException");
+        } else if (location.httpMethod() == null) {
             CfnDeletes.safeDelete("API resource", physicalId, () -> apiGatewayService.deleteResource(
                     region, location.restApiId(), location.resourceId()), "NotFoundException");
         } else {
@@ -169,6 +176,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
         return ReplacementCleanup.complete(resource,
                 (type, physicalId, region) -> deleteEntity(resource, physicalId, region));
     }
@@ -176,6 +184,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.REST_API_UPDATE_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
@@ -195,13 +204,19 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts a replaced RestApi, Resource or Method back when a later resource fails the update, and a
-     * RestApi patched in place back to its snapshot. Without a replacement, a Resource update
+     * Puts a replaced RestApi, Resource, Method or Authorizer back when a later resource fails the
+     * update, a RestApi patched in place back to its snapshot, and an Authorizer patched in place, or
+     * created because the prior was gone, back through its own snapshot. Without a replacement, a Resource update
      * changed nothing, since all its properties are createOnly, so there is nothing to undo. A
      * Method the update kept was written in place, with no snapshot to put back.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        JsonNode authorizerSnapshot = AUTHORIZER.equals(resource.getResourceType())
+                ? CfnRollback.updateSnapshot(resource, AUTHORIZER_SNAPSHOT_ATTR) : null;
+        if (authorizerSnapshot != null) {
+            return rollbackAuthorizerUpdate(resource, authorizerSnapshot);
+        }
         if (ReplacementCleanup.rollback(resource,
                 (type, physicalId, region) -> deleteEntity(resource, physicalId, region))) {
             return true;
@@ -231,8 +246,16 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         return true;
     }
 
-    /** A resource of a REST API, or with an HTTP method, one of that resource's methods. */
+    /**
+     * A resource of a REST API, or with an HTTP method, one of that resource's methods. An
+     * authorizer is the API and the authorizer id, with the kind in place of the method.
+     */
     private record Location(String restApiId, String resourceId, String httpMethod) {
+
+        /** An authorizer, recorded with {@link #AUTHORIZER_KIND} where a method would name its verb. */
+        boolean authorizer() {
+            return AUTHORIZER_KIND.equals(httpMethod);
+        }
     }
 
     private Map<String, Location> locations(StackResource r) {
@@ -504,8 +527,29 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * RestApiId is the one create-only property: a change to it replaces the authorizer, and any
+     * other change patches the authorizer in place, which keeps its id for the methods that name it.
+     */
     private void provisionAuthorizer(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        String region = ctx.region();
         String apiId = ctx.resolveOptional(props, "RestApiId");
+        PropertyChanges changes = ctx.isUpdate() ? ctx.changes(AUTHORIZER, props) : null;
+        boolean replaces = changes != null && changes.requiresReplacement();
+        Authorizer live = ctx.isUpdate() && !replaces
+                ? findPrior("API authorizer", ctx.priorPhysicalId(),
+                        () -> apiGatewayService.getAuthorizer(region, apiId, ctx.priorPhysicalId()))
+                : null;
+        if (live != null) {
+            updateAuthorizerInPlace(r, props, ctx, apiId, live);
+            return;
+        }
         Map<String, Object> req = new HashMap<>();
         req.put("name", ctx.resolveOptional(props, "Name"));
         req.put("type", ctx.resolveOptional(props, "Type"));
@@ -518,9 +562,133 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
         if (props != null && props.has("ProviderARNs")) {
             req.put("providerARNs", ctx.resolveStringList(props, "ProviderARNs"));
         }
-        Authorizer authorizer = apiGatewayService.createAuthorizer(ctx.region(), apiId, req);
+        Authorizer authorizer = apiGatewayService.createAuthorizer(region, apiId, req);
         r.setPhysicalId(authorizer.getId());
         r.getAttributes().put("AuthorizerId", authorizer.getId());
+        recordLocation(r, ctx, new Location(apiId, authorizer.getId(), AUTHORIZER_KIND));
+        if (ctx.isUpdate() && !replaces) {
+            // The authorizer the update started from is gone, so this one is the update's to undo.
+            CfnRollback.recordCreatedByUpdate(r, ctx, AUTHORIZER_SNAPSHOT_ATTR);
+        }
+        if (ctx.isUpdate()) {
+            // The authorizer the prior physical id named is deleted once the update commits, and the
+            // new one is removed if the update rolls back.
+            ReplacementCleanup.record(r, ctx, attributesBefore, replaces);
+        }
+    }
+
+    /**
+     * Patches the authorizer to the template. A declared property is set; a dropped one goes back to
+     * its create default (the TTL, 300) or is cleared (identity source, Cognito pools), except the URI,
+     * which the patch cannot remove and which is kept; one the
+     * template never declared keeps what the authorizer has.
+     */
+    private void updateAuthorizerInPlace(StackResource r, JsonNode props, ProvisionContext ctx, String apiId,
+                                         Authorizer live) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("region", ctx.region());
+        snapshot.put("apiId", apiId);
+        snapshot.put("authorizerId", live.getId());
+        snapshot.put("name", live.getName());
+        snapshot.put("type", live.getType());
+        snapshot.put("authorizerUri", live.getAuthorizerUri());
+        snapshot.put("identitySource", live.getIdentitySource());
+        snapshot.put("authorizerResultTtlInSeconds", live.getAuthorizerResultTtlInSeconds());
+        ArrayNode providers = snapshot.putArray("providerARNs");
+        providerArns(live).forEach(providers::add);
+        r.getAttributes().put(AUTHORIZER_SNAPSHOT_ATTR, snapshot.toString());
+
+        Set<String> dropped = ctx.droppedProperties(props);
+        String name = ctx.resolveOptional(props, "Name");
+        String type = ctx.resolveOptional(props, "Type");
+        String uri = ctx.resolveOptional(props, "AuthorizerUri");
+        String identity = ctx.resolveOptional(props, "IdentitySource");
+        String ttl = ctx.resolveOptional(props, "AuthorizerResultTtlInSeconds");
+        List<String> arns = props != null && props.has("ProviderARNs")
+                ? ctx.resolveStringList(props, "ProviderARNs") : null;
+        applyAuthorizer(ctx.region(), apiId, live,
+                name != null ? name : live.getName(),
+                type != null ? type : live.getType(),
+                orLive(uri, live.getAuthorizerUri()),
+                identity != null || !dropped.contains("IdentitySource")
+                        ? orLive(identity, live.getIdentitySource()) : null,
+                ttl != null ? ttl : dropped.contains("AuthorizerResultTtlInSeconds") ? "300"
+                        : live.getAuthorizerResultTtlInSeconds(),
+                arns != null ? arns : dropped.contains("ProviderARNs") ? List.of() : providerArns(live));
+        r.setPhysicalId(live.getId());
+        r.getAttributes().put("AuthorizerId", live.getId());
+        recordLocation(r, ctx, new Location(apiId, live.getId(), AUTHORIZER_KIND));
+    }
+
+    private static String orLive(String declared, String live) {
+        return declared != null ? declared : live;
+    }
+
+    private static List<String> providerArns(Authorizer authorizer) {
+        return authorizer.getProviderARNs() == null ? List.of() : authorizer.getProviderARNs();
+    }
+
+    /**
+     * One UpdateAuthorizer patch that takes {@code live} to the values given; a null identity
+     * source clears it. Nothing is sent when the authorizer already has them.
+     */
+    private void applyAuthorizer(String region, String apiId, Authorizer live, String name, String type,
+                                 String uri, String identitySource, String ttl, List<String> providerArns) {
+        List<Map<String, String>> ops = new ArrayList<>();
+        addIfChanged(ops, "/name", live.getName(), name);
+        addIfChanged(ops, "/type", live.getType(), type);
+        if (uri != null) {
+            // The patch has no remove for the URI: a drop keeps it, and a rollback writes it back whole.
+            addIfChanged(ops, "/authorizerUri", live.getAuthorizerUri(), uri);
+        }
+        addIfChanged(ops, "/identitySource", live.getIdentitySource(), identitySource);
+        addIfChanged(ops, "/authorizerResultTtlInSeconds", live.getAuthorizerResultTtlInSeconds(), ttl);
+        for (String arn : providerArns) {
+            if (!providerArns(live).contains(arn)) {
+                ops.add(Map.of("op", "add", "path", "/providerARNs", "value", arn));
+            }
+        }
+        for (String arn : providerArns(live)) {
+            if (!providerArns.contains(arn)) {
+                ops.add(Map.of("op", "remove", "path", "/providerARNs", "value", arn));
+            }
+        }
+        if (!ops.isEmpty()) {
+            apiGatewayService.updateAuthorizer(region, apiId, live.getId(), ops);
+        }
+    }
+
+    private void addIfChanged(List<Map<String, String>> ops, String path, String current, String desired) {
+        if (Objects.equals(current, desired)) {
+            return;
+        }
+        ops.add(desired == null ? Map.of("op", "remove", "path", path) : replacePatchOp(path, desired));
+    }
+
+    /**
+     * Puts an authorizer the update patched back as it was, or deletes the one the update created
+     * because the prior was gone. Spent only once it succeeded, so a failure can be retried.
+     */
+    private boolean rollbackAuthorizerUpdate(StackResource resource, JsonNode snapshot) {
+        if (CfnRollback.undoCreatedByUpdate(resource, snapshot, AUTHORIZER_SNAPSHOT_ATTR, "AuthorizerId",
+                (createdId, region) -> deleteEntity(resource, createdId, region))) {
+            return true;
+        }
+        String region = snapshot.path("region").asText();
+        String apiId = snapshot.path("apiId").asText();
+        List<String> arns = new ArrayList<>();
+        snapshot.path("providerARNs").forEach(arn -> arns.add(arn.asText()));
+        Authorizer prior = new Authorizer();
+        prior.setId(snapshot.path("authorizerId").asText());
+        prior.setName(CfnRollback.snapshotText(snapshot, "name"));
+        prior.setType(CfnRollback.snapshotText(snapshot, "type"));
+        prior.setAuthorizerUri(CfnRollback.snapshotText(snapshot, "authorizerUri"));
+        prior.setIdentitySource(CfnRollback.snapshotText(snapshot, "identitySource"));
+        prior.setAuthorizerResultTtlInSeconds(CfnRollback.snapshotText(snapshot, "authorizerResultTtlInSeconds"));
+        prior.setProviderARNs(arns);
+        apiGatewayService.restoreAuthorizer(region, apiId, prior);
+        resource.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
+        return true;
     }
 
     private void provisionMethod(StackResource r, JsonNode props, ProvisionContext ctx) {

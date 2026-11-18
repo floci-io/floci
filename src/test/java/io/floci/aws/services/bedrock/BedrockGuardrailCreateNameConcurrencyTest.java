@@ -33,7 +33,7 @@ class BedrockGuardrailCreateNameConcurrencyTest {
     private static void overlappingCreates(boolean sameName) throws Exception {
         ParkingStore<Guardrail> storage = new ParkingStore<>();
         ObjectMapper mapper = new ObjectMapper();
-        BedrockService service = new BedrockService(storage, new InMemoryStorage<>(),
+        BedrockService service = new BedrockService(storage, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"), mapper, mock(KmsService.class));
         AtomicReference<Guardrail> firstResult = new AtomicReference<>();
         AtomicReference<Guardrail> secondResult = new AtomicReference<>();

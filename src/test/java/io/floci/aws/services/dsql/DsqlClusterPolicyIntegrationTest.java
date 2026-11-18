@@ -3,6 +3,7 @@ package io.floci.aws.services.dsql;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
 import io.floci.aws.testing.EnforcementFixtures;
+import io.floci.aws.testing.IamEnforcedServiceSettingsProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -40,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * the decision to the caller's own policies.
  */
 @QuarkusTest
-@TestProfile(DsqlEnforcementProfile.class)
+@TestProfile(IamEnforcedServiceSettingsProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Tag("docker")
 class DsqlClusterPolicyIntegrationTest {

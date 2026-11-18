@@ -13,6 +13,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.BoundedMaps;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.FileTrees;
 import io.floci.aws.core.common.IamConditionContextResolver;
@@ -263,14 +264,12 @@ public class S3Service implements Resettable, ResourceProvider {
     private record MultipartPosition(String bucket, String key, String ownerAccountId, Instant initiated) {}
 
     private static final int REMOVED_MULTIPART_POSITION_LIMIT = 1000;
-    private final Map<String, MultipartPosition> removedMultipartPositions = Collections.synchronizedMap(
-            new LinkedHashMap<>(64, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<String, MultipartPosition> eldest) {
-                    return size() > REMOVED_MULTIPART_POSITION_LIMIT;
-                }
-            });
+    private final Map<String, MultipartPosition> removedMultipartPositions = BoundedMaps.leastRecentlyUsed(REMOVED_MULTIPART_POSITION_LIMIT);
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
+    // Permanently deleted versions by versionedKey, so a ListObjectVersions marker naming one still
+    // resumes where that version stood.
+    private static final int REMOVED_VERSION_POSITION_LIMIT = 1000;
+    private final Map<String, S3Object> removedVersionPositions = BoundedMaps.leastRecentlyUsed(REMOVED_VERSION_POSITION_LIMIT);
     // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
     // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
     // security control that LZA applies once per governed account, so it is StorageFactory-backed
@@ -495,6 +494,7 @@ public class S3Service implements Resettable, ResourceProvider {
         memoryMultipartStore.clear();
         multipartUploads.clear();
         removedMultipartPositions.clear();
+        removedVersionPositions.clear();
         if (!inMemory) {
             // The reset above erases the annotation metadata through storageFactory.clearAll(),
             // so detached .s3ann payload files become unreachable: sweep the annotation payload
@@ -2629,6 +2629,9 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             // Permanently delete a specific version (metadata + file data)
             objectStore.delete(historyKey);
+            if (toDelete != null) {
+                removedVersionPositions.put(versionedKey(bucketName, key, reportedVersionId(toDelete)), toDelete);
+            }
             deleteVersionedFile(bucketName, key, versionId);
             deleteAllAnnotationsFor(bucketName, key, normalizeNullVersionId(versionId));
             LOG.debugv("Permanently deleted version: {0}/{1} v={2}", bucketName, key, versionId);
@@ -3226,7 +3229,8 @@ public class S3Service implements Resettable, ResourceProvider {
      * last entry returned, and the next request resumes at the entry immediately after it.
      *
      * @param versionIdMarker version id of the last entry of the previous page; only meaningful together with
-     *                        {@code keyMarker}, and ignored when the key it names holds no such version
+     *                        {@code keyMarker}; a deleted version still resumes where it stood, and one
+     *                        Floci has no position for lists every version of the key still stored
      */
     public ListVersionsResult listObjectVersions(String bucketName, String prefix, String delimiter, int maxKeys,
                                                  String keyMarker, String versionIdMarker) {
@@ -3292,19 +3296,26 @@ public class S3Service implements Resettable, ResourceProvider {
                     .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
 
             if (versionIdMarker != null && !versionIdMarker.isEmpty()) {
-                List<S3Object> remaining = new ArrayList<>();
-                boolean afterMarker = false;
+                List<S3Object> markerKeyVersions = new ArrayList<>();
+                List<S3Object> laterKeys = new ArrayList<>();
                 for (S3Object v : versions) {
                     int keyCompare = v.getKey().compareTo(km);
-                    if (keyCompare < 0) {
-                        continue;
-                    }
-                    if (keyCompare > 0 || afterMarker) {
-                        remaining.add(v);
-                    } else if (versionIdMarker.equals(reportedVersionId(v))) {
-                        afterMarker = true;
+                    if (keyCompare == 0) {
+                        markerKeyVersions.add(v);
+                    } else if (keyCompare > 0) {
+                        laterKeys.add(v);
                     }
                 }
+                // A client that deletes each page before requesting the next one names a version that is gone.
+                // Its recorded position still says where to resume; without one (after a restart, or once
+                // evicted) every version of keyMarker still stored is listed.
+                S3Object marker = markerKeyVersions.stream()
+                        .filter(v -> versionIdMarker.equals(reportedVersionId(v)))
+                        .findFirst()
+                        .orElseGet(() -> removedVersionPositions.get(versionedKey(bucketName, km, versionIdMarker)));
+                List<S3Object> remaining = new ArrayList<>(marker == null ? markerKeyVersions
+                        : markerKeyVersions.stream().filter(v -> WRITE_ORDER.compare(v, marker) < 0).toList());
+                remaining.addAll(laterKeys);
                 versions = remaining;
             } else {
                 versions = versions.stream()

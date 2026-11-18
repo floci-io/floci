@@ -133,6 +133,7 @@ floci:
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
     max-connections: 1024                    # Docker client connection pool for short calls
     streaming-max-connections: 2048          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
+    pool-gauge-interval-seconds: 60          # Log Docker pool use every N seconds while a pool is busy; 0 = off
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 

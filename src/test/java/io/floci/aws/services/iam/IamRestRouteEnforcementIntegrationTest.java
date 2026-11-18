@@ -1141,19 +1141,48 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void fisIsCheckedOnTheTemplateItsPathNames() {
-        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
-                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
-                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}}";
-        String id = adminOf("fis").body(template).post("/experimentTemplates")
-                .then().statusCode(200).extract().path("experimentTemplate.id");
-        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
-        String arn = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/" + id;
+        String id = fisTemplate(null);
+        String arn = fisTemplateArn(id);
         String user = user("route-fis");
 
         policy(user, allow("fis:GetExperimentTemplate", arn));
         request(user, "fis", "GET", "/experimentTemplates/" + id, null)
                 .statusCode(200).body("experimentTemplate.arn", equalTo(arn));
         refused(request(user, "fis", "GET", "/experimentTemplates/EXTother", null), "fis:GetExperimentTemplate");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags AWS FIS holds on the experiment template a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller read that team's template and not
+     * another's.
+     */
+    @Test
+    void aFisResourceTagConditionReadsTheTagsOfTheTemplate() {
+        String tagged = fisTemplate("{\"team\":\"web\"}");
+        String other = fisTemplate("{\"team\":\"web\"}");
+        adminOf("fis").body("{\"tags\":{\"team\":\"data\"}}").post("/tags/" + fisTemplateArn(tagged))
+                .then().statusCode(200);
+        String user = user("route-fis-tags");
+
+        policy(user, onTeam("Allow", "fis:GetExperimentTemplate", "data"));
+        request(user, "fis", "GET", "/experimentTemplates/" + tagged, null).statusCode(200);
+        refused(request(user, "fis", "GET", "/experimentTemplates/" + other, null), "fis:GetExperimentTemplate");
+    }
+
+    /** The id of an experiment template an administrator creates, with the {@code tags} JSON object if any. */
+    private String fisTemplate(String tags) {
+        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
+                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}"
+                + (tags == null ? "" : ",\"tags\":" + tags) + "}";
+        String id = adminOf("fis").body(template).post("/experimentTemplates")
+                .then().statusCode(200).extract().path("experimentTemplate.id");
+        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
+        return id;
+    }
+
+    private static String fisTemplateArn(String id) {
+        return "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/" + id;
     }
 
     @Test
@@ -1185,6 +1214,35 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(request(user, "oam", "POST", "/GetSink", getSink), "oam:GetSink");
         policy(user, allow("oam:GetSink", "*") + "," + onTeam("Deny", "oam:GetSink", "data"));
         refused(request(user, "oam", "POST", "/GetSink", getSink), "oam:GetSink");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags EMR on EKS holds on the job template a request names, those
+     * it was created with (TagResource takes only virtual clusters, job runs and managed endpoints), so an allow on one
+     * team's tag lets the caller read that team's template and not another's.
+     */
+    @Test
+    void anEmrContainersResourceTagConditionReadsTheTagsOfTheJobTemplate() {
+        String tagged = emrContainersJobTemplate("data");
+        String other = emrContainersJobTemplate("web");
+        String user = user("route-emrc-tags");
+
+        policy(user, onTeam("Allow", "emr-containers:DescribeJobTemplate", "data"));
+        request(user, "emr-containers", "GET", "/jobtemplates/" + tagged, null).statusCode(200);
+        refused(request(user, "emr-containers", "GET", "/jobtemplates/" + other, null),
+                "emr-containers:DescribeJobTemplate");
+    }
+
+    /** The id of an EMR on EKS job template an administrator creates, tagged with {@code team}, deleted after. */
+    private String emrContainersJobTemplate(String team) {
+        String body = "{\"name\":\"route-template-" + suffix() + "\",\"clientToken\":\"" + suffix()
+                + "\",\"tags\":{\"team\":\"" + team + "\"},\"jobTemplateData\":{\"executionRoleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/emr-job\",\"releaseLabel\":\"emr-7.5.0-latest\",\"jobDriver\":"
+                + "{\"sparkSubmitJobDriver\":{\"entryPoint\":\"s3://bucket/pi.py\"}}}}";
+        String id = adminOf("emr-containers").body(body).post("/jobtemplates").then().statusCode(200).extract()
+                .path("id");
+        cleanup.register(() -> adminOf("emr-containers").delete("/jobtemplates/" + id).then().statusCode(200));
+        return id;
     }
 
     /** A statement with {@code effect} on {@code action} for every resource whose {@code team} tag is the one given. */

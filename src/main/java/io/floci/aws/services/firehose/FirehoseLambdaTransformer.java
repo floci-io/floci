@@ -2,7 +2,6 @@ package io.floci.aws.services.firehose;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.firehose.model.DeliveryStreamDescription;
@@ -296,8 +295,7 @@ public class FirehoseLambdaTransformer {
         Map<String, Object> event = new LinkedHashMap<>();
         event.put("invocationId", UUID.randomUUID().toString());
         event.put("deliveryStreamArn", stream.getDeliveryStreamARN());
-        event.put("region", AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
-                regionResolver.getDefaultRegion()));
+        event.put("region", regionResolver.regionOf(stream.getDeliveryStreamARN()));
         List<Map<String, Object>> eventRecords = new ArrayList<>(records.size());
         for (int i = 0; i < records.size(); i++) {
             Map<String, Object> eventRecord = new LinkedHashMap<>();

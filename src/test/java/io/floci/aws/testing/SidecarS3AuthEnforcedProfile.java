@@ -12,7 +12,7 @@ public class SidecarS3AuthEnforcedProfile extends SidecarContainersProfile {
 
     @Override
     public Map<String, String> getConfigOverrides() {
-        Map<String, String> overrides = new HashMap<>(super.getConfigOverrides());
+        Map<String, String> overrides = new HashMap<>(containerOverrides());
         overrides.put("floci.services.s3.enforce-auth", "true");
         return overrides;
     }

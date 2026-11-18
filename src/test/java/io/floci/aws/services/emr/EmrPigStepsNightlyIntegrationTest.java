@@ -3,7 +3,7 @@ package io.floci.aws.services.emr;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.ContainerDataPlaneProfile;
+import io.floci.aws.testing.CloudFormationSettingsProfile;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.EmrRequests;
 import io.floci.aws.testing.PartitionCleanup;
@@ -75,7 +75,7 @@ class EmrPigStepsNightlyIntegrationTest {
     private String clusterId;
 
     /** The Docker data planes, with Floci's Pig on. */
-    public static class PigProfile extends ContainerDataPlaneProfile {
+    public static class PigProfile extends CloudFormationSettingsProfile {
         @Override
         public Map<String, String> getConfigOverrides() {
             Map<String, String> overrides = new HashMap<>(super.getConfigOverrides());

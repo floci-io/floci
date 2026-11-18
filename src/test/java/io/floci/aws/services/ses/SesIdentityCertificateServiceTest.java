@@ -96,15 +96,15 @@ class SesIdentityCertificateServiceTest {
 
         assertEquals(List.of("alice@example.org"),
                 fromAddresses(service.list("alice@example.org", null, null, REGION)));
-        assertBadRequest("FromAddress <bob@example.org> does not match the email identity <alice@example.org>.",
+        assertBadRequest("FromAddress <bob@example.org> must match the email identity <alice@example.org>.",
                 () -> service.associate("alice@example.org", "bob@example.org", CERT_ARN, REGION));
     }
 
     @Test
     void emailIdentityFromAddressMustMatchExactly() {
-        assertBadRequest("FromAddress <Alice@example.org> does not match the email identity <alice@example.org>.",
+        assertBadRequest("FromAddress <Alice@example.org> must match the email identity <alice@example.org>.",
                 () -> service.associate("alice@example.org", "Alice@example.org", CERT_ARN, REGION));
-        assertBadRequest("FromAddress <ALICE@example.org> does not match the email identity <alice@example.org>.",
+        assertBadRequest("FromAddress <ALICE@example.org> must match the email identity <alice@example.org>.",
                 () -> service.disassociate("alice@example.org", "ALICE@example.org", REGION));
     }
 

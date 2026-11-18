@@ -11,7 +11,8 @@
 | `CreateKey` | Create a key with fresh material |
 | `GetKey` | Get a key's attributes, state and check value |
 | `ListKeys` | List the keys of a region |
-| `DeleteKey` | Delete a key |
+| `DeleteKey` | Schedule a key for deletion |
+| `RestoreKey` | Cancel a scheduled key deletion |
 | `StartKeyUsage` | Start the use of a key |
 | `StopKeyUsage` | Stop the use of a key |
 | `CreateAlias` | Point an alias name at a key |
@@ -29,12 +30,16 @@
 | `GetDefaultKeyReplicationRegions` | The Regions the account replicates a new key to |
 | `EnableDefaultKeyReplicationRegions` | Replicate every new key to the Regions named |
 | `DisableDefaultKeyReplicationRegions` | Stop replicating every new key to the Regions named |
+| `GetCertificateSigningRequest` | The certificate signing request a key pair signs |
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
 | `PutResourcePolicy` | Attach or replace the resource-based policy of a key |
 | `GetResourcePolicy` | Get the resource-based policy of a key |
 | `DeleteResourcePolicy` | Remove the resource-based policy of a key |
+| `AssociateMpaTeam` | Associate a Multi-Party Approval team with a protected operation |
+| `GetMpaTeamAssociation` | The Multi-Party Approval team of a protected operation |
+| `DisassociateMpaTeam` | Remove the Multi-Party Approval team of a protected operation |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -54,11 +59,21 @@
   copy of its primary's material and metadata, so a replica carries the primary's tags
   and a change to them is replicated. The alias names are the region's own: an alias
   names a key in its own region, and a replica is named by an alias of that region.
-- **Deletion:** `DeleteKey` removes the key and the aliases that name it, and answers
-  with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
-  A key that is gone does not come back: a tagging request for it is refused. The
-  service deletes a key the moment it is asked to, so the waiting period of
-  `DeleteKeyInDays` is checked against the range the model states and is not waited for.
+- **Deletion and restore:** `DeleteKey` disables the key and answers with the key, its
+  state `DELETE_PENDING` and the moment its deletion takes effect. The key is kept, so it
+  stays readable and keeps its aliases and tags until the waiting period ends.
+  `DeleteKeyInDays` is checked against the range the model states. `RestoreKey` cancels a
+  scheduled deletion and returns the key to `CREATE_COMPLETE` with no pending deletion
+  timestamp; a key that is not pending deletion is refused with `ConflictException`. The
+  reference's own example of the restore says that two members change, the state and the
+  pending timestamp, so the restored key stays disabled and keeps the moments of its use:
+  it is `StartKeyUsage` that enables a key again. The waiting period is not swept by a
+  timer: the emulator keeps the key pending rather than deleting it on a clock. A key that
+  is already pending deletion is refused with `ConflictException`, because the deletion is
+  already under way, and the replicas of the key carry its pending state and the moment the
+  deletion takes effect, as they carry the rest of its metadata. A replica is read-only, so
+  the deletion is cancelled on the primary: a request that names a replica is refused with
+  `ValidationException`.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled`, `Tags`,
   `DeriveKeyUsage` and `ReplicationRegions`, and a key created disabled or with tags
   comes back that way. The `KeyUsage` and the
@@ -76,9 +91,25 @@
   summary the model names: its identifier, its state, its attributes, its check value,
   its two flags and, for a key that is replicated, the kind of key it is and the region
   it is the primary of.
-- **The members a request may name that the service does not read:** `ImportKey` takes
-  `RequesterComment`, and the service reads none of it. No approval is recorded, because
-  the multi-party approval is not emulated.
+- **The members a request may name that the service does not read:** `ImportKey`,
+  `AssociateMpaTeam` and `DisassociateMpaTeam` take `RequesterComment`, and the service
+  reads none of it.
+- **The Multi-Party Approval team of a protected operation:** a protected operation has one
+  team, so a second association replaces the first. The association answers with the
+  operation, the team and the state of the association, and removing it answers with the
+  association as it was, its state now `DELETE_PENDING`, and the association is gone from
+  the service. An operation with no team is refused as the resource the reference cannot
+  find. The team's ARN is kept as the request names it: the emulator has no Multi-Party
+  Approval service to check it against. The requester's comment is read by nobody, so no
+  approval session is recorded.
+- **The approval session itself is not made:** the reference holds the import of a root
+  certificate pending until the team approves it, and answers with a key whose state is
+  `CREATE_IN_PROGRESS` and whose `MpaStatus` carries the session. The emulator has no
+  Multi-Party Approval service to ask, so the import is not held pending and the key is
+  imported at once. The protected operation is the one the reference names, the import of
+  a root public key certificate. The disassociation is not held either: the reference holds
+  it pending the approval of the team that is associated, and the emulator answers it with
+  the state `DELETE_PENDING` and takes the association away at once.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
   that names none removes the key the alias names and leaves the alias. `CreateAlias`
   refuses an alias without a key, as the reference does, though its model requires
@@ -245,7 +276,8 @@
   on, so a policy that names another key is refused. The reference attaches a policy to the
   primary key alone, so a replica takes none and a request that names one is refused. The
   access the policy grants is not enforced: the service's operations are not among the ones
-  IAM checks.
+  IAM checks. A key that is pending deletion keeps its policy, because the key is still
+  there.
 - **Key usage:** `StopKeyUsage` disables the key and records when it stopped, and
   `StartKeyUsage` enables it again and records when it started. The moment recorded is the
   moment the key changed state, so a request that names a key that is already in the state
@@ -253,9 +285,33 @@
   readable and its material stays where it is, so it can be started again. A replica is
   read-only, so the change is made on the primary, and a request that names a replica is
   refused. The change reaches the replicas: a stop on the primary stops the use of the
-  replicas too, as the reference says.
-- **Not yet emulated:** the key restore operation, the multi-party approval operations
-  and the certificate signing request.
+  replicas too, as the reference says. A key that is pending deletion is not the caller's
+  to start or stop: the reference does not publish the answer for that case, so the
+  request is refused with `ConflictException`, which is the code the service uses for a
+  request that conflicts with the state of a key.
+- **The certificate signing request of a key pair:** `GetCertificateSigningRequest` answers
+  with a request the key pair signs, over the subject the request names and with the digest
+  it names. The answer is the PEM of the request, base64 encoded, which is what the
+  reference's own answer carries, so a caller that decodes it holds the file the
+  `-----BEGIN CERTIFICATE REQUEST-----` and `-----END CERTIFICATE REQUEST-----` markers are
+  in. The key has to be a key pair the service holds the private half of: a key that is not
+  a key pair has no public half to certify, a key pair the service holds no private half of
+  has nothing to sign with, and a key that is disabled does no work. The reference
+  publishes no table of the keys this operation takes, so the rules here are this service's
+  own: the usage and the mode of use of the key are not narrowed, and the reference's own
+  flows are both served, the one that signs with a key pair of the digital signature usage
+  whose mode of use is `Sign` and the one that signs with a key pair of the TR-34 usage
+  whose modes of use are `Unwrap` and `Decrypt`. The signature algorithm is the one the
+  key's own algorithm gives with that digest, so an RSA key signs with an RSA algorithm and
+  an elliptic curve one with an ECDSA algorithm. The subject's members are written in the
+  order the reference's own request writes them, the most general member first: the
+  country, the state or province, the city, the organization, the organization unit, the
+  common name and the email address. The email address is written as an IA5String, which
+  holds ASCII alone, so an address with a character outside ASCII is refused with
+  `ValidationException` rather than signed with that character narrowed to a byte. The
+  model settles what the request may name: the digest is one of the four it names and the
+  subject carries a common name, so a request that names another digest or leaves the
+  common name out is refused with `ValidationException` by the model's own check.
 
 ## Configuration
 

@@ -46,6 +46,12 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `ListFunctionUrlConfigs` | List a function's URL configurations across its unpublished version and aliases, with marker pagination |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
+| `PublishLayerVersion` | Publish a layer version from a zip or an S3 object (see Layers below) |
+| `GetLayerVersion` | Get a layer version by name and version number |
+| `GetLayerVersionByArn` | Get a layer version by its ARN |
+| `ListLayerVersions` | List the versions of a layer, optionally by runtime and architecture |
+| `ListLayers` | List layers with their newest version, optionally by runtime and architecture |
+| `DeleteLayerVersion` | Delete a layer version |
 | `ListTags` | List tags on a function or event source mapping |
 | `TagResource` | Tag a function or event source mapping |
 | `UntagResource` | Untag a function or event source mapping |
