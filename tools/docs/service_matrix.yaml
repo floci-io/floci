@@ -67,26 +67,72 @@ aliases:
 # row lands - don't wait for it to expire.
 deferred: []
 
-# Non-tabular pages with one Query/JSON action dispatcher per numeric base row.
-# These counts are checked against the handler switch, without flattening the
-# grouped documentation. Anchored and mixed-dispatch rows need separate rules.
+# Rows whose count is checked against the dispatchers behind them, without
+# flattening the grouped or multi-table page into one generated table. The key is the
+# row's link target: `slug`, or `slug#anchor` for a row linking to a section of a page
+# that documents more than one service. A value is one switch dispatcher's path, or a
+# mapping with `sources:` (paths, or `{ path, mode }` for another regen_action_docs.py
+# mode) and `exclude_actions:` for labels a file carries beside its actions.
 # Paths are relative to the Java package root, PACKAGE_DIR in tools/java_sources.py.
 action_count_sources:
   autoscaling: services/autoscaling/AutoScalingQueryHandler.java
+  bcm-data-exports: services/bcmdataexports/BcmDataExportsJsonHandler.java
+  bcm-pricing-calculator: services/bcmpricingcalculator/BcmPricingCalculatorJsonHandler.java
+  cloudcontrol: services/cloudcontrol/CloudControlJsonHandler.java
   cloudmap: services/cloudmap/CloudMapHandler.java
+  cloudwatch: services/cloudwatch/logs/CloudWatchLogsHandler.java  # the CloudWatch Logs row; it routes the nested handlers by name
+  cloudwatch#metrics:
+    sources:
+      - services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java
+      - services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java
   codebuild: services/codebuild/CodeBuildJsonHandler.java
   codedeploy: services/codedeploy/CodeDeployJsonHandler.java
+  codepipeline:
+    sources:
+      - services/codepipeline/CodePipelineService.java
+    exclude_actions:                    # action providers and execution states, not actions
+      - Abandoned
+      - CodeBuild
+      - CodeDeploy
+      - CodePipeline
+      - Failed
+      - Lambda
+      - LambdaInvoke
+      - Stopped
+      - Succeeded
+      - VariableCheck
   cognito: services/cognito/CognitoJsonHandler.java
   config: services/configservice/ConfigServiceJsonHandler.java
+  cur: services/cur/CurJsonHandler.java
+  dynamodb: services/dynamodb/NativeDynamoDbJsonHandler.java
+  dynamodb#streams: services/dynamodb/NativeDynamoDbStreamsJsonHandler.java
   ec2: services/ec2/Ec2QueryHandler.java
+  ecr: services/ecr/EcrJsonHandler.java
   ecs: services/ecs/EcsJsonHandler.java
   elastic-beanstalk: services/elasticbeanstalk/ElasticBeanstalkQueryHandler.java
   elb: services/elbv2/ElbV2QueryHandler.java
   elb-classic: services/elb/ElbClassicQueryHandler.java
   glue: services/glue/GlueJsonHandler.java
   iam: services/iam/IamQueryHandler.java
+  lightsail:                            # local responses: switch arms plus the empty-list answers
+    sources:
+      - services/lightsail/LightsailJsonHandler.java
+      - { path: services/lightsail/LightsailJsonHandler.java, mode: map_entries }
+  pricing: services/pricing/PricingJsonHandler.java
   resource-groups-tagging: services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java
   ses: services/ses/SesQueryHandler.java
+  sns:
+    sources:
+      - services/sns/SnsJsonHandler.java
+      - services/sns/SnsQueryHandler.java
+  ssm:
+    sources:
+      - services/ssm/SsmJsonHandler.java
+      - services/ssm/Ec2MessagesJsonHandler.java
+  sts: services/iam/StsQueryHandler.java
+  textract: services/textract/TextractJsonHandler.java
+  transcribe: services/transcribe/TranscribeJsonHandler.java
+  transfer: services/transfer/TransferHandler.java
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
 facet_pages:

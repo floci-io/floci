@@ -182,6 +182,27 @@ def test_extract_actions_dedupes_across_sources(tmp_path: Path):
     assert r.extract_actions(entry) == ["Foo", "Bar", "Baz"]
 
 
+def test_extract_map_entry_keys():
+    src = """
+        private static final Map<String, String> EMPTY_LIST_RESULTS = Map.ofEntries(
+                Map.entry("GetAlarms", "alarms"),
+                Map.entry( "GetBuckets", "buckets"),
+                Map.entry("NOT_AN_ACTION", "x"));
+    """
+    assert r.extract_map_entry_actions(src) == ["GetAlarms", "GetBuckets"]
+
+
+def test_extract_actions_reads_map_entries_beside_switch_arms(tmp_path: Path):
+    src = tmp_path / "LightsailJsonHandler.java"
+    src.write_text('case "GetDisk" -> disk();\nMap.entry("GetAlarms", "alarms"),\n')
+    entry = r.ServiceEntry(
+        service="lightsail",
+        doc=tmp_path / "lightsail.md",
+        sources=[r.Source(path=src, mode="switch"), r.Source(path=src, mode="map_entries")],
+    )
+    assert r.extract_actions(entry) == ["GetDisk", "GetAlarms"]
+
+
 # --------------------------------------------------------------------------- #
 # Table parsing: robustness
 # --------------------------------------------------------------------------- #
