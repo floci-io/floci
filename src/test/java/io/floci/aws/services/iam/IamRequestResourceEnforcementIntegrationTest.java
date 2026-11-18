@@ -1612,11 +1612,7 @@ class IamRequestResourceEnforcementIntegrationTest {
      */
     @Test
     void anAcceleratorIsCheckedOnItsArnNotOnAnEndpointGroupOfIt() {
-        String arn = adminJson("globalaccelerator", "GlobalAccelerator_V20180706.CreateAccelerator")
-                .body("{\"Name\":\"res-accelerator\",\"IdempotencyToken\":\"" + suffix() + "\",\"Enabled\":false}")
-                .post("/").then().statusCode(200).extract().path("Accelerator.AcceleratorArn");
-        cleanup.register(() -> adminJson("globalaccelerator", "GlobalAccelerator_V20180706.DeleteAccelerator")
-                .body("{\"AcceleratorArn\":\"" + arn + "\"}").post("/"));
+        String arn = accelerator(null);
         assertTrue(arn.startsWith("arn:aws:globalaccelerator::" + ACCOUNT + ":accelerator/"), arn);
 
         User user = user("res-accelerator");
@@ -1630,6 +1626,40 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"AcceleratorArn\":\"" + arn + "\",\"EndpointGroupArn\":\"" + arn
                         + "/listener/0123abcd/endpoint-group/0123456789ab\"}")
                 .body(not(containsString("not authorized")));
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Global Accelerator holds on the accelerator a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller describe that team's accelerator and
+     * not another's.
+     */
+    @Test
+    void aGlobalAcceleratorResourceTagConditionReadsTheTagsOfTheAccelerator() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = accelerator(web);
+        String other = accelerator(web);
+        adminJson("globalaccelerator", "GlobalAccelerator_V20180706.TagResource")
+                .body("{\"ResourceArn\":\"" + tagged + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-accelerator-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"globalaccelerator:DescribeAccelerator\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "globalaccelerator", "GlobalAccelerator_V20180706.DescribeAccelerator", "1.1",
+                "{\"AcceleratorArn\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "globalaccelerator", "GlobalAccelerator_V20180706.DescribeAccelerator", "1.1",
+                "{\"AcceleratorArn\":\"" + other + "\"}"), "globalaccelerator:DescribeAccelerator");
+    }
+
+    /** The ARN of a disabled accelerator an administrator creates, with the {@code tags} list if any, deleted after. */
+    private String accelerator(String tags) {
+        String arn = adminJson("globalaccelerator", "GlobalAccelerator_V20180706.CreateAccelerator")
+                .body("{\"Name\":\"res-accelerator\",\"IdempotencyToken\":\"" + suffix() + "\",\"Enabled\":false"
+                        + (tags == null ? "" : ",\"Tags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("Accelerator.AcceleratorArn");
+        cleanup.register(() -> adminJson("globalaccelerator", "GlobalAccelerator_V20180706.DeleteAccelerator")
+                .body("{\"AcceleratorArn\":\"" + arn + "\"}").post("/"));
+        return arn;
     }
 
     /** A Timestream for InfluxDB parameter group is checked on {@code db-parameter-group/<id>}, the id it was given. */

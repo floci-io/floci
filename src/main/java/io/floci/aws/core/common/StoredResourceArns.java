@@ -51,7 +51,8 @@ import java.util.Optional;
  * tags of a DB instance, a DB cluster, a parameter group or a backup; CloudTrail, for the tags of a trail; Budgets, for
  * the tags of a budget or a budget action; AWS FIS, for the tags of an experiment template, an experiment or an action;
  * CodePipeline, for the tags of a pipeline, a webhook or a custom action type; DataSync, for the tags of an agent, a
- * location or a task); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through
+ * location or a task; Global Accelerator, for the tags of an accelerator, a listener or an endpoint group); looked up
+ * lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through
  * {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on that
  * service directly.</p>
  *

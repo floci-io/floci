@@ -3382,8 +3382,8 @@ floci populates:
   for Apache Flink for its applications, S3 Vectors for its vector buckets and indexes, Timestream for InfluxDB for its
   DB instances, DB clusters, parameter groups and backups, CloudTrail for its trails, Budgets for its budgets and budget
   actions, AWS FIS for its experiment templates, experiments and actions, CodePipeline for its pipelines, webhooks and
-  custom action types, and DataSync for its agents, locations and tasks. Tag keys differing only in case are one
-  condition key holding every value.
+  custom action types, DataSync for its agents, locations and tasks, and Global Accelerator for its accelerators,
+  listeners and endpoint groups. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
