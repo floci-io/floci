@@ -74,7 +74,7 @@ public class SesTemplateController {
             if (parsedTags != null) {
                 template.setTags(parsedTags);
             }
-            templateService.createTemplate(template, region);
+            templateService.createTemplate(template, region, regionResolver.getAccountId());
             LOG.infov("SES V2 CreateEmailTemplate: {0}", templateName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
