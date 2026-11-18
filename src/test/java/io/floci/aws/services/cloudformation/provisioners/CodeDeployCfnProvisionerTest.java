@@ -358,6 +358,48 @@ class CodeDeployCfnProvisionerTest {
     }
 
     @Test
+    void anUpdateOfAStubThatNamesTheApplicationCreatesThatNameAndRollsItBack() {
+        when(codeDeploy.createApplication(eq("us-east-1"), eq("my-app"), any(), any())).thenReturn(app("my-app"));
+        StackResource r = stub();
+        ObjectNode props = mapper.createObjectNode().put("ApplicationName", "my-app");
+
+        provisioner.provision(r, props, ctx("App-1a2b3c4d", props.deepCopy()));
+
+        verify(codeDeploy).createApplication(eq("us-east-1"), eq("my-app"), any(), any());
+        assertEquals("my-app", r.getPhysicalId());
+        assertFalse(r.getAttributes().containsKey("Arn"), "the stub's Arn names nothing that exists");
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(codeDeploy).deleteApplication("us-east-1", "my-app");
+        assertEquals("App-1a2b3c4d", r.getPhysicalId());
+        assertEquals("arn:aws:stub:::App", r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void committingAnUpdateOfAStubDeletesNothing() {
+        when(codeDeploy.createApplication(eq("us-east-1"), eq("my-app"), any(), any())).thenReturn(app("my-app"));
+        StackResource r = stub();
+        ObjectNode props = mapper.createObjectNode().put("ApplicationName", "my-app");
+        provisioner.provision(r, props, ctx("App-1a2b3c4d", props.deepCopy()));
+
+        provisioner.completeUpdate(r);
+
+        verify(codeDeploy, never()).deleteApplication(anyString(), anyString());
+    }
+
+    @Test
+    void clearUpdateDropsTheTagSnapshot() {
+        StackResource r = updatedInPlace();
+        assertTrue(r.getAttributes().containsKey(CodeDeployCfnProvisioner.SNAPSHOT_ATTR));
+
+        provisioner.clearUpdate(r);
+
+        assertFalse(r.getAttributes().containsKey(CodeDeployCfnProvisioner.SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
     void deleteRemovesTheApplication() {
         provisioner.delete("AWS::CodeDeploy::Application", "my-app", "us-east-1");
         verify(codeDeploy).deleteApplication("us-east-1", "my-app");
