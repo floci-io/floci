@@ -99,6 +99,7 @@ public class EmrServerlessJobRunService implements Resettable {
     private static final String SPARK_CONNECT_ADDRESS = "spark.connect.grpc.binding.address";
     private static final String S3_MONITORING = "s3MonitoringConfiguration";
     private static final String CLOUD_WATCH_LOGGING = "cloudWatchLoggingConfiguration";
+    private static final String MANAGED_PERSISTENCE = "managedPersistenceMonitoringConfiguration";
     // "If you don't specify the optional values, then CloudWatch publishes the logs to a default log group".
     private static final String DEFAULT_LOG_GROUP = "/aws/emr-serverless";
     private static final String SPARK_DRIVER = "SPARK_DRIVER";
@@ -347,6 +348,11 @@ public class EmrServerlessJobRunService implements Resettable {
         if (logs == null) {
             // A run stored before Floci kept its attempts' destinations: where its application now sends them.
             logs = driverLogDestinations(applications.getApplication(applicationId), run);
+        } else if (logs.managedStorage() == null) {
+            // An attempt stored before Floci kept whether its logs were in managed storage: as the run's own
+            // configuration says, or else as its application's now does.
+            logs = new DriverLogDestinations(logs.s3Folder(), logs.logGroup(), logs.stdoutStream(),
+                    logs.stderrStream(), managedStorage(applications.getApplication(applicationId), run));
         }
         return new DashboardView(run, logs);
     }
@@ -614,7 +620,19 @@ public class EmrServerlessJobRunService implements Resettable {
         SparkJobRunner.CloudWatchLogs cloudWatch = driverCloudWatchLogs(app, run);
         return new DriverLogDestinations(driverLogFolder(app, run), cloudWatch != null ? cloudWatch.logGroup() : null,
                 cloudWatch != null ? cloudWatch.stdoutStream() : null,
-                cloudWatch != null ? cloudWatch.stderrStream() : null);
+                cloudWatch != null ? cloudWatch.stderrStream() : null, managedStorage(app, run));
+    }
+
+    /**
+     * Whether a run's logs are kept in EMR Serverless's managed storage: its {@code
+     * managedPersistenceMonitoringConfiguration}, or else its application's, "Enables managed logging and defaults to
+     * true. If set to false, managed logging will be turned off." Its application UIs need it: with logs in an S3
+     * bucket alone, the application UI is "Not supported", and "Otherwise, you can't use the built-in application UIs"
+     * (EMR Serverless user guide, "Storing logs").
+     */
+    static boolean managedStorage(Application app, JobRun run) {
+        return !(monitoring(app, run, MANAGED_PERSISTENCE) instanceof Map<?, ?> configuration
+                && Boolean.FALSE.equals(configuration.get("enabled")));
     }
 
     // Where the run's latest attempt sends its driver's logs, as it was admitted.
@@ -678,6 +696,14 @@ public class EmrServerlessJobRunService implements Resettable {
     /** The runner of the docker runner mode, or null in the immediate one. */
     SparkJobRunner containerRunner() {
         return sparkRunner;
+    }
+
+    /**
+     * Whether the drivers of its Spark runs and sessions serve their Spark UI for Floci to open: in the docker runner
+     * mode, on a network where a container has an address of its own.
+     */
+    boolean servesDriverUis() {
+        return sparkRunner != null && sparkRunner.servesDriverUis(dockerNetwork);
     }
 
     /**
@@ -1357,7 +1383,7 @@ public class EmrServerlessJobRunService implements Resettable {
         return regionResolver.getRegion().equals(AwsArnUtils.parse(run.getArn()).region());
     }
 
-    private static boolean isTerminal(JobRun run) {
+    static boolean isTerminal(JobRun run) {
         return TERMINAL_STATES.contains(run.getState());
     }
 

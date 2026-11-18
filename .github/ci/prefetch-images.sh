@@ -131,8 +131,10 @@ starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest
     EmrNotebookExecutionNightlyIntegrationTest EmrAppUiNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
 # The nightly EmrServerlessSparkConnectNightlyIntegrationTest runs a session's Spark Connect server, and its client, in
-# the emr-7.13.0 image, 3.7 GB, the first release with sessions.
-starts EmrServerlessSparkConnectNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark/emr-7.13.0:latest
+# the emr-7.13.0 image, 3.7 GB, the first release with sessions, and EmrServerlessDashboardNightlyIntegrationTest a job
+# run and a session in it, whose dashboards it opens.
+starts EmrServerlessSparkConnectNightlyIntegrationTest EmrServerlessDashboardNightlyIntegrationTest \
+    && ecr public.ecr.aws/emr-serverless/spark/emr-7.13.0:latest
 # The nightly EmrSessionServerNightlyIntegrationTest runs an EMR session's Spark Connect server on an emr-spark-8.1.0
 # cluster, Spark 4, sessions needing the AWS runtime for Apache Spark, and its client in that image.
 starts EmrSessionServerNightlyIntegrationTest && ecr public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest

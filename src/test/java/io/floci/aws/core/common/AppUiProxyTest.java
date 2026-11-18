@@ -1,6 +1,5 @@
-package io.floci.aws.services.emr;
+package io.floci.aws.core.common;
 
-import io.floci.aws.core.common.ServiceConfigAccess;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
@@ -18,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,17 +32,21 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Requests to an on-cluster application UI's own host through {@link EmrAppUiProxy}: a server stands in for the
- * interface on the cluster's primary node, and a route for what the link's host resolves to.
+ * Requests to an application UI's own host through {@link AppUiProxy}: a server stands in for the interface, an EMR
+ * cluster's primary node's here, and a service's routes for what the link's host resolves to.
  */
-class EmrAppUiProxyTest {
+class AppUiProxyTest {
 
     private static final String HOST = "s".repeat(26) + "-8088.emrappui.localhost";
     private static final String NODE_ORIGIN = "http://ip-10-0-0-1.ec2.internal:19888";
     private static final String BROWSER_ORIGIN = "http://" + "s".repeat(26) + "-19888.emrappui.localhost:4566";
     private static final Map<String, String> REWRITES = Map.of(NODE_ORIGIN, BROWSER_ORIGIN);
 
-    private final EmrAppUiService appUis = mock(EmrAppUiService.class);
+    private static final String REFUSAL = "This link is not valid, or its hour has passed.";
+
+    private final AppUiRoutes appUis = mock(AppUiRoutes.class);
+    private final AppUiRoutes otherService = mock(AppUiRoutes.class);
+    private final ServiceConfigAccess services = mock(ServiceConfigAccess.class);
     private final AtomicReference<MultiMap> interfaceSaw = new AtomicReference<>();
     private final AtomicReference<String> interfaceSawUri = new AtomicReference<>();
     private final AtomicReference<Buffer> interfaceSawBody = new AtomicReference<>();
@@ -67,11 +71,15 @@ class EmrAppUiProxyTest {
             interfaceSawBody.set(body);
             answer.answer(request.response(), body);
         })).listen(0, "127.0.0.1"));
-        ServiceConfigAccess services = mock(ServiceConfigAccess.class);
+        when(appUis.hostLabel()).thenReturn("emrappui");
+        when(appUis.service()).thenReturn("emr");
+        when(otherService.hostLabel()).thenReturn("other-ui");
+        when(otherService.service()).thenReturn("other");
         when(services.isEnabled("emr")).thenReturn(true);
+        when(services.isEnabled("other")).thenReturn(true);
         Router router = Router.router(vertx);
         // An interface that sends nothing for two seconds is given up.
-        new EmrAppUiProxy(appUis, services, vertx, Duration.ofSeconds(2)).register(router);
+        new AppUiProxy(List.of(appUis, otherService), services, vertx, Duration.ofSeconds(2)).register(router);
         router.route().handler(context -> context.response().setStatusCode(404).end("not a link"));
         floci = await(vertx.createHttpServer().requestHandler(router).listen(0, "127.0.0.1"));
         client = vertx.createHttpClient();
@@ -172,12 +180,12 @@ class EmrAppUiProxyTest {
     @Test
     void aRefusedLinkIsAnsweredWithAPageSayingWhy() throws Exception {
         when(appUis.route(eq(HOST + ":4566"), anyString()))
-                .thenReturn(EmrAppUiService.UiRoute.refused(403, EmrAppUiController.INVALID));
+                .thenReturn(AppUiRoute.refused(403, REFUSAL));
 
         Answered response = send(HttpMethod.GET, "/cluster", null);
 
         assertEquals(403, response.statusCode());
-        assertTrue(response.body().toString().contains("not valid, or its hour has passed"));
+        assertTrue(response.body().toString().contains(REFUSAL));
     }
 
     @Test
@@ -185,7 +193,7 @@ class EmrAppUiProxyTest {
         int closed = node.actualPort();
         await(node.close());
         AtomicBoolean forgotten = new AtomicBoolean();
-        when(appUis.route(eq(HOST + ":4566"), anyString())).thenReturn(new EmrAppUiService.UiRoute("127.0.0.1",
+        when(appUis.route(eq(HOST + ":4566"), anyString())).thenReturn(new AppUiRoute("127.0.0.1",
                 closed, REWRITES, () -> forgotten.set(true), 0, null));
 
         Answered response = send(HttpMethod.GET, "/cluster", null);
@@ -204,8 +212,46 @@ class EmrAppUiProxyTest {
         assertEquals("not a link", response.body().toString());
     }
 
+    @Test
+    void aHostUnderAnotherServicesLabelGoesToThatServicesRoutes() throws Exception {
+        String host = "s".repeat(26) + "-4040.other-ui.localhost";
+        when(otherService.route(eq(host + ":4566"), eq("http"))).thenReturn(AppUiRoute.to("127.0.0.1",
+                node.actualPort(), 502, null));
+        answer = (response, body) -> response.putHeader("content-type", "text/plain").end("the driver's UI");
+
+        Answered response = send(host, HttpMethod.GET, "/jobs/", null);
+
+        assertEquals(200, response.statusCode());
+        assertEquals("the driver's UI", response.body().toString());
+        assertEquals(host + ":4566", interfaceSaw.get().get("host"));
+    }
+
+    @Test
+    void anInterfaceThatIsNotUpYetIsAnsweredAsItsRouteSays() throws Exception {
+        int closed = node.actualPort();
+        await(node.close());
+        when(appUis.route(eq(HOST + ":4566"), anyString())).thenReturn(AppUiRoute.to("127.0.0.1", closed, 503,
+                "Not answering yet."));
+
+        Answered response = send(HttpMethod.GET, "/cluster", null);
+
+        assertEquals(503, response.statusCode());
+        assertTrue(response.body().toString().contains("Not answering yet."));
+    }
+
+    @Test
+    void aHostOfADisabledServiceGoesOnToTheRestOfFloci() throws Exception {
+        routeTo(node.actualPort());
+        when(services.isEnabled("emr")).thenReturn(false);
+
+        Answered response = send(HttpMethod.GET, "/cluster", null);
+
+        assertEquals(404, response.statusCode());
+        assertEquals("not a link", response.body().toString());
+    }
+
     private void routeTo(int port) {
-        when(appUis.route(eq(HOST + ":4566"), eq("http"))).thenReturn(new EmrAppUiService.UiRoute("127.0.0.1", port,
+        when(appUis.route(eq(HOST + ":4566"), eq("http"))).thenReturn(new AppUiRoute("127.0.0.1", port,
                 REWRITES, () -> { }, 0, null));
     }
 
@@ -222,9 +268,13 @@ class EmrAppUiProxyTest {
     }
 
     private Answered send(HttpMethod method, String uri, String body) throws Exception {
+        return send(HOST, method, uri, body);
+    }
+
+    private Answered send(String host, HttpMethod method, String uri, String body) throws Exception {
         RequestOptions options = new RequestOptions().setMethod(method)
                 .setServer(SocketAddress.inetSocketAddress(floci.actualPort(), "127.0.0.1"))
-                .setHost(HOST).setPort(4566).setURI(uri);
+                .setHost(host).setPort(4566).setURI(uri);
         return await(client.request(options).compose(request -> body == null ? request.send()
                 : request.send(Buffer.buffer(body)))
                 .compose(response -> response.body().map(read -> new Answered(response, read))));

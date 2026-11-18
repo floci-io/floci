@@ -18,11 +18,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The page a {@code GetDashboardForJobRun} or {@code GetResourceDashboard} link opens
- * ({@link EmrServerlessDashboards}). EMR Serverless opens the run's live Spark or Tez UI while it runs and its Spark
- * History Server or persistent Tez UI once it has ended, and a session's live Spark UI or Spark History Server
- * likewise; Floci keeps neither, so the page shows the attempt as GetJobRun gives it and where its driver's logs go, as
- * it was admitted, or the session as GetSession gives it. A link that is not one of this process's, or whose hour has
+ * The page a {@code GetDashboardForJobRun} or {@code GetResourceDashboard} link opens where it opens no live Spark UI
+ * ({@link EmrServerlessAppUis}, {@link EmrServerlessDashboards}). EMR Serverless opens the run's live Spark or Tez UI
+ * while it runs and its Spark History Server or persistent Tez UI once it has ended, and a session's live Spark UI or
+ * Spark History Server likewise; Floci opens a live Spark UI only in the docker runner mode, so elsewhere the page
+ * shows the attempt as GetJobRun gives it and where its driver's logs go, as it was admitted, or the session as
+ * GetSession gives it. A link that is not one of this process's, or whose hour has
  * passed, opens a refusal instead, and so does one whose run or session has gone. Like the rest of Floci the page takes
  * no AWS credentials: the link is all it asks for.
  */
@@ -32,10 +33,12 @@ public class EmrServerlessDashboardController {
     // No source gives AWS's wording for these; they are Floci's.
     static final String INVALID = "This dashboard link is not valid, or its hour has passed. Call"
             + " GetDashboardForJobRun or GetResourceDashboard for a new one.";
-    static final String NO_UI = "Floci keeps no Spark UI, Tez UI or Spark History Server for a job run, so this page"
+    static final String NO_UI = "Floci opens a job run's live Spark UI only while a Spark run runs in the docker"
+            + " runner mode with its logs in managed storage, and keeps no Tez UI or Spark History Server, so this page"
             + " stands in for the application UI EMR Serverless opens. The driver's output is in its logs.";
-    static final String NO_SESSION_UI = "Floci keeps no Spark UI or Spark History Server for a session, and runs no"
-            + " Spark driver for one, so this page stands in for the application UI EMR Serverless opens.";
+    static final String NO_SESSION_UI = "Floci opens a session's live Spark UI only while its Spark Connect server runs"
+            + " in the docker runner mode, and keeps no Spark History Server, so this page stands in for the"
+            + " application UI EMR Serverless opens.";
 
     private final EmrServerlessDashboards dashboards;
     private final EmrServerlessJobRunService jobRuns;
@@ -99,6 +102,7 @@ public class EmrServerlessDashboardController {
         Html.row(lines, "Driver logs in CloudWatch Logs", view.logs().logGroup());
         Html.row(lines, "Driver stdout stream", view.logs().stdoutStream());
         Html.row(lines, "Driver stderr stream", view.logs().stderrStream());
+        Html.row(lines, "Logs in managed storage", view.logs().inManagedStorage() ? "Yes" : "No");
         lines.add("</table>");
         lines.add("<p>" + Html.escape(NO_UI) + "</p>");
         return lines;

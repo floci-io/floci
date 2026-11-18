@@ -1,8 +1,11 @@
 package io.floci.aws.services.emrserverless;
 
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Runs a Spark application, or a Hive query, to its end, in the EMR services' {@code docker} runner mode: an
@@ -24,6 +27,22 @@ public interface SparkJobRunner {
      * a run {@link #run} has already returned from is left as it is.
      */
     void stop(String runId);
+
+    /**
+     * Where Floci reaches the Spark UI of run {@code runId}'s driver while its container runs, for an EMR Serverless
+     * Spark run or session; empty for any other run, and before or after its container runs.
+     */
+    default Optional<ContainerLifecycleManager.EndpointInfo> driverUi(String runId) {
+        return Optional.empty();
+    }
+
+    /**
+     * Whether the drivers of EMR Serverless Spark runs and sessions on {@code dockerNetwork} (null for the default)
+     * serve their Spark UI for Floci to open ({@link #driverUi}).
+     */
+    default boolean servesDriverUis(String dockerNetwork) {
+        return false;
+    }
 
     /**
      * Removes the drivers of {@code service}'s runs an earlier Floci process left running, which no thread
@@ -182,6 +201,14 @@ public interface SparkJobRunner {
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
                     hadoopEnvironment, executors, platform, port);
+        }
+
+        /** This job, its containers on {@code network} (null for the global default). */
+        public Job onNetwork(String network) {
+            return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
+                    network, executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs,
+                    environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment,
+                    executors, platform, listenPort);
         }
 
         /** This job, its containers run for {@code platform} (null for the Docker host's own). */
