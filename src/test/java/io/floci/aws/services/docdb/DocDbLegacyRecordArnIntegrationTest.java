@@ -1,6 +1,6 @@
 package io.floci.aws.services.docdb;
 
-import io.floci.aws.testing.DocDbMockProfile;
+import io.floci.aws.testing.IamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
@@ -21,9 +21,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * call resolved by identifier alone — the hole that check closes, left open for exactly the records
  * that predate it. The region such a record belongs to is the configured default, which is the
  * region it was in fact created under.
+ *
+ * <p>{@link IamEnforcementProfile} mocks the DocumentDB container layer and leaves RDS unmocked,
+ * so the shared RDS paths run as they are.
  */
 @QuarkusTest
-@TestProfile(DocDbMockProfile.class)
+@TestProfile(IamEnforcementProfile.class)
 class DocDbLegacyRecordArnIntegrationTest {
 
     @Inject
