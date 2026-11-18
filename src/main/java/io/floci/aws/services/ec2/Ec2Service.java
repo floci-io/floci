@@ -157,6 +157,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiPredicate;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -174,6 +175,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private jakarta.enterprise.inject.Instance<Ec2LaunchTemplateSelections> launchTemplateSelections;
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
+
+    /** How long a terminated instance stays listed, as EC2 keeps one visible for about an hour. */
+    static final Duration TERMINATED_INSTANCE_RETENTION = Duration.ofHours(1);
 
     /**
      * The availability zones every region is modelled with. DescribeAvailabilityZones publishes
@@ -1083,13 +1087,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     @PostConstruct
     void restoreMetadataRegistrations() {
         migrateTagsToRegionKeys();
+        Consumer<Instance> persister = inst -> {
+            if (inst != null && inst.getRegion() != null && inst.getInstanceId() != null) {
+                putInstanceForOwner(key(inst.getRegion(), inst.getInstanceId()), inst);
+            }
+        };
         if (portForwardManager != null) {
-            portForwardManager.setPersister(inst -> {
-                if (inst != null && inst.getRegion() != null && inst.getInstanceId() != null) {
-                    putInstanceForOwner(key(inst.getRegion(), inst.getInstanceId()), inst);
-                }
-            });
+            portForwardManager.setPersister(persister);
         }
+        if (containerManager != null) {
+            containerManager.setPersister(persister);
+        }
+        stampUntimedTerminatedRecords();
         if (config.services().ec2().mock()) {
             return;
         }
@@ -1097,10 +1106,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         restoreVpcNetworks();
 
         int restored = 0;
+        Set<String> registered = new HashSet<>();
         for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
             if (needsMetadataRegistration(entry.value())
                     && RequestScopes.callAs(entry.accountId(), entry.value().getRegion(), () -> restoreInstance(entry))) {
                 restored++;
+                registered.add(entry.accountId() + "/" + entry.key());
             }
         }
         if (restored > 0) {
@@ -1109,10 +1120,133 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
             restoreAttachedVolumesOnStartup();
         }
+        resumeInterruptedLifecycles(registered);
 
         // Runs after the restore loop, so anything legitimately revived above is already
         // accounted for and only genuine leftovers are left to collect.
         containerManager.reconcileOrphanedContainers(this::instanceContainerStillWanted);
+    }
+
+    /**
+     * Starts the retention clock of terminated records that have none. Records written before
+     * every terminal path stamped {@code terminatedAt} (a launch that failed, for one) carry zero,
+     * which {@link #pruneTerminatedInstances(Instant)} reads as "not yet expired" for ever.
+     */
+    private void stampUntimedTerminatedRecords() {
+        long now = System.currentTimeMillis();
+        int stamped = 0;
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            Instance instance = entry.value();
+            if (instance != null && instance.getState() != null
+                    && "terminated".equals(instance.getState().getName()) && instance.getTerminatedAt() <= 0) {
+                instance.markTerminated(now);
+                putForOwner(instances, entry, instance);
+                stamped++;
+            }
+        }
+        if (stamped > 0) {
+            LOG.infov("Started the retention clock of {0} terminated EC2 instance(s) recorded without one",
+                    stamped);
+        }
+    }
+
+    /**
+     * Settles instances a previous run left mid-transition. The thread that would have finished
+     * each of them died with that run, so without this a record stays {@code pending},
+     * {@code stopping} or {@code shutting-down} for good, whatever its container is doing.
+     *
+     * <ul>
+     *   <li>{@code shutting-down}: the termination is finished, container and all.</li>
+     *   <li>{@code pending} with no container: the launch never produced one, so it ends as a
+     *       failed launch does.</li>
+     *   <li>{@code pending} with a container: running if the container is, which is what the
+     *       restore loop just re-registered, otherwise the container is stopped and the record
+     *       settles as stopped. The container is never discarded, because the record may be a
+     *       stopped instance that was being started.</li>
+     *   <li>{@code stopping}: the container is stopped and the record settles as stopped.</li>
+     * </ul>
+     *
+     * <p>A record settles as stopped only when Docker confirms its container stopped or gone. When
+     * it cannot (Docker unreachable, for one) the record keeps its state and the next start tries
+     * again, because writing {@code stopped} for a container that may be running would be wrong.
+     *
+     * @param registered the accounts and keys whose running container the restore loop registered
+     */
+    private void resumeInterruptedLifecycles(Set<String> registered) {
+        List<String> unsettled = new ArrayList<>();
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            Instance instance = entry.value();
+            if (instance == null || instance.getState() == null) {
+                continue;
+            }
+            boolean containerRegistered = registered.contains(entry.accountId() + "/" + entry.key());
+            // One instance that cannot be settled must neither stop the others being settled nor
+            // stop Floci starting, so a failure is kept apart and reported below.
+            try {
+                boolean settled = RequestScopes.callAs(entry.accountId(), instance.getRegion(),
+                        () -> resumeInterruptedLifecycle(entry, containerRegistered));
+                if (!settled) {
+                    unsettled.add(instance.getInstanceId());
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not settle EC2 instance {0} left in state {1} by a previous run",
+                        instance.getInstanceId(), instance.getState().getName());
+                unsettled.add(instance.getInstanceId());
+            }
+        }
+        if (!unsettled.isEmpty()) {
+            LOG.errorv("{0} EC2 instance(s) left mid-transition by a previous run could not be settled and "
+                    + "keep their state until the next start: {1}", unsettled.size(), unsettled);
+        }
+    }
+
+    /**
+     * @return false when the instance could not be settled and was left as it was
+     */
+    private boolean resumeInterruptedLifecycle(AccountAwareStorageBackend.AccountEntry<Instance> entry,
+                                               boolean containerRegistered) {
+        Instance instance = entry.value();
+        String state = instance.getState().getName();
+        boolean hasContainer = instance.getDockerContainerId() != null;
+        if ("shutting-down".equals(state) || ("pending".equals(state) && !hasContainer)) {
+            LOG.infov("Finishing the termination of EC2 instance {0} left {1} by a previous run",
+                    instance.getInstanceId(), state);
+            finishTermination(entry);
+        } else if ("pending".equals(state)) {
+            if (!containerRegistered && !containerManager.stopAndConfirm(instance)) {
+                LOG.warnv("The container of EC2 instance {0}, left pending by a previous run, could not be "
+                        + "confirmed stopped, so the instance stays pending", instance.getInstanceId());
+                return false;
+            }
+            instance.setState(containerRegistered ? InstanceState.running() : InstanceState.stopped());
+            putForOwner(instances, entry, instance);
+            LOG.infov("EC2 instance {0} left pending by a previous run is now {1}", instance.getInstanceId(),
+                    instance.getState().getName());
+        } else if ("stopping".equals(state)) {
+            if (hasContainer && !containerManager.stopAndConfirm(instance)) {
+                LOG.warnv("The container of EC2 instance {0}, left stopping by a previous run, could not be "
+                        + "confirmed stopped, so the instance stays stopping", instance.getInstanceId());
+                return false;
+            }
+            instance.setState(InstanceState.stopped());
+            putForOwner(instances, entry, instance);
+            LOG.infov("EC2 instance {0} left stopping by a previous run is now stopped", instance.getInstanceId());
+        }
+        return true;
+    }
+
+    private void finishTermination(AccountAwareStorageBackend.AccountEntry<Instance> entry) {
+        Instance instance = entry.value();
+        String region = instance.getRegion();
+        String owner = entry.accountId();
+        containerManager.terminate(instance, () -> RequestScopes.runAs(owner,
+                () -> reclaimCapturesPinnedBy(region, instance, Set.of(instance.getInstanceId()))));
+        detachAttachedVolumesOnTermination(region, instance);
+        releaseStandaloneInterfacesOnTermination(region, instance);
+        putForOwner(instances, entry, instance);
+        synchronized (capacityReservationLock) {
+            reconcileCapacityMembership(region);
+        }
     }
 
     /**
@@ -5369,11 +5503,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (config.services().ec2().mock()) {
                 // Under the instance's lock, so a concurrent Elastic IP write sees the new state.
                 synchronized (inst) {
-                    inst.setState(InstanceState.terminated());
+                    inst.markTerminated(System.currentTimeMillis());
                     // Termination also disassociates an Elastic IP, so nothing public is left.
                     clearPublicAddress(inst);
                 }
-                inst.setTerminatedAt(System.currentTimeMillis());
             } else {
                 // Also attempt the reclaim once this container is really gone. The synchronous
                 // attempt below runs while teardown is still scheduled, so for a batch whose
@@ -5707,20 +5840,61 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /** Removes terminated instances older than 1 hour. Called periodically by lifecycle. */
     public void pruneTerminatedInstances() {
-        long cutoff = System.currentTimeMillis() - 3_600_000L;
-        for (String storeKey : new ArrayList<>(instances.keys())) {
-            Instance inst = instances.get(storeKey).orElse(null);
-            if (inst != null
-                    && "terminated".equals(inst.getState().getName())
-                    && inst.getTerminatedAt() > 0
-                    && inst.getTerminatedAt() < cutoff) {
-                instances.delete(storeKey);
-                if (inst.getRegion() != null) {
-                    removeTags(inst.getRegion(), inst.getInstanceId());
+        pruneTerminatedInstances(Instant.now());
+    }
+
+    /**
+     * Removes terminated instances older than {@link #TERMINATED_INSTANCE_RETENTION}, of every
+     * account, with their tags. {@link Ec2TerminatedInstanceScheduler} calls it on a timer.
+     *
+     * <p>Whatever termination left attached is released first: a launch that failed ends
+     * terminated without TerminateInstances having run, so its volumes and interfaces are settled
+     * here rather than left pointing at a record that no longer exists.
+     */
+    public void pruneTerminatedInstances(Instant now) {
+        long cutoff = now.minus(TERMINATED_INSTANCE_RETENTION).toEpochMilli();
+        List<String> failed = new ArrayList<>();
+        RuntimeException failure = null;
+        for (AccountAwareStorageBackend.AccountEntry<Instance> entry : entriesOfEveryAccount(instances)) {
+            Instance inst = entry.value();
+            if (inst == null || inst.getState() == null
+                    || !"terminated".equals(inst.getState().getName())
+                    || inst.getTerminatedAt() <= 0
+                    || inst.getTerminatedAt() >= cutoff) {
+                continue;
+            }
+            // A record that cannot be removed must not keep the others from expiring, so every
+            // failure is collected and reported once the sweep has been through all of them.
+            try {
+                RequestScopes.runAs(entry.accountId(), inst.getRegion(), () -> pruneTerminatedInstance(entry));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not remove terminated EC2 instance {0}", inst.getInstanceId());
+                failed.add(inst.getInstanceId());
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
                 }
             }
+        }
+        if (failure != null) {
+            throw new IllegalStateException("Could not remove " + failed.size()
+                    + " expired terminated EC2 instance(s), they are tried again on the next sweep: " + failed,
+                    failure);
+        }
+    }
+
+    void pruneTerminatedInstance(AccountAwareStorageBackend.AccountEntry<Instance> entry) {
+        Instance inst = entry.value();
+        String region = inst.getRegion();
+        if (region != null) {
+            detachAttachedVolumesOnTermination(region, inst);
+            releaseStandaloneInterfacesOnTermination(region, inst);
+        }
+        deleteForOwner(instances, entry);
+        if (region != null) {
+            removeTags(entry.accountId(), region, inst.getInstanceId());
         }
     }
 

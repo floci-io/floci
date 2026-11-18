@@ -49,7 +49,20 @@ A systemd guest gets a private cgroup namespace, as kind runs its nodes, so its 
 | `running → shutting-down → terminated` | `docker rm -f` |
 | Reboot | `docker restart` |
 
-Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned.
+Terminated instances remain queryable for 1 hour (matching real EC2 tombstone behavior) before being pruned. A sweep that runs every minute removes the expired ones, with their tags, for every account.
+
+Every state change the container manager makes in the background is written to the store as it happens, so a Floci process that is killed or restarted never restores a record stuck in a transitional state. On startup Floci settles any it still finds:
+
+| Stored state | Settled as |
+|---|---|
+| `shutting-down` | The termination is finished and the container removed: `terminated` |
+| `pending`, no container recorded | The launch is treated as failed: `terminated` |
+| `pending`, container running | `running` |
+| `pending`, container not running or not reachable | The container is stopped and kept so the instance can be started again: `stopped` |
+| `stopping` | The container is stopped: `stopped` |
+| `terminated`, recorded without a time | The retention clock starts at this startup |
+
+A record is settled as `stopped` only once Docker confirms that its container stopped or is gone. When Docker cannot confirm it (it is unreachable, for one), the record keeps its state and the next start tries again, and an instance that cannot be settled is named in an error in the log. The releases of a termination (port forwards, firewall rules, addresses) are independent of the container removal, so one that fails neither skips it nor keeps the instance from terminating. The sweep that removes expired instances carries on past one that cannot be removed and reports the failure when it ends.
 
 ## Instance Resource Limits
 
