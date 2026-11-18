@@ -31,6 +31,7 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
     private static final String SSE_STACK = "cfn-sqs-queue-sse";
     private static final String FIFO_STACK = "cfn-sqs-queue-fifo";
     private static final String FIFO_FALSE_STACK = "cfn-sqs-queue-fifo-false";
+    private static final String FIFO_NO_VALUE_STACK = "cfn-sqs-queue-fifo-no-value";
 
     @Test
     void declaredPropertiesReachTheQueueAndDroppedOnesReturnToTheirDefaults() {
@@ -252,6 +253,28 @@ class CloudFormationSqsQueuePropertiesIntegrationTest {
                 .toList();
         assertThat(failures, contains(containsString("Unknown Attribute FifoQueue.")));
         cloudFormation(FIFO_FALSE_STACK, "DeleteStack", null);
+    }
+
+    @Test
+    void aFifoQueueAConditionDropsWithNoValueLeavesAStandardQueue() {
+        String template = """
+                {
+                  "Conditions": {"Fifo": {"Fn::Equals": ["yes", "no"]}},
+                  "Resources": {
+                    "Queue": {
+                      "Type": "AWS::SQS::Queue",
+                      "Properties": {"FifoQueue": {"Fn::If": ["Fifo", true, {"Ref": "AWS::NoValue"}]}}
+                    }
+                  },
+                  "Outputs": {"QueueUrl": {"Value": {"Ref": "Queue"}}}
+                }
+                """;
+        cloudFormation(FIFO_NO_VALUE_STACK, "CreateStack", template);
+        String queueUrl = XmlParser.extractPairs(describeStacks(FIFO_NO_VALUE_STACK, "CREATE_COMPLETE"), "Outputs",
+                "OutputKey", "OutputValue").get("QueueUrl");
+
+        assertFalse(queueAttributes(queueUrl).containsKey("FifoQueue"));
+        cloudFormation(FIFO_NO_VALUE_STACK, "DeleteStack", null);
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {
