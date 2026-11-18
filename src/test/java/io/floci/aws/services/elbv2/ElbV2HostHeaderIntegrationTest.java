@@ -1,7 +1,7 @@
 package io.floci.aws.services.elbv2;
 
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -38,7 +38,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(RealElbV2DataPlaneProfile.class)
+@TestProfile(RdsMockProfile.class)
 class ElbV2HostHeaderIntegrationTest {
 
     private final List<Executable> cleanup = new ArrayList<>();

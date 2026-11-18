@@ -4,7 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.EksTestNode;
-import io.floci.aws.testing.RealEksProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -23,11 +23,11 @@ import java.util.UUID;
  * {@code Bidirectional} propagation, and a node exporter reads the node's {@code /} with {@code HostToContainer}.
  * On a node whose mounts are private, containerd refuses both ("is not a shared mount").
  *
- * <p>The cluster is started through {@link EksClusterManager} directly and runs on {@link RealEksProfile} with the
+ * <p>The cluster is started through {@link EksClusterManager} directly and runs on {@link RdsMockProfile} with the
  * other classes that run a real cluster.
  */
 @QuarkusTest
-@TestProfile(RealEksProfile.class)
+@TestProfile(RdsMockProfile.class)
 class EksNodeMountPropagationDockerIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksNodeMountPropagationDockerIntegrationTest.class);

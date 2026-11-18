@@ -1,13 +1,11 @@
 package io.floci.aws.services.emr;
 
+import io.floci.aws.testing.RdsMockProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-
-import java.util.Map;
 
 import static io.floci.aws.testing.EmrRequests.emr;
 import static org.hamcrest.Matchers.equalTo;
@@ -17,17 +15,12 @@ import static org.hamcrest.Matchers.hasSize;
  * A default release label the catalogue does not describe is still a known release: it is listed
  * (newest first here) and described with no applications, so Floci never calls its own default
  * unknown.
+ *
+ * <p>The default release label, {@code emr-7.9.0}, comes from {@link RdsMockProfile}.
  */
 @QuarkusTest
-@TestProfile(EmrReleaseCatalogCustomDefaultIntegrationTest.FutureDefault.class)
+@TestProfile(RdsMockProfile.class)
 class EmrReleaseCatalogCustomDefaultIntegrationTest {
-
-    public static class FutureDefault implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.emr.default-release-label", "emr-7.9.0");
-        }
-    }
 
     @BeforeAll
     static void configure() {

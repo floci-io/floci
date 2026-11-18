@@ -3,7 +3,7 @@ package io.floci.aws.services.elbv2;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.testing.AwsTestClients;
-import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -62,7 +62,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
-@TestProfile(RealElbV2DataPlaneProfile.class)
+@TestProfile(RdsMockProfile.class)
 class ElbV2BackendTlsIntegrationTest {
 
     private final String name = "alb-tls-" + UUID.randomUUID().toString().substring(0, 8);

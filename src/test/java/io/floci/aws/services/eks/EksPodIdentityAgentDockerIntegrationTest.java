@@ -44,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>The cluster is started through {@link EksClusterManager} directly, on the webhook and TLS
  * settings the Pod Identity forward needs, so this class keeps a profile of its own rather than
- * {@code RealEksProfile}. The add-on is created and deleted through the EKS API, as a client would.
+ * {@code RdsMockProfile}, which the other real-cluster classes share. The add-on is created and deleted through the EKS API, as a client would.
  */
 @QuarkusTest
 @TestProfile(EksPodIdentityAgentDockerIntegrationTest.Profile.class)
