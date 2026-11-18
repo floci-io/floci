@@ -359,14 +359,14 @@ class DynamoDbPartiQLHandler {
     private Page readOrdered(Stmt.Select stmt, TableDefinition table, DynamoDbAccessPath accessPath,
                              Routing routing, JsonNode after, Integer limit, String region) {
         List<JsonNode> rows = new ArrayList<>();
-        long scannedBytes = 0;
+        List<Long> readBytes = new ArrayList<>();
         List<JsonNode> scannedItems = new ArrayList<>();
         JsonNode lastKey = null;
         do {
             JsonNode from = lastKey;
             Page page = readPage(stmt, table, accessPath, routing, () -> from, null, region);
             rows.addAll(page.items());
-            scannedBytes += page.readBytes().stream().mapToLong(Long::longValue).sum();
+            readBytes.addAll(page.readBytes());
             scannedItems.addAll(page.scannedItems());
             lastKey = page.lastEvaluatedKey();
         } while (lastKey != null);
@@ -381,7 +381,7 @@ class DynamoDbPartiQLHandler {
         }
         int end = limit == null ? rows.size() : start + Math.min(rows.size() - start, limit);
         JsonNode resumeAfter = start < end && end < rows.size() ? orderingKey(rows.get(end - 1), accessPath, table) : null;
-        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, List.of(scannedBytes), scannedItems);
+        return new Page(new ArrayList<>(rows.subList(start, end)), resumeAfter, readBytes, scannedItems);
     }
 
     private static void requireOrderByShape(Stmt.Select stmt, DynamoDbAccessPath accessPath,

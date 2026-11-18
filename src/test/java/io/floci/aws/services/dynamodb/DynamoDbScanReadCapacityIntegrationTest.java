@@ -82,6 +82,9 @@ class DynamoDbScanReadCapacityIntegrationTest {
             assertEquals(5.0, scanUnits(client, many, r -> r.consistentRead(true)));
             assertEquals(3.0, statementUnits(client, "SELECT * FROM \"" + big + "\"", false));
             assertEquals(2.5, statementUnits(client, "SELECT * FROM \"" + many + "\"", false));
+            String severalKeys = "SELECT * FROM \"" + many + "\" WHERE pk IN ['m0', 'm1']";
+            assertEquals(statementUnits(client, severalKeys, false),
+                    statementUnits(client, severalKeys + " ORDER BY pk", false));
         }
     }
 
