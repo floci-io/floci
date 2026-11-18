@@ -990,7 +990,8 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 if (!"/description".equals(path)) {
                     throw new AwsException("BadRequestException", "Unsupported operation or path", 400);
                 }
-                newDescription = value;
+                // UpdateDeployment has no remove for the description, so an empty value clears it.
+                newDescription = value.isEmpty() ? null : value;
             }
             Deployment updated = new Deployment(existing.id(), newDescription, existing.createdDate(), existing.exportSnapshot());
             deploymentStore.put(deploymentKey(region, apiId, deploymentId), updated);

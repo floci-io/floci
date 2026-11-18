@@ -206,6 +206,13 @@ public final class CfnRollback {
      */
     public static final String APIGW_STAGE_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayStageUpdateSnapshot";
 
+    /**
+     * The description a deployment (and the inline stage it patched) carried before an in-place update,
+     * the stage an update created, or the deployment created because the prior was gone. Written and
+     * spent by {@code ApiGatewayRestApiCfnProvisioner}.
+     */
+    public static final String APIGW_DEPLOYMENT_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayDeploymentUpdateSnapshot";
+
     public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
 
     /**
