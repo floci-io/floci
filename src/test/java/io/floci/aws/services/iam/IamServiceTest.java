@@ -54,6 +54,7 @@ import java.util.function.Predicate;
 
 import static io.floci.aws.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.floci.aws.testing.IamTestPolicies.TRUST_POLICY;
 import static io.floci.aws.testing.IamTestPolicies.policyDocument;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1806,7 +1807,7 @@ class IamServiceTest {
     @Test
     void updateAssumeRolePolicyWithMatchingExpectedIdApplies() {
         IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, role.getRoleId());
 
@@ -1816,7 +1817,7 @@ class IamServiceTest {
     @Test
     void updateAssumeRolePolicyWithNullExpectedIdSkipsCheck() {
         iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         iamService.updateAssumeRolePolicy("LambdaExec", newDoc, null);
 
@@ -1831,7 +1832,7 @@ class IamServiceTest {
         // silently applied to a role the caller never actually verified owning.
         IamRole role = iamService.createRole("LambdaExec", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         String originalDoc = role.getAssumeRolePolicyDocument();
-        String newDoc = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+        String newDoc = TRUST_POLICY;
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> iamService.updateAssumeRolePolicy("LambdaExec", newDoc, "AROAWRONGID"));
