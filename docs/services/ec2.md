@@ -1093,6 +1093,9 @@ With IAM enforcement enabled, `DeleteLaunchTemplate`, `CreateLaunchTemplateVersi
 `DeleteLaunchTemplateVersions`, and `ModifyLaunchTemplate` resolve a `LaunchTemplateName`
 selector in the caller's account and request region before evaluating the template's
 ID-based ARN. Exact-resource grants and explicit denies apply to both name and ID selectors.
+The request retains that resolved ID, so deleting and recreating a template under the same
+name cannot redirect an authorized mutation to the replacement. `CreateLaunchTemplate`
+authorizes a new template's ARN and preserves the duplicate-name error for an existing name.
 
 Deleting versions updates `$Latest` to the highest surviving version. New versions receive numbers
 above every previously issued version, including deleted versions, and the counter survives restart.

@@ -170,6 +170,9 @@ import static io.floci.aws.services.ec2.Ec2Ids.randomHex;
 @ApplicationScoped
 public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettable {
 
+    // CDI Instance is qualified because EC2 also has an Instance model.
+    private jakarta.enterprise.inject.Instance<Ec2LaunchTemplateSelections> launchTemplateSelections;
+
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
 
     /**
@@ -608,7 +611,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                       jakarta.enterprise.inject.Instance<Ec2InstanceLaunchListener> instanceLaunchListenersInstance,
                       Ec2EbsEncryptionService ebsEncryptionService,
                       jakarta.enterprise.inject.Instance<VpcDependencyProvider> vpcDependencyProviders,
-                      jakarta.enterprise.inject.Instance<ResourceGroupsService> resourceGroupsServices) {
+                      jakarta.enterprise.inject.Instance<ResourceGroupsService> resourceGroupsServices,
+                      jakarta.enterprise.inject.Instance<Ec2LaunchTemplateSelections> launchTemplateSelections) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
@@ -618,6 +622,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.ebsEncryptionService = ebsEncryptionService;
         this.vpcDependencyProviders = vpcDependencyProviders;
         this.resourceGroupsServices = resourceGroupsServices;
+        this.launchTemplateSelections = launchTemplateSelections;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -10410,11 +10415,33 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** The caller's stored launch-template ARN, without creating defaults or changing the template. */
     Optional<String> findLaunchTemplateArn(String region, String name) {
+        String id;
+        try {
+            id = launchTemplateSelections == null ? launchTemplateIdByName(region, name)
+                    : launchTemplateSelections.get().resolve(callerAccountId(), region, name,
+                            () -> launchTemplateIdByName(region, name)).id();
+        } catch (ContextNotActiveException expected) {
+            LOG.debug("No active request context for launch-template authorization");
+            id = launchTemplateIdByName(region, name);
+        }
+        return Optional.ofNullable(id).map(found -> AwsArnUtils.Arn.of("ec2", region, callerAccountId(),
+                "launch-template/" + found).toString());
+    }
+
+    private String launchTemplateIdByName(String region, String name) {
         return launchTemplates.scan(k -> true).stream()
                 .filter(template -> region.equals(template.getRegion()) && name.equals(template.getLaunchTemplateName()))
-                .findFirst()
-                .map(template -> AwsArnUtils.Arn.of("ec2", region, callerAccountId(),
-                        "launch-template/" + template.getLaunchTemplateId()).toString());
+                .map(LaunchTemplate::getLaunchTemplateId).findFirst().orElse(null);
+    }
+
+    private Ec2LaunchTemplateSelections.Selection selectedLaunchTemplate(String region, String name) {
+        try {
+            return launchTemplateSelections == null ? null
+                    : launchTemplateSelections.get().get(callerAccountId(), region, name);
+        } catch (ContextNotActiveException expected) {
+            LOG.debug("No active request context for launch-template selection");
+            return null;
+        }
     }
 
     private List<LaunchTemplate> matchingLaunchTemplates(String region, List<String> ids, List<String> names,
@@ -10629,9 +10656,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 return launchTemplate;
             }
         } else if (name != null && !name.isBlank()) {
-            return launchTemplates.scan(k -> true).stream()
-                    .filter(lt -> lt.getRegion().equals(region) && name.equals(lt.getLaunchTemplateName()))
-                    .findFirst()
+            Ec2LaunchTemplateSelections.Selection selected = selectedLaunchTemplate(region, name);
+            String selectedId = selected == null ? launchTemplateIdByName(region, name) : selected.id();
+            return (selectedId == null ? Optional.<LaunchTemplate>empty() : launchTemplates.get(key(region, selectedId)))
                     .orElseThrow(() -> new AwsException("InvalidLaunchTemplateName.NotFoundException",
                             "The specified launch template does not exist.", 400));
         }

@@ -2678,3 +2678,10 @@ def test_create_name_does_not_look_up_an_existing_id():
     resource = {"type": "widget", "fill": {"WidgetId": "WidgetId"}}
     assert r.with_documented("svc:CreateWidget", ["widget"], formats,
                              cluster_model("CreateWidget", docs), [resource]) == [resource]
+
+
+def test_a_name_for_a_new_resource_does_not_select_an_existing_id():
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetId}"}
+    models = cluster_model("CreateWidget", {"WidgetName": "<p>A name for the widget.</p>"})
+    resource = {"type": "widget", "fill": {}}
+    assert r.with_documented("svc:CreateWidget", ["widget"], formats, models, [resource]) == [resource]

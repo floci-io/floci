@@ -9,6 +9,7 @@ import io.floci.aws.testing.SignedIamUsers;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -22,9 +23,16 @@ import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
 
 @QuarkusTest
 @TestProfile(SignedIamEnforcementProfile.class)
@@ -34,6 +42,9 @@ class Ec2LaunchTemplateNameIamIntegrationTest {
 
     @Inject
     Ec2Service ec2;
+
+    @InjectSpy
+    Ec2StoredResourceArns resources;
 
     @ParameterizedTest
     @ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1"})
@@ -164,6 +175,93 @@ class Ec2LaunchTemplateNameIamIntegrationTest {
                     r.launchTemplateName("missing-" + UUID.randomUUID())));
             assertEquals(400, error.statusCode());
             assertEquals("InvalidLaunchTemplateName.NotFoundException", error.awsErrorDetails().errorCode());
+        }
+    }
+
+    @Test
+    void duplicateCreateDoesNotAuthorizeAgainstTheExistingTemplate() throws Exception {
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint)) {
+            LaunchTemplate template = create(admin, "duplicate-" + UUID.randomUUID());
+            String policy = """
+                    {"Version":"2012-10-17","Statement":[
+                    {"Effect":"Allow","Action":"ec2:CreateLaunchTemplate","Resource":"*"},
+                    {"Effect":"Deny","Action":"ec2:CreateLaunchTemplate","Resource":"%s"}]}
+                    """.formatted(arn(Region.US_EAST_1, template));
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "lt-duplicate-", "create", policy);
+                    Ec2Client caller = client(user)) {
+                Ec2Exception error = assertThrows(Ec2Exception.class, () -> create(caller, template.launchTemplateName()));
+                assertEquals("InvalidLaunchTemplateName.AlreadyExistsException", error.awsErrorDetails().errorCode());
+                assertPresent(admin, template);
+            } finally {
+                remove(admin, template.launchTemplateId());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"DeleteLaunchTemplate", "CreateLaunchTemplateVersion", "ModifyLaunchTemplate",
+            "DeleteLaunchTemplateVersions"})
+    void replacementCannotBeMutatedUsingTheOriginalTemplatesGrant(String action) throws Exception {
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint)) {
+            String name = "replaced-" + UUID.randomUUID();
+            LaunchTemplate original = create(admin, name);
+            CountDownLatch resolved = new CountDownLatch(1);
+            CountDownLatch replaced = new CountDownLatch(1);
+            doAnswer(invocation -> {
+                Object found = invocation.callRealMethod();
+                resolved.countDown();
+                assertTrue(replaced.await(15, TimeUnit.SECONDS), "replacement must finish before authorization resumes");
+                return found;
+            }).when(resources).find("launch-template", List.of(name), "us-east-1");
+            String policy = """
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ec2:%s","Resource":"%s"}]}
+                    """.formatted(action, arn(Region.US_EAST_1, original));
+            ExecutorService worker = Executors.newSingleThreadExecutor();
+            LaunchTemplate replacement = null;
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "lt-race-", "mutate", policy);
+                    Ec2Client caller = client(user)) {
+                Future<?> mutation = worker.submit(() -> {
+                    if ("DeleteLaunchTemplateVersions".equals(action)) {
+                        assertEquals("launchTemplateNameDoesNotExist", caller.deleteLaunchTemplateVersions(r ->
+                                r.launchTemplateName(name).versions("2")).unsuccessfullyDeletedLaunchTemplateVersions()
+                                .getFirst().responseError().codeAsString());
+                    } else {
+                        Ec2Exception error = assertThrows(Ec2Exception.class, () -> {
+                            switch (action) {
+                                case "DeleteLaunchTemplate" -> caller.deleteLaunchTemplate(r -> r.launchTemplateName(name));
+                                case "CreateLaunchTemplateVersion" -> caller.createLaunchTemplateVersion(r ->
+                                        r.launchTemplateName(name).launchTemplateData(d -> d.imageId("ami-87654321")));
+                                case "ModifyLaunchTemplate" -> caller.modifyLaunchTemplate(r ->
+                                        r.launchTemplateName(name).defaultVersion("2"));
+                                default -> throw new AssertionError(action);
+                            }
+                        });
+                        assertEquals("InvalidLaunchTemplateName.NotFoundException", error.awsErrorDetails().errorCode());
+                    }
+                });
+                assertTrue(resolved.await(15, TimeUnit.SECONDS), "IAM must resolve the original template");
+                remove(admin, original.launchTemplateId());
+                replacement = create(admin, name);
+                admin.createLaunchTemplateVersion(r -> r.launchTemplateName(name)
+                        .launchTemplateData(d -> d.imageId("ami-22222222")));
+                replaced.countDown();
+                mutation.get(15, TimeUnit.SECONDS);
+                assertPresent(admin, replacement);
+                LaunchTemplate after = admin.describeLaunchTemplates(r -> r.launchTemplateNames(name))
+                        .launchTemplates().getFirst();
+                assertEquals(1L, after.defaultVersionNumber());
+                assertEquals(2L, after.latestVersionNumber());
+                assertEquals(2, admin.describeLaunchTemplateVersions(r -> r.launchTemplateName(name))
+                        .launchTemplateVersions().size());
+            } finally {
+                replaced.countDown();
+                worker.shutdownNow();
+                assertTrue(worker.awaitTermination(15, TimeUnit.SECONDS));
+                remove(admin, original.launchTemplateId());
+                if (replacement != null) {
+                    remove(admin, replacement.launchTemplateId());
+                }
+            }
         }
     }
 
