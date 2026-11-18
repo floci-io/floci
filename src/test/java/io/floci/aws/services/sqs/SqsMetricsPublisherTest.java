@@ -270,7 +270,7 @@ class SqsMetricsPublisherTest {
 
         Instant ended = Instant.parse("2026-10-22T12:00:00Z");
         List<Datapoint> points = cloudWatch.getMetricStatistics("AWS/SQS", "NumberOfMessagesSent",
-                List.of(new Dimension("QueueName", "stamped")), ended, ended.plusSeconds(60), 60, List.of("Sum"), null, REGION);
+                List.of(new Dimension("QueueName", "stamped")), ended, ended.plusSeconds(60), 1, List.of("Sum"), null, REGION);
         assertEquals(1, points.size());
         assertEquals(ended, points.getFirst().timestamp());
     }
