@@ -1384,6 +1384,35 @@ hold reports that user instead.
 Hardware TOTP tokens and FIDO security keys are not modeled, so `ListMFADevices` returns only
 virtual devices where AWS would return every type.
 
+#### What a refused device answers
+
+Every MFA refusal here is the sentence AWS was recorded answering, and the sentences are not shared
+between the two services.
+
+`EnableMFADevice` and `ResyncMFADevice` answer `InvalidAuthenticationCode` 403 with
+`Authentication code for device is not valid.`, wholly fixed text, recorded 2026-11-05, and the
+refusal leaves the device as it found it: a refused enable leaves an unassigned device unassigned,
+and a refused resync leaves the assignment it requires in place, since resync is for a device that
+is already the user's. A second virtual device at the same path and
+name is `EntityAlreadyExists` 409 with `MFA device already exists.`, recorded the same day, where
+this emulator used to name the entity type and describe the collision.
+
+`GetSessionToken` answers a failed claim 403 `AccessDenied` in one of two sentences, by which half
+of the claim failed, both wholly fixed and neither echoing the serial or the code:
+
+- a serial no device of the caller's answers to, `MultiFactorAuthentication failed, unable to
+  validate MFA code.  Please verify your MFA serial number is valid and associated with this
+  user.`, recorded 2026-10-29. The two consecutive spaces after `MFA code.` are AWS's own.
+- a code the device did not produce, or produced for a step already spent,
+  `MultiFactorAuthentication failed with invalid MFA one time pass code. `, recorded 2026-11-13.
+  That sentence ends in a single space, which is also AWS's own.
+
+A caller cannot tell the two apart from the code or the status, so the sentence is the only signal,
+which is why it is held byte for byte here. `AssumeRole` takes the same pair through the same seam
+and carries no recording of its own, so it answers the same two sentences, which is a reading
+rather than a measurement. A request naming one member and not the other is read as the half it
+left out: no code is a code that cannot validate, no serial a device nothing can be looked up by.
+
 #### What a device affects
 
 An enabled device is a device a session can be minted behind, and that session is what a statement
