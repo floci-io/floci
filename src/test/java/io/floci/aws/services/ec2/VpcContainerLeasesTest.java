@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
@@ -107,6 +109,7 @@ class VpcContainerLeasesTest {
     @Test
     @Timeout(30)
     void aDaemonThatDoesNotAnswerLeavesTheDependencyCheckAnsweringFromMemory() throws Exception {
+        leases = new VpcContainerLeases(ec2, "Test resource", () -> docker, Duration.ofMillis(50));
         when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
                 .thenReturn(Optional.of("10.0.1.20"));
         leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "r1");
@@ -128,7 +131,7 @@ class VpcContainerLeasesTest {
                 assertTrue(leases.holdsVpc(ACCOUNT, REGION, "vpc-1"));
             }
             long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-            assertTrue(tookMillis < 1_000, "the checks should not wait on Docker, took " + tookMillis + " ms");
+            assertTrue(tookMillis < 3_000, "each check should wait at most the recheck wait, took " + tookMillis + " ms");
             awaitTrue(() -> inspects.get() == 2, "one background look should be running");
             Thread.sleep(200);
             assertEquals(2, inspects.get(), "asking again while a look runs starts no second one");
@@ -138,6 +141,87 @@ class VpcContainerLeasesTest {
 
         awaitTrue(() -> !leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"),
                 "the address should be given back once Docker says the container is gone");
+    }
+
+    // Catches: the first DeleteSubnet after an unconfirmed removal getting DependencyViolation even
+    // though a healthy daemon would say at once that the container is gone (a console asks once).
+    @Test
+    void aHealthyDaemonsAnswerCountsForTheCheckThatAsked() {
+        join("c1", "10.0.1.20");
+        AtomicReference<RuntimeException> inspect = new AtomicReference<>(new IllegalStateException("daemon down"));
+        when(docker.inspectContainerCmd("c1").exec()).thenAnswer(invocation -> {
+            throw inspect.get();
+        });
+        leases.releaseIfGone("c1");
+        inspect.set(new NotFoundException("gone"));
+
+        assertFalse(leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"), "the first check should see the address free");
+    }
+
+    // Catches: one container whose address could not be given back stopping the look before the others.
+    @Test
+    void oneFailedReleaseDoesNotStopTheOthers() {
+        when(ec2.allocateVpcPrivateIp(ACCOUNT, REGION, "subnet-1"))
+                .thenReturn(Optional.of("10.0.1.20"), Optional.of("10.0.1.21"));
+        join("c1", "10.0.1.20");
+        join("c2", "10.0.1.21");
+        AtomicReference<RuntimeException> inspect = new AtomicReference<>(new IllegalStateException("daemon down"));
+        when(docker.inspectContainerCmd(anyString()).exec()).thenAnswer(invocation -> {
+            throw inspect.get();
+        });
+        leases.releaseIfGone("c1");
+        leases.releaseIfGone("c2");
+        inspect.set(new NotFoundException("gone"));
+        doThrow(new IllegalStateException("EC2 refused")).when(ec2)
+                .releaseVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.20");
+
+        leases.holdsSubnet(ACCOUNT, REGION, "subnet-1");
+
+        verify(ec2, timeout(5_000)).releaseVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.21");
+        assertTrue(leases.lease("c2").isEmpty(), "the second container's address should be given back");
+    }
+
+    // Catches: a removal that went unconfirmed while a look was running waiting for the next question.
+    @Test
+    @Timeout(30)
+    void aLookTakesUpAContainerThatBecameUnconfirmedWhileItRan() throws Exception {
+        when(ec2.allocateVpcPrivateIp(ACCOUNT, REGION, "subnet-1"))
+                .thenReturn(Optional.of("10.0.1.20"), Optional.of("10.0.1.21"));
+        join("c1", "10.0.1.20");
+        join("c2", "10.0.1.21");
+        CountDownLatch firstLookStarted = new CountDownLatch(1);
+        CountDownLatch daemonAnswers = new CountDownLatch(1);
+        AtomicInteger c1Looks = new AtomicInteger();
+        when(docker.inspectContainerCmd("c1").exec()).thenAnswer(invocation -> {
+            if (c1Looks.getAndIncrement() == 0) {
+                throw new IllegalStateException("daemon down");
+            }
+            firstLookStarted.countDown();
+            daemonAnswers.await();
+            throw new NotFoundException("gone");
+        });
+        AtomicInteger c2Looks = new AtomicInteger();
+        when(docker.inspectContainerCmd("c2").exec()).thenAnswer(invocation -> {
+            if (c2Looks.getAndIncrement() == 0) {
+                throw new IllegalStateException("daemon down");
+            }
+            throw new NotFoundException("gone");
+        });
+        leases.releaseIfGone("c1");
+        leases.holdsSubnet(ACCOUNT, REGION, "subnet-1");
+        assertTrue(firstLookStarted.await(5, TimeUnit.SECONDS));
+
+        leases.releaseIfGone("c2");
+        daemonAnswers.countDown();
+
+        awaitTrue(() -> leases.lease("c2").isEmpty(), "the running look should also take up c2");
+    }
+
+    private void join(String containerId, String address) {
+        when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", containerId, address))
+                .thenReturn(Optional.of(address));
+        assertEquals(address, leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", containerId, "r-" + containerId)
+                .orElseThrow().address());
     }
 
     private static void awaitTrue(BooleanSupplier condition, String message) throws InterruptedException {
