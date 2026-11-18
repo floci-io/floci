@@ -2919,8 +2919,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (roleNames) {
             if (!roleNames.contains(roleName)) {
                 if (!roleNames.isEmpty()) {
+                    // The quota name is what says which of the operation's limits fired, and it is
+                    // this one rather than a roles-per-profile quota, which AWS publishes nowhere.
                     throw new AwsException("LimitExceeded",
-                            "An instance profile can contain at most 1 role.", 409);
+                            "Cannot exceed quota for InstanceSessionsPerInstanceProfile: 1", 409);
                 }
                 roleNames.add(roleName);
                 instanceProfiles.put(instanceProfileName, profile);
@@ -2931,10 +2933,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void removeRoleFromInstanceProfile(String instanceProfileName, String roleName) {
         validateRoleName(roleName);
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
-        // Tolerates an already-deleted role, so guard only what is still there.
+        // Tolerates an already-deleted role that the profile still lists, so guard only what is
+        // still there; what the profile never held is a different case and AWS refuses it.
         roles.get(roleName).ifPresent(role -> requireNotServiceLinked(role, roleName));
-        profile.getRoleNames().remove(roleName);
-        instanceProfiles.put(instanceProfileName, profile);
+        List<String> roleNames = profile.getRoleNames();
+        // Whether the pairing is there and the removal of it are one decision, taken on the
+        // monitor the attach path holds, so a concurrent attach cannot land between them.
+        synchronized (roleNames) {
+            if (!roleNames.remove(roleName)) {
+                throw new AwsException("NoSuchEntity", "Role " + roleName + " in Instance Profile "
+                        + instanceProfileName + " cannot be found.", 404);
+            }
+            instanceProfiles.put(instanceProfileName, profile);
+        }
     }
 
     public List<InstanceProfile> listInstanceProfilesForRole(String roleName) {
