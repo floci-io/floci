@@ -47,12 +47,24 @@ import java.util.Map;
  *   {@code cdi} mode with the device the {@value #SAGEMAKER_GPU_CDI_DEVICE_PROPERTY} system property
  *   names, or in {@code count} mode when it names none. {@code SageMakerGpuDockerIntegrationTest}
  *   relies on it.</li>
+ *   <li>{@code floci.services.ecs.mock=false} runs ECS in Docker mode, and
+ *   {@code floci.services.ecs.reconcile-containers-on-startup=false} leaves a previous run's
+ *   containers unswept at boot. {@code EcsBackgroundTaskStopIntegrationTest} and
+ *   {@code EcsBackgroundTaskLaunchIntegrationTest} rely on them, over a container manager that
+ *   starts and stops nothing for real.</li>
+ *   <li>{@code floci.services.kinesis.creating-delay-millis} and {@code updating-delay-millis}, a
+ *   minute each, keep a stream CREATING and UPDATING for the whole test.
+ *   {@code KinesisStatusWindowIntegrationTest} relies on them.</li>
+ *   <li>{@code floci.services.rds.default-postgres-image=postgis/postgis:17-3.5-alpine} starts a
+ *   PostgreSQL instance on an image that creates a template database at startup.
+ *   {@code RdsTemplateDatabaseRestoreIntegrationTest} relies on it.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes: each is read by a single service, CloudFormation,
  * the Timestream for InfluxDB data plane, an EKS cluster's container start, the EMR and EMR
- * Serverless runners, CloudFront, DynamoDB and SageMaker training, and no other class here calls
- * that service. The persistent path is the one setting every class sees: it moves where this
+ * Serverless runners, CloudFront, DynamoDB, SageMaker training, ECS, Kinesis and RDS, and no other
+ * class here calls that service. Boot-time reconciliation only acts on containers a previous run
+ * left, which this application never adopts. The persistent path is the one setting every class sees: it moves where this
  * application writes what services keep on disk whatever their storage mode, Timestream backups and
  * Lambda code-volume markers among them, each under a directory of its own, and DynamoDB is the only
  * service here that stores its records there.
@@ -91,7 +103,12 @@ public class CloudFormationSettingsProfile implements QuarkusTestProfile {
                 Map.entry("floci.storage.services.dynamodb.item-layout", "per-table"),
                 Map.entry("floci.storage.services.dynamodb.item-shards", "4"),
                 Map.entry("floci.storage.persistent-path", DYNAMODB_PARTITIONED_STORAGE_DIR),
-                Map.entry("floci.services.sagemaker.gpu.enabled", "true")));
+                Map.entry("floci.services.sagemaker.gpu.enabled", "true"),
+                Map.entry("floci.services.ecs.mock", "false"),
+                Map.entry("floci.services.ecs.reconcile-containers-on-startup", "false"),
+                Map.entry("floci.services.kinesis.creating-delay-millis", "60000"),
+                Map.entry("floci.services.kinesis.updating-delay-millis", "60000"),
+                Map.entry("floci.services.rds.default-postgres-image", "postgis/postgis:17-3.5-alpine")));
         String device = System.getProperty(SAGEMAKER_GPU_CDI_DEVICE_PROPERTY);
         if (device != null && !device.isBlank()) {
             overrides.put("floci.services.sagemaker.gpu.mode", "cdi");
