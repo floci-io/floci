@@ -368,6 +368,11 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
         store.put(record.getSession().getSessionId(), record);
     }
 
+    /** The session {@code sessionId} of {@code account} as stored, read in place, for IAM's lookup of stored tags. */
+    Optional<Session> storedSession(String account, String sessionId) {
+        return AccountAwareStorageBackend.readInAccount(store, account, sessionId).map(SessionRecord::getSession);
+    }
+
     private static void validate(StartSessionRequest request) {
         List<String> violations = new ArrayList<>();
         if (request.getClientToken() == null) {

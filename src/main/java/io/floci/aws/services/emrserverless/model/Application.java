@@ -29,7 +29,7 @@ public class Application {
     private Instant createdAt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant updatedAt;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
     private String architecture;
     private Map<String, InitialCapacityConfig> initialCapacity;
     private MaximumCapacity maximumCapacity;
