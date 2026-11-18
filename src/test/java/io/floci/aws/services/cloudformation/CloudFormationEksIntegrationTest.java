@@ -234,13 +234,17 @@ class CloudFormationEksIntegrationTest {
 
     @Test
     void aBlankEncryptionConfigFailsTheClusterInsteadOfCreatingItUnencrypted() {
-        String stack = "cfn-eks-blank-" + Long.toString(System.nanoTime(), 36);
-        try (CloudFormationClient client = AwsTestClients.create(
-                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
-            CfnStackWaits.createStack(client, stack, subjectStack("", "", "AWS::EKS::Cluster",
-                    ROLE + "\"EncryptionConfig\": \"\""), "ROLLBACK_COMPLETE");
-        } finally {
-            CfnStackWaits.deleteStack(stack);
+        for (String blank : List.of("\"EncryptionConfig\": \"\"",
+                "\"Logging\": {\"ClusterLogging\": {\"EnabledTypes\": [{}]}}",
+                "\"Logging\": {\"ClusterLogging\": {\"EnabledTypes\": [{\"Type\": \"\"}]}}")) {
+            String stack = "cfn-eks-blank-" + Long.toString(System.nanoTime(), 36);
+            try (CloudFormationClient client = AwsTestClients.create(
+                    CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+                CfnStackWaits.createStack(client, stack, subjectStack("", "", "AWS::EKS::Cluster",
+                        ROLE + blank), "ROLLBACK_COMPLETE");
+            } finally {
+                CfnStackWaits.deleteStack(stack);
+            }
         }
     }
 
