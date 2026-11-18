@@ -59,6 +59,12 @@ import java.util.Set;
  *   relies on it. The refusal comes from the reset preflight, before any service is cleared.
  *   DynamoDB itself never starts in this application: its state and its TTL sweeper are set up by
  *   the lifecycle this one replaces.</li>
+ *   <li>{@code floci.protocols.reject-unknown-service-scope=false} turns off two refusals that
+ *   would otherwise answer with {@code UnknownOperationException}: a REST request signed for a
+ *   scope the catalog does not list, and a known REST JSON service's request that lands on S3's
+ *   path-style wildcard route or on another service's colliding route. Either now falls through to
+ *   the route it matched. {@code UnknownServiceScopeGuardDisabledIntegrationTest} relies on it, and
+ *   checks both.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes. Each is read by a single service: RDS, the
@@ -66,11 +72,15 @@ import java.util.Set;
  * EMR release catalogue, Firehose delivery, ElastiCache and the DynamoDB backend. No other class
  * here calls the service an override changes, none calls DynamoDB, and no class here posts an
  * emulator reset apart from {@code DynamoDbBackendResetIntegrationTest}, whose reset is the refused
- * one.
+ * one. The two refusals the guard setting turns off only answer a request signed for an unlisted
+ * scope or a known REST JSON service's request on a route that is not its own, and only
+ * {@code UnknownServiceScopeGuardDisabledIntegrationTest} sends either.
  *
- * <p>A class joins only if no other class here calls the service its setting changes, and if it
- * neither resets the emulator nor calls DynamoDB, directly or through a CloudFormation stack. A
- * class that needs RDS mocked and nothing else can join on those terms.
+ * <p>A class joins if every setting here is either one it relies on or one that never reaches its
+ * requests, and if any setting it adds never reaches the requests of a class already here. It must
+ * also neither reset the emulator nor call DynamoDB, directly or through a CloudFormation stack, nor
+ * expect either refusal above, so a class that needs RDS mocked and nothing else can join on those
+ * terms.
  */
 public class RdsMockProfile implements QuarkusTestProfile {
 
@@ -96,7 +106,8 @@ public class RdsMockProfile implements QuarkusTestProfile {
                 Map.entry("floci.services.firehose.flush-record-count", "2"),
                 Map.entry("floci.services.elasticache.default-image", ELASTICACHE_SHELL_LESS_IMAGE),
                 Map.entry("floci.services.elasticache.shell-less-backend", "true"),
-                Map.entry("floci.services.elasticache.shell-less-backend-dbfilename", "dump.kdb"));
+                Map.entry("floci.services.elasticache.shell-less-backend-dbfilename", "dump.kdb"),
+                Map.entry("floci.protocols.reject-unknown-service-scope", "false"));
     }
 
     @Override
