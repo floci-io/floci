@@ -1500,6 +1500,40 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags Cost Explorer holds on the anomaly monitor a request names,
+     * as TagResource leaves them, so an allow on one team's tag lets the caller read that team's monitor and not
+     * another's.
+     */
+    @Test
+    void aCostExplorerResourceTagConditionReadsTheTagsOfTheAnomalyMonitor() {
+        String tagged = anomalyMonitor("[{\"Key\":\"team\",\"Value\":\"web\"}]");
+        String other = anomalyMonitor("[{\"Key\":\"team\",\"Value\":\"web\"}]");
+        adminJson("ce", "AWSInsightsIndexService.TagResource")
+                .body("{\"ResourceArn\":\"" + tagged + "\",\"ResourceTags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-monitor-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ce:GetAnomalyMonitors\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "ce", "AWSInsightsIndexService.GetAnomalyMonitors", "1.1",
+                "{\"MonitorArnList\":[\"" + tagged + "\"]}").statusCode(200);
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetAnomalyMonitors", "1.1",
+                "{\"MonitorArnList\":[\"" + other + "\"]}"), "ce:GetAnomalyMonitors");
+    }
+
+    /** The ARN of a custom anomaly monitor an administrator creates with the {@code tags} list, deleted afterwards. */
+    private String anomalyMonitor(String tags) {
+        String arn = adminJson("ce", "AWSInsightsIndexService.CreateAnomalyMonitor").body("{\"AnomalyMonitor\":"
+                + "{\"MonitorName\":\"res-monitor-" + suffix() + "\",\"MonitorType\":\"CUSTOM\","
+                + "\"MonitorSpecification\":{\"Dimensions\":{\"Key\":\"LINKED_ACCOUNT\",\"Values\":[\"" + ACCOUNT
+                + "\"]}}},\"ResourceTags\":" + tags + "}")
+                .post("/").then().statusCode(200).extract().path("MonitorArn");
+        cleanup.register(() -> adminJson("ce", "AWSInsightsIndexService.DeleteAnomalyMonitor")
+                .body("{\"MonitorArn\":\"" + arn + "\"}").post("/"));
+        return arn;
+    }
+
+    /**
      * A Cost Explorer cost read is checked on the billing view its {@code BillingViewArn} gives, and Floci answers the
      * costs of none but the caller's primary view: another is refused, so a grant on it does not reach the account's
      * costs, nor does one on the primary view reach another's.
