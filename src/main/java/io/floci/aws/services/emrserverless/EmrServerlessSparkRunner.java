@@ -1358,7 +1358,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // jars, named here as Tez's own defaults are; its port ranges and addresses are placeholders EMR Serverless fills,
     // and its compression needs a native library the image lacks. An application master says where it is by
     // ${env.NM_HOST}, which is left for its own node to fill in: the settings are read on the step's side first, and
-    // $NM_HOST or an env of the step's would be filled in there.
+    // $NM_HOST or an env of the step's would be filled in there. Where the cluster's primary node runs the YARN
+    // timeline server, the application master logs its DAGs there, through the timeline server's REST interface, which
+    // the Tez UI reads.
     private static List<SparkSetting> tezOnYarnSettings(Job job, List<String> executorEnvironment,
                                                         List<String> classPath, String... variables) {
         String root = hadoopRoot(job);
@@ -1369,7 +1371,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         List<String> containerVariables = new ArrayList<>(List.of(variables));
         containerVariables.add("TEZ_HOME=" + root + "/tez");
         String environment = containerEnvironment(executorEnvironment, containerVariables.toArray(String[]::new));
-        return List.of(
+        List<SparkSetting> settings = new ArrayList<>(List.of(
                 new SparkSetting("yarn.resourcemanager.hostname", job.storage().resourceManager()),
                 new SparkSetting("tez.local.mode", "false"),
                 new SparkSetting("tez.framework.client", "org.apache.tez.client.TezYarnClient"),
@@ -1394,7 +1396,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("tez.task.launch.env", environment),
                 new SparkSetting("tez.am.resource.memory.mb", "1024"),
                 new SparkSetting("tez.runtime.intermediate-output.should-compress", "false"),
-                new SparkSetting("tez.runtime.intermediate-input.is-compressed", "false"));
+                new SparkSetting("tez.runtime.intermediate-input.is-compressed", "false")));
+        String timeline = job.storage().timelineServer();
+        if (timeline != null) {
+            settings.add(new SparkSetting("tez.history.logging.service.class",
+                    "org.apache.tez.dag.history.logging.ats.ATSHistoryLoggingService"));
+            settings.add(new SparkSetting("yarn.timeline-service.enabled", "true"));
+            settings.add(new SparkSetting("yarn.timeline-service.hostname", timeline));
+        }
+        return settings;
     }
 
     // The folders holding Hadoop on a cluster's nodes, as a class path's entries; the LZO codec's beside them.

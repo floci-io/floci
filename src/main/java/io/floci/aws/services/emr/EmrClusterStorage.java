@@ -143,6 +143,22 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // The MapReduce JobHistory server's information on its web port, which says it has started.
     private static final String JOB_HISTORY_INFO = "http://" + BIND + ":"
             + EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT + "/ws/v1/history/info";
+    /** The YARN timeline server's web port, Hadoop's default {@code yarn.timeline-service.webapp.address}'s. */
+    static final int TIMELINE_WEB_PORT = 8188;
+    /** The port the Tez UI is served on, at {@link #TEZ_UI_PATH}: "Tez | http://master-public-dns-name:8080/tez-ui". */
+    static final int TEZ_UI_PORT = 8080;
+    static final String TEZ_UI_PATH = "/tez-ui/";
+    // Set on a primary node that runs the YARN timeline server, as on a cluster with Hadoop, and the Tez UI, as on one
+    // with Tez; what each answers on its web port says it has started. The Tez UI's configuration, which its page
+    // reads, names the timeline server and the ResourceManager by the node's name, whose links Floci makes the
+    // browser's.
+    private static final String TIMELINE_VARIABLE = "FLOCI_YARN_TIMELINE";
+    private static final String TEZ_UI_VARIABLE = "FLOCI_TEZ_UI";
+    private static final String TIMELINE_ABOUT = "http://" + BIND + ":" + TIMELINE_WEB_PORT + "/ws/v1/timeline";
+    private static final String TEZ_UI_PAGE = "http://" + BIND + ":" + TEZ_UI_PORT + TEZ_UI_PATH;
+    private static final String TEZ_UI_CONFIG = "/etc/tez-ui/conf/configs.js";
+    // The Tez UI's files, which an image with Tez has, one with Hive or Floci's Pig.
+    private static final String TEZ_UI_FILES = "/usr/lib/tez/tez-ui";
     // Set on a primary node that runs a Spark History Server, as on a cluster with Spark; its version on its web port
     // says it has started.
     private static final String SPARK_HISTORY_VARIABLE = "FLOCI_SPARK_HISTORY";
@@ -217,6 +233,23 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " \"<property><name>dfs.datanode.ipc.address</name>"
                     + "<value>$FLOCI_HDFS_BIND:9867</value></property>\""
                     + " '</configuration>' > " + HDFS_CONF + "/hdfs-site.xml",
+            "timeline=; [ -z \"$" + TIMELINE_VARIABLE + "\" ] || timeline=\"" + String.join("", List.of(
+                    property("yarn.timeline-service.enabled", "true"),
+                    property("yarn.timeline-service.hostname", "$FLOCI_HDFS_HOST"),
+                    property("yarn.timeline-service.bind-host", "$FLOCI_HDFS_BIND"),
+                    property("yarn.timeline-service.leveldb-timeline-store.path", "/mnt/yarn/timeline"),
+                    property("yarn.timeline-service.http-cross-origin.enabled", "true"),
+                    property("yarn.resourcemanager.webapp.cross-origin.enabled", "true"),
+                    // The ResourceManager publishes its applications there: Hadoop 3.4 reads the first, which
+                    // deprecates the second that earlier releases' Hadoop may still read.
+                    property("yarn.system-metrics-publisher.enabled", "true"),
+                    property("yarn.resourcemanager.system-metrics-publisher.enabled", "true"))) + "\"",
+            "if [ -n \"$" + TEZ_UI_VARIABLE + "\" ]; then",
+            "  mkdir -p " + TEZ_UI_CONFIG.substring(0, TEZ_UI_CONFIG.lastIndexOf('/')) + " && printf '%s\\n' 'ENV = {'"
+                    + " '  hosts: {' \"    timeline: 'http://$FLOCI_HDFS_HOST:" + TIMELINE_WEB_PORT + "',\""
+                    + " \"    rm: 'http://$FLOCI_HDFS_HOST:" + RESOURCE_MANAGER_WEB_PORT + "',\" '  },' '};'"
+                    + " > " + TEZ_UI_CONFIG + " || exit",
+            "fi",
             "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then",
             "  printf '%s\\n' '<configuration>'" + yarnProperties(List.of(
                     "yarn.resourcemanager.hostname", "$FLOCI_HDFS_HOST",
@@ -235,7 +268,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     "yarn.nodemanager.aux-services", "mapreduce_shuffle",
                     "yarn.resourcemanager.nodes.exclude-path", YARN_EXCLUDE,
                     "yarn.resourcemanager.decommissioning-nodes-watcher.poll-interval-secs", "3"))
-                    + " '</configuration>' > " + HDFS_CONF + "/yarn-site.xml || exit",
+                    + " \"$timeline\" '</configuration>' > " + HDFS_CONF + "/yarn-site.xml || exit",
             "  printf '%s\\n' '<configuration>'" + yarnProperties(List.of(
                     "yarn.scheduler.capacity.root.queues", "default",
                     "yarn.scheduler.capacity.root.default.capacity", "100",
@@ -335,6 +368,14 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " \"${site[@]}\" & n=$((n + 1)); "
                     + "fi; "
                     + "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn timelineserver & n=$((n + 1)); fi; "
+                    + "tez_ui=; if [ -n \"$" + TEZ_UI_VARIABLE + "\" ]; then "
+                    + "if [ -d " + TEZ_UI_FILES + " ]; then tez_ui=1; "
+                    + "else echo \"Floci: no Tez UI in this image, at " + TEZ_UI_FILES + "\" >&2; fi; fi; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + "python3 -m http.server " + TEZ_UI_PORT + " --bind $FLOCI_HDFS_BIND --directory /usr/lib/tez"
+                    + " > /dev/null 2>&1 & n=$((n + 1)); fi; "
                     + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn resourcemanager & n=$((n + 1)); "
                     + "if [ -z \"$" + NODE_WORKERS_VARIABLE + "\" ]; then "
                     + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn nodemanager & n=$((n + 1)); fi; "
@@ -366,6 +407,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + "fi; "
                     + "if [ -n \"$" + SPARK_HISTORY_VARIABLE + "\" ]; then "
                     + untilReady("curl -sf -m 5 " + SPARK_HISTORY_VERSION + " > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$" + TIMELINE_VARIABLE + "\" ]; then "
+                    + untilReady("curl -sf -m 5 " + TIMELINE_ABOUT + " > /dev/null")
+                    + "fi; "
+                    + "if [ -n \"$tez_ui\" ]; then "
+                    + untilReady("curl -sf -m 5 " + TEZ_UI_PAGE + " > /dev/null")
                     + "fi; "
                     + "touch " + HDFS_READY + "; "
                     // Not wait -n: an emr-6.x image's bash, 4.2, does not have it.
@@ -764,6 +811,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             storage = storage.withYarn(host, everyWorkerJoined ? awsEnv.flociEndpoint() : flociEndpointOn(name));
             if (yarn.sparkHistory()) {
                 storage = storage.withSparkHistoryServer(host);
+            }
+            if (yarn.timelineServer()) {
+                storage = storage.withTimelineServer(host);
             }
             return yarn.nodes().stream().anyMatch(Node::core) ? storage.withReplication(yarn.replication()) : storage;
         }
@@ -1253,6 +1303,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return properties.toString();
     }
 
+    // A Hadoop property, as a line of a site file.
+    private static String property(String name, String value) {
+        return "<property><name>" + name + "</name><value>" + value + "</value></property>";
+    }
+
     // A node script's wait until condition holds, polled; one of its n daemons exiting meanwhile ends the node.
     private static String untilReady(String condition) {
         return "until " + condition + "; do [ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; ";
@@ -1337,6 +1392,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (yarn.sparkHistory()) {
                 spec.withLoopbackPortBinding(EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT, 0);
             }
+            if (yarn.timelineServer()) {
+                spec.withLoopbackPortBinding(TIMELINE_WEB_PORT, 0);
+            }
+            if (yarn.tezUi()) {
+                spec.withLoopbackPortBinding(TEZ_UI_PORT, 0);
+            }
         }
         if (yarn != null) {
             spec.withEnv(YARN_MEMORY_VARIABLE, String.valueOf(yarn.memoryMb()))
@@ -1350,6 +1411,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
             if (yarn.sparkHistory()) {
                 spec.withEnv(SPARK_HISTORY_VARIABLE, "1");
+            }
+            if (yarn.timelineServer()) {
+                spec.withEnv(TIMELINE_VARIABLE, "1");
+            }
+            if (yarn.tezUi()) {
+                spec.withEnv(TEZ_UI_VARIABLE, "1");
             }
         }
         // The metastore and the executors YARN runs reach Floci, Floci on the host by its address, Floci's own

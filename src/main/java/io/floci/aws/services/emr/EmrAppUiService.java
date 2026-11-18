@@ -39,12 +39,12 @@ import java.util.regex.Pattern;
  * A cluster's application user interfaces: the persistent ones "hosted off-cluster" (Amazon EMR Management Guide, "View
  * persistent application user interfaces in Amazon EMR") and the on-cluster ones, both reached through presigned URLs.
  * In the docker runner mode, an on-cluster UI that runs on the cluster's primary node, its ResourceManager, an
- * application master through it, its MapReduce JobHistory server, the NodeManager of a primary node that works, or the
- * Spark History Server of a cluster with Spark, opens for real through {@link EmrAppUiProxy}, on a host of its own
- * under {@link #UI_HOST}, as AWS's are under "emrappui-prod.us-east-1.amazonaws.com" (Management Guide, "View Amazon
- * EMR application history"). Floci keeps a persistent application UI's record, but serves no persistent UI, Tez UI or
- * YARN timeline server: a link to one of those, and to any on-cluster UI elsewhere, opens a page of Floci's own about
- * the cluster
+ * application master through it, its MapReduce JobHistory server, the NodeManager of a primary node that works, the
+ * Spark History Server of a cluster with Spark, or the YARN timeline server and the Tez UI of one with Hadoop and Tez,
+ * opens for real through {@link EmrAppUiProxy}, on a host of its own under {@link #UI_HOST}, as AWS's are under
+ * "emrappui-prod.us-east-1.amazonaws.com" (Management Guide, "View Amazon EMR application history"). Floci keeps a
+ * persistent application UI's record, but serves no persistent UI: a link to one, and to any on-cluster UI elsewhere,
+ * opens a page of Floci's own about the cluster
  * ({@link EmrAppUiController}). Either link is valid for {@link #VALIDITY}: the page's is signed with a key of this
  * process, and a proxied interface's host holds a secret this process gave it.
  */
@@ -74,6 +74,8 @@ public class EmrAppUiService {
     static final String APPLICATION_MASTER = "ApplicationMaster";
     static final String JOB_HISTORY_SERVER = "JobHistoryServer";
     static final String SPARK_HISTORY_SERVER = "SparkHistoryServer";
+    static final String YARN_TIMELINE_SERVICE = "YarnTimelineService";
+    static final String TEZ_UI = "TezUI";
     // No source gives AWS's wording for these; they are Floci's.
     static final String NO_SUCH_INTERFACE = "This link opens none of the cluster's interfaces on that port.";
     static final String CLUSTER_ENDED = "Cluster %s is no longer running, and its on-cluster application UIs are"
@@ -270,6 +272,8 @@ public class EmrAppUiService {
             case RESOURCE_MANAGER, APPLICATION_MASTER -> EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT;
             case JOB_HISTORY_SERVER -> EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT;
             case SPARK_HISTORY_SERVER -> EmrServerlessSparkRunner.SPARK_HISTORY_WEB_PORT;
+            case YARN_TIMELINE_SERVICE -> EmrClusterStorage.TIMELINE_WEB_PORT;
+            case TEZ_UI -> EmrClusterStorage.TEZ_UI_PORT;
             default -> 0;
         };
         return interfaces.ports().contains(port) ? port : null;
@@ -286,6 +290,9 @@ public class EmrAppUiService {
                 yield matcher != null && matcher.matches() ? "/jobhistory/job/job_" + matcher.group(1) : "/jobhistory";
             }
             case SPARK_HISTORY_SERVER -> application != null ? "/history/" + application + "/" : "/";
+            case YARN_TIMELINE_SERVICE -> application != null ? "/applicationhistory/app/" + application
+                    : "/applicationhistory";
+            case TEZ_UI -> EmrClusterStorage.TEZ_UI_PATH + (application != null ? "#/app/" + application : "");
             default -> application != null ? "/cluster/app/" + application : "/cluster";
         };
     }

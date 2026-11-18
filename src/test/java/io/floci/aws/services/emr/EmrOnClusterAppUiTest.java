@@ -87,6 +87,33 @@ class EmrOnClusterAppUiTest {
         assertTrue(history.url().contains("-18080.emrappui."), history.url());
         assertEquals("/history/" + application + "/", path(history));
         assertEquals("/", path(appUis.onClusterUrl(clusterId, "SparkHistoryServer", null, false)));
+        // A cluster with Hadoop: its YARN timeline server's application history.
+        EmrAppUiService.Presigned timeline = appUis.onClusterUrl(clusterId, "YarnTimelineService", application, false);
+        assertTrue(timeline.url().contains("-8188.emrappui."), timeline.url());
+        assertEquals("/applicationhistory/app/" + application, path(timeline));
+    }
+
+    @Test
+    void aClusterWithTezOpensItsTezUiOnTheApplicationAskedFor() {
+        fixture.clusterStorage.webInterfaces.put(EmrClusterStorage.TEZ_UI_PORT,
+                new ContainerLifecycleManager.EndpointInfo("localhost", 32802));
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster cluster = cluster("tez", true);
+        cluster.setReleaseLabel("emr-7.5.0");
+        cluster.setApplications("[{\"Name\":\"Hadoop\"},{\"Name\":\"Hive\"},{\"Name\":\"Tez\"}]");
+        String clusterId = fixture.service.runJobFlow(cluster, REGION).getId();
+
+        URI tez = URI.create(appUis.onClusterUrl(clusterId, "TezUI", "application_1_0001", false).url());
+
+        assertTrue(tez.getAuthority().contains("-8080.emrappui."), tez.toString());
+        assertEquals("/tez-ui/", tez.getPath());
+        assertEquals("/app/application_1_0001", tez.getFragment());
+        // Its page asks the timeline server and the ResourceManager, on their own hosts under the same link.
+        String secret = tez.getHost().substring(0, 26);
+        EmrAppUiService.UiRoute route = appUis.route(tez.getAuthority(), "http");
+        String primary = EmrService.masterPrivateDnsName(fixture.service.describeCluster(clusterId));
+        assertEquals("http://" + secret + "-8188.emrappui.localhost:4566",
+                route.rewrites().get("http://" + primary + ":8188"));
     }
 
     @Test
@@ -125,6 +152,22 @@ class EmrOnClusterAppUiTest {
         EmrAppUiService.UiRoute expired = appUis.route(authority, "http");
         assertEquals(403, expired.status());
         assertEquals(EmrAppUiController.INVALID, expired.refusal());
+    }
+
+    @Test
+    void aClusterWithTezButNeitherHiveNorPigHasNoTezUiAsItsImageHasNoTez() {
+        fixture.clusterStorage.webInterfaces.put(EmrClusterStorage.TEZ_UI_PORT,
+                new ContainerLifecycleManager.EndpointInfo("localhost", 32802));
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster cluster = cluster("tez-alone", true);
+        cluster.setReleaseLabel("emr-7.5.0");
+        cluster.setApplications("[{\"Name\":\"Hadoop\"},{\"Name\":\"Spark\"},{\"Name\":\"Tez\"}]");
+        String clusterId = fixture.service.runJobFlow(cluster, REGION).getId();
+
+        EmrAppUiService.Presigned tez = appUis.onClusterUrl(clusterId, "TezUI", null, false);
+
+        assertTrue(tez.url().startsWith("http://localhost:4566" + EmrAppUiService.PATH + "?"), tez.url());
+        assertTrue(appUis.onClusterUrl(clusterId, "YarnTimelineService", null, false).url().contains("-8188."));
     }
 
     @Test

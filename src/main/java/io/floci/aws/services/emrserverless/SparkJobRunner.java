@@ -212,12 +212,13 @@ public interface SparkJobRunner {
      * {@code hdfsNetwork}, the cluster's own, which the container joins (all three null until it runs, the network
      * also on the host's own network, which steps share with it); and, on a cluster with Hive or HCatalog, the URI of
      * the Hive metastore service on that node, or null; how many copies of a block its HDFS keeps, when its core
-     * nodes hold it, else 0; and the host of the Spark History Server on that node, which reads its Spark applications'
-     * event logs, or null where it runs none.
+     * nodes hold it, else 0; the host of the Spark History Server on that node, which reads its Spark applications'
+     * event logs, or null where it runs none; and the host of the YARN timeline server on that node, which Tez logs its
+     * DAGs to, or null where it runs none.
      */
     record Storage(String home, String mnt, String hdfsHost, String hdfsAddress, String hdfsNetwork,
                    String hiveMetastore, String resourceManager, String flociEndpoint, int replication,
-                   String metadataAddress, String sparkHistoryServer) {
+                   String metadataAddress, String sparkHistoryServer, String timelineServer) {
 
         /**
          * The component label of an EMR cluster's HDFS container, which carries its service's labels as a driver
@@ -230,19 +231,21 @@ public interface SparkJobRunner {
 
         /** A cluster's volumes, before its HDFS runs. */
         public Storage(String home, String mnt) {
-            this(home, mnt, null, null, null, null, null, null, 0, null, null);
+            this(home, mnt, null, null, null, null, null, null, 0, null, null, null);
         }
 
         /** This storage, its HDFS's NameNode on {@code host}, at {@code address} on {@code network}. */
         public Storage withHdfs(String host, String address, String network) {
             return new Storage(home, mnt, host, address, network, hiveMetastore, resourceManager, flociEndpoint,
-                    replication, metadataAddress, sparkHistoryServer);
+                    replication, metadataAddress, sparkHistoryServer,
+                    timelineServer);
         }
 
         /** This storage, its Hive metastore service at {@code uri}. */
         public Storage withHiveMetastore(String uri) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, uri, resourceManager, flociEndpoint,
-                    replication, metadataAddress, sparkHistoryServer);
+                    replication, metadataAddress, sparkHistoryServer,
+                    timelineServer);
         }
 
         /**
@@ -251,13 +254,15 @@ public interface SparkJobRunner {
          */
         public Storage withYarn(String host, String flociEndpoint) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, host, flociEndpoint,
-                    replication, metadataAddress, sparkHistoryServer);
+                    replication, metadataAddress, sparkHistoryServer,
+                    timelineServer);
         }
 
         /** This storage, its HDFS keeping {@code copies} copies of a block on its core nodes. */
         public Storage withReplication(int copies) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, resourceManager,
-                    flociEndpoint, copies, metadataAddress, sparkHistoryServer);
+                    flociEndpoint, copies, metadataAddress, sparkHistoryServer,
+                    timelineServer);
         }
 
         /**
@@ -265,7 +270,13 @@ public interface SparkJobRunner {
          */
         public Storage withSparkHistoryServer(String host) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, resourceManager,
-                    flociEndpoint, replication, metadataAddress, host);
+                    flociEndpoint, replication, metadataAddress, host, timelineServer);
+        }
+
+        /** This storage, YARN's timeline server on {@code host}, which Tez's application masters log their DAGs to. */
+        public Storage withTimelineServer(String host) {
+            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, resourceManager,
+                    flociEndpoint, replication, metadataAddress, sparkHistoryServer, host);
         }
 
         /**
@@ -274,7 +285,8 @@ public interface SparkJobRunner {
          */
         public Storage withMetadataAddress(String address) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, resourceManager,
-                    flociEndpoint, replication, address, sparkHistoryServer);
+                    flociEndpoint, replication, address, sparkHistoryServer,
+                    timelineServer);
         }
     }
 

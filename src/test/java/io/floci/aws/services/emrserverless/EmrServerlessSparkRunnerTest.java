@@ -1265,6 +1265,22 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aHiveStepsTezLogsItsDagsToTheTimelineServerOfItsClusterWhereItsPrimaryNodeRunsOne() {
+        List<String> logged = EmrServerlessSparkRunner.hiveArguments(hiveJob(List.of("-e", "select 1"))
+                .onStorage(ON_YARN.withTimelineServer("ip-10-0-0-1.ec2.internal")), ENDPOINT, AWS_ENVIRONMENT);
+        List<String> notLogged = EmrServerlessSparkRunner.hiveArguments(
+                hiveJob(List.of("-e", "select 1")).onStorage(ON_YARN), ENDPOINT, AWS_ENVIRONMENT);
+
+        for (String setting : List.of(
+                "tez.history.logging.service.class=org.apache.tez.dag.history.logging.ats.ATSHistoryLoggingService",
+                "yarn.timeline-service.enabled=true",
+                "yarn.timeline-service.hostname=ip-10-0-0-1.ec2.internal")) {
+            assertTrue(logged.contains(setting), setting + " in " + logged);
+            assertFalse(notLogged.contains(setting), setting + " in " + notLogged);
+        }
+    }
+
+    @Test
     void aHiveStepOnItsClustersYarnRunsStockTezThereInPlaceOfEmrServerlesssPlugins() {
         List<String> arguments = EmrServerlessSparkRunner.hiveArguments(
                 hiveJob(List.of("-e", "select 1")).onStorage(ON_YARN), ENDPOINT, AWS_ENVIRONMENT);
