@@ -1634,7 +1634,7 @@ public class NativeDynamoDbJsonHandler {
             response.set("LastEvaluatedKey", result.lastEvaluatedKey());
         }
         addConsumedCapacity(response, request, tableName,
-                readCapacityUnits(result.scannedBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
+                readCapacityUnits(result.readBytes(), request.path("ConsistentRead").asBoolean(false)), scanAccessPath);
         return Response.ok(response).build();
     }
 
@@ -3727,6 +3727,11 @@ public class NativeDynamoDbJsonHandler {
     static double readCapacityUnits(long bytes, boolean consistentRead) {
         double units = Math.max(1, (bytes + 4095) / 4096) * 0.5;
         return consistentRead ? units * 2 : units;
+    }
+
+    /** Each read DynamoDB charges on its own, such as each partition a scan page reads. */
+    static double readCapacityUnits(List<Long> reads, boolean consistentRead) {
+        return reads.stream().mapToDouble(bytes -> readCapacityUnits(bytes, consistentRead)).sum();
     }
 
     /**
