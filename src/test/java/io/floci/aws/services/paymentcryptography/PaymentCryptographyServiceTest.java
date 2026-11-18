@@ -40,6 +40,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -1953,8 +1954,10 @@ class PaymentCryptographyServiceTest {
     /**
      * The request a key pair signed, read back and checked.
      *
-     * <p>The subject is the one the request named, and the signature verifies under the
-     * public half of the key, so the request is the one the key signed.
+     * <p>The subject is the one the request named, the request carries the public half of
+     * the key that signed it, and the signature verifies under that half, so the request is
+     * the one the key signed and a certificate authority can verify it against the key it
+     * carries.
      */
     private static void assertCertificateSigningRequestVerifies(String pem,
                                                                  PaymentCryptographyKey pair,
@@ -1963,6 +1966,9 @@ class PaymentCryptographyServiceTest {
             PKCS10CertificationRequest request = requestOf(pem);
             assertTrue(request.getSubject().toString().contains("Floci"),
                     request.getSubject().toString());
+            assertArrayEquals(PaymentCryptographyKeyExchange.publicKeyOf(pair).getEncoded(),
+                    request.getSubjectPublicKeyInfo().getEncoded(),
+                    "the request carries a public key that is not the key that signed it");
             String algorithm = digest + (pair.getKeyAlgorithm().startsWith("ECC")
                     ? "withECDSA" : "withRSA");
             Signature verifier = Signature.getInstance(algorithm);
