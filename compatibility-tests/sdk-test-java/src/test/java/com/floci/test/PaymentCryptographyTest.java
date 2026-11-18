@@ -424,7 +424,6 @@ class PaymentCryptographyTest {
         return arn.substring(arn.lastIndexOf('/') + 1);
     }
 
-
     @Test
     void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
         // The team's ARN is kept as the request names it: the emulator has no Multi-Party

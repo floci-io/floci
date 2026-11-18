@@ -1679,42 +1679,38 @@ class PaymentCryptographyServiceTest {
                 "WrappedKeyBlock", block), "", true, Map.of());
     }
 
-
     /** The ARN of a Multi-Party Approval team, for the tests that need one. */
     private static final String MPA_TEAM =
             "arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha";
 
-    @Test
-    void theTeamOfTheReferenceIsAssociated() {
-        // The reference associates a team with the import of a root public key
-        // certificate, and the model names that operation.
-        PaymentCryptographyMpaTeamAssociation association = service.associateMpaTeam("us-east-1",
-                "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", MPA_TEAM);
+    /** The ARN of another team of the same account, for the test that replaces one. */
+    private static final String MPA_TEAM_OTHER =
+            "arn:aws:mpa:us-east-1:000000000000:approval-team/team-beta";
 
-        assertEquals("IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", association.getAction());
-        assertEquals(MPA_TEAM, association.getMpaTeamArn());
-        assertEquals("ACTIVE", association.getAssociationState());
-    }
+    /** The operation the reference protects, and the model names. */
+    private static final String MPA_OPERATION = "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE";
 
     @Test
     void aMultiPartyApprovalTeamIsAssociatedReadAndRemoved() {
-        PaymentCryptographyMpaTeamAssociation association = service.associateMpaTeam("us-east-1",
-                "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", MPA_TEAM);
+        // The reference associates a team with the import of a root public key
+        // certificate, and the model names that operation.
+        PaymentCryptographyMpaTeamAssociation association =
+                service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
 
-        assertEquals("IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", association.getAction());
+        assertEquals(MPA_OPERATION, association.getAction());
         assertEquals(MPA_TEAM, association.getMpaTeamArn());
         assertEquals("ACTIVE", association.getAssociationState());
 
         PaymentCryptographyMpaTeamAssociation read =
-                service.mpaTeamAssociation("us-east-1", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE");
+                service.mpaTeamAssociation("us-east-1", MPA_OPERATION);
         assertEquals(MPA_TEAM, read.getMpaTeamArn());
 
         PaymentCryptographyMpaTeamAssociation removed =
-                service.disassociateMpaTeam("us-east-1", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE");
+                service.disassociateMpaTeam("us-east-1", MPA_OPERATION);
         assertEquals("DELETE_PENDING", removed.getAssociationState());
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.mpaTeamAssociation("us-east-1", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"));
+                () -> service.mpaTeamAssociation("us-east-1", MPA_OPERATION));
         assertEquals("ResourceNotFoundException", refused.getErrorCode());
     }
 
@@ -1738,24 +1734,22 @@ class PaymentCryptographyServiceTest {
     @Test
     void aSecondTeamReplacesTheFirst() {
         // A protected operation has one team, so a second association replaces the first.
-        service.associateMpaTeam("us-east-1", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", MPA_TEAM);
-        service.associateMpaTeam("us-east-1", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE",
-                "arn:aws:mpa:us-east-1:000000000000:approval-team/team-beta");
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM_OTHER);
 
         PaymentCryptographyMpaTeamAssociation read =
-                service.mpaTeamAssociation("us-east-1", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE");
-        assertEquals("arn:aws:mpa:us-east-1:000000000000:approval-team/team-beta",
-                read.getMpaTeamArn());
+                service.mpaTeamAssociation("us-east-1", MPA_OPERATION);
+        assertEquals(MPA_TEAM_OTHER, read.getMpaTeamArn());
     }
 
     @Test
     void aTeamIsTheOneOfItsOwnRegion() {
         // The association belongs to the account and the Region, so the team of one Region
         // is not the team of another.
-        service.associateMpaTeam("us-east-1", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE", MPA_TEAM);
+        service.associateMpaTeam("us-east-1", MPA_OPERATION, MPA_TEAM);
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.mpaTeamAssociation("us-west-2", "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"));
+                () -> service.mpaTeamAssociation("us-west-2", MPA_OPERATION));
         assertEquals("ResourceNotFoundException", refused.getErrorCode());
     }
 
