@@ -85,7 +85,7 @@ public class NeptuneContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). Neptune metadata "
-                        + "operations keep working and clusters still reach 'available', but they "
+                        + "operations keep working and clusters still reach ''available'', but they "
                         + "have no backing graph database container until a daemon becomes "
                         + "reachable.", e.getMessage());
             }

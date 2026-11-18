@@ -245,7 +245,7 @@ public class EmbeddedDnsServer {
             // The failure handler has already logged why the bind failed; containers keep resolving without it.
         } catch (TimeoutException e) {
             LOG.warnv("Embedded DNS server on {0}:53 did not finish binding within {1} seconds; containers "
-                    + "launched before it does are not given Floci's resolver",
+                    + "launched before it does are not given Floci''s resolver",
                     address, String.valueOf(CONTAINER_LISTENER_WAIT_SECONDS));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

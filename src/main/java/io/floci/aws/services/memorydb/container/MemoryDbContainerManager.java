@@ -102,7 +102,7 @@ public class MemoryDbContainerManager {
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). MemoryDB metadata "
-                        + "operations keep working and clusters still reach 'available', but they "
+                        + "operations keep working and clusters still reach ''available'', but they "
                         + "have no backing Redis/Valkey container until a daemon becomes reachable.",
                         e.getMessage());
             }

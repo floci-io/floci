@@ -219,7 +219,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             if (!dockerUnavailableLogged) {
                 dockerUnavailableLogged = true;
                 LOG.warnv("No Docker daemon is reachable from Floci ({0}). RDS metadata operations "
-                        + "keep working and DB instances still reach 'available', but they have no "
+                        + "keep working and DB instances still reach ''available'', but they have no "
                         + "backing database container until a daemon becomes reachable.",
                         e.getMessage());
             }

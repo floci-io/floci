@@ -724,7 +724,7 @@ public class PostgresProtocolHandler {
             return null;
         }
         if (type != 'p') {
-            LOG.warnv("Expected PasswordMessage ('p'), got {0}", (char) type);
+            LOG.warnv("Expected PasswordMessage (''p''), got {0}", (char) type);
             return null;
         }
         int length = PostgresWire.checkedLength(PostgresWire.readInt32(in), 5, MAX_HANDSHAKE_PACKET_LENGTH, "password message");
@@ -773,7 +773,7 @@ public class PostgresProtocolHandler {
         while (true) {
             int type = readAuthenticationType(in);
             if (type != 'R') {
-                LOG.warnv("Expected Authentication ('R') from backend, got type={0}", type);
+                LOG.warnv("Expected Authentication (''R'') from backend, got type={0}", type);
                 return false;
             }
             byte[] body = PostgresWire.readBody(in, 8, MAX_HANDSHAKE_PACKET_LENGTH, packetName);

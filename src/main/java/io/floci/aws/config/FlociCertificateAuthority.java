@@ -342,7 +342,7 @@ public final class FlociCertificateAuthority {
         if (Files.getFileAttributeView(keyFile.getParent(), PosixFileAttributeView.class) != null) {
             Files.createFile(keyFile, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
         } else {
-            LOG.warnv("TLS: {0} is written with the file system's default permissions because it has no POSIX "
+            LOG.warnv("TLS: {0} is written with the file system''s default permissions because it has no POSIX "
                     + "permissions; restrict it to your own account yourself", keyFile);
         }
         Files.writeString(keyFile, pem);
