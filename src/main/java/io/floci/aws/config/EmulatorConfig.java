@@ -1386,6 +1386,14 @@ public interface EmulatorConfig {
     interface FisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Whether the {@code aws:fis:inject-api-*} actions take any service namespace instead of only the
+         * {@code ec2} and {@code kinesis} ones AWS supports, so they can inject errors into the other services Floci
+         * emulates ({@code FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE}).
+         */
+        @WithDefault("false")
+        boolean injectApiAnyService();
     }
 
     interface Route53ServiceConfig {

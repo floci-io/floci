@@ -664,7 +664,7 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("TransferService."), Set.of("transfer"), Set.of(), Set.of()),
                 descriptor("route53", "route53", config.services().route53().enabled(), true,
-                        "route53", config.storage().mode(), 5000L, null, ServiceProtocol.REST_XML,
+                        "route53", config.storage().mode(), 5000L, AwsNamespaces.ROUTE53, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
                         Set.of(), Set.of("route53"), Set.of(), Set.of(Route53Controller.class)),
                 descriptor("textract", "textract", config.services().textract().enabled(), true,

@@ -1943,9 +1943,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private Response accessDeniedForRequest(String action, String credentialScope,
                                                  ContainerRequestContext ctx, String resourceArn) {
         WireProtocol protocol = claimedProtocol(ctx);
-        if (isCbor(protocol)) {
+        if (ProtocolErrorResponses.isCbor(protocol)) {
             // 403, the status the Kinesis and CloudWatch common errors give AccessDeniedException.
-            return cborError(ctx, "AccessDeniedException", accessDeniedMessage(action), 403);
+            return ProtocolErrorResponses.cbor(ctx, "AccessDeniedException", accessDeniedMessage(action), 403);
         }
         // The route decides the envelope, not the resolved action: a request on an S3 Control
         // route is S3 Control's however its action reads, and only its ErrorResponse wrapper
@@ -1978,7 +1978,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String resourcePath = formatS3ResourcePath(resourceArn);
             return s3XmlAccessDenied(message, resourcePath);
         }
-        if (restXml || protocol == WireProtocol.AWS_QUERY || isFormEncoded(requestMediaType)) {
+        if (restXml || protocol == WireProtocol.AWS_QUERY
+                || ProtocolErrorResponses.isFormEncoded(requestMediaType)) {
             return queryXmlError(queryAccessDeniedCode(credentialScope), message);
         }
         int status = protocol == WireProtocol.AWS_JSON_1_0 || protocol == WireProtocol.AWS_JSON_1_1
@@ -2004,32 +2005,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return "/" + tail;
     }
 
-    private static boolean isFormEncoded(MediaType mt) {
-        return mt != null
-                && "application".equalsIgnoreCase(mt.getType())
-                && "x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype());
-    }
-
     private static Response queryXmlAccessDenied(String message) {
         return queryXmlError("AccessDenied", message);
     }
 
     private static Response queryXmlError(String code, String message) {
-        return queryXmlError(code, message, 403);
-    }
-
-    private static Response queryXmlError(String code, String message, int status) {
-        String xml = new XmlBuilder()
-                .start("ErrorResponse")
-                  .start("Error")
-                    .elem("Type", "Sender")
-                    .elem("Code", code)
-                    .elem("Message", message)
-                  .end("Error")
-                  .elem("RequestId", UUID.randomUUID().toString())
-                .end("ErrorResponse")
-                .build();
-        return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml).build();
+        return ProtocolErrorResponses.queryXml(code, message, 403);
     }
 
     private static Response s3XmlAccessDenied(String message) {
@@ -2037,11 +2018,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     private static Response s3XmlError(String code, String message, int status) {
-        return s3Xml(code, message, null, status);
+        return ProtocolErrorResponses.s3Xml(code, message, null, status);
     }
 
     private static Response s3XmlAccessDenied(String message, String resourcePath) {
-        return s3Xml("AccessDenied", message, resourcePath, 403);
+        return ProtocolErrorResponses.s3Xml("AccessDenied", message, resourcePath, 403);
     }
 
     /**
@@ -2069,20 +2050,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml).build();
     }
 
-    private static Response s3Xml(String code, String message, String resourcePath, int status) {
-        XmlBuilder xml = new XmlBuilder()
-                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-                .start("Error")
-                  .elem("Code", code)
-                  .elem("Message", message);
-        if (resourcePath != null && !resourcePath.isBlank()) {
-            xml.elem("Resource", resourcePath);
-        }
-        xml.elem("RequestId", UUID.randomUUID().toString())
-           .end("Error");
-        return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml.build()).build();
-    }
-
     /**
      * The response for an access key that exists nowhere, in each protocol's own vocabulary for
      * the same failure. S3 answers with {@code InvalidAccessKeyId}, as
@@ -2101,8 +2068,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("s3".equals(credentialScope)) {
             return s3XmlError("InvalidAccessKeyId", S3_INVALID_ACCESS_KEY_ID, 403);
         }
-        return protocolError(claimedProtocol(ctx), ctx, "InvalidClientTokenId", "UnrecognizedClientException",
-                INVALID_SECURITY_TOKEN, 403);
+        return ProtocolErrorResponses.of(claimedProtocol(ctx), ctx, "InvalidClientTokenId",
+                "UnrecognizedClientException", INVALID_SECURITY_TOKEN, 403);
     }
 
     /** {@link #unrecognizedClientResponse} for a caller that renders the error itself. */
@@ -2124,8 +2091,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("s3".equals(credentialScope)) {
             return s3XmlError("ExpiredToken", S3_EXPIRED_TOKEN, 400);
         }
-        return protocolError(claimedProtocol(ctx), ctx, "ExpiredTokenException", "ExpiredTokenException",
-                EXPIRED_TOKEN, 403);
+        return ProtocolErrorResponses.of(claimedProtocol(ctx), ctx, "ExpiredTokenException",
+                "ExpiredTokenException", EXPIRED_TOKEN, 403);
     }
 
     /** {@link #expiredTokenResponse} for a caller that renders the error itself. */
@@ -2161,8 +2128,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     + "the Credential is mal-formed; expecting "
                     + "\"<YOUR-AKID>/YYYYMMDD/REGION/SERVICE/aws4_request\".", 400);
         }
-        return protocolError(claimedProtocol(ctx), ctx, "IncompleteSignature", "IncompleteSignatureException",
-                message, 400);
+        return ProtocolErrorResponses.of(claimedProtocol(ctx), ctx, "IncompleteSignature",
+                "IncompleteSignatureException", message, 400);
     }
 
     /**
@@ -2222,8 +2189,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (protocol == WireProtocol.AWS_QUERY && Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
             return Ec2ErrorResponses.of("MissingAuthenticationToken", MISSING_AUTHENTICATION_TOKEN, 403);
         }
-        return protocolError(protocol, ctx, "MissingAuthenticationToken", "MissingAuthenticationTokenException",
-                MISSING_AUTHENTICATION_TOKEN, 403);
+        return ProtocolErrorResponses.of(protocol, ctx, "MissingAuthenticationToken",
+                "MissingAuthenticationTokenException", MISSING_AUTHENTICATION_TOKEN, 403);
     }
 
     private static WireProtocol claimedProtocol(ContainerRequestContext ctx) {
@@ -2231,47 +2198,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 ? claim.protocol() : WireProtocol.REST;
     }
 
-    /**
-     * An authentication failure outside S3, in the shape the caller's protocol reads: a Query
-     * {@code ErrorResponse} for a form-encoded request, the request's own encoding for a CBOR
-     * call, and JSON otherwise. Query names some failures without the {@code Exception} suffix, and
-     * some differently altogether, so it takes its own code.
-     */
-    private static Response protocolError(WireProtocol protocol, ContainerRequestContext ctx, String queryCode,
-                                          String code, String message, int status) {
-        if (isCbor(protocol)) {
-            return cborError(ctx, code, message, status);
-        }
-        if (protocol == WireProtocol.AWS_QUERY || isFormEncoded(ctx.getMediaType())) {
-            return queryXmlError(queryCode, message, status);
-        }
-        return jsonError(code, message, status);
-    }
-
-    private static boolean isCbor(WireProtocol protocol) {
-        return protocol == WireProtocol.RPCV2_CBOR || protocol == WireProtocol.AWS_CBOR_TARGET;
-    }
-
-    /**
-     * A CBOR client cannot read a JSON body, so a rejection has to arrive in the encoding the
-     * request used, the same shape the rpcv2 controller returns for its own errors.
-     */
-    private static Response cborError(ContainerRequestContext ctx, String code, String message, int status) {
-        String requestContentType = ctx.getHeaderString(AwsCborContentTypeFilter.ORIGINAL_CONTENT_TYPE_HEADER);
-        if (requestContentType == null) {
-            requestContentType = ctx.getHeaderString("Content-Type");
-        }
-        return CborErrorResponses.of(new AwsException(code, message, status),
-                CborErrorResponses.mediaTypeFor(requestContentType));
-    }
-
     private static Response jsonAccessDenied(String message, int status) {
-        return jsonError("AccessDeniedException", message, status);
+        return ProtocolErrorResponses.json("AccessDeniedException", message, status);
     }
 
-    /** A JSON error in the shape {@link AwsExceptionMapper} gives every other JSON failure. */
-    private static Response jsonError(String code, String message, int status) {
-        return Response.status(status).type(MediaType.APPLICATION_JSON)
-                .entity(new AwsErrorResponse(code, message)).build();
-    }
 }
