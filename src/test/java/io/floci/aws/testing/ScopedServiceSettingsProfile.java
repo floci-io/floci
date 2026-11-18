@@ -11,15 +11,24 @@ import java.util.Map;
  *
  * <p>The overrides, and who relies on them:
  * <ul>
- *   <li>{@code floci.services.ecs.mock=false} runs ECS tasks as Docker containers,
+ *   <li>{@code floci.services.ecs.mock=false} runs ECS tasks as Docker containers.
+ *   {@code EcsImagePullDockerIntegrationTest}, {@code EcsEssentialContainerExitDockerIntegrationTest}
+ *   and {@code EcsLinuxParametersDockerIntegrationTest} rely on it.
  *   {@code floci.network.security-group-enforcement.enabled=false} puts security-group enforcement
  *   back to its shipped default of off, and {@code floci.services.ecs.image-pull-behavior=default}
  *   back to the shipped pull on every launch, which the shared test config swaps for
- *   {@code prefer-cached}. {@code EcsImagePullDockerIntegrationTest} relies on them.
+ *   {@code prefer-cached}. The image pull class relies on them.
  *   {@code floci.services.ecs.reconcile-containers-on-startup=false} keeps the application from
  *   sweeping the Docker daemon for ECS containers and volumes a previous run left when it starts,
- *   which a class that runs no container would otherwise trigger too. The image pull class stops
- *   its own tasks and removes the registry it starts, so it needs no sweep.</li>
+ *   which a class that runs no container would otherwise trigger too. Each ECS class stops its own
+ *   tasks, so none needs the sweep. {@code floci.docker.resource-namespace} names their containers
+ *   in this run's {@link SidecarContainersProfile#namespace() sidecar namespace}, so another test
+ *   JVM on the same Docker daemon and port, whose startup sweep is on, never takes them for its own
+ *   leftovers.</li>
+ *   <li>{@code floci.services.ecs.host-volume-roots=/dev/null} makes {@code /dev/null} the one host
+ *   path a device may take, since devices are refused by default, and
+ *   {@code floci.services.ecs.allow-privileged-containers=true} lets a task definition ask for
+ *   privilege. {@code EcsLinuxParametersDockerIntegrationTest} relies on them.</li>
  *   <li>The extra CORS origins, allowed and exposed headers, and
  *   {@code floci.security.cors-allow-private-network=true} are what a browser's preflight is
  *   answered with. {@code GlobalCorsFilterIntegrationTest} relies on them.</li>
@@ -32,10 +41,14 @@ import java.util.Map;
  *   them.</li>
  * </ul>
  *
- * <p>Each is inert for the other classes. Only {@code EcsImagePullDockerIntegrationTest} runs an
- * ECS task or any other container. Only {@code GlobalCorsFilterIntegrationTest} sends an
- * {@code Origin} header, the only request the CORS settings answer differently. Every other class
- * signs its requests for the commercial partition, where AWS publishes each service it calls. Only
+ * <p>Each is inert for the other classes. Only the three ECS classes run a task or any other
+ * container, so only their containers carry the namespace. Their tasks run in bridge mode, which security-group enforcement never protects, and
+ * only the Linux parameters class asks for a device or privilege. The pull on every launch reaches
+ * the other two ECS classes' tasks too, and changes nothing they check: their busybox tasks run
+ * the same way on the image the tag names now, and a failed pull runs the cached image. Only
+ * {@code GlobalCorsFilterIntegrationTest} sends an {@code Origin} header, the only request the CORS
+ * settings answer differently. Every other class signs its requests for the commercial partition,
+ * where AWS publishes each service it calls. Only
  * {@code Ec2MockFixedPublicAddressIntegrationTest} launches an instance. It stays apart from
  * {@link IndependentServiceSettingsProfile}, which runs EC2 for real.
  *
@@ -54,6 +67,9 @@ public class ScopedServiceSettingsProfile implements QuarkusTestProfile {
                 Map.entry("floci.network.security-group-enforcement.enabled", "false"),
                 Map.entry("floci.services.ecs.image-pull-behavior", "default"),
                 Map.entry("floci.services.ecs.reconcile-containers-on-startup", "false"),
+                Map.entry("floci.docker.resource-namespace", SidecarContainersProfile.namespace()),
+                Map.entry("floci.services.ecs.host-volume-roots", "/dev/null"),
+                Map.entry("floci.services.ecs.allow-privileged-containers", "true"),
                 Map.entry("floci.security.extra-cors-allowed-origins", "http://localhost:3000,https://ui.example.test"),
                 Map.entry("floci.security.extra-cors-allowed-headers", "x-added-header"),
                 Map.entry("floci.security.extra-cors-expose-headers", "x-visible-header"),
