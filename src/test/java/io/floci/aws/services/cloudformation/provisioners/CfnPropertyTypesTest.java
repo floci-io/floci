@@ -114,11 +114,7 @@ class CfnPropertyTypesTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("ecsTaskDefinitions")
     void anEcsTaskDefinitionFailsWhereTheEcsHandlerDoes(String measured, String properties, String violations) {
-        AwsException e = assertThrows(AwsException.class, () -> new CfnPropertyTypes.HandlerReader(engine())
-                .read("AWS::ECS::TaskDefinition", json(properties)));
-
-        assertEquals("InvalidRequest", e.getErrorCode());
-        assertEquals("Model validation failed (" + violations, e.getMessage());
+        assertHandlerReaderFailure("AWS::ECS::TaskDefinition", properties, "Model validation failed (" + violations);
     }
 
     static Stream<Arguments> ecsTaskDefinitions() {
@@ -251,12 +247,8 @@ class CfnPropertyTypesTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("invalidSesRequiredValues")
     void handlerReaderRejectsNullAndBlankRequiredMembers(String caseName, String properties, String violation) {
-        AwsException failure = assertThrows(AwsException.class,
-                () -> new CfnPropertyTypes.HandlerReader(engine())
-                        .read("AWS::SES::ConfigurationSetEventDestination", json(properties)));
-
-        assertEquals("InvalidRequest", failure.getErrorCode());
-        assertEquals("Model validation failed (" + violation + ")", failure.getMessage());
+        assertHandlerReaderFailure("AWS::SES::ConfigurationSetEventDestination", properties,
+                "Model validation failed (" + violation + ")");
     }
 
     static Stream<Arguments> invalidSesRequiredValues() {
@@ -287,12 +279,8 @@ class CfnPropertyTypesTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("unknownSesMembers")
     void handlerReaderRejectsExtraneousMembers(String caseName, String properties, String violation) {
-        AwsException failure = assertThrows(AwsException.class,
-                () -> new CfnPropertyTypes.HandlerReader(engine())
-                        .read("AWS::SES::ConfigurationSetEventDestination", json(properties)));
-
-        assertEquals("InvalidRequest", failure.getErrorCode());
-        assertEquals("Model validation failed (" + violation + ")", failure.getMessage());
+        assertHandlerReaderFailure("AWS::SES::ConfigurationSetEventDestination", properties,
+                "Model validation failed (" + violation + ")");
     }
 
     static Stream<Arguments> unknownSesMembers() {
@@ -308,12 +296,17 @@ class CfnPropertyTypesTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("invalidLaunchConfigurationProperties")
     void handlerReaderValidatesAnotherVendoredType(String caseName, String properties, String violation) {
+        assertHandlerReaderFailure("AWS::AutoScaling::LaunchConfiguration", properties,
+                "Model validation failed (" + violation + ")");
+    }
+
+    private static void assertHandlerReaderFailure(String resourceType, String properties, String expectedMessage) {
         AwsException failure = assertThrows(AwsException.class,
                 () -> new CfnPropertyTypes.HandlerReader(engine())
-                        .read("AWS::AutoScaling::LaunchConfiguration", json(properties)));
+                        .read(resourceType, json(properties)));
 
         assertEquals("InvalidRequest", failure.getErrorCode());
-        assertEquals("Model validation failed (" + violation + ")", failure.getMessage());
+        assertEquals(expectedMessage, failure.getMessage());
     }
 
     static Stream<Arguments> invalidLaunchConfigurationProperties() {
