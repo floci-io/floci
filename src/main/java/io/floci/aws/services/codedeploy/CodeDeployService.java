@@ -395,6 +395,7 @@ public class CodeDeployService {
                     "Application does not exist: " + name, 400);
         }
         persistRegion(applications, region);
+        tags.remove(applicationArn(region, name));
     }
 
     public List<String> listApplications(String region) {

@@ -89,6 +89,17 @@ class CodeDeployServiceTest {
     }
 
     @Test
+    void deletingAnApplicationDropsItsTags() {
+        String arn = service.applicationArn(REGION, "tagged-app");
+        service.createApplication(REGION, "tagged-app", "Server", List.of(Map.of("Key", "team", "Value", "core")));
+
+        service.deleteApplication(REGION, "tagged-app");
+        service.createApplication(REGION, "tagged-app", "Server", null);
+
+        assertEquals(List.of(), service.listTagsForResource(arn));
+    }
+
+    @Test
     void onPremisesRegistrationAndDeregistrationUseTheDeploymentClock() {
         Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
         CodeDeployService target = newService(Duration.ofHours(1), clock);
