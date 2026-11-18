@@ -4494,7 +4494,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (mfaDeviceLock) {
             if (virtualMfaDevices.get(serialNumber).isPresent()) {
                 throw new AwsException("EntityAlreadyExists",
-                        "MFADevice entity at the same path and name already exists.", 409);
+                        "MFA device already exists.", 409);
             }
             virtualMfaDevices.put(serialNumber, device);
         }
@@ -4668,8 +4668,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void requireConsecutiveCodes(VirtualMfaDevice device, String code1, String code2, int driftSteps) {
         if (!VirtualMfaCodes.matchesConsecutiveCodes(device.getBase32Seed(), code1, code2,
                 driftSteps, Instant.now())) {
+            // Recorded on EnableMFADevice and ResyncMFADevice, 2026-11-05, wholly fixed text.
             throw new AwsException("InvalidAuthenticationCode",
-                    "Invalid MFA one time pass code.", 403);
+                    "Authentication code for device is not valid.", 403);
         }
     }
 
@@ -4722,27 +4723,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return RequestMfaClaim.NONE;
         }
         if (serialNumber == null || tokenCode == null) {
-            return new RequestMfaClaim(true, null);
+            // Which half is missing decides the sentence: no code is a code that cannot validate,
+            // and no serial is a device nothing can be looked up by.
+            return tokenCode == null ? RequestMfaClaim.invalidCode() : RequestMfaClaim.unknownSerial();
         }
         Optional<String> userName = mfaUserName(accessKeyId);
         if (userName.isEmpty()) {
-            return new RequestMfaClaim(true, holdsKey(accessKeyId) ? null : clock.instant());
+            return holdsKey(accessKeyId)
+                    ? RequestMfaClaim.unknownSerial()
+                    : RequestMfaClaim.authenticated(clock.instant());
         }
         synchronized (mfaDeviceLock) {
             Optional<VirtualMfaDevice> device = virtualMfaDevices.get(serialNumber)
                     .filter(candidate -> userName.get().equals(candidate.getUserName()));
             if (device.isEmpty()) {
-                return new RequestMfaClaim(true, null);
+                return RequestMfaClaim.unknownSerial();
             }
             OptionalLong step = Totp.matchingStep(device.get().getBase32Seed(), tokenCode,
                     ENABLE_DRIFT_STEPS, Instant.now());
             Long spent = device.get().getLastUsedTotpStep();
             if (step.isEmpty() || (spent != null && step.getAsLong() <= spent)) {
-                return new RequestMfaClaim(true, null);
+                return RequestMfaClaim.invalidCode();
             }
             device.get().setLastUsedTotpStep(step.getAsLong());
             virtualMfaDevices.put(serialNumber, device.get());
-            return new RequestMfaClaim(true, clock.instant());
+            return RequestMfaClaim.authenticated(clock.instant());
         }
     }
 
