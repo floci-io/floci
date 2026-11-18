@@ -1772,10 +1772,12 @@ public class DynamoDbService {
 
         DynamoDbAccessPath accessPath = DynamoDbAccessPath.resolve(table, indexName);
         int partitions = DynamoDbKeyHash.partitionCount(table);
+        boolean segmented = segment != null && totalSegments != null && totalSegments > 1;
 
         ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedItemsKey(storageKey));
         if (items == null) {
-            return new ScanResult(List.of(), 0, Collections.nCopies(partitions, 0L), null, List.of());
+            return new ScanResult(List.of(), 0, segmented ? List.of(0L) : Collections.nCopies(partitions, 0L),
+                    null, List.of());
         }
 
         // ConcurrentSkipListMap keeps items sorted by base item key — no sort needed.
@@ -1797,7 +1799,6 @@ public class DynamoDbService {
         String indexSkName = lekSkName;
         Predicate<JsonNode> inIndex = item -> !indexScan || (hasNonNullAttribute(item, indexPkName)
                 && (indexSkName == null || hasNonNullAttribute(item, indexSkName)));
-        boolean segmented = segment != null && totalSegments != null && totalSegments > 1;
         ToIntFunction<JsonNode> partitionOf = DynamoDbKeyHash.partitionLocator(
                 accessPath.isGlobalSecondaryIndex() ? accessPath.partitionKeyNames() : List.of(pkName), partitions);
         Map<Integer, Long> bytesByPartition = new TreeMap<>();
