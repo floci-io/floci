@@ -17357,9 +17357,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         requireAccountId("AwsAccountId", awsAccountId);
         ensureDefaultResources(region);
-        synchronized (privateIpAllocationLock) {
-            NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-            return grantInstanceAttach(callerAccountId(), region, ni, awsAccountId);
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (privateIpAllocationLock) {
+                NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+                return grantInstanceAttach(callerAccountId(), region, ni, awsAccountId);
+            }
         }
     }
 
@@ -17386,8 +17388,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         ensureDefaultResources(region);
         List<NetworkInterfacePermission> held = new ArrayList<>();
-        for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
-            held.addAll(ni.getPermissions());
+        synchronized (attachmentTopologyLock(region)) {
+            for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
+                held.addAll(ni.getPermissions());
+            }
         }
         for (String id : permissionIds) {
             if (held.stream().noneMatch(perm -> id.equals(perm.getNetworkInterfacePermissionId()))) {
