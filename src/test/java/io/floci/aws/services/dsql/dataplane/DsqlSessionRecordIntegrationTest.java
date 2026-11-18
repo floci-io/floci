@@ -7,7 +7,7 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.services.dsql.DsqlClusterFixture;
-import io.floci.aws.services.dsql.DsqlDatabasesProfile;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * serialization error and the login would be refused; the endpoint records at read committed.
  */
 @QuarkusTest
-@TestProfile(DsqlDatabasesProfile.class)
+@TestProfile(SidecarContainersProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Tag("docker")
 class DsqlSessionRecordIntegrationTest {

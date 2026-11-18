@@ -31,9 +31,9 @@ import java.util.Map;
  * stays up for the Timestream test, on a port that test does not use. The EMR settings only act
  * when a cluster runs a step or an application runs a job, which neither of the other classes does.
  *
- * <p>The ELBv2 data-plane classes stay on {@link RealElbV2DataPlaneProfile}: one of them,
- * {@code ElbV2WebSocketIntegrationTest}, injects a spy, and a class that does is not merged into
- * another group.
+ * <p>These classes stay out of {@link SidecarContainersProfile}: its container namespace makes an
+ * EMR cluster's node container name longer than the 63-character DNS label limit, and the
+ * cluster's HDFS then cannot resolve a datanode that registers, so it never starts.
  */
 public class ContainerDataPlaneProfile implements QuarkusTestProfile {
 
