@@ -11982,7 +11982,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public int clusterMemberPromotionTier(DbCluster cluster, String memberId) {
         DbInstance member = findInstanceForScope(accountIdFromArn(cluster.getDbClusterArn()),
-                effectiveRegion(regionFromArn(cluster.getDbClusterArn())), memberId);
+                AwsArnUtils.regionOrDefault(cluster.getDbClusterArn(), regionResolver.getDefaultRegion()), memberId);
         return member == null ? 1 : member.getPromotionTier();
     }
 
