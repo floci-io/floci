@@ -2,7 +2,7 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.testing.CfnStackWaits;
-import io.floci.aws.testing.PartnerPermissionBoundaryProfile;
+import io.floci.aws.testing.ServicesOffSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ExtractableResponse;
@@ -36,7 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * anything, which is the partner that never onboarded.
  */
 @QuarkusTest
-@TestProfile(PartnerPermissionBoundaryProfile.class)
+@TestProfile(ServicesOffSettingsProfile.class)
 class DelegationRoleBoundaryIntegrationTest {
 
     /** One double quote, so a template can be written without escaping every quote twice. */
