@@ -1292,9 +1292,12 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         // The store hands back live objects, so every op is validated against pending values first and
         // only applied once the whole patch is known to be good.
         String newName = authorizer.getName();
+        String newType = authorizer.getType();
         String newAuthorizerUri = authorizer.getAuthorizerUri();
         String newIdentitySource = authorizer.getIdentitySource();
         String newTtl = authorizer.getAuthorizerResultTtlInSeconds();
+        List<String> newProviderArns = authorizer.getProviderARNs() == null
+                ? null : new ArrayList<>(authorizer.getProviderARNs());
         if (patchOperations != null) {
         for (Map<String, String> op : patchOperations) {
             if (op == null) {
@@ -1303,18 +1306,32 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             String path = op.get("path");
             String value = op.get("value");
             String opType = op.get("op");
-            if (!"add".equals(opType) && !"replace".equals(opType)) {
+            // remove clears the identity source and takes one pool ARN off the list.
+            boolean clearable = "/identitySource".equals(path);
+            boolean providerArns = "/providerARNs".equals(path);
+            boolean remove = "remove".equals(opType) && (clearable || providerArns);
+            boolean add = "add".equals(opType) || ("replace".equals(opType) && !providerArns);
+            if (!add && !remove) {
                 throw new AwsException("BadRequestException", "Invalid operation", 400);
             }
-            if (path == null || value == null) {
+            if (path == null || (value == null && !(remove && clearable))) {
                 throw new AwsException("BadRequestException", "Missing path or value", 400);
             }
             if ("/name".equals(path)) {
                 newName = value;
+            } else if ("/type".equals(path)) {
+                newType = value;
             } else if ("/authorizerUri".equals(path)) {
                 newAuthorizerUri = value;
             } else if ("/identitySource".equals(path)) {
-                newIdentitySource = value;
+                newIdentitySource = remove ? null : value;
+            } else if (providerArns) {
+                newProviderArns = newProviderArns == null ? new ArrayList<>() : newProviderArns;
+                if (remove) {
+                    newProviderArns.remove(value);
+                } else if (!newProviderArns.contains(value)) {
+                    newProviderArns.add(value);
+                }
             } else if ("/authorizerResultTtlInSeconds".equals(path)) {
                 // Validate before accepting: the store hands back live objects, and an unparseable TTL
                 // would break serialisation on every later GetAuthorizer/GetAuthorizers.
@@ -1331,11 +1348,13 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             }
         }
         }
-        validateRequestAuthorizerIdentitySource(authorizer.getType(), newIdentitySource, newTtl);
+        validateRequestAuthorizerIdentitySource(newType, newIdentitySource, newTtl);
         authorizer.setName(newName);
+        authorizer.setType(newType);
         authorizer.setAuthorizerUri(newAuthorizerUri);
         authorizer.setIdentitySource(newIdentitySource);
         authorizer.setAuthorizerResultTtlInSeconds(newTtl);
+        authorizer.setProviderARNs(newProviderArns);
         authorizerStore.put(authorizerKey(region, apiId, authorizerId), authorizer);
         return authorizer;
     }
