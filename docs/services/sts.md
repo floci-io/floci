@@ -394,6 +394,11 @@ forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acc
 and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are honored when matching `sts:AssumeRole`.
 The caller's own identity policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
 allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
+That evaluation sees the request's `sts:RoleSessionName`, and `sts:ExternalId` when the caller passes `ExternalId`,
+as the trust policy does: the [Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_awssecuritytokenservice.html)
+lists both among the condition keys of `AssumeRole`, so an identity policy can require a session name, such as
+`"sts:RoleSessionName": "${aws:username}"`, or an external ID, and a `Deny` conditioned on either applies only when
+it matches.
 
 The caller is the account that owns the request's credentials, whether they sign the
 `Authorization` header or a presigned query string: an IAM user's or a role session's access key

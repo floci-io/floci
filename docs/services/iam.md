@@ -3688,6 +3688,13 @@ floci populates:
   given a JSON null is absent, never the cluster's stored value. The actions, members and protocol come from
   the same `request-condition-keys.json`. A boolean member given anything but a boolean or its text is refused
   before it is read (see [EKS](eks.md)), so the key never misses a value the cluster takes.
+- `sts:RoleSessionName` and `sts:ExternalId`: the `RoleSessionName` and `ExternalId` an `AssumeRole` request
+  passes, as given, for the caller's identity-based policies, permissions boundary, session policy and SCPs, as
+  the role's trust policy reads them (see [STS](sts.md)); `sts:ExternalId` is absent when the request passes none.
+  The actions and request members come from the same `request-condition-keys.json`.
+  `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not signed, so no identity-based policy is
+  evaluated for them. `sts:SourceIdentity`, `sts:TransitiveTagKeys`, `aws:RequestTag/<key>` and `aws:TagKeys`
+  are not populated for `AssumeRole`: Floci does not model source identity or session tags.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor
