@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 /**
@@ -60,7 +61,7 @@ final class DockerPoolGaugeLogger {
 
     private void logSafely() {
         try {
-            String line = line(readings(), countStreamThreads());
+            String line = line(readings(), DockerPoolGaugeLogger::countStreamThreads);
             if (line != null) {
                 LOG.infov("Docker pools: {0}", line);
             }
@@ -76,11 +77,12 @@ final class DockerPoolGaugeLogger {
     }
 
     /**
-     * The text of one reading, pools in name order, or null when every pool is idle. For example
+     * The text of one reading, pools in name order, or null when every pool is idle, in which case the
+     * stream threads are not counted. For example
      * {@code control-plane leased=2 available=6 pending=0 max=1024; streaming leased=40 available=0
      * pending=0 max=2048 streams[logs=20 wait=20]; stream threads=40}.
      */
-    static String line(Map<String, FlociDockerHttpClient.PoolGauges> readings, int streamThreads) {
+    static String line(Map<String, FlociDockerHttpClient.PoolGauges> readings, IntSupplier streamThreads) {
         if (readings.values().stream().allMatch(FlociDockerHttpClient.PoolGauges::idle)) {
             return null;
         }
@@ -98,14 +100,25 @@ final class DockerPoolGaugeLogger {
             }
             parts.add(part.toString());
         });
-        parts.add("stream threads=" + streamThreads);
+        parts.add("stream threads=" + streamThreads.getAsInt());
         return String.join("; ", parts);
     }
 
+    /** Counts the live docker-java stream threads by name, without capturing any thread's stack. */
     static int countStreamThreads() {
+        ThreadGroup root = Thread.currentThread().getThreadGroup();
+        while (root.getParent() != null) {
+            root = root.getParent();
+        }
+        Thread[] threads = new Thread[root.activeCount() + 16];
+        int listed = root.enumerate(threads, true);
+        while (listed == threads.length) {
+            threads = new Thread[threads.length * 2];
+            listed = root.enumerate(threads, true);
+        }
         int count = 0;
-        for (Thread thread : Thread.getAllStackTraces().keySet()) {
-            if (thread.getName().startsWith(STREAM_THREAD_PREFIX)) {
+        for (int i = 0; i < listed; i++) {
+            if (threads[i].getName().startsWith(STREAM_THREAD_PREFIX)) {
                 count++;
             }
         }

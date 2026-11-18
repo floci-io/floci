@@ -110,12 +110,12 @@ To see how close Floci is to those limits, it logs a line every `pool-gauge-inte
 Docker pools: control-plane leased=2 available=6 pending=0 max=1024; streaming leased=40 available=0 pending=0 max=2048 streams[logs=20 wait=20]; stream threads=40
 ```
 
-A `pending` above 0 means calls are waiting for a connection, and a call that waits longer than `connection-request-timeout-seconds` fails. Set the interval to 0 to turn the lines off:
+A `pending` above 0 means calls are waiting for a connection, and a call that waits longer than `connection-request-timeout-seconds` fails. To turn the lines off, set the interval to 0:
 
 ```yaml
 floci:
   docker:
-    pool-gauge-interval-seconds: 60
+    pool-gauge-interval-seconds: 0
 ```
 
 Environment variable: `FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS`
