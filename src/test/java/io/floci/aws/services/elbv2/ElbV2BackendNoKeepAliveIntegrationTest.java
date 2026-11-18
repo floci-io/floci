@@ -1,7 +1,7 @@
 package io.floci.aws.services.elbv2;
 
+import io.floci.aws.testing.IndependentServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import io.vertx.core.http.HttpClient;
@@ -21,16 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 @QuarkusTest
-@TestProfile(ElbV2BackendNoKeepAliveIntegrationTest.NoKeepAliveProfile.class)
+@TestProfile(IndependentServiceSettingsProfile.class)
 class ElbV2BackendNoKeepAliveIntegrationTest extends ElbV2BackendConnectionTestSupport {
-
-    public static class NoKeepAliveProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.elbv2.mock", "false",
-                    "floci.services.elbv2.backend-keep-alive", "false");
-        }
-    }
 
     @Test
     void disablingKeepAliveUsesFreshConnectionsForSequentialRequests() throws Exception {
