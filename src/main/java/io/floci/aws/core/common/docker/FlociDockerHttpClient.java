@@ -42,6 +42,7 @@ import org.apache.hc.core5.http.io.entity.InputStreamEntity;
 import org.apache.hc.core5.http.protocol.HttpContext;
 import org.apache.hc.core5.http.protocol.HttpCoreContext;
 import org.apache.hc.core5.net.URIAuthority;
+import org.apache.hc.core5.pool.PoolStats;
 import org.apache.hc.core5.util.TimeValue;
 import org.apache.hc.core5.util.Timeout;
 import org.jboss.logging.Logger;
@@ -55,7 +56,11 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -87,6 +92,9 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
     static final TimeValue EVICT_IDLE_AFTER = TimeValue.ofSeconds(30);
 
     private final CloseableHttpClient httpClient;
+    private final PoolingHttpClientConnectionManager connectionManager;
+    /** Responses still open per {@link #streamKind} of the request that opened them. */
+    private final Map<String, AtomicInteger> openStreams = new ConcurrentHashMap<>();
     private final HttpHost host;
     private final String pathPrefix;
     /** The same settings with no response timeout, for requests that hold a stream open (see isLongLivedStream). */
@@ -111,7 +119,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         String rawPath = "tcp".equals(dockerHost.getScheme()) ? dockerHost.getRawPath() : "";
         pathPrefix = rawPath.endsWith("/") ? rawPath.substring(0, rawPath.length() - 1) : rawPath;
 
-        PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(
+        connectionManager = new PoolingHttpClientConnectionManager(
                 connectionOperator, null, null, null,
                 new ManagedHttpClientConnectionFactory(null, null, null, null,
                         FlociDockerHttpClient::determineLength, null));
@@ -198,7 +206,8 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
             httpRequest.setEntity(new InputStreamEntity(request.body(), null));
         }
 
-        if (isLongLivedStream(request)) {
+        String streamKind = streamKind(request);
+        if (streamKind != null) {
             httpRequest.setConfig(streamRequestConfig);
         }
 
@@ -211,7 +220,12 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         try {
             boolean ttyExec = isTtyExec(request);
             ClassicHttpResponse response = httpClient.executeOpen(host, httpRequest, context);
-            return new FlociResponse(httpRequest, response, ttyExec && response.getCode() == 200);
+            AtomicInteger openOfKind = null;
+            if (streamKind != null) {
+                openOfKind = openStreams.computeIfAbsent(streamKind, kind -> new AtomicInteger());
+                openOfKind.incrementAndGet();
+            }
+            return new FlociResponse(httpRequest, response, ttyExec && response.getCode() == 200, openOfKind);
         } catch (IOException e) {
             throw new RuntimeException(e);
         } catch (LinkageError e) {
@@ -228,6 +242,31 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
     @Override
     public void close() throws IOException {
         httpClient.close();
+    }
+
+    /**
+     * The pool's leased, available and pending connections and its limit, and the long-lived stream
+     * responses still open by kind (only kinds with an open stream are listed), read at this moment.
+     */
+    public PoolGauges gauges() {
+        PoolStats stats = connectionManager.getTotalStats();
+        Map<String, Integer> streams = new TreeMap<>();
+        openStreams.forEach((kind, open) -> {
+            int count = open.get();
+            if (count > 0) {
+                streams.put(kind, count);
+            }
+        });
+        return new PoolGauges(stats.getLeased(), stats.getAvailable(), stats.getPending(), stats.getMax(), streams);
+    }
+
+    /** A point-in-time reading of one pool, see {@link #gauges()}. */
+    public record PoolGauges(int leased, int available, int pending, int max, Map<String, Integer> openStreams) {
+
+        /** Whether nothing is in use: no lease, no caller waiting for one and no stream open. */
+        public boolean idle() {
+            return leased == 0 && pending == 0 && openStreams.isEmpty();
+        }
     }
 
     private static boolean isTtyExec(Request request) throws IOException {
@@ -248,22 +287,47 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
      * none. Every other call keeps the response timeout.
      */
     static boolean isLongLivedStream(Request request) {
-        if (request.hijackedInput() != null) {
-            return true;
-        }
+        return streamKind(request) != null;
+    }
+
+    /**
+     * The kind of long-lived stream a request opens ({@code wait}, {@code attach}, {@code exec},
+     * {@code build}, {@code pull}, {@code events}, {@code logs}, {@code stats}, or {@code hijacked} for
+     * another upgraded connection), or null for an ordinary call. See {@link #isLongLivedStream}.
+     */
+    static String streamKind(Request request) {
         String path = request.path();
         int queryStart = path.indexOf('?');
         String route = queryStart < 0 ? path : path.substring(0, queryStart);
         String query = queryStart < 0 ? "" : path.substring(queryStart + 1);
-        return switch (request.method()) {
-            case "POST" -> route.endsWith("/wait") || route.endsWith("/attach") || route.endsWith("/build")
-                    || route.endsWith("/images/create")
-                    || (route.contains("/exec/") && route.endsWith("/start"));
-            case "GET" -> route.endsWith("/events")
-                    || (route.endsWith("/logs") && queryFlag(query, "follow", false))
-                    || (route.endsWith("/stats") && queryFlag(query, "stream", true));
-            default -> false;
+        String kind = switch (request.method()) {
+            case "POST" -> {
+                if (route.endsWith("/wait")) {
+                    yield "wait";
+                } else if (route.endsWith("/attach")) {
+                    yield "attach";
+                } else if (route.endsWith("/build")) {
+                    yield "build";
+                } else if (route.endsWith("/images/create")) {
+                    yield "pull";
+                } else if (route.contains("/exec/") && route.endsWith("/start")) {
+                    yield "exec";
+                }
+                yield null;
+            }
+            case "GET" -> {
+                if (route.endsWith("/events")) {
+                    yield "events";
+                } else if (route.endsWith("/logs") && queryFlag(query, "follow", false)) {
+                    yield "logs";
+                } else if (route.endsWith("/stats") && queryFlag(query, "stream", true)) {
+                    yield "stats";
+                }
+                yield null;
+            }
+            default -> null;
         };
+        return kind == null && request.hijackedInput() != null ? "hijacked" : kind;
     }
 
     /** A boolean query parameter as Docker reads it ({@code 1} or {@code true}), or its default when absent. */
@@ -335,12 +399,17 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         private final HttpUriRequestBase request;
         private final ClassicHttpResponse response;
         private final boolean ttyExec;
+        /** The open-stream count this response is in, or null for an ordinary call. */
+        private final AtomicInteger openOfKind;
+        private final AtomicBoolean closed = new AtomicBoolean();
         private InputStream body;
 
-        FlociResponse(HttpUriRequestBase request, ClassicHttpResponse response, boolean ttyExec) {
+        FlociResponse(HttpUriRequestBase request, ClassicHttpResponse response, boolean ttyExec,
+                      AtomicInteger openOfKind) {
             this.request = request;
             this.response = response;
             this.ttyExec = ttyExec;
+            this.openOfKind = openOfKind;
         }
 
         @Override
@@ -377,6 +446,9 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
 
         @Override
         public void close() {
+            if (openOfKind != null && closed.compareAndSet(false, true)) {
+                openOfKind.decrementAndGet();
+            }
             try {
                 request.abort();
             } catch (Exception e) {

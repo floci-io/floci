@@ -4401,6 +4401,15 @@ public interface EmulatorConfig {
         int imagePullTimeoutSeconds();
 
         /**
+         * Seconds between the log lines that report how busy the Docker connection pools are: each
+         * pool's leased, available and pending connections against its limit, its open long-lived
+         * streams by kind, and the docker-java stream threads. A line is written only while a pool is in
+         * use, so an idle emulator logs nothing. 0 turns the lines off.
+         */
+        @WithDefault("60")
+        int poolGaugeIntervalSeconds();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */

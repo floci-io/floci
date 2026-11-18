@@ -104,6 +104,22 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS`
 
+To see how close Floci is to those limits, it logs a line every `pool-gauge-interval-seconds` (60 by default) while a pool is in use, and nothing while both are idle. Each pool reports its leased, available and pending connections against its limit and its open streams by kind, followed by the number of docker-java stream threads:
+
+```
+Docker pools: control-plane leased=2 available=6 pending=0 max=1024; streaming leased=40 available=0 pending=0 max=2048 streams[logs=20 wait=20]; stream threads=40
+```
+
+A `pending` above 0 means calls are waiting for a connection, and a call that waits longer than `connection-request-timeout-seconds` fails. To turn the lines off, set the interval to 0:
+
+```yaml
+floci:
+  docker:
+    pool-gauge-interval-seconds: 0
+```
+
+Environment variable: `FLOCI_DOCKER_POOL_GAUGE_INTERVAL_SECONDS`
+
 ## Private Registry Authentication
 
 Any service that pulls a container image from a private registry (Lambda image functions, custom OpenSearch images, private Postgres images, etc.) needs Docker credentials. Two approaches are supported and can be combined.
