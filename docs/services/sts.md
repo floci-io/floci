@@ -443,8 +443,10 @@ names its session ARN or its role's ARN, path included.
 `Condition` blocks are evaluated with the same operators as identity and resource policies. The
 request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller passes `ExternalId`,
 `aws:PrincipalArn` (for a caller using assumed-role credentials, the role's ARN with its path, as on AWS),
-`aws:PrincipalAccount`, `aws:ResourceAccount`, `aws:RequestedRegion` and
-`aws:PrincipalIsAWSService`. A trust policy that requires `sts:ExternalId`, the confused-deputy
+`aws:PrincipalAccount`, `aws:ResourceAccount`, `aws:RequestedRegion`,
+`aws:PrincipalIsAWSService`, and the keys of the request itself, `aws:SourceIp`,
+`aws:SecureTransport`, `aws:UserAgent` and `aws:referer` (see
+[IAM](iam.md#condition-keys-floci-populates)). A trust policy that requires `sts:ExternalId`, the confused-deputy
 guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
 when its condition matches.
 

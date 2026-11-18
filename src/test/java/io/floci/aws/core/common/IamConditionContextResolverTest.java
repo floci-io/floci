@@ -19,6 +19,10 @@ import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
 import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3Service;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.net.SocketAddress;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -143,6 +147,45 @@ class IamConditionContextResolverTest {
                 lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()), mock(Instance.class),
                 requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog);
+    }
+
+    @SuppressWarnings("unchecked")
+    private IamConditionContextResolver resolverFor(HttpServerRequest request) {
+        RoutingContext routing = mock(RoutingContext.class);
+        when(routing.request()).thenReturn(request);
+        CurrentVertxRequest current = mock(CurrentVertxRequest.class);
+        when(current.getCurrent()).thenReturn(routing);
+        return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                requestContext, new RegionResolver("us-east-1", "123456789012"), config, current, serviceCatalog);
+    }
+
+    @Test
+    void theRequestTransportKeysComeFromTheConnectionAndItsHeaders() {
+        HttpServerRequest request = mock(HttpServerRequest.class);
+        when(request.remoteAddress()).thenReturn(SocketAddress.inetSocketAddress(51000, "198.51.100.23"));
+        when(request.isSSL()).thenReturn(true);
+        when(request.getHeader("User-Agent")).thenReturn("aws-cli/2.17.0");
+        when(request.getHeader("X-Forwarded-For")).thenReturn("203.0.113.7");
+        Map<String, List<String>> conditions = new HashMap<>();
+        resolverFor(request).putRequestTransport(conditions);
+        assertEquals(Map.of("aws:SourceIp", List.of("198.51.100.23"),
+                "aws:SecureTransport", List.of("true"),
+                "aws:UserAgent", List.of("aws-cli/2.17.0")), conditions);
+
+        when(request.isSSL()).thenReturn(false);
+        when(request.getHeader("Referer")).thenReturn("https://intranet.example.com/reports");
+        conditions.clear();
+        resolverFor(request).putRequestTransport(conditions);
+        assertEquals(List.of("false"), conditions.get("aws:SecureTransport"));
+        assertEquals(List.of("https://intranet.example.com/reports"), conditions.get("aws:referer"));
+    }
+
+    @Test
+    void noRequestTransportKeyIsWrittenWithoutARequest() {
+        Map<String, List<String>> conditions = new HashMap<>();
+        resolver.putRequestTransport(conditions);
+        assertTrue(conditions.isEmpty());
     }
 
     @Test

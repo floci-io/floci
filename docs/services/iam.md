@@ -3599,7 +3599,8 @@ variable can only resolve to a key floci populates, which is the list under
 A role trust policy is the narrower case, because `sts:AssumeRole` is authorized before there is a
 session to describe: its context carries `aws:PrincipalArn`, `aws:PrincipalAccount`,
 `aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `aws:CurrentTime`,
-`aws:EpochTime`, `sts:RoleSessionName`, `aws:TokenIssueTime` when the caller is itself a session,
+`aws:EpochTime`, `aws:SourceIp`, `aws:SecureTransport`, `aws:UserAgent`, `aws:referer` when the
+request sends one, `sts:RoleSessionName`, `aws:TokenIssueTime` when the caller is itself a session,
 and `sts:ExternalId` when the request passes one. `aws:username`, `aws:userid` and
 `aws:PrincipalType` are not among them, so a variable naming one of those resolves to nothing in a
 trust policy and the value it sits in matches nothing.
@@ -3907,6 +3908,21 @@ floci populates:
   They are on every request the enforcement filter checks, its `iam:PassRole` checks included,
   in the context S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`, in a
   role trust policy's context, and in that of a call an AWS service makes on its own behalf.
+- `aws:SourceIp`, `aws:SecureTransport`, `aws:UserAgent` and `aws:referer`: the keys the guide
+  takes from the request itself. `aws:SourceIp` is "the requester's IP address", the address
+  CloudTrail records as `sourceIPAddress`: read from the connection Floci accepted (or the address a
+  proxy Quarkus trusts forwards) and never from a header the client writes, such as `X-Forwarded-For`;
+  behind a proxy it is the proxy's address. `aws:SecureTransport` is `true` when the request "was
+  sent using TLS" to Floci's TLS listener and `false` otherwise. `aws:UserAgent` is the request's
+  `User-Agent` header, and `aws:referer` its `Referer` header, present "only if" the request carries
+  one. They are on every request the enforcement filter checks, its `iam:PassRole` checks
+  included, and in an `AssumeRole` trust policy's context. A request an AWS service makes on the
+  caller's behalf (`aws:ViaAWSService` `true`) carries none of them: the guide says "the target
+  service sees the IP address of the calling service rather than the IP address of the originating
+  user", which Floci has no address for. S3's own bucket-policy check under `s3.enforce-auth` does
+  not carry them either. The guide says `aws:SourceIp` "can only be used for public IP address
+  ranges"; Floci's clients are usually on a private network, and the key holds their address as
+  it is.
 - `aws:TagKeys`: the case-sensitive requested tag keys for all 16 IAM tagging actions
   in the generated table (tag structures or a list of keys), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and
