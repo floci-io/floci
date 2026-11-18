@@ -20,6 +20,8 @@ import java.util.Map;
 public class JobRunRecord {
     private JobRun jobRun;
     private String clientToken;
+    // Orders it among those created within the same millisecond: EmrServerlessService.nextSequence.
+    private long sequence;
     private JsonNode request;
     private String applicationType;
     private boolean containerRun;
@@ -30,6 +32,8 @@ public class JobRunRecord {
     public void setJobRun(JobRun jobRun) { this.jobRun = jobRun; }
     public String getClientToken() { return clientToken; }
     public void setClientToken(String clientToken) { this.clientToken = clientToken; }
+    public long getSequence() { return sequence; }
+    public void setSequence(long sequence) { this.sequence = sequence; }
     public JsonNode getRequest() { return request; }
     public void setRequest(JsonNode request) { this.request = request; }
     public String getApplicationType() { return applicationType; }

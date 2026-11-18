@@ -2,6 +2,7 @@ package io.floci.aws.services.athena;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
@@ -41,6 +42,7 @@ import java.util.TreeMap;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.mock;
@@ -143,6 +145,35 @@ class AthenaIcebergSidecarIntegrationTest {
         assertEquals(List.of(row("id", "2", "name", "b2", "category", "y"), row("id", "3", "name", "c", "category", "x")),
                 rows("SELECT id, name, category FROM events ORDER BY id"));
         assertEquals("2", loadTable("events").path("metadata").path("properties").path("format-version").asText());
+    }
+
+    /**
+     * A query holding two writes is rejected before either runs, as on Athena (engine v3). Run, only the first would
+     * have reached the Iceberg catalog, and it would have committed before the second failed.
+     */
+    @Test
+    void aQueryHoldingASecondWriteIsRejectedAndWritesNothing() {
+        run("CREATE TABLE events (id bigint) LOCATION 's3://" + bucket + "/lake/events/' "
+                + "TBLPROPERTIES ('table_type'='ICEBERG');");
+        run("INSERT INTO events VALUES (1);");
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> execute(null, database, "INSERT INTO events VALUES (3); INSERT INTO events VALUES (4)"));
+
+        assertEquals("InvalidRequestException", rejected.getErrorCode());
+        assertEquals(List.of(row("id", "1")), rows("SELECT id FROM events ORDER BY id"));
+    }
+
+    @Test
+    void anIcebergInsertWritesItsBoundParameters() {
+        run("CREATE TABLE events (id bigint, name string) LOCATION 's3://" + bucket + "/lake/events/' "
+                + "TBLPROPERTIES ('table_type'='ICEBERG')");
+
+        QueryExecution insert = execute(null, database, "INSERT INTO events VALUES (?, ?)", List.of("5", "'e'"));
+
+        assertEquals(QueryExecutionState.SUCCEEDED, insert.getStatus().getState(),
+                insert.getStatus().getStateChangeReason());
+        assertEquals(List.of(row("id", "5", "name", "e")), rows("SELECT id, name FROM events ORDER BY id"));
     }
 
     /** Runs a write and checks its commit landed on the Glue table, moving its {@code metadata_location}. */
@@ -255,11 +286,15 @@ class AthenaIcebergSidecarIntegrationTest {
     }
 
     private QueryExecution execute(String catalogName, String contextDatabase, String sql) {
+        return execute(catalogName, contextDatabase, sql, List.of());
+    }
+
+    private QueryExecution execute(String catalogName, String contextDatabase, String sql, List<String> parameters) {
         QueryExecutionContext context = new QueryExecutionContext();
         context.setCatalog(catalogName);
         context.setDatabase(contextDatabase);
         String id = RequestScopes.callAs(ACCOUNT, REGION, () -> athena.startQueryExecution(sql, "primary", context,
-                new ResultConfiguration("s3://" + bucket + "/results/")));
+                new ResultConfiguration("s3://" + bucket + "/results/"), parameters));
         return await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(100))
                 .until(() -> RequestScopes.callAs(ACCOUNT, REGION, () -> athena.getQueryExecution(id)),
                         found -> found.getStatus().getState() != QueryExecutionState.RUNNING

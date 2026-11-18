@@ -117,6 +117,18 @@ public class SecurityGroupFirewallManager {
     public Namespace createNamespace(String service, String resourceId, String accountId, String region,
                                      Optional<String> dockerNetwork, Map<Integer, Integer> portBindings,
                                      Map<String, String> extraLabels, String hostIp) {
+        return createNamespace(service, resourceId, accountId, region, dockerNetwork, portBindings, extraLabels,
+                hostIp, List.of());
+    }
+
+    /**
+     * {@link #createNamespace} with {@code linkLocalIps} on the helper's Docker network endpoint. Every workload
+     * shares the helper's namespace, so one address gives all of them a connected route into 169.254.0.0/16, which
+     * is what an ECS task needs to reach its credential endpoint at 169.254.170.2.
+     */
+    public Namespace createNamespace(String service, String resourceId, String accountId, String region,
+                                     Optional<String> dockerNetwork, Map<Integer, Integer> portBindings,
+                                     Map<String, String> extraLabels, String hostIp, List<String> linkLocalIps) {
         if (!enabled()) {
             throw new IllegalStateException("Security-group enforcement is disabled");
         }
@@ -133,6 +145,7 @@ public class SecurityGroupFirewallManager {
                 .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true",
                         ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
                 .withLabels(extraLabels);
+        linkLocalIps.forEach(builder::withLinkLocalIp);
         return startHelper(builder, resourceId, "protected",
                 helperId -> apply(helperId, SecurityGroupNftCompiler.initialRuleset()));
     }
@@ -152,6 +165,16 @@ public class SecurityGroupFirewallManager {
                 .withLabels(extraLabels);
         linkLocalIps.forEach(builder::withLinkLocalIp);
         return startHelper(builder, resourceId, "shared", helperId -> { });
+    }
+
+    /**
+     * Removes the helper {@link #createNamespace} started for {@code resourceId}, if there is one, and throws when
+     * Docker keeps it, since it may still hold host ports and a link-local address. Found by its name, so this also
+     * removes a helper whose ENI was never registered, or was already forgotten, which {@link #removeNamespaceStrict}
+     * cannot find.
+     */
+    public void removeProtectedNamespaceStrict(String resourceId) {
+        lifecycleManager.removeIfExistsStrict(helperName(PROTECTED_HELPER_PREFIX, resourceId));
     }
 
     /**

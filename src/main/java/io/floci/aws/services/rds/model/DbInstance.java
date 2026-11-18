@@ -75,6 +75,7 @@ public class DbInstance {
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private Instant createdAt;
     private int proxyPort;
+    private Integer requestedPort;
     // Read replication links, kept on both ends the way DescribeDBInstances reports them: a
     // replica names its source, a source lists its replicas, by identifier within a Region and
     // by ARN across Regions. Null and empty on a standalone. The status is the "read
@@ -287,6 +288,9 @@ public class DbInstance {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
+    public Integer getRequestedPort() { return requestedPort; }
+    public void setRequestedPort(Integer requestedPort) { this.requestedPort = requestedPort; }
 
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }

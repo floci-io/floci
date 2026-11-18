@@ -126,6 +126,22 @@ public interface EmulatorConfig {
 
     ProtocolsConfig protocols();
 
+    /** The opt-in log of every request and response, one JSON object per line, for debugging. */
+    RequestLogConfig requestLog();
+
+    interface RequestLogConfig {
+        /** Write each request and its response to {@link #file()}. Env: FLOCI_REQUEST_LOG_ENABLED */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * Where the log is written, one JSON object per line (JSONL); {@code ./floci-requests.jsonl} when unset. It
+         * holds request and response bodies as plain text, which can include secrets: known secret headers and query
+         * parameters are redacted, but a secret inside a body is not. Env: FLOCI_REQUEST_LOG_FILE
+         */
+        Optional<String> file();
+    }
+
     interface NetworkConfig {
         SecurityGroupEnforcementConfig securityGroupEnforcement();
     }
@@ -1370,6 +1386,14 @@ public interface EmulatorConfig {
     interface FisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Whether the {@code aws:fis:inject-api-*} actions take any service namespace instead of only the
+         * {@code ec2} and {@code kinesis} ones AWS supports, so they can inject errors into the other services Floci
+         * emulates ({@code FLOCI_SERVICES_FIS_INJECT_API_ANY_SERVICE}).
+         */
+        @WithDefault("false")
+        boolean injectApiAnyService();
     }
 
     interface Route53ServiceConfig {
@@ -1668,6 +1692,37 @@ public interface EmulatorConfig {
          */
         @WithDefault("300")
         int latestRestorableLagSeconds();
+
+        /**
+         * Open shards in each DynamoDB stream of the native engine. An item's changes always go to the shard its
+         * partition key picks, so they stay in order. AWS gives each table partition a shard of its own.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT
+         */
+        @WithDefault("1")
+        int streamShardCount();
+
+        /**
+         * Seconds a stream shard of the native engine stays open before it closes and a child shard, which names it
+         * as its parent, takes its keys. 0 keeps shards open until the stream is disabled.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS
+         */
+        @WithDefault("0")
+        long streamShardRolloverSeconds();
+
+        /**
+         * Expire a stream shard iterator 15 minutes after it is returned, as AWS does.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamIteratorExpiryEnabled();
+
+        /**
+         * Keep stream records, and shards after they close, for 24 hours as AWS does, and refuse a shard iterator
+         * for a sequence number the shard no longer holds or never held.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED
+         */
+        @WithDefault("false")
+        boolean streamRetentionEnabled();
 
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
@@ -1990,6 +2045,11 @@ public interface EmulatorConfig {
 
         @WithDefault("7099")
         int proxyMaxPort();
+
+        /** When true, Describe* reports the Port a client requested instead of the proxy port.
+         *  The proxy still listens in the proxy port range; connect there. */
+        @WithDefault("false")
+        boolean advertiseRequestedPort();
 
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();

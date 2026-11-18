@@ -34,7 +34,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudHSM v2](cloudhsmv2.md) | `POST /` + `X-Amz-Target: BaldrApiService.*` | JSON 1.1 | 18 |
 | [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 32 |
 | [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 15 |
-| [Payment Cryptography](payment-cryptography.md) | `POST /` + `X-Amz-Target: PaymentCryptographyControlPlane.*` | JSON 1.0 | 22 |
+| [Payment Cryptography](payment-cryptography.md) | `POST /` + `X-Amz-Target: PaymentCryptographyControlPlane.*` | JSON 1.0 | 27 |
 | [Payment Cryptography data plane](payment-cryptography-data.md) | `POST /keys/{KeyIdentifier}/encrypt` and the rest | REST JSON | 12 |
 | [Secrets Manager](secrets-manager.md) | `POST /` + `X-Amz-Target: secretsmanager.*` | JSON 1.1 | 23 |
 | [Step Functions](step-functions.md) | `POST /` + `X-Amz-Target: AmazonStatesService.*` | JSON 1.1 | 32 |
@@ -51,7 +51,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
 | [X-Ray](xray.md) | `/TraceSegments`, `/Traces`, `/TraceSummaries`, `/ServiceGraph`, `/TraceGraph`, `/GetSamplingRules`, `/CreateSamplingRule`, `/SamplingTargets`, `/TelemetryRecords` | REST JSON | 11 |
 | [GuardDuty](guardduty.md) | `/detector`, `/detector/{detectorId}`, `/detector/{detectorId}/admin`, `/admin/*`, `/tags/*` | REST JSON | 28 |
-| [AWS Account Management](account.md) | `/putAlternateContact`, `/getAlternateContact`, `/deleteAlternateContact`, `/putContactInformation`, `/getContactInformation` | REST JSON | 5 |
+| [AWS Account Management](account.md) | `/putAlternateContact`, `/getAlternateContact`, `/deleteAlternateContact`, `/putContactInformation`, `/getContactInformation`, `/getAccountInformation`, `/putAccountName` | REST JSON | 7 |
 | [IAM Access Analyzer](access-analyzer.md) | `/analyzer`, `/analyzer/{name}`, `/policy/validation` | REST JSON | 5 |
 | [IAM Identity Center (SSO Admin)](ssoadmin.md) | `POST /` + `X-Amz-Target: SWBExternalService.*` | JSON 1.1 | 79 |
 | [IAM Identity Center OIDC](ssooidc.md) | `/client/register`, `/device_authorization`, `/token`, `/token?aws_iam=t`, `/authorize`, `/device` | REST JSON | 4 |

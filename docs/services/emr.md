@@ -46,7 +46,7 @@ Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job 
 | `CreatePersistentAppUI` | Makes a cluster's persistent application UIs; see [Application UIs](#application-uis) |
 | `DescribePersistentAppUI` | Returns a persistent application UI's types and status |
 | `GetPersistentAppUIPresignedURL` | Returns a presigned URL to a persistent application UI, a page of Floci's |
-| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, a page of Floci's |
+| `GetOnClusterAppUIPresignedURL` | Returns a presigned URL to a running cluster's on-cluster UI, which opens for real in the `docker` mode; see [Application UIs](#application-uis) |
 | `GetClusterSessionCredentials` | Returns temporary basic credentials for a runtime role enabled cluster; see [Application UIs](#application-uis) |
 | `AddInstanceGroups` | Adds instance groups to a running cluster |
 | `ListInstanceGroups` | Lists the instance groups of a cluster |
@@ -208,8 +208,10 @@ included; see [Step Functions: Amazon EMR tasks](step-functions.md#amazon-emr-ta
 ## Sessions
 
 A session is "a managed connection between your local PySpark client and a Spark Connect Server running on your Amazon
-EMR cluster" (Management Guide, "Interactive sessions"). Floci keeps a session and its lifecycle on its cluster, but
-starts no Spark Connect server for it, in either runner mode, so nothing answers Spark Connect at its endpoint.
+EMR cluster" (Management Guide, "Interactive sessions"). With `runner-mode` set to `docker`, Floci runs that server on
+the session's cluster, and a client reaches it through Floci (see [Running a session's Spark Connect
+server](#running-a-sessions-spark-connect-server)). With the default `immediate` mode, Floci keeps a session and its
+lifecycle on its cluster but runs no server for it.
 
 * **Starting**: `StartSession` needs a cluster created with `SessionEnabled` (which `DescribeCluster` reports), on
   "release emr-spark-8.0.0 or later", with "The Spark application installed on the cluster", that is `RUNNING` or
@@ -225,22 +227,52 @@ starts no Spark Connect server for it, in either runner mode, so nothing answers
   `ValidationException`. A retry with the same `ClientRequestToken` that asks for the same session answers as the
   first call did, a member left out, empty or at its default counting as the same; the token reused for a different
   session is refused with `InvalidRequestException`.
-* **States**: `StartSession` answers `SUBMITTED`, as "When a session is first created, it enters the SUBMITTED state",
-  and the session is `IDLE` from then on, with `StartedAt` and `IdleSince` its creation time. It is `TERMINATED` once
+* **States**: `StartSession` answers `SUBMITTED`, as "When a session is first created, it enters the SUBMITTED state".
+  In the `immediate` mode the session is `IDLE` from then on, with `StartedAt` and `IdleSince` its creation time; in
+  the `docker` mode it goes through `STARTING` and `IDLE`, then `BUSY` and back (see below). It is `TERMINATED` once
   it has been idle for its `SessionIdleTimeoutInMinutes` (60 when not given: "The default timeout is 60 minutes"), when
   `TerminateSession` ends it, or when its cluster shuts down, its `StateChangeReason` saying which. Floci never reports
-  `STARTING`, `STARTED`, `BUSY`, `TERMINATING` or `FAILED`.
-* **TerminateSession** ends a session at once as `TERMINATED`; AWS's passes through `TERMINATING` first. A session that
-  has already ended is refused with `InvalidRequestException`, in Floci's own wording.
-* **GetSessionEndpoint** answers for a session that has not ended with an endpoint on Floci's own address
-  (`/_aws/emr/sessions/<clusterId>/<sessionId>`) and a fresh `AuthToken` that expires in an hour, as "Authentication
-  tokens expire after 1 hour". Nothing answers Spark Connect there, and no `Credentials` are given. A session that has
-  ended is refused with `InvalidRequestException`, in Floci's own wording.
+  `STARTED`.
+* **TerminateSession** ends a session with no server at once as `TERMINATED`; one whose server runs is `TERMINATING`
+  until its server has stopped, as "the session enters the TERMINATING state and then transitions to TERMINATED". A
+  session that has already ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **GetSessionEndpoint** answers for a session that has not ended with Floci's own address as its endpoint, such as
+  `http://localhost:4566`, and a fresh `AuthToken` that expires in an hour, as "Authentication tokens expire after 1
+  hour". AWS's endpoint is an `https://` URL per session without a port; a Spark Connect URL holds no path, so Floci's
+  is its address alone, port included, and the token names the session. No `Credentials` are given. A session that has
+  ended, or is `TERMINATING`, is refused with `InvalidRequestException`, in Floci's own wording.
 * **ListSessions** returns the newest sessions first, as "Newer sessions are returned first", the later of two started
   in the same millisecond first too, filtered by `SessionStates`, at most `MaxResults` (1 to 100, 100 by default) to a
   page.
 * A session's `EngineConfigurations`, `MonitoringConfiguration` and `Tags` are kept as given and reported by
-  `GetSession`; none of them configures anything, and no session logs are written.
+  `GetSession`. In the `docker` mode the engine configurations' `spark-defaults` configure its server (below); the
+  monitoring configuration configures nothing, and no session logs are written.
+
+### Running a session's Spark Connect server
+
+With `runner-mode` set to `docker`, each session runs a Spark Connect server on its cluster, as "Amazon EMR launches a
+Spark Connect Server as a YARN application on your cluster": a container on the cluster, as a step's is, in the image
+its steps run in, its HDFS and YARN started first where they are not running, the server's driver in that container
+and its executors on the cluster's YARN. Its `spark-defaults` are the cluster's, then the session's
+`EngineConfigurations`, which are "applied to the Spark Connect Server for that session only"; Floci sets
+`spark.connect.grpc.binding.port` itself. It runs as the session's `ExecutionRoleArn`, else the cluster's instance
+profile. The server's port is published on the Docker host's loopback interface only, and clients reach it through
+Floci, as an EMR Serverless session's are (see EMR Serverless, "Running a session's Spark Connect server").
+
+* **Connecting**: build the connection string from `GetSessionEndpoint`'s answer as AWS's guide does, but keep the
+  endpoint's port: `sc://localhost:4566/;x-aws-proxy-auth=<AuthToken>;authorization=<SessionId>`, with
+  `;use_ssl=true` only where Floci's TLS is on. The token names the session; the `authorization` parameter, which
+  AWS's proxy reads, is dropped before the call reaches the server. The client's PySpark must match the release's
+  Spark.
+* **Tokens**: a call whose token Floci did not give, or which has expired, fails with gRPC's `UNAUTHENTICATED`; one
+  to a session that is not `IDLE` or `BUSY`, or, in the `immediate` mode, to any session, with `UNAVAILABLE`, in
+  Floci's own wording.
+* **States**: a session is `SUBMITTED` until its container runs, `STARTING` until the server answers, then `IDLE`,
+  with `StartedAt` and `IdleSince` set. No source says when a session is `BUSY`: Floci makes it `BUSY` while a call
+  runs on its server, and `IDLE` again once none does, its idle timeout counting from then. A server that does not
+  answer within 10 minutes, or stops on its own, fails its session, its `StateChangeReason` saying why; one Floci
+  stopped running when it restarted fails too, and its container, if one is left, goes. The cluster's end ends its
+  sessions and stops their servers.
 
 ## Studios
 
@@ -265,7 +297,8 @@ nothing answers.
 * **UpdateStudio** changes what it is given. Its `SubnetIds` "can include new subnet IDs, but must also include all of
   the subnet IDs previously associated with the Studio", at most 5, in the Studio's VPC; anything else is refused.
 * **DeleteStudio** removes the Studio and its session mappings. **ListStudios** lists the Region's Studios in the order
-  they were made, 50 to a page, after a `Marker`; no source gives AWS's order or page size.
+  they were made, 50 to a page, after a `Marker`, which resumes only the listing it came from: the same account and
+  Region. No source gives AWS's order or page size.
 * **Session mappings** are for an `SSO` Studio, as "Use CreateStudioSessionMapping to assign users to a Studio when you
   use IAM Identity Center authentication"; one on an `IAM` Studio is refused. A call names its user or group by
   "Either IdentityName or IdentityId ... but not both", and the identity must be in the identity store of the
@@ -273,12 +306,14 @@ nothing answers.
   both. A user or group mapped twice, or not mapped, is refused, each with `InvalidRequestException` in Floci's own
   wording. Getting, updating and removing a mapping finds it by the id or the name it was made with, so one whose
   user or group has since been deleted can still be removed. The `SessionPolicyArn` is kept as given. `ListStudioSessionMappings` lists a Studio's mappings, or every
-  Studio's when it names none, filtered by `IdentityType`, in the order they were made, 50 to a page.
+  Studio's when it names none, filtered by `IdentityType`, in the order they were made, 50 to a page, after a `Marker`
+  that resumes only the listing it came from: the same account, Region, Studio and `IdentityType`.
 
 ## Notebook executions
 
-Floci keeps a notebook execution and its lifecycle, but runs no notebook, in either runner mode, and writes no output
-notebook.
+With `runner-mode` set to `docker`, a notebook execution runs its notebook on its cluster and writes it as run (see
+[Running a notebook execution's notebook](#running-a-notebook-executions-notebook)). With the default `immediate`
+mode, Floci keeps an execution and its lifecycle but runs no notebook and writes no output notebook.
 
 * **StartNotebookExecution** refuses a request without `ExecutionEngine.Id` or `ServiceRole`, or with an
   `ExecutionEngine.Type` or `OutputNotebookFormat` the model does not name, with `ValidationException`, and a member of
@@ -292,24 +327,75 @@ notebook.
   `InvalidRequestException` in Floci's own wording. The editor, relative path, S3 locations and parameters are kept as
   given. The execution's id is `ex-` and 29 letters and digits, and its `ExecutionEngine.Type` is `EMR` unless given.
   IAM's `aws:ResourceTag` conditions read its tags.
-* **States**: an execution is `START_PENDING` as it starts, `RUNNING` from then on, and `FINISHED` once the cluster's
-  `step-duration-seconds` has passed (at once by default), with AWS's "Execution is finished for cluster ...". It is
-  `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An execution is terminated if it runs for
-  more than 30 days", in Floci's own wording.
-* **StopNotebookExecution** stops one that has not ended at once, `STOPPED` with AWS's "Execution is stopped for
-  cluster ...". One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
+* **States**: in the `immediate` mode an execution is `START_PENDING` as it starts, `RUNNING` from then on, and
+  `FINISHED` once the cluster's `step-duration-seconds` has passed (at once by default), with AWS's "Execution is
+  finished for cluster ...". It is `FAILED` if its cluster shuts down first, or once it has run 30 days, as "An
+  execution is terminated if it runs for more than 30 days", in Floci's own wording. In the `docker` mode its run sets
+  them (below).
+* **StopNotebookExecution** stops one that has not ended, `STOPPED` with AWS's "Execution is stopped for cluster ...":
+  at once with no notebook running, else `STOPPING` ("Execution is being stopped for cluster ...") until its run has
+  stopped. One that has ended is refused with `InvalidRequestException`, in Floci's own wording.
 * **ListNotebookExecutions** lists the Region's executions that started from `From` (by default 30 days ago) to
   `To` (by default now), filtered by `EditorId`, `Status` and `ExecutionEngineId`, newest first, at most 50 to a page
   ("Returns a maximum of 50 notebook executions") after a `Marker`, which resumes only the listing it came from: the
   same account, Region and filters.
 
+### Running a notebook execution's notebook
+
+With `runner-mode` set to `docker`, an execution runs its notebook on its cluster as a step's command runs: a
+`spark-submit` there, a YARN application with the cluster's Spark settings, as the execution's `ExecutionRoleArn`,
+else the cluster's instance profile, with its `EnvironmentVariables`. No source names the kernel AWS runs a notebook
+with, so Floci runs it with a program of its own, needing only Python and PySpark, which every release's image has,
+not Jupyter:
+
+* **The notebook** is the execution's `NotebookS3Location`, read through the cluster's S3A. AWS finds an EMR
+  Notebook named by `EditorId` and `RelativePath` under the notebook's own S3 location, which Floci keeps none of, so
+  such an execution fails at once, in Floci's own wording.
+* **Its cells**: the code cells run in turn in one Python namespace that holds `spark` and `sc`, each keeping what it
+  printed, the value of its last expression, and any error, every output an earlier run left cleared first. Of
+  sparkmagic's cell commands, a `%%sql` cell runs its body with `spark.sql`, showing the result's first 20 rows, and a
+  `%%local` or `%%spark` one runs its body as Python; any other (`%%configure`, `%%info`, ...) is not run. A `%` or
+  `!` line of IPython's or sparkmagic's commands is not run either, where the cell is not Python as it stands.
+  `NotebookParams`, "Input parameters in JSON format", go in as papermill puts them, in a cell tagged
+  `injected-parameters` after the one tagged `parameters`, else first, as "You can pass different parameter values to
+  a notebook with a parameterized notebook cell", in place of any such cell an earlier run left; each parameter's name
+  must be a Python variable's, or the run fails before any cell. An environment variable `KERNEL_EXTRA_SPARK_OPTS`, as
+  AWS's example passes, goes to `spark-submit` as its options.
+* **The notebook as run**: no source gives where AWS writes it, so Floci writes it under the
+  `OutputNotebookS3Location` prefix, else beside the notebook, in a folder named for the execution, as `<name>.ipynb`
+  and `<name>.html`, and reports the one `OutputNotebookFormat` names, the HTML one, else the notebook, as the
+  execution's `OutputNotebookURI`.
+* **States**: `START_PENDING` until its container runs, then `RUNNING`; `FINISHED` once every cell has run; `FAILED`
+  at the first cell that raises (the notebook as run, written all the same, holds its error), where the run fails
+  otherwise (its reason giving the run's exit code, the notebook as run perhaps not written), where it could not
+  start, where its cluster shuts down, which stops the run, or after 30 days, in Floci's own wording. One Floci stopped
+  running when it restarted fails too.
+
 ## Application UIs
 
-Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI, YARN timeline server
-or on-cluster UI: a presigned URL opens a page Floci serves at `/_aws/emr/app-ui` on its own address (`base-url`, or
-`hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for. The link is signed with a key
-Floci makes as it starts and lasts an hour, as no source gives AWS's; one changed, past its hour or given before
-Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
+Floci keeps a cluster's persistent application UIs, but serves no Spark History Server, Tez UI or YARN timeline
+server: a presigned URL to one of those opens a page Floci serves at `/_aws/emr/app-ui` on its own address
+(`base-url`, or `hostname`), with the cluster as `DescribeCluster` gives it and the interface asked for, and so does
+one to an on-cluster UI in the `immediate` mode. The link is signed with a key Floci makes as it starts and lasts an
+hour, as no source gives AWS's; one changed, past its hour or given before Floci restarted opens a `403` page, and one
+whose cluster has gone a `404`.
+
+In the `docker` mode, an on-cluster UI that runs on the cluster's primary node opens for real: the `ResourceManager`
+("YARN ResourceManager | http://master-public-dns-name:8088/"), an `ApplicationMaster` through the ResourceManager's
+web proxy, and the `JobHistoryServer`, on a cluster whose primary node runs YARN (see **YARN**). Each opens on a host of
+its own, as AWS's application UIs are on hosts of their own under "emrappui-prod.us-east-1.amazonaws.com", which "are
+registered in the Public Suffix List": `http://<secret>-<port>.emrappui.<Floci's host and port>/`, the secret 26
+random letters and digits that only this link holds, so the host itself is the link's authority, as the interface
+takes no AWS credentials. Floci's host must resolve its subdomains: `localhost` and `localhost.floci.io` do, and Floci's
+TLS certificate names `*.emrappui.localhost` and `*.emrappui.localhost.floci.io`. Requests to the host go on to that
+port of the primary node, which Floci reaches at a port Docker publishes on the host's loopback interface alone, or,
+Floci in a container, on the cluster's network, which its container joins; the node's daemons write their links to
+one another by the node's name, and Floci makes each such link, in the text it sends, a link to that interface's own
+host under the same secret, so the ResourceManager's links to a job's history and to its containers' logs on the
+NodeManager of a primary node that works open too. A NodeManager on a core or task node, which Floci does not reach,
+keeps its links as written. The link lasts an hour, as the page's does, after which its host answers with a `403`
+page; once its cluster has ended, its host answers with a `404` one. A request's body goes on to the interface as it
+arrives, and an interface that sends nothing for a minute has the request given up with a `502` page.
 
 * **CreatePersistentAppUI** takes an EMR cluster's ARN of the account in the Region as its `TargetResourceArn`; Floci
   keeps none for an EMR on EKS virtual cluster. The persistent Spark History Server is there "Starting with Amazon
@@ -327,8 +413,14 @@ Floci restarted opens a `403` page, and one whose cluster has gone a `404`.
   any source gives. A tag without its `Key`, "the minimum required information for a valid tag", is refused, as it is
   for sessions, Studios and notebook executions.
 * **GetPersistentAppUIPresignedURL** gives a URL to one of the UI's types, its first by default; a type it has not is
-  refused. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI, the `ResourceManager` by default, while
-  the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. Both are `PresignedURLReady` at once.
+  refused, and the URL is `PresignedURLReady` at once. **GetOnClusterAppUIPresignedURL** gives one to an on-cluster UI,
+  the `ResourceManager` by default, while the cluster is `RUNNING` or `WAITING`, and none for a `DryRun`. With an
+  `ApplicationId`, the ResourceManager's link lands on the application's page, an application master's on its UI
+  through the web proxy, and the JobHistory server's on the job of that id (`job_` in place of `application_`); without
+  one, on the cluster's applications, its running ones, and its jobs. A link Floci opens for real is
+  `PresignedURLReady` once the primary node is: until then, as on a cluster no step has run on yet, the node starts as
+  a step's would ("Used to determine if the presigned URL is ready"), and its host answers with a `503` page meanwhile.
+  Any other is ready at once.
 * **GetClusterSessionCredentials** gives "temporary, HTTP basic credentials that are associated with a given runtime
   IAM role and used by a cluster with fine-grained access control activated": a random username and password that
   expire in an hour, as no source gives AWS's lifetime, for a `RUNNING` or `WAITING` cluster on `emr-6.11.0` or later
@@ -877,7 +969,7 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_CLUSTER_STARTUP_DELAY_SECONDS` | `0` | Seconds a new cluster takes to be ready to run steps, the first half `STARTING` and the second `BOOTSTRAPPING`; `0` makes it ready as soon as it is created |
 | `FLOCI_SERVICES_EMR_STEP_DURATION_SECONDS` | `0` | Seconds a step stays `RUNNING` before it completes; `0` completes it as soon as it starts |
 | `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
-| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps)) |
+| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step, each session's Spark Connect server and each notebook execution's notebook in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps), [Running a session's Spark Connect server](#running-a-sessions-spark-connect-server) and [Running a notebook execution's notebook](#running-a-notebook-executions-notebook)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label; a mirror sets `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` too |
 | `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image a `docker` cluster takes HDFS and YARN from, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the Hadoop of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |

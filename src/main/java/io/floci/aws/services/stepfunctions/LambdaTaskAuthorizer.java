@@ -257,7 +257,8 @@ public class LambdaTaskAuthorizer {
         // session name, and a session's aws:userid is role-id:session-name, so it and aws:username
         // stay absent, which is what makes a condition on either of them not match.
         CallerArns trustCaller = new CallerArns(sessionArn(callerRoleArn), callerRoleArn,
-                CallerArns.TYPE_ASSUMED_ROLE, null, null);
+                CallerArns.TYPE_ASSUMED_ROLE, null, null)
+                .withOrganization(iamService.organizationContextOf(callerId.accountId()).orElse(null));
         TrustDecision trust = trustEvaluator.decide(target.get().getAssumeRolePolicyDocument(), trustCaller,
                 callerId.accountId(), context);
         ResourceAccountRelationship relationship = relationship(callerId.accountId(), roleAccount);

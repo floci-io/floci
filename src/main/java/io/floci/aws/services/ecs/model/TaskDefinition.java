@@ -34,7 +34,7 @@ public class TaskDefinition {
     private String registeredBy;
     private Instant deregisteredAt;
     private Instant deleteRequestedAt;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     /** Members Floci does not act on, kept verbatim so DescribeTaskDefinition round-trips. */
     private Map<String, Object> unparsed;
 

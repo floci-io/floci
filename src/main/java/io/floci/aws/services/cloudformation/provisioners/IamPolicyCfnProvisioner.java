@@ -378,6 +378,6 @@ public class IamPolicyCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void deleteLegacyManagedPolicy(StackResource resource) {
-        IamManagedPolicyDeletes.detachRolesAndDeletePolicy(iamService, resource);
+        IamManagedPolicyDeletes.detachAndDeletePolicy(iamService, resource);
     }
 }

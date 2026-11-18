@@ -1,10 +1,12 @@
 package io.floci.aws.services.emr;
 
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
@@ -155,6 +157,14 @@ public interface ClusterStorage {
         Node(String id, String host, boolean core) {
             this(id, host, core, null);
         }
+    }
+
+    /**
+     * Where Floci reaches {@code port}, a web interface's, on {@code clusterId}'s primary node: empty while the node is
+     * not running and ready, or where Floci cannot reach it.
+     */
+    default Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+        return Optional.empty();
     }
 
     /**

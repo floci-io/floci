@@ -35,7 +35,9 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.MultiRegionKeyType;
+import software.amazon.awssdk.services.paymentcryptography.model.PublicPolicyException;
 import software.amazon.awssdk.services.paymentcryptography.model.RemoveKeyReplicationRegionsResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
 import software.amazon.awssdk.services.paymentcryptography.model.Tr34KeyBlockFormat;
 import software.amazon.awssdk.services.paymentcryptography.model.WrappedKeyMaterialFormat;
@@ -722,6 +724,48 @@ class PaymentCryptographyTest {
                 .stream()
                 .collect(Collectors.toMap(Tag::key, Tag::value, (a, b) -> a));
         assertThat(tags).containsEntry("owner", "compat");
+    }
+
+    @Test
+    void aResourcePolicyIsPutReadAndDeleted() {
+        Key key = createAesKey();
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"arn:aws:iam::111122223333:role/ExampleRole\"},"
+                + "\"Action\":[\"payment-cryptography:GenerateCardValidationData\"],"
+                + "\"Resource\":\"*\"}]}";
+
+        assertThat(client.putResourcePolicy(r -> r
+                .resourceArn(key.keyArn())
+                .policy(policy)).policy()).isEqualTo(policy);
+        assertThat(client.getResourcePolicy(r -> r.resourceArn(key.keyArn())).policy())
+                .isEqualTo(policy);
+
+        client.deleteResourcePolicy(r -> r.resourceArn(key.keyArn()));
+
+        assertThatThrownBy(() -> client.getResourcePolicy(r -> r.resourceArn(key.keyArn())))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void aPublicResourcePolicyIsRefused() {
+        Key key = createAesKey();
+
+        assertThatThrownBy(() -> client.putResourcePolicy(r -> r
+                .resourceArn(key.keyArn())
+                .policy("{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\"}]}")))
+                .isInstanceOf(PublicPolicyException.class);
+    }
+    @Test
+    void aKeyIsStoppedAndStartedAgain() {
+        Key key = createAesKey();
+
+        Key stopped = client.stopKeyUsage(r -> r.keyIdentifier(key.keyArn())).key();
+        assertThat(stopped.enabled()).isFalse();
+        assertThat(stopped.usageStopTimestamp()).isNotNull();
+
+        Key started = client.startKeyUsage(r -> r.keyIdentifier(key.keyArn())).key();
+        assertThat(started.enabled()).isTrue();
+        assertThat(started.usageStartTimestamp()).isNotNull();
     }
 
     /**

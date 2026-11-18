@@ -26,11 +26,15 @@ import java.util.Set;
 final class EmrSessions {
 
     static final String SUBMITTED = "SUBMITTED";
+    static final String STARTING = "STARTING";
     static final String IDLE = "IDLE";
+    static final String BUSY = "BUSY";
+    static final String TERMINATING = "TERMINATING";
     static final String TERMINATED = "TERMINATED";
+    static final String FAILED = "FAILED";
     static final List<String> STATES =
-            List.of(SUBMITTED, "STARTING", "STARTED", IDLE, "BUSY", "TERMINATING", TERMINATED, "FAILED");
-    private static final Set<String> ENDED = Set.of(TERMINATED, "FAILED");
+            List.of(SUBMITTED, STARTING, "STARTED", IDLE, BUSY, TERMINATING, TERMINATED, FAILED);
+    private static final Set<String> ENDED = Set.of(TERMINATED, FAILED);
     // "Amazon EMR enforces a limit of 1000 concurrent active sessions per cluster."
     static final int MAX_CONCURRENT_SESSIONS = 1000;
     // "Sessions end after a configurable idle timeout. The default timeout is 60 minutes, with a maximum of 24 hours."
@@ -40,8 +44,9 @@ final class EmrSessions {
     static final Duration TOKEN_VALIDITY = Duration.ofHours(1);
     // ListSessions' MaxResultsNumber is 1 to 100.
     static final int MAX_LIST_RESULTS = 100;
-    // Where GetSessionEndpoint points; nothing answers Spark Connect there, as Floci runs no server for a session.
-    static final String ENDPOINT_PATH = "/_aws/emr/sessions/";
+    // The port a session's Spark Connect server listens on in its container, Spark Connect's own default.
+    static final int SPARK_CONNECT_PORT = 15002;
+    static final String SPARK_CONNECT_SERVER = "org.apache.spark.sql.connect.service.SparkConnectServer";
     private static final int MAX_NAME_LENGTH = 256;
     private static final int MIN_TOKEN_LENGTH = 1;
     private static final int MAX_TOKEN_LENGTH = 36;
@@ -54,6 +59,10 @@ final class EmrSessions {
     static final String IDLE_TIMED_OUT = "The session was idle for its idle timeout.";
     static final String CLUSTER_ENDED = "The session's cluster was terminated.";
     static final String USER_REQUEST = "The session was terminated by request.";
+    static final String INTERRUPTED = "Floci stopped while the session was running.";
+    static final String NO_SERVER = "Floci runs no Spark Connect server for session %s, as the EMR runner mode is"
+            + " immediate; floci.services.emr.runner-mode docker runs one.";
+    static final String NOT_READY = "Session %s is %s, not ready for calls.";
 
     private EmrSessions() {
     }
@@ -192,8 +201,8 @@ final class EmrSessions {
     }
 
     /**
-     * Brings a session of the cluster up to {@code now}: a SUBMITTED one is IDLE from when it was made, as nothing has
-     * to start; an IDLE one ends once its idle timeout has passed since it went idle; and every one that has not
+     * Brings a session of the cluster up to {@code now}: a SUBMITTED one with no server to start is IDLE from when it
+     * was made; an IDLE one ends once its idle timeout has passed since it went idle; and every one that has not
      * ended ends as its cluster shuts down, whichever comes first. Returns whether it changed.
      */
     static boolean settle(EmrCluster cluster, EmrSession session, Instant now) {
@@ -202,7 +211,7 @@ final class EmrSessions {
         }
         boolean changed = false;
         Instant clusterEnd = EmrService.shutDownAt(cluster, now);
-        if (SUBMITTED.equals(session.getState())
+        if (SUBMITTED.equals(session.getState()) && !session.isContainerSession()
                 && (clusterEnd == null || session.getCreatedAt().isBefore(clusterEnd))) {
             session.setState(IDLE);
             session.setStartedAt(session.getCreatedAt());
@@ -239,12 +248,36 @@ final class EmrSessions {
 
     /**
      * Terminates a session that has not ended: "After you call this operation, the session enters the TERMINATING
-     * state and then transitions to TERMINATED." With no server to stop, Floci's is TERMINATED at once. One that has
-     * already ended is refused, in Floci's own wording, as AWS's answer is not recorded.
+     * state and then transitions to TERMINATED." With no server to stop, Floci's is TERMINATED at once; one whose
+     * server runs is TERMINATING until it has stopped ({@link #terminating}). One that has already ended is refused,
+     * in Floci's own wording, as AWS's answer is not recorded.
      */
     static void terminate(EmrSession session, Instant now) {
         requireNotEnded(session);
         end(session, USER_REQUEST, now);
+    }
+
+    /** A session whose server is being stopped at the request's word: TERMINATING until it has stopped. */
+    static void terminating(EmrSession session, Instant now) {
+        requireNotEnded(session);
+        session.setState(TERMINATING);
+        session.setStateChangeReason(USER_REQUEST);
+        session.setUpdatedAt(now);
+        session.setIdleSince(null);
+    }
+
+    /** Ends a session as {@code state}, TERMINATED or FAILED, for {@code reason}, at {@code at}. */
+    static void end(EmrSession session, String state, String reason, Instant at) {
+        session.setState(state);
+        session.setStateChangeReason(reason);
+        session.setEndedAt(at);
+        session.setUpdatedAt(at);
+        session.setIdleSince(null);
+    }
+
+    /** Whether the session has ended, TERMINATED or FAILED. */
+    static boolean ended(EmrSession session) {
+        return ENDED.contains(session.getState());
     }
 
     /** Refuses a session that has ended, which has nothing to connect to or terminate. */
@@ -263,10 +296,6 @@ final class EmrSessions {
     }
 
     private static void end(EmrSession session, String reason, Instant at) {
-        session.setState(TERMINATED);
-        session.setStateChangeReason(reason);
-        session.setEndedAt(at);
-        session.setUpdatedAt(at);
-        session.setIdleSince(null);
+        end(session, TERMINATED, reason, at);
     }
 }

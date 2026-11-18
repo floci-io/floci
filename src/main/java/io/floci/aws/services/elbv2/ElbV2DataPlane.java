@@ -12,6 +12,7 @@ import io.floci.aws.core.common.RequestHost;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.WebSocketUpgrades;
 import io.floci.aws.core.common.tls.ReloadingKeyManager;
+import io.floci.aws.services.ec2.Ec2InstancePorts;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.elbv2.model.Action;
 import io.floci.aws.services.elbv2.model.Listener;
@@ -135,6 +136,9 @@ public class ElbV2DataPlane {
 
     @Inject
     Ec2Service ec2Service;
+
+    @Inject
+    Ec2InstancePorts instancePorts;
 
     @Inject
     CertificateReferenceResolver certificateResolver;
@@ -718,8 +722,10 @@ public class ElbV2DataPlane {
             return;
         }
         TargetDescription target = pickRoundRobin(tgArn, candidates);
-        int port = ElbV2HealthChecker.effectivePort(target, tg);
-        String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, target);
+        Ec2InstancePorts.Endpoint endpoint = ElbV2TargetResolver.resolve(ec2Service, instancePorts, tg,
+                target.getId(), ElbV2HealthChecker.effectivePort(target, tg));
+        int port = endpoint.port();
+        String host = endpoint.host();
         AtomicBoolean disconnected = new AtomicBoolean();
         socket.closeHandler(ignored -> disconnected.set(true));
         vertx.executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
@@ -1161,8 +1167,10 @@ public class ElbV2DataPlane {
             target = pickRoundRobin(tgArn, candidates);
         }
         List<String> cookies = duration > 0 ? stickyCookie.headers(scope, tg, target) : List.of();
-        int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
-        String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, target);
+        Ec2InstancePorts.Endpoint endpoint = ElbV2TargetResolver.resolve(ec2Service, instancePorts, tg,
+                target.getId(), ElbV2HealthChecker.effectivePort(target, tg));
+        int targetPort = endpoint.port();
+        String host = endpoint.host();
         boolean secure = "HTTPS".equals(tg.getProtocol());
         if (isWebSocketUpgrade(req)) {
             proxyUpgrade(req, host, targetPort, secure, hostHeader, forwarded,

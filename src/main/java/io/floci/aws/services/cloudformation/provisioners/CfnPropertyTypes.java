@@ -349,6 +349,17 @@ final class CfnPropertyTypes {
             return read(path, path.substring(path.lastIndexOf('/') + 1), engine.omitNoValue(raw), shapeName);
         }
 
+        /**
+         * The property {@code property} of {@code resourceType} in {@code props} read as the shape its
+         * resource schema declares; null when {@code props} lacks it or it is {@code AWS::NoValue}.
+         */
+        JsonNode readProperty(String resourceType, JsonNode props, String property) {
+            if (props == null || !props.has(property)) {
+                return null;
+            }
+            return read(property, props.get(property), propertyShape(resourceType, property));
+        }
+
         /** Throws the first model validation failure found by {@link #read}, if any. */
         void finish() {
             if (modelFailure != null) {

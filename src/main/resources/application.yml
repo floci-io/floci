@@ -393,6 +393,10 @@ floci:
     strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
     reject-unknown-service-scope: true # FLOCI_PROTOCOLS_REJECT_UNKNOWN_SERVICE_SCOPE — reject REST requests signed for a service Floci does not implement
 
+  request-log:
+    enabled: false                     # FLOCI_REQUEST_LOG_ENABLED: write every request and response as one JSON line (holds bodies, secrets included)
+    # file: ./floci-requests.jsonl     # FLOCI_REQUEST_LOG_FILE
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
@@ -458,6 +462,10 @@ floci:
       vector-index-allocation-seconds: 4   # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS. Resource allocation phase of a vector index added by UpdateTable.
       vector-index-backfill-seconds: 10    # FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS. Backfilling phase that follows it.
       latest-restorable-lag-seconds: 300   # FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS. How far LatestRestorableDateTime trails now.
+      stream-shard-count: 1                # FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_COUNT. Open shards per stream (native engine).
+      stream-shard-rollover-seconds: 0     # FLOCI_SERVICES_DYNAMODB_STREAM_SHARD_ROLLOVER_SECONDS. 0: shards stay open.
+      stream-iterator-expiry-enabled: false   # FLOCI_SERVICES_DYNAMODB_STREAM_ITERATOR_EXPIRY_ENABLED. 15-minute iterators.
+      stream-retention-enabled: false      # FLOCI_SERVICES_DYNAMODB_STREAM_RETENTION_ENABLED. 24-hour records and shards.
       backend: native                      # FLOCI_SERVICES_DYNAMODB_BACKEND: native or local
       # local-endpoint: http://dynamodb-local:8000   # FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT
       local-connect-timeout-seconds: 2     # FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS
@@ -600,6 +608,7 @@ floci:
       mock: false                                 # FLOCI_SERVICES_RDS_MOCK — true = metadata only, no Docker (useful for CI)
       proxy-base-port: 7001
       proxy-max-port: 7099
+      # advertise-requested-port: false         # FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT; true = Describe* reports the requested Port, not the proxy port
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.
@@ -656,7 +665,7 @@ floci:
       cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
       step-duration-seconds: 0              # 0 = a step completes as soon as it starts
       cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
-      runner-mode: immediate                # docker = run bootstrap actions and steps in containers
+      runner-mode: immediate                # docker = run bootstrap actions, steps, sessions' servers and notebooks in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
@@ -985,6 +994,7 @@ floci:
       job-completion-delay-seconds: 3
     fis:
       enabled: true
+      inject-api-any-service: false  # Let the aws:fis:inject-api-* actions target any service, not only ec2 and kinesis
     route53:
       enabled: true
       vpc-association-control-plane-delay-ms: 0
@@ -1087,7 +1097,7 @@ floci:
     emrserverless:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
-      runner-mode: immediate        # docker = run each job run's spark-submit or hive in a container
+      runner-mode: immediate        # docker = run each job run, and each session's Spark Connect server, in a container
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # for Hive job runs

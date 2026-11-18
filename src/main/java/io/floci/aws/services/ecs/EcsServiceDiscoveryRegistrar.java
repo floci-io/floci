@@ -7,6 +7,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudmap.CloudMapService;
 import io.floci.aws.services.cloudmap.model.Instance;
+import io.floci.aws.services.cloudmap.model.Namespace;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.EcsRegisteredInstances;
@@ -211,6 +212,16 @@ public class EcsServiceDiscoveryRegistrar {
                 }
             }
         }
+    }
+
+    /** The ARN of the Region's Cloud Map namespace that a name or ARN gives; null when there is none. */
+    public String namespaceArn(String nameOrArn, String region) {
+        for (Namespace namespace : cloudMapService.listNamespaces(region)) {
+            if (nameOrArn.equals(namespace.getName()) || nameOrArn.equals(namespace.getArn())) {
+                return namespace.getArn();
+            }
+        }
+        return null;
     }
 
     public boolean hasRegistries(EcsServiceModel svc) {

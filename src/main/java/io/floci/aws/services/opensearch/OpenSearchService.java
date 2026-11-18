@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -33,6 +34,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -50,7 +52,7 @@ import java.util.concurrent.TimeUnit;
  * region from the domain's ARN, which has always carried it.
  */
 @ApplicationScoped
-public class OpenSearchService implements ResourceProvider {
+public class OpenSearchService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchService.class);
 
@@ -352,9 +354,12 @@ public class OpenSearchService implements ResourceProvider {
         return domain;
     }
 
-    public void addTags(String arn, Map<String, String> tags) {
+    /** Gives the domain a new map, its tags with {@code tags} added, one tag call at a time. */
+    public synchronized void addTags(String arn, Map<String, String> tags) {
         Domain domain = findByArn(arn);
-        domain.getTags().putAll(tags);
+        Map<String, String> merged = new HashMap<>(domain.getTags());
+        merged.putAll(tags);
+        domain.setTags(merged);
         putDomain(domain);
     }
 
@@ -362,10 +367,53 @@ public class OpenSearchService implements ResourceProvider {
         return findByArn(arn).getTags();
     }
 
-    public void removeTags(String arn, List<String> tagKeys) {
+    /** Gives the domain a new map, its tags without {@code tagKeys}, one tag call at a time. */
+    public synchronized void removeTags(String arn, List<String> tagKeys) {
         Domain domain = findByArn(arn);
-        tagKeys.forEach(domain.getTags()::remove);
+        Map<String, String> kept = new HashMap<>(domain.getTags());
+        tagKeys.forEach(kept::remove);
+        domain.setTags(kept);
         putDomain(domain);
+    }
+
+    @Override
+    public String namespace() {
+        return "es";
+    }
+
+    /** A request names a domain by its name, which its ARN carries whole, so there is nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The tags of the domain whose ARN is {@code arn}, in the request's account, where the tag handlers read: an ARN of
+     * another account names none. Read in place under the key the ARN gives, or the name a domain was stored under
+     * before its key named the Region, a record from before storage was account-aware included, as {@link #findByArn}
+     * finds it, and matched on the whole ARN. A tag call stores a new map, so the read is of one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "es")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        if (!account.equals(regionResolver.getAccountId()) || !parsed.resource().startsWith("domain/")) {
+            return Map.of();
+        }
+        String domainName = parsed.resource().substring("domain/".length());
+        Map<String, String> tags = new LinkedHashMap<>();
+        AccountAwareStorageBackend.readInAccount(domainStore, account, storageKey(parsed.region(), domainName))
+                .or(() -> AccountAwareStorageBackend.readInAccount(domainStore, account, domainName))
+                .filter(domain -> arn.equals(domain.getArn()))
+                .ifPresent(domain -> domain.getTags().forEach((key, value) -> {
+                    if (key != null && value != null) {
+                        tags.put(key, value);
+                    }
+                }));
+        return tags;
     }
 
     public Domain upgradeDomain(String domainName, String targetVersion, String region) {

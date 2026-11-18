@@ -20,11 +20,11 @@ import java.util.Optional;
  * points at.
  *
  * <p>Implemented by the service that owns such resources or whose requests name them (EventBridge, for its
- * connections and API destinations; Application Auto Scaling, for its scalable targets; Redshift Data, for the
- * Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment Cryptography, for
- * the key an alias names and the tags of a key; EMR, for the clusters of its instance groups and a tag call's
- * resource and the tags of a cluster; IAM Identity Center, for the accounts its permission sets are provisioned to
- * and the tags of an instance,
+ * connections and API destinations; Application Auto Scaling, for its scalable targets and their tags; Redshift
+ * Data, for the Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment
+ * Cryptography, for the key an alias names and the tags of a key; EMR, for the clusters of its instance groups and a
+ * tag call's resource and the tags of a cluster; IAM Identity Center, for the accounts its permission sets are
+ * provisioned to and the tags of an instance,
  * a permission set, an application or a trusted token issuer; Resource Explorer, for its default view and the tags
  * of an index or a view; OAM and RAM, for the sinks, invitations and shares of other accounts they act on, OAM for
  * the tags of a sink or a link, and RAM for the tags of a resource share;
@@ -42,9 +42,14 @@ import java.util.Optional;
  * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
  * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
  * another account an association runs and the tags of a parameter, a document or an association; CloudFront, for the
- * key value store a name names and the tags of any resource it tags); looked up lazily by {@code ResourceArnBuilder}
- * and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or
- * an ARN is of, so IAM never depends on that service directly.</p>
+ * key value store a name names and the tags of any resource it tags; ECS, for the revision a task definition
+ * reference resolves to, its default cluster and the tags of a cluster, a task definition, a service, a capacity
+ * provider, a task or a container instance; ACM, for the tags of a certificate; Firehose, for the tags of a delivery
+ * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain; Signer, for
+ * the tags of a signing profile; Access Analyzer, for the tags of an analyzer; Managed Service for Apache Flink, for
+ * the tags of an application); looked up lazily by {@code ResourceArnBuilder} and
+ * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
+ * ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone

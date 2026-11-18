@@ -65,6 +65,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static final String EVENTS = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":";
     private static final String TARGETS = "arn:aws:application-autoscaling:" + REGION + ":" + ACCOUNT + ":scalable-target/";
     private static final String REDSHIFT = "arn:aws:redshift:" + REGION + ":" + ACCOUNT + ":";
+    /** The X-Amz-Target prefix of ECS operations. */
+    private static final String ECS_API = "AmazonEC2ContainerServiceV20141113.";
     private static final String WORKGROUPS = "arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT + ":workgroup/";
     /** The AWS Load Balancer Controller's create, tag-on-create and listener statements (its policy v2.14.0). */
     private static final String CONTROLLER_CREATE = "{\"Effect\":\"Allow\",\"Action\":[\"elasticloadbalancing:CreateLoadBalancer\","
@@ -516,20 +518,46 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     @Test
     void aUserPoolIsCheckedOnTheArnItsIdNames() {
-        String id = admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
-                .contentType("application/x-amz-json-1.1").body("{\"PoolName\":\"res-pool-" + suffix() + "\"}")
-                .post("/").then().statusCode(200).extract().path("UserPool.Id");
+        String id = userPool(null);
         String arn = admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
                 .contentType("application/x-amz-json-1.1").body("{\"UserPoolId\":\"" + id + "\"}")
                 .post("/").then().statusCode(200).extract().path("UserPool.Arn");
-        cleanup.register(() -> admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.DeleteUserPool")
-                .contentType("application/x-amz-json-1.1").body("{\"UserPoolId\":\"" + id + "\"}").post("/"));
         assertEquals("arn:aws:cognito-idp:" + REGION + ":" + ACCOUNT + ":userpool/" + id, arn);
 
         User user = user("res-pool");
         user.policy(allowOn("cognito-idp:DescribeUserPool", arn));
         describeUserPool(user, id).statusCode(200);
         refusedJson(describeUserPool(user, id + "x"), "cognito-idp:DescribeUserPool");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Cognito holds on the user pool a request names by its id, as
+     * a tag call leaves them, so an allow on one team's tag lets the caller describe that team's pool and not
+     * another's.
+     */
+    @Test
+    void aCognitoResourceTagConditionReadsTheTagsOfTheUserPool() {
+        String tagged = userPool("{\"team\":\"web\"}");
+        String other = userPool("{\"team\":\"web\"}");
+        adminJson("cognito-idp", "AWSCognitoIdentityProviderService.TagResource").body("{\"ResourceArn\":\""
+                + "arn:aws:cognito-idp:" + REGION + ":" + ACCOUNT + ":userpool/" + tagged
+                + "\",\"Tags\":{\"team\":\"data\"}}").post("/").then().statusCode(200);
+
+        User user = user("res-pool-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"cognito-idp:DescribeUserPool\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeUserPool(user, tagged).statusCode(200);
+        refusedJson(describeUserPool(user, other), "cognito-idp:DescribeUserPool");
+    }
+
+    /** The id of a user pool an administrator creates, with the {@code tags} object if any, deleted afterwards. */
+    private String userPool(String tags) {
+        String id = adminJson("cognito-idp", "AWSCognitoIdentityProviderService.CreateUserPool")
+                .body("{\"PoolName\":\"res-pool-" + suffix() + "\"" + (tags == null ? "" : ",\"UserPoolTags\":" + tags)
+                        + "}").post("/").then().statusCode(200).extract().path("UserPool.Id");
+        cleanup.register(() -> adminJson("cognito-idp", "AWSCognitoIdentityProviderService.DeleteUserPool")
+                .body("{\"UserPoolId\":\"" + id + "\"}").post("/"));
+        return id;
     }
 
     /**
@@ -691,6 +719,33 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code ecs:ResourceTag} or {@code aws:ResourceTag} condition reads the tags ECS holds on the cluster a request
+     * names, by its name or by its ARN, as a tag call leaves them, so an allow on one team's tag lets the caller read
+     * that team's cluster and not another's.
+     */
+    @Test
+    void anEcsResourceTagConditionReadsTheTagsOfTheCluster() {
+        String tagged = ecsCluster("res-tag-cluster-" + suffix(), "web");
+        String other = ecsCluster("res-tag-cluster-" + suffix(), "web");
+        String arns = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":cluster/";
+        adminJson("ecs", ECS_API + "TagResource").body("{\"resourceArn\":\"" + arns + tagged
+                + "\",\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}").post("/").then().statusCode(200);
+
+        User user = user("res-ecs-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ecs:DescribeClusters\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"ecs:ResourceTag/team\":\"data\"}}},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"ecs:ListTagsForResource\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "ecs", ECS_API + "DescribeClusters", "1.1", "{\"clusters\":[\"" + tagged + "\"]}").statusCode(200);
+        refusedJson(send(user, "ecs", ECS_API + "DescribeClusters", "1.1", "{\"clusters\":[\"" + other + "\"]}"),
+                "ecs:DescribeClusters");
+        send(user, "ecs", ECS_API + "ListTagsForResource", "1.1", "{\"resourceArn\":\"" + arns + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "ecs", ECS_API + "ListTagsForResource", "1.1", "{\"resourceArn\":\"" + arns + other
+                + "\"}"), "ecs:ListTagsForResource");
+    }
+
+    /**
      * An {@code ssm:resourceTag} or {@code aws:ResourceTag} condition reads the tags SSM holds on the parameter or the
      * document a request names, so an allow on one team's tag lets the caller read that team's and not another's.
      */
@@ -736,6 +791,13 @@ class IamRequestResourceEnforcementIntegrationTest {
                 "{\"repositoryName\":\"" + name + "\",\"force\":true}", name);
     }
 
+    /** An ECS cluster of the name, tagged with the team, deleted afterwards. */
+    private String ecsCluster(String name, String team) {
+        return created("ecs", ECS_API + "CreateCluster", "{\"clusterName\":\"" + name + "\",\"tags\":[{\"key\":"
+                + "\"team\",\"value\":\"" + team + "\"}]}", ECS_API + "DeleteCluster", "{\"cluster\":\"" + name + "\"}",
+                name);
+    }
+
     /**
      * {@code name}, after an administrator creates the resource with the JSON 1.1 {@code create} call and registers
      * the {@code delete} call that removes it after the test.
@@ -768,22 +830,81 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(describeDeliveryStream(user, name + "-other"), "firehose:DescribeDeliveryStream");
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Firehose holds on the delivery stream a request names, as a
+     * tag call leaves them, so an allow on one team's tag lets the caller describe that team's stream and not
+     * another's.
+     */
+    @Test
+    void aFirehoseResourceTagConditionReadsTheTagsOfTheDeliveryStream() {
+        String tagged = deliveryStream("res-tag-stream-" + suffix(), "web");
+        String other = deliveryStream("res-tag-stream-" + suffix(), "web");
+        adminJson("firehose", "Firehose_20150804.TagDeliveryStream").body("{\"DeliveryStreamName\":\"" + tagged
+                + "\",\"Tags\":" + teamTag("data") + "}").post("/").then().statusCode(200);
+
+        User user = user("res-stream-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"firehose:DescribeDeliveryStream\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeDeliveryStream(user, tagged).statusCode(200);
+        refusedJson(describeDeliveryStream(user, other), "firehose:DescribeDeliveryStream");
+    }
+
+    /** A Firehose delivery stream of the name, tagged with the team, deleted afterwards. */
+    private String deliveryStream(String name, String team) {
+        return created("firehose", "Firehose_20150804.CreateDeliveryStream", "{\"DeliveryStreamName\":\"" + name
+                + "\",\"Tags\":" + teamTag(team) + "}", "Firehose_20150804.DeleteDeliveryStream",
+                "{\"DeliveryStreamName\":\"" + name + "\"}", name);
+    }
+
     /** An identity pool is checked on the ARN its id gives, the one Cognito tags it under. */
     @Test
     void anIdentityPoolIsCheckedOnTheArnItsIdGives() {
-        String id = adminJson("cognito-identity", "AWSCognitoIdentityService.CreateIdentityPool")
-                .body("{\"IdentityPoolName\":\"res pool " + suffix() + "\",\"AllowUnauthenticatedIdentities\":false}")
-                .post("/").then().statusCode(200).extract().path("IdentityPoolId");
-        cleanup.register(() -> adminJson("cognito-identity", "AWSCognitoIdentityService.DeleteIdentityPool")
-                .body("{\"IdentityPoolId\":\"" + id + "\"}").post("/"));
-        String arn = "arn:aws:cognito-identity:" + REGION + ":" + ACCOUNT + ":identitypool/" + id;
-        adminJson("cognito-identity", "AWSCognitoIdentityService.TagResource")
-                .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":{\"a\":\"b\"}}").post("/").then().statusCode(200);
+        String id = identityPool(null);
+        String arn = identityPoolArn(id);
+        tagIdentityPool(arn, "{\"a\":\"b\"}");
 
         User user = user("res-identity-pool");
         user.policy(allowOn("cognito-identity:DescribeIdentityPool", arn));
         describeIdentityPool(user, id).statusCode(200);
         refusedJson(describeIdentityPool(user, REGION + ":" + UUID.randomUUID()), "cognito-identity:DescribeIdentityPool");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Cognito holds on the identity pool a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller describe that team's pool and not
+     * another's.
+     */
+    @Test
+    void aCognitoIdentityResourceTagConditionReadsTheTagsOfTheIdentityPool() {
+        String tagged = identityPool("{\"team\":\"web\"}");
+        String other = identityPool("{\"team\":\"web\"}");
+        tagIdentityPool(identityPoolArn(tagged), "{\"team\":\"data\"}");
+
+        User user = user("res-identity-pool-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"cognito-identity:DescribeIdentityPool\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeIdentityPool(user, tagged).statusCode(200);
+        refusedJson(describeIdentityPool(user, other), "cognito-identity:DescribeIdentityPool");
+    }
+
+    /** The id of an identity pool an administrator creates, with the {@code tags} object if any, deleted afterwards. */
+    private String identityPool(String tags) {
+        String id = adminJson("cognito-identity", "AWSCognitoIdentityService.CreateIdentityPool")
+                .body("{\"IdentityPoolName\":\"res pool " + suffix() + "\",\"AllowUnauthenticatedIdentities\":false"
+                        + (tags == null ? "" : ",\"IdentityPoolTags\":" + tags) + "}")
+                .post("/").then().statusCode(200).extract().path("IdentityPoolId");
+        cleanup.register(() -> adminJson("cognito-identity", "AWSCognitoIdentityService.DeleteIdentityPool")
+                .body("{\"IdentityPoolId\":\"" + id + "\"}").post("/"));
+        return id;
+    }
+
+    private static String identityPoolArn(String id) {
+        return "arn:aws:cognito-identity:" + REGION + ":" + ACCOUNT + ":identitypool/" + id;
+    }
+
+    private static void tagIdentityPool(String arn, String tags) {
+        adminJson("cognito-identity", "AWSCognitoIdentityService.TagResource")
+                .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":" + tags + "}").post("/").then().statusCode(200);
     }
 
     @Test
@@ -811,11 +932,7 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     @Test
     void aCertificateIsCheckedOnItsArn() {
-        String arn = adminJson("acm", "CertificateManager.RequestCertificate")
-                .body("{\"DomainName\":\"res-" + suffix() + ".example.com\"}").post("/").then().statusCode(200)
-                .extract().path("CertificateArn");
-        cleanup.register(() -> adminJson("acm", "CertificateManager.DeleteCertificate")
-                .body("{\"CertificateArn\":\"" + arn + "\"}").post("/"));
+        String arn = certificate(null);
         assertTrue(arn.startsWith("arn:aws:acm:" + REGION + ":" + ACCOUNT + ":certificate/"), arn);
 
         User user = user("res-certificate");
@@ -823,6 +940,45 @@ class IamRequestResourceEnforcementIntegrationTest {
         describeCertificate(user, arn).statusCode(200);
         refusedJson(describeCertificate(user, "arn:aws:acm:" + REGION + ":" + ACCOUNT + ":certificate/" + UUID.randomUUID()),
                 "acm:DescribeCertificate");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags ACM holds on the certificate a request names, as a tag call
+     * leaves them, so an allow on one team's tag lets the caller read that team's certificate and not another's, and
+     * a deny on it holds, also for the certificate's id under another Region's ARN, which is checked in the request's
+     * Region too, where the handler reads it.
+     */
+    @Test
+    void anAcmResourceTagConditionReadsTheTagsOfTheCertificate() {
+        String tagged = certificate(teamTag("web"));
+        String other = certificate(teamTag("web"));
+        adminJson("acm", "CertificateManager.AddTagsToCertificate").body("{\"CertificateArn\":\"" + tagged
+                + "\",\"Tags\":" + teamTag("data") + "}").post("/").then().statusCode(200);
+
+        User user = user("res-acm-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"acm:DescribeCertificate\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeCertificate(user, tagged).statusCode(200);
+        refusedJson(describeCertificate(user, other), "acm:DescribeCertificate");
+
+        User denied = user("res-acm-tag-deny");
+        denied.policy(allowOn("acm:DescribeCertificate", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"acm:DescribeCertificate\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":"
+                + "{\"aws:ResourceTag/team\":\"data\"}}}");
+        refusedJson(describeCertificate(denied, tagged), "acm:DescribeCertificate");
+        describeCertificate(denied, other).statusCode(200);
+        refusedJson(describeCertificate(denied, tagged.replace(":" + REGION + ":", ":eu-west-1:")),
+                "acm:DescribeCertificate");
+    }
+
+    /** The ARN of a certificate an administrator requests, with the {@code tags} list if any, deleted afterwards. */
+    private String certificate(String tags) {
+        String arn = adminJson("acm", "CertificateManager.RequestCertificate")
+                .body("{\"DomainName\":\"res-" + suffix() + ".example.com\"" + (tags == null ? "" : ",\"Tags\":" + tags)
+                        + "}").post("/").then().statusCode(200).extract().path("CertificateArn");
+        cleanup.register(() -> adminJson("acm", "CertificateManager.DeleteCertificate")
+                .body("{\"CertificateArn\":\"" + arn + "\"}").post("/"));
+        return arn;
     }
 
     /**
@@ -1066,9 +1222,47 @@ class IamRequestResourceEnforcementIntegrationTest {
     @Test
     void anApplicationIsCheckedOnTheArnItsNameGives() {
         String name = "res-app-" + suffix();
+        String arn = application(name, null);
+        assertEquals("arn:aws:kinesisanalytics:" + REGION + ":" + ACCOUNT + ":application/" + name, arn);
+
+        User user = user("res-application");
+        user.policy(allowOn("kinesisanalytics:DescribeApplication", arn));
+        describeApplication(user, name).statusCode(200);
+        refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Managed Service for Apache Flink holds on the application a
+     * request names, as TagResource leaves them, so an allow on one team's tag lets the caller describe that team's
+     * application and not another's.
+     */
+    @Test
+    void aKinesisAnalyticsResourceTagConditionReadsTheTagsOfTheApplication() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = "res-app-tagged-" + suffix();
+        String other = "res-app-other-" + suffix();
+        String taggedArn = application(tagged, web);
+        application(other, web);
+        adminJson("kinesisanalytics", "KinesisAnalytics_20180523.TagResource")
+                .body("{\"ResourceARN\":\"" + taggedArn + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}")
+                .post("/").then().statusCode(200);
+
+        User user = user("res-application-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"kinesisanalytics:DescribeApplication\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeApplication(user, tagged).statusCode(200);
+        refusedJson(describeApplication(user, other), "kinesisanalytics:DescribeApplication");
+    }
+
+    /**
+     * The ARN of the application {@code name} an administrator creates, with the {@code tags} list if any, deleted
+     * afterwards.
+     */
+    private String application(String name, String tags) {
         String arn = adminJson("kinesisanalytics", "KinesisAnalytics_20180523.CreateApplication")
                 .body("{\"ApplicationName\":\"" + name + "\",\"RuntimeEnvironment\":\"FLINK-1_18\","
-                        + "\"ServiceExecutionRole\":\"arn:aws:iam::" + ACCOUNT + ":role/flink-role\"}")
+                        + "\"ServiceExecutionRole\":\"arn:aws:iam::" + ACCOUNT + ":role/flink-role\""
+                        + (tags == null ? "" : ",\"Tags\":" + tags) + "}")
                 .post("/").then().statusCode(200).extract().path("ApplicationDetail.ApplicationARN");
         cleanup.register(() -> adminJson("kinesisanalytics", "KinesisAnalytics_20180523.DeleteApplication")
                 .body("{\"ApplicationName\":\"" + name + "\",\"CreateTimestamp\":"
@@ -1076,12 +1270,7 @@ class IamRequestResourceEnforcementIntegrationTest {
                         .body("{\"ApplicationName\":\"" + name + "\"}").post("/").then().statusCode(200).extract()
                         .jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
                         .getString("ApplicationDetail.CreateTimestamp") + "}").post("/"));
-        assertEquals("arn:aws:kinesisanalytics:" + REGION + ":" + ACCOUNT + ":application/" + name, arn);
-
-        User user = user("res-application");
-        user.policy(allowOn("kinesisanalytics:DescribeApplication", arn));
-        describeApplication(user, name).statusCode(200);
-        refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
+        return arn;
     }
 
     /**
@@ -1587,6 +1776,31 @@ class IamRequestResourceEnforcementIntegrationTest {
                 adminClient.deregisterScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource).scalableDimension("ecs:service:DesiredCount"));
             }
         }
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Application Auto Scaling holds on the scalable target a
+     * request names, so an allow on one team's tag lets the caller list that team's target's tags and not another's.
+     */
+    @Test
+    void anApplicationAutoScalingResourceTagConditionReadsTheTagsOfTheScalableTarget() {
+        String tagged = taggedScalableTarget("data");
+        String other = taggedScalableTarget("web");
+
+        User user = user("res-target-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"application-autoscaling:ListTagsForResource\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + tagged + "\"}").statusCode(200);
+        refusedJson(scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + other + "\"}"),
+                "application-autoscaling:ListTagsForResource");
+    }
+
+    /** A scalable target the admin registers and tags with the team; its ARN. */
+    private String taggedScalableTarget(String team) {
+        String arn = registerScalableTarget(scalableTarget("service/res-" + suffix() + "/web"));
+        adminJson("application-autoscaling", "AnyScaleFrontendService.TagResource").body("{\"ResourceARN\":\"" + arn
+                + "\",\"Tags\":{\"team\":\"" + team + "\"}}").post("/").then().statusCode(200);
+        return arn;
     }
 
     /** The members naming an ECS service's desired count as a scalable target, an open JSON object. */

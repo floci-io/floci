@@ -17,7 +17,6 @@ import static io.floci.aws.testing.EmrServerlessRequests.emrServerless;
 import static io.floci.aws.testing.EmrServerlessRequests.tagsPath;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -88,7 +87,7 @@ class EmrServerlessSessionIntegrationTest {
                 .then().statusCode(200)
                 .body("applicationId", equalTo(applicationId))
                 .body("sessionId", equalTo(sessionId))
-                .body("endpoint", endsWith("/_aws/emr-serverless/sessions/" + applicationId + "/" + sessionId))
+                .body("endpoint", matchesPattern("https?://[^/]+"))
                 .body("authToken", matchesPattern("[0-9a-f]{64}"))
                 .body("authTokenExpiresAt", notNullValue());
 

@@ -75,6 +75,45 @@ class SecurityGroupFirewallManagerTest {
     }
 
     @Test
+    void aProtectedHelperTakesTheLinkLocalAddressItsWorkloadsShareAndIsRemovedByName() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.network().securityGroupEnforcement().enabled()).thenReturn(true);
+        when(config.network().securityGroupEnforcement().helperImage()).thenReturn("example/network-helper:test");
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        when(config.docker().imageRegistryBase()).thenReturn(Optional.empty());
+        DockerClient dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        Info linux = mock(Info.class);
+        when(linux.getOsType()).thenReturn("linux");
+        when(linux.getArchitecture()).thenReturn("amd64");
+        when(dockerClient.infoCmd().exec()).thenReturn(linux);
+        InspectImageResponse image = mock(InspectImageResponse.class);
+        when(image.getOs()).thenReturn("linux");
+        when(image.getArch()).thenReturn("amd64");
+        when(dockerClient.inspectImageCmd(anyString()).exec()).thenReturn(image);
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+        EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenThrow(new IllegalStateException("stop after the spec"));
+        SecurityGroupFirewallManager manager = new SecurityGroupFirewallManager(dockerClient,
+                new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer), lifecycleManager, config,
+                embeddedDnsServer);
+
+        assertThrows(IllegalStateException.class, () -> manager.createNamespace("ecs", "abc123", "000000000000",
+                "us-east-1", Optional.of("floci-net"), Map.of(), Map.of(), "127.0.0.1", List.of("169.254.170.1")));
+
+        ArgumentCaptor<ContainerSpec> helper = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).createAndStart(helper.capture());
+        assertEquals(List.of("169.254.170.1"), helper.getValue().linkLocalIps());
+        assertEquals("floci-net", helper.getValue().networkMode());
+        assertEquals("floci-aws-sg-abc123", helper.getValue().name());
+
+        manager.removeProtectedNamespaceStrict("abc123");
+        verify(lifecycleManager).removeIfExistsStrict("floci-aws-sg-abc123");
+    }
+
+    @Test
     void aSharedHelperNeedsNeitherEnforcementNorRootfulDockerAndInstallsNoFirewall() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.network().securityGroupEnforcement().enabled()).thenReturn(false);

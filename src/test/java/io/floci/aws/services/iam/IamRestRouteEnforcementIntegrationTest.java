@@ -814,6 +814,35 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code aws:ResourceTag} condition reads the tags OpenSearch holds on the domain a request names in its path,
+     * as a tag call leaves them, so an allow on one team's tag lets the caller describe that team's domain and not
+     * another's.
+     */
+    @Test
+    void anOpenSearchResourceTagConditionReadsTheTagsOfTheDomain() {
+        String tagged = openSearchDomain("web");
+        String other = openSearchDomain("web");
+        adminOf("es").body("{\"ARN\":\"arn:aws:es:us-east-1:" + ACCOUNT + ":domain/" + tagged
+                + "\",\"TagList\":[{\"Key\":\"team\",\"Value\":\"data\"}]}").post("/2021-01-01/tags").then()
+                .statusCode(200);
+        String user = user("route-domain-tags");
+
+        policy(user, onTeam("Allow", "es:DescribeDomain", "data"));
+        request(user, "es", "GET", "/2021-01-01/opensearch/domain/" + tagged, null).statusCode(200);
+        refused(request(user, "es", "GET", "/2021-01-01/opensearch/domain/" + other, null), "es:DescribeDomain");
+    }
+
+    /** The name of an OpenSearch domain an administrator creates tagged with the team, deleted after the test. */
+    private String openSearchDomain(String team) {
+        String name = "route-tags-" + suffix();
+        adminOf("es").body("{\"DomainName\":\"" + name + "\",\"EngineVersion\":\"OpenSearch_2.11\",\"TagList\":"
+                + "[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}").post("/2021-01-01/opensearch/domain").then()
+                .statusCode(200);
+        cleanup.register(() -> adminOf("es").delete("/2021-01-01/opensearch/domain/" + name));
+        return name;
+    }
+
+    /**
      * An Access Analyzer request naming its analyzer, in its path or its body, is checked on that analyzer, the ARN
      * Access Analyzer gives it: a caller with no grant is refused, a grant scoped to the analyzer lets
      * {@code GetAnalyzer} read it and {@code CreateAnalyzer} reach its validation of the type, a request naming
@@ -846,6 +875,31 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "access-analyzer").get("/analyzer/" + analyzer).then(), "access-analyzer:GetAnalyzer");
         as(user, "access-analyzer").get("/analyzer/other-" + analyzer).then().statusCode(404);
         as(user, "access-analyzer").delete("/analyzer/" + analyzer).then().statusCode(200);
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Access Analyzer holds on the analyzer a request names in its
+     * path, the ones it was created with, so an allow on one team's tag lets the caller read that team's analyzer and
+     * not another's.
+     */
+    @Test
+    void anAccessAnalyzerResourceTagConditionReadsTheTagsOfTheAnalyzer() {
+        String tagged = analyzer("data");
+        String other = analyzer("web");
+        String user = user("route-analyzer-tags");
+
+        policy(user, onTeam("Allow", "access-analyzer:GetAnalyzer", "data"));
+        as(user, "access-analyzer").get("/analyzer/" + tagged).then().statusCode(200);
+        refused(as(user, "access-analyzer").get("/analyzer/" + other).then(), "access-analyzer:GetAnalyzer");
+    }
+
+    /** The name of an organization analyzer an administrator creates tagged with the team, deleted after the test. */
+    private String analyzer(String team) {
+        String name = "route-tags-" + suffix();
+        accessAnalyzer().body("{\"analyzerName\":\"" + name + "\",\"type\":\"ORGANIZATION\",\"tags\":{\"team\":\""
+                + team + "\"}}").put("/analyzer").then().statusCode(200);
+        cleanup.register(() -> accessAnalyzer().delete("/analyzer/" + name));
+        return name;
     }
 
     /**
@@ -984,6 +1038,8 @@ class IamRestRouteEnforcementIntegrationTest {
                 "account:GetAlternateContact");
         checkedAs(user, "account", "POST", "/getContactInformation", "{}", "account:GetContactInformation");
         checkedAs(user, "account", "POST", "/putContactInformation", "{}", "account:PutContactInformation");
+        checkedAs(user, "account", "POST", "/getAccountInformation", "{}", "account:GetAccountInformation");
+        checkedAs(user, "account", "POST", "/putAccountName", "{}", "account:PutAccountName");
         checkedAs(user, "controlcatalog", "POST", "/list-controls", "{}", "controlcatalog:ListControls");
         checkedAs(user, "fis", "GET", "/experimentTemplates", null, "fis:ListExperimentTemplates");
         checkedAs(user, "oam", "POST", "/ListSinks", "{}", "oam:ListSinks");

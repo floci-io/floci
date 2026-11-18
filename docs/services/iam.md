@@ -832,18 +832,35 @@ nor de-duplicated, matching AWS's own documented
 example response, which repeats a key referenced by more than one statement.
 
 `SimulatePrincipalPolicy` populates the principal keys itself when the policy source is an IAM
-user, as AWS's simulator does: the guide lists `aws:PrincipalAccount`, `aws:PrincipalId`,
-`aws:PrincipalType`, `aws:Type`, `aws:UserId` and `aws:UserName` as "populated for you", with the
-caller providing "the values for all other condition keys", so a policy scoped to
+user, as AWS's simulator does: the guide gives the principal context it fills in as
+`aws:PrincipalAccount`, `aws:PrincipalId`, `aws:PrincipalType`, `aws:UserId` and `aws:UserName`,
+with the caller providing "the values for all other condition keys", so a policy scoped to
 `${aws:username}` simulates the way it is evaluated. What a simulation gets is the principal half
 of the request context, the same keys the enforcement filter writes: `aws:PrincipalArn`,
-`aws:PrincipalType`, `aws:username`, `aws:userid` and the account. `aws:PrincipalId` and
-`aws:Type` are in no request context here, so a simulation does not populate them either; a
-statement matching on one matches nothing, as it would on an enforced request. A value passed in
-`ContextEntries` wins, being the one the call asked to simulate with, whatever case it spells the
-key in. A role named as the policy source is not a session, so there is no session name for an
-`aws:userid` and no documented `aws:PrincipalType` for it; those keys stay absent and a statement
-matching on one does not match.
+`aws:PrincipalType`, `aws:username` and `aws:userid`. `aws:PrincipalId` is in no request context
+here, so a simulation does not populate it either; a statement matching on it matches nothing, as
+it would on an enforced request. A value passed in `ContextEntries` wins, being the one the call
+asked to simulate with, whatever case it spells the key in. A role named as the policy source is
+not a session, so there is no session name for an `aws:userid` and no documented
+`aws:PrincipalType` for it; those keys stay absent and a statement matching on one does not match.
+
+The keys that describe the account a policy source names rather than the credential it stands for
+are populated for a user and a role alike: `aws:PrincipalAccount`, and the organization context the
+guide lists beside the principal context, `aws:PrincipalOrgID`, `aws:PrincipalOrgMasterAccountId`
+and `aws:PrincipalOrgPaths`. AWS ties that list to exactly the policies a simulation is handed:
+"because these keys are populated for you, SCPs and other policies that use principal or
+organization conditions are evaluated correctly". The organization is the one holding that account,
+asked of Organizations, so an account in no organization carries none of the three and a condition
+on them matches nothing, which is the availability both published keys declare, "included in the
+request context only if the principal is a member of an organization". `aws:PrincipalOrgPaths`
+carries the path down to the account's parent and stops there: an account's entity path is built
+"using the IDs of the organization, root, and all OUs in the path down to and including the OU" and
+ends with the account's own id, while the key's own published condition compares
+`o-a1b2c3d4e5/r-ab12/ou-ab12-11111111/ou-ab12-22222222/` with `StringEquals` and "returns true for
+principals in accounts that are attached directly to the ou-ab12-22222222 OU", which a value
+carrying the account id could never equal. An account the organization holds at its root, the
+management account among them, carries `o-.../r-.../`. `SimulateCustomPolicy` names no principal,
+so none of these keys are populated for it, and a level keyed on one of them matches nothing there.
 
 `aws:PrincipalTag/<key>` must be supplied in `ContextEntries`, even when the policy source is a
 tagged user or role. The simulator does not populate stored identity tags.
@@ -861,10 +878,85 @@ the shape. The length wording follows the captures of real IAM length violations
 bound the value broke and leaving the value itself out of the message. Either simulation action
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
 limit; extra documents beyond the first are ignored. Neither evaluates a resource-based policy
-(`ResourcePolicy`), and neither returns `MatchedStatements`, `ResourceSpecificResults`, or a
-`PermissionsBoundaryDecisionDetail`: only the top-level `EvalDecision` is populated, so which
-policy allowed an action is not reported even where AWS names one, `PolicyInputList.1` in its own
-example for the principal simulator.
+(`ResourcePolicy`), so a cross-account simulation is not modelled and `EvalDecisionDetails`, which
+"is populated for only cross-account simulations", carries nothing. The reference distinguishes the
+two ways of carrying nothing, and both are answered: "if the simulation evaluates policies within
+the same account and includes a resource ARN, then the parameter is present but the response is
+empty. If the simulation evaluates policies within the same account and specifies all resources
+(`*`), then the parameter is not returned."
+
+A result names the statements that decided it. `MatchedStatements` reports each one by the policy
+it came from and the place it sits in that policy's text: a supplied document is
+`PolicyInputList.N`, the identifier AWS's own example reports and the position the member arrived
+under, and a policy the principal holds is named by its own name with the type the published list
+gives it, `user`, `group` or `role` for a policy embedded in the entity holding it and
+`user-managed` or `aws-managed` for a managed one. A grant the account applies without attaching
+anything, such as the password self-service grant, is named by neither: no policy names it and AWS
+publishes no spelling for one, so only its position is reported. The positions are the published
+convention, which AWS's own example fixes to the character: its document opens the statement with a
+brace in column 15 of line 3 and the response reports column 16, so each position is the character
+just past the statement's braces. An allow reports every statement that allowed, an explicit deny
+reports the one that denied, "the deny statement is the only entry included in the result", and an
+implicit deny reports none. The top-level list is "the union of matched statements across all
+requested resources" held to the sentence beside it, "only statements that contributed to the
+reported decision are included", so an action allowed on one resource and denied on another reports
+the deny alone.
+
+`MissingContextValues` names the "context keys that are required by the included input policies but
+that were not provided by one of the input parameters". A key is wanted when a statement the
+evaluation reaches for the action names it: the variables its resources are written with, whichever
+element it writes them in, `Resource` or `NotResource`, since both are resolved before a resource can
+be compared at all and a value supplied for either can change the answer, and, for a statement whose
+resources match, the keys its conditions compare. A statement the action does not match is reached by nothing
+and wants nothing, which is what gives each resource's list its own content, and the top-level list
+is "the deduplicated set of missing context values across all requested resources", one key however
+two statements spell it, a context key not being case sensitive. A key the call supplied with no
+values at all counts as supplied, an empty set being a value rather than an absence, and a `${...}`
+in a document whose version gives variables no meaning names no key. A key an operator answers for
+without a value is not one the policy requires, and is not named: an `...IfExists` operator says
+"if the key is not present, evaluate the condition element as true", a `Null` asking for absence is
+satisfied by the absence itself, a `ForAllValues` quantifier holds over no values, and a negated
+operator holds against a key that matches nothing. A `Null` asking for presence does require the
+key, and names it.
+
+`OrganizationsDecisionDetail` reports whether the organization levels allowed the action, for a
+simulation that was handed any, and `PermissionsBoundaryDecisionDetail` whether the boundary allowed
+it, for one that carries a boundary; the boundary's is reported for each resource as well, as AWS's
+same-account example shows. Each top-level flag is the most restrictive of the resources' answers,
+as every other top-level field is.
+
+A simulation answers with one result per action, whatever the call named for resources: "the
+simulator now returns a single `EvaluationResult` per action, regardless of how many resource ARNs
+are provided", its top-level fields carrying "the aggregate decision across all requested
+resources" and its `EvalDecision` "the most restrictive decision across all resources (for example,
+if any resource produces `explicitDeny`, the top-level decision is `explicitDeny`)". So an action
+allowed on one resource and denied on another answers the deny at the top, and only an action
+allowed on every resource the call named answers `allowed` there. Each named resource answers for
+itself under `ResourceSpecificResults`, carrying its own ARN and `EvalResourceDecision`, which is
+where the reference sends a client that read them off the top-level result before: "if your
+application parses evaluation results per resource ARN, update your code to read per-resource
+decisions from `ResourceSpecificResults` rather than from the top-level result". A simulation whose
+resource is `*`, "either explicitly, or when the `ResourceArns` parameter blank", carries no
+per-resource section at all, which is the case the reference answers at the top level alone.
+
+`EvalResourceName` names no resource at the top. It carries "the ARN template for the simulated
+resource type (for example, `arn:${Partition}:s3:::${BucketName}/${KeyName}`), or `*` if no ARN
+format is defined for the action. This is not a specific customer-provided resource ARN", so it
+describes the action rather than anything the call named. The templates come from the generated
+tables built from AWS's Service Reference, which publishes the resource types each action acts on
+and each type's ARN formats: `iam:GetUser` answers
+`arn:${Partition}:iam::${Account}:user/${UserNameWithPath}`, and `ssm:GetParameter` its parameter
+template. Where an action's published types carry more than one format, floci answers `*`, the
+value the field publishes for an action with no format at all, and so does an action of a namespace
+no generated table reads. Which of several templates AWS names is published in no machine-readable
+source: `s3:GetObject` acts on an object and on an access point object, and the field's own example
+names the object's, so `s3:GetObject` and `ec2:RunInstances`, which acts on eighteen types, both
+answer `*` here where AWS names a template. Outside IAM's own actions the table is keyed by the
+operation a request is dispatched as, so an action whose name is not its operation's answers `*`
+too: `lambda:InvokeFunction` is the action of the `Invoke` operation, and what joins the two names
+is published in no machine-readable source either. An action is read whatever case it is written
+in, policy action names being case-insensitive.
+
 `ContextEntries.member.N.ContextKeyType` is accepted but not read; the comparison is driven
 entirely by the policy's own condition operator (`Bool`, `NumericEquals`, `DateEquals`, and so on),
 not by the declared type.
@@ -877,11 +969,23 @@ statements is `FullAWSAccess` semantics and is skipped. A level whose document d
 policy is an `InvalidInput` naming the item's position. The levels a call hands in are the whole of
 the organization a simulation runs against: the SCPs the principal's own account sits under are not
 applied, matching the console, which includes SCPs only when "AWS Organizations SCPs" is ticked.
-One difference from AWS's simulator is known and open: AWS
-documents that "the policy simulator doesn't evaluate SCPs that have global conditions", while this
-walk evaluates a condition in an SCP exactly as the live evaluation does. So a simulation here can
-decide a level AWS's simulator passes over, and the published sentence does not say whether what
-AWS skips is the statement carrying the condition or the policy holding it.
+A condition in a level is evaluated exactly as the live evaluation reads it, which is
+what AWS documents of its own simulator: "the policy simulator evaluates SCPs, including condition
+keys and resource scoping in deny statements", and where an identity-based policy's global keys are
+read without regard to which services support them, "service control policies (SCPs) are evaluated
+with service-aware logic, including global condition keys". A value the call supplies reaches a
+level's condition like any other, which is the API's own half of that: "with the AWS CLI or AWS API,
+you can provide values for condition keys that are referenced by SCPs", where the console sets
+values only for the keys its other policy types reference. The keys a level reads without being
+given them are the populated context below.
+
+AWS keeps SCPs out of both halves of what a result reports, "for security reasons": the matched
+statements "do not include statements from SCPs", and a context key "referenced only by an SCP" is
+not returned among the missing ones, the decision still being answered. Both exclusions are kept
+here: a deny that came from a level reports no statement, and a key only a level references is not
+among the missing ones. The same sentence keeps a session policy and the permissions boundary out
+of the matched statements, "only statements from identity-based and resource-based policies appear
+here", and the boundary's effect is reported under its own detail instead.
 
 `ResourceHandlingOption` is read by both simulators, which hold a named scenario to the resources
 it requires, "to enforce the presence of the required resources to ensure reliable simulation
@@ -1239,6 +1343,12 @@ conditioned on MFA reads:
   the session then carries differs by operation, as it does on AWS: a `GetSessionToken` session is
   MFA-authenticated on its own requests, while an assumed-role session is not, "once the user has
   assumed the role, no further MFA checks are made".
+- **A device decides what a session token may reach.** Under enforcement a `GetSessionToken` session
+  calls IAM only where a device minted it, "you cannot call any IAM API operations unless MFA
+  authentication information is included in the request", and reaches no STS operation but
+  `AssumeRole` and `GetCallerIdentity` either way. The refusal names the operation and what the
+  credentials do not carry; see [STS MFA](sts.md#mfa). An assumed-role session carries no such
+  limit.
 
 What a device still does not reach is the console sign-in AWS also gates on one, there being no
 sign-in here, and the hardware and FIDO device types above, so the device behind a session is
@@ -3051,7 +3161,8 @@ variable can only resolve to a key floci populates, which is the list under
 
 A role trust policy is the narrower case, because `sts:AssumeRole` is authorized before there is a
 session to describe: its context carries `aws:PrincipalArn`, `aws:PrincipalAccount`,
-`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `sts:RoleSessionName`,
+`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `aws:CurrentTime`,
+`aws:EpochTime`, `sts:RoleSessionName`, `aws:TokenIssueTime` when the caller is itself a session,
 and `sts:ExternalId` when the request passes one. `aws:username`, `aws:userid` and
 `aws:PrincipalType` are not among them, so a variable naming one of those resolves to nothing in a
 trust policy and the value it sits in matches nothing.
@@ -3201,8 +3312,12 @@ floci populates:
   snapshot schedules, event subscriptions and integrations, SSM for its parameters, documents and associations,
   EMR for its clusters, CloudFront for every resource it tags, by its ARN, IAM Identity Center for its instances,
   permission sets, applications and trusted token issuers, OAM for its sinks and links, RAM for its resource shares,
-  Payment Cryptography for its keys, and Resource Explorer for its indexes and views. Tag keys differing only in
-  case are one condition key holding every value.
+  Payment Cryptography for its keys, Resource Explorer for its indexes and views, Application Auto Scaling for its
+  scalable targets, ECS for its clusters, task definitions, services, capacity providers, tasks and container
+  instances, ACM for its certificates, Firehose for its delivery streams, Cognito for its user pools and identity
+  pools, OpenSearch for its domains, Signer for its signing profiles, Access Analyzer for its analyzers, and Managed
+  Service for Apache Flink for its applications. Tag keys differing only in case are one condition key holding every
+  value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
@@ -3265,6 +3380,17 @@ floci populates:
   `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
   ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `aws:PrincipalOrgID`, `aws:PrincipalOrgMasterAccountId` and `aws:PrincipalOrgPaths`: the
+  organization the caller's account belongs to, asked of Organizations when it is deployed and
+  written beside the keys above by the same writer, so every context a request is evaluated
+  against sees them, including the callers a service builds for itself rather than resolving from
+  a credential: the trust caller a state machine's execution role is checked as, the account-root
+  principal a site falls back to, and the principals a trust policy is asked about on behalf of an
+  account. All three are "included in the request context only if the principal is a
+  member of an organization", so a caller whose account is in none carries none of them and a
+  condition on one matches nothing. The path ends at the organizational unit holding the account,
+  `o-.../r-.../ou-.../`, which is the value the key's own published condition compares with
+  `StringEquals`, and is `o-.../r-.../` for an account the organization holds at its root.
 - `aws:PrincipalTag/<key>`: the stored tags of the IAM user making the request, including a
   `GetSessionToken` session, or of the role an assumed-role session represents. Tags are read
   from that identity's account and copied for the request; later requests see tag updates and
@@ -3315,6 +3441,24 @@ floci populates:
   `GetSessionToken`, and decides an `AssumeRole` without outliving it; a call that presents one also
   publishes the keys for that call itself, so the permission to make it can be conditioned on MFA.
   See [STS MFA](sts.md#mfa).
+- `aws:TokenIssueTime`: when the temporary credentials the request is signed with were issued, as
+  an ISO 8601 date, for every STS session (`AssumeRole` and its SAML and web identity forms,
+  `GetSessionToken`, `GetFederationToken`, `AssumeRoot`) and every role session floci issues
+  itself (Lambda execution roles, EC2 instance profiles, ECS task roles). The guide says it "is
+  included in the request context only when the principal uses temporary credentials to make the
+  request" and "is not present in AWS CLI, AWS API, or AWS SDK requests that are made using access
+  keys", so it is absent for an IAM user access key and for the account root. It is the key the
+  `AWSRevokeOlderSessions` policy of
+  [revoking role sessions](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)
+  matches: a `Deny` on `DateLessThan` `aws:TokenIssueTime` refuses the sessions issued before that
+  time and leaves later sessions and long-term keys alone. A session stored by an earlier floci
+  version, which did not record its issue time, carries no value for it.
+- `aws:CurrentTime` and `aws:EpochTime`: the time of the request, which the guide says "is always
+  included in the request context": `aws:CurrentTime` as an ISO 8601 date, `aws:EpochTime` as
+  whole seconds since January 1, 1970, so it matches the `Date` and the `Numeric` operators.
+  They are on every request the enforcement filter checks, its `iam:PassRole` checks included,
+  in the context S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`, in a
+  role trust policy's context, and in that of a call an AWS service makes on its own behalf.
 - `aws:TagKeys`: the case-sensitive requested tag keys for all 16 IAM tagging actions
   in the generated table (tag structures or a list of keys), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and
@@ -3468,6 +3612,14 @@ Note that `aws:PrincipalArn` is populated for the account-root principal too, as
 `arn:aws:iam::<account>:root`, so a principal-scoped guardrail keyed on `aws:PrincipalArn`
 (for example a `DenyRootUser` statement matching `arn:aws:iam::*:root`) fires against it —
 consistent with the account root already being bounded by SCPs above.
+
+The keys that name the organization are populated for a real request as well, so an SCP keyed on
+the organization it guards fires against the accounts inside it: `aws:PrincipalOrgID`,
+`aws:PrincipalOrgMasterAccountId` and `aws:PrincipalOrgPaths` are written for every principal the
+filter resolves and for the account-root principal beside it, which is what AWS means by "because
+these keys are populated for you, SCPs and other policies that use principal or organization
+conditions are evaluated correctly". An identity policy and a resource policy read them from the
+same context, and an account in no organization carries none of them.
 
 A level containing an SCP document that fails to parse denies every action at that level. The
 ceiling cannot tell what an unreadable guardrail would have said, and every target also carries

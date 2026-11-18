@@ -112,6 +112,9 @@ class RdsContainerManagerPostgresTest {
                 "SELECT value FROM probe WHERE id = 1");
         assertEquals("round-trip-test", result.trim(),
                 "Restored database should contain the probe row");
+        assertEquals("rds_iam\nrds_replication", queryPsql(targetContainerId, MASTER_USER, DB_NAME,
+                "SELECT rolname FROM pg_roles WHERE rolname IN ('rds_iam', 'rds_replication') ORDER BY 1").trim(),
+                "A dump without the predefined roles should restore with them");
     }
 
     private String startPostgresContainer(String name) {

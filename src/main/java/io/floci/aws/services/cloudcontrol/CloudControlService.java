@@ -316,7 +316,7 @@ public class CloudControlService {
     private void submitCreate(String region, String accountId, String typeName, String desiredStateJson,
                               String token, ProgressEvent pending, JsonNode props, boolean replay) {
         persistRequest(new PersistedRequest(pending, region, desiredStateJson, System.currentTimeMillis()));
-        Runnable task = () -> RequestScopes.runAs(accountId, () -> {
+        Runnable task = () -> RequestScopes.runAs(accountId, region, () -> {
             try {
                 StackResource resource = provisioner.provisionStandalone(typeName, props, region, accountId);
                 if (resource == null || resource.getPhysicalId() == null) {
@@ -510,7 +510,7 @@ public class CloudControlService {
                     + "not hold for " + identifier + ".", null, accountId));
         }
 
-        RequestScopes.runAs(accountId,
+        RequestScopes.runAs(accountId, region,
                 () -> provisioner.deleteStandalone(typeName, identifier, region, attributes));
         created.remove(key);
         removePersistedCreated(accountId, region, typeName, identifier);

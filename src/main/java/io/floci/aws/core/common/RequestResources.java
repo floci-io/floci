@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -81,6 +82,61 @@ public final class RequestResources {
     public static boolean readsNamespace(String namespace) {
         return namespace != null && RequestResourceMembers.table().namespaces().contains(namespace)
                 && !builtByHand(namespace);
+    }
+
+    /**
+     * The ARN formats AWS publishes for the resource types an operation acts on, as
+     * {@code <namespace>:<Operation>}, with the variables the published formats carry
+     * ({@code arn:${Partition}:ssm:${Region}:${Account}:parameter/${FullName}}), each once and in the order the
+     * table lists the types: empty for an operation the table does not read, and for one AWS publishes no resource
+     * type for. A type the table reads without a format of its own is left out, there being no format to name.
+     *
+     * <p>The name is read whatever case it is written in, an action naming an operation being case-insensitive
+     * where a dispatched request names its own operation exactly, which is what {@link #reads} answers for.
+     */
+    public static List<String> arnFormatsOf(String operation) {
+        String named = operationNamed(operation);
+        if (named == null) {
+            return List.of();
+        }
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, named);
+        List<String> published = new ArrayList<>();
+        for (String type : table.types().getOrDefault(named, List.of())) {
+            RequestResourceMembers.ArnFormat format = formats.get(type);
+            if (format != null && !published.contains(format.format())) {
+                published.add(format.format());
+            }
+        }
+        return List.copyOf(published);
+    }
+
+    /** The table's own spelling of an operation named in any case, or null for one it does not read. */
+    private static String operationNamed(String operation) {
+        if (operation == null) {
+            return null;
+        }
+        if (reads(operation)) {
+            return operation;
+        }
+        return OperationNames.INDEX.get(operation.toLowerCase(Locale.ROOT));
+    }
+
+    /** Every operation the table reads, under its own name lowercased, built once on first use. */
+    private static final class OperationNames {
+
+        private static final Map<String, String> INDEX = index();
+
+        private static Map<String, String> index() {
+            Map<String, String> index = new HashMap<>();
+            for (String operation : RequestResourceMembers.table().operations().keySet()) {
+                index.putIfAbsent(operation.toLowerCase(Locale.ROOT), operation);
+            }
+            return Map.copyOf(index);
+        }
+
+        private OperationNames() {
+        }
     }
 
     /**

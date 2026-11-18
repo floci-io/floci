@@ -154,10 +154,35 @@ public class AthenaService {
         this.hiveDdlExecutor = new AthenaHiveDdlExecutor(glueService, s3Service, icebergStatements);
     }
 
-    public String startQueryExecution(String query,
+    public String startQueryExecution(String submitted,
                                       String workGroup,
                                       QueryExecutionContext context,
                                       ResultConfiguration resultConfiguration) {
+        return startQueryExecution(submitted, workGroup, context, resultConfiguration, List.of());
+    }
+
+    /**
+     * Starts a query, binding {@code executionParameters} to its {@code ?} placeholders when it runs on the
+     * engine. They are not kept on the execution: AWS documents that "the list of parameters is not returned
+     * in the response".
+     */
+    public String startQueryExecution(String submitted,
+                                      String workGroup,
+                                      QueryExecutionContext context,
+                                      ResultConfiguration resultConfiguration,
+                                      List<String> executionParameters) {
+        // Athena takes one statement per query and rejects any other before an execution exists, with the
+        // AthenaErrorCode its InvalidRequestException carries for malformed SQL. The engine would otherwise run
+        // every statement of one that returns no rows, so a query that failed could still have written a table.
+        if (TrinoSqlCompatibility.holdsSeveralStatements(submitted)) {
+            throw new AwsException("InvalidRequestException", "Only one sql statement is allowed. Got: " + submitted,
+                    400, Map.of("AthenaErrorCode", "MALFORMED_QUERY"));
+        }
+        // Athena records, returns and runs the statement without the semicolons around it, so everything below,
+        // the execution's record included, reads that form.
+        String query = TrinoSqlCompatibility.recordedForm(submitted);
+        // Read when the query runs, on another thread, so a caller changing its list later changes nothing.
+        List<String> parameters = executionParameters == null ? List.of() : List.copyOf(executionParameters);
         String id = UUID.randomUUID().toString();
         String database = context != null && context.getDatabase() != null ? context.getDatabase() : "default";
         QueryExecutionContext resolvedContext = context != null ? context : new QueryExecutionContext();
@@ -263,26 +288,41 @@ public class AthenaService {
                         icebergStatements.vacuum(vacuum.ref(), database);
                         return null;
                     }
+                    // The parameters are bound into the statement, so the Iceberg rewrite and the engine both read
+                    // literals. A count that doesn't match fails the query here, before the checks below, as Trino
+                    // checks parameters before it analyzes a statement. Hive DDL never gets this far, and binds none.
+                    // Everything after this reads the bound statement, as if the values had been written in place: a
+                    // value bound as an expression can name a column, which must not pass the projection checks as
+                    // the `?` would, or a table, whose view the engine needs.
+                    String statement = TrinoSqlCompatibility.bindParameters(query, parameters);
+                    // A value bound as Athena binds it cannot add a statement (see bindParameters). The engine runs
+                    // every statement of a write, so the bound statement is checked again rather than trusted.
+                    if (TrinoSqlCompatibility.holdsSeveralStatements(statement)) {
+                        throw new AwsException("InvalidRequestException",
+                                "Only one sql statement is allowed. Got: " + statement, 400);
+                    }
                     List<Table> projectionTables = tablesForProjectionCheck(database);
-                    PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
-                    PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
+                    PartitionProjection.assertLocationTemplatesComplete(statement, projectionTables);
+                    PartitionProjection.assertInjectedColumnsFiltered(statement, projectionTables);
                     // S3 Tables catalogs the query names are attached under their own names; a write to an Iceberg
                     // table of the default catalog goes through the engine's attachment of Glue's Iceberg catalog.
-                    AthenaIcebergStatements.S3TablesAttachment s3Tables = icebergStatements.s3TablesAttachment(query,
-                            resolvedContext.getCatalog(), database);
+                    AthenaIcebergStatements.S3TablesAttachment s3Tables = icebergStatements.s3TablesAttachment(
+                            statement, resolvedContext.getCatalog(), database);
                     AthenaIcebergStatements.IcebergWrite icebergWrite = null;
                     try {
-                        icebergWrite = icebergStatements.write(query, resolvedContext.getCatalog(), database);
+                        icebergWrite = icebergStatements.write(statement, resolvedContext.getCatalog(), database);
                         String setupDdl = (s3Tables != null ? s3Tables.attachSql() : "")
                                 + (icebergWrite != null ? icebergWrite.setupSql() : "")
-                                + TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, query)
+                                + TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, statement)
                                 + (s3Tables != null ? s3Tables.searchPathSql() : "");
                         String duckQuery = TrinoSqlCompatibility.translate(
-                                icebergWrite != null ? icebergWrite.query() : query);
+                                icebergWrite != null ? icebergWrite.query() : statement);
                         if (outputLocation != null) {
                             ensureOutputBucket(outputLocation);
                         }
-                        duckClient.execute(duckQuery, setupDdl, outputLocation, accountId);
+                        // floci-duck runs a query that returns rows as COPY (<query>) TO ... on one line, so a line
+                        // comment ending the query would comment out the ) TO ... after it; a line break ends it.
+                        duckClient.execute(duckQuery + "\n", setupDdl, outputLocation, accountId);
                         if (outputLocation != null) {
                             resultColumnTypeStore.put(id, describeColumnTypes(duckQuery, setupDdl, accountId));
                         }

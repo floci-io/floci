@@ -18,6 +18,11 @@ public class SessionCredential {
     private String roleSessionName;
     private String assumedRoleId;
     private Instant expiration;
+    /**
+     * When the credentials were issued, the request's {@code aws:TokenIssueTime}. Null for a
+     * session stored before Floci recorded it.
+     */
+    private Instant issuedAt;
     /** Inline session policy passed to AssumeRole/GetFederationToken — further restricts role policies. */
     private String sessionPolicyDocument;
     /**
@@ -136,6 +141,9 @@ public class SessionCredential {
 
     public Instant getExpiration() { return expiration; }
     public void setExpiration(Instant expiration) { this.expiration = expiration; }
+
+    public Instant getIssuedAt() { return issuedAt; }
+    public void setIssuedAt(Instant issuedAt) { this.issuedAt = issuedAt; }
 
     public String getSessionPolicyDocument() { return sessionPolicyDocument; }
     public void setSessionPolicyDocument(String sessionPolicyDocument) { this.sessionPolicyDocument = sessionPolicyDocument; }

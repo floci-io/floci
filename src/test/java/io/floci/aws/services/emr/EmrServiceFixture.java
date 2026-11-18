@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
+import io.floci.aws.services.emrserverless.SparkConnectServers;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamService;
@@ -22,6 +24,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -95,6 +99,8 @@ final class EmrServiceFixture {
         final List<List<String>> relays = new ArrayList<>();
         final List<Instance> given = new ArrayList<>();
         final List<String> released = new ArrayList<>();
+        // Where each port of a primary node's web interfaces is reached, once the node is ready.
+        final Map<Integer, ContainerLifecycleManager.EndpointInfo> webInterfaces = new HashMap<>();
         // How each cluster's nodes are known as EC2 instances.
         final Map<String, Function<String, Instance>> identities = new HashMap<>();
 
@@ -146,6 +152,11 @@ final class EmrServiceFixture {
         @Override
         public boolean ownNetwork(String dockerNetwork) {
             return ownNetwork;
+        }
+
+        @Override
+        public Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+            return Optional.ofNullable(webInterfaces.get(port));
         }
 
         @Override
@@ -228,8 +239,10 @@ final class EmrServiceFixture {
     Target target = event -> { };
     private final List<Wakeup> wakeups = new ArrayList<>();
     private final List<Runnable> deliveries = new ArrayList<>();
-    // The docker runner mode's step threads, not yet run.
-    private final List<Runnable> stepThreads = new ArrayList<>();
+    // The docker runner mode's step threads, not yet run; a session server's thread may add one too.
+    private final List<Runnable> stepThreads = new CopyOnWriteArrayList<>();
+    // Whether the pool refuses what it is handed, as a pool shut down does.
+    volatile boolean threadsRefused;
     private boolean waking;
     final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
@@ -239,6 +252,8 @@ final class EmrServiceFixture {
     final RecordingReleaseImages releaseImages;
     private final IamService iam;
     private final int[] durations;
+    // How the docker runner mode's session servers are asked whether they answer; null for no session servers.
+    private final SparkConnectServers.Probe sessionProbe;
 
     /** The service as configured by default, every duration 0. */
     EmrServiceFixture() {
@@ -246,7 +261,7 @@ final class EmrServiceFixture {
     }
 
     EmrServiceFixture(int startupDelaySeconds, int stepDurationSeconds, int terminationDelaySeconds) {
-        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), null, null, null, null, null,
+        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), null, null, null, null, null, null,
                 startupDelaySeconds, stepDurationSeconds, terminationDelaySeconds);
     }
 
@@ -258,12 +273,23 @@ final class EmrServiceFixture {
     /** As {@link #docker(SparkJobRunner, IamService)}, its clusters' bootstrap actions run by {@code bootstrap}. */
     static EmrServiceFixture docker(SparkJobRunner runner, BootstrapRunner bootstrap, IamService iam) {
         return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, bootstrap,
-                new RecordingStorage(), new RecordingReleaseImages(), iam, 0, 0, 0);
+                new RecordingStorage(), new RecordingReleaseImages(), iam, null, 0, 0, 0);
+    }
+
+    /**
+     * As {@link #docker(SparkJobRunner, IamService)}, its sessions' Spark Connect servers run by {@code runner} too,
+     * each on a thread of its own, and asked whether they answer by {@code probe}.
+     */
+    static EmrServiceFixture dockerSessions(SparkJobRunner runner, IamService iam, SparkConnectServers.Probe probe) {
+        return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, null,
+                new RecordingStorage(), new RecordingReleaseImages(), iam, probe, 0, 0, 0);
     }
 
     private EmrServiceFixture(InMemoryStorageFactory storage, MutableClock clock, SparkJobRunner runner,
                               BootstrapRunner bootstrap, RecordingStorage clusterStorage,
-                              RecordingReleaseImages releaseImages, IamService iam, int... durations) {
+                              RecordingReleaseImages releaseImages, IamService iam,
+                              SparkConnectServers.Probe sessionProbe, int... durations) {
+        this.sessionProbe = sessionProbe;
         this.storage = storage;
         this.clock = clock;
         this.runner = runner;
@@ -286,7 +312,7 @@ final class EmrServiceFixture {
         }).when(eventBridge).publishServiceEvent(eq("aws.emr"), anyString(), anyString(), isNull(), eq(REGION));
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         publisher = new EmrEventPublisher(eventBridge, objectMapper, regionResolver);
-        service = new EmrService(storage, config(false), regionResolver, publisher, clock, new EmrService.Wakeups() {
+        EmrService.Wakeups recorded = new EmrService.Wakeups() {
             @Override
             public void at(Instant due, Runnable task) {
                 wakeups.add(new Wakeup(due, task));
@@ -296,17 +322,25 @@ final class EmrServiceFixture {
             public void deliver(Runnable delivery) {
                 deliveries.add(delivery);
             }
-        }, runner, bootstrap, clusterStorage, releaseImages, stepThreads::add, iam);
+        };
+        service = sessionProbe == null
+                ? new EmrService(storage, config(false), regionResolver, publisher, clock, recorded, runner, bootstrap,
+                        clusterStorage, releaseImages, this::handToThread, iam)
+                : new EmrService(storage, config(false), regionResolver, publisher, clock, recorded, runner, bootstrap,
+                        clusterStorage, releaseImages, this::handToThread, iam,
+                        new SparkConnectServers(runner, task -> Thread.ofPlatform().daemon().start(task), null,
+                                sessionProbe, clock));
     }
 
     /** A new service on the same storage and clock, as after a restart of Floci with persistent storage. */
     EmrServiceFixture restart() {
-        return new EmrServiceFixture(storage, clock, runner, bootstrap, clusterStorage, releaseImages, iam, durations);
+        return new EmrServiceFixture(storage, clock, runner, bootstrap, clusterStorage, releaseImages, iam,
+                sessionProbe, durations);
     }
 
     /** A new service on the same storage and clock, as {@link #restart} builds, in the {@code immediate} mode. */
     EmrServiceFixture restartImmediate() {
-        return new EmrServiceFixture(storage, clock, null, null, null, null, iam, durations);
+        return new EmrServiceFixture(storage, clock, null, null, null, null, iam, null, durations);
     }
 
     /**
@@ -315,7 +349,7 @@ final class EmrServiceFixture {
      */
     EmrService restartReconciling(SparkJobRunner runner, EmrService.Wakeups wakeups) {
         return new EmrService(storage, config(true), new RegionResolver(REGION, ACCOUNT), publisher, clock, wakeups,
-                runner, bootstrap, clusterStorage, releaseImages, stepThreads::add, iam);
+                runner, bootstrap, clusterStorage, releaseImages, this::handToThread, iam);
     }
 
     /**
@@ -326,7 +360,7 @@ final class EmrServiceFixture {
         EmulatorConfig config = config(false);
         when(config.services().emr().hiveImageTemplate()).thenReturn(Optional.of(hiveImageTemplate));
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
-                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);
     }
 
@@ -338,7 +372,7 @@ final class EmrServiceFixture {
         EmulatorConfig config = config(false);
         when(config.services().emr().pig().enabled()).thenReturn(true);
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
-                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, stepThreads::add,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);
     }
 
@@ -357,6 +391,13 @@ final class EmrServiceFixture {
         when(config.services().emr().yarnMaxWorkerNodes()).thenReturn(4);
         when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
         return config;
+    }
+
+    private void handToThread(Runnable task) {
+        if (threadsRefused) {
+            throw new RejectedExecutionException("The pool takes no more threads");
+        }
+        stepThreads.add(task);
     }
 
     /** Runs the oldest step thread not yet run, as the docker runner mode's pool would. */

@@ -131,9 +131,15 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // The nodes being decommissioned, one host name to a line, as HDFS and YARN read them on the primary node.
     private static final String DFS_EXCLUDE = HDFS_CONF + "/dfs.exclude";
     private static final String YARN_EXCLUDE = HDFS_CONF + "/yarn.exclude";
+    /** The ResourceManager's web port, "YARN ResourceManager | http://master-public-dns-name:8088/". */
+    static final int RESOURCE_MANAGER_WEB_PORT = 8088;
+    /** A NodeManager's web port, "YARN NodeManager | http://coretask-public-dns-name:8042/". */
+    static final int NODE_MANAGER_WEB_PORT = 8042;
     // The ResourceManager's cluster metrics on its web port, which say when the NodeManager has registered.
-    private static final String RESOURCE_MANAGER_METRICS = "http://" + BIND + ":8088/ws/v1/cluster/metrics";
-    private static final String RESOURCE_MANAGER_NODES = "http://" + BIND + ":8088/ws/v1/cluster/nodes?states=";
+    private static final String RESOURCE_MANAGER_METRICS = "http://" + BIND + ":" + RESOURCE_MANAGER_WEB_PORT
+            + "/ws/v1/cluster/metrics";
+    private static final String RESOURCE_MANAGER_NODES = "http://" + BIND + ":" + RESOURCE_MANAGER_WEB_PORT
+            + "/ws/v1/cluster/nodes?states=";
     // The MapReduce JobHistory server's information on its web port, which says it has started.
     private static final String JOB_HISTORY_INFO = "http://" + BIND + ":"
             + EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT + "/ws/v1/history/info";
@@ -1298,6 +1304,15 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 spec.withLinkLocalIp(address);
             }
         }
+        if (yarn != null && !shared) {
+            // Its web interfaces, which Floci's application UI links reach, published on the host's loopback interface
+            // alone, as Floci on the host reaches them there, and they take no credentials.
+            spec.withLoopbackPortBinding(RESOURCE_MANAGER_WEB_PORT, 0)
+                    .withLoopbackPortBinding(EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT, 0);
+            if (yarn.primaryWorks()) {
+                spec.withLoopbackPortBinding(NODE_MANAGER_WEB_PORT, 0);
+            }
+        }
         if (yarn != null) {
             spec.withEnv(YARN_MEMORY_VARIABLE, String.valueOf(yarn.memoryMb()))
                     .withEnv(YARN_VCORES_VARIABLE, String.valueOf(yarn.vcores()))
@@ -1428,6 +1443,33 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
         }
         return null;
+    }
+
+    /**
+     * Where Floci reaches a web interface's port on the cluster's primary node, once the node is ready: Floci on the
+     * host at the port Docker published for it on the host's loopback interface; Floci in a container of its own at
+     * the node's address on the cluster's network, which its container joins, as the node's daemons listen there
+     * alone (see BIND_SETUP).
+     */
+    @Override
+    public Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+        String name = hdfsName(clusterId);
+        try {
+            if (lifecycleManager.probeContainer(name) != ContainerLiveness.RUNNING
+                    || ContainerExec.run(lifecycleManager.getDockerClient(), name,
+                            new String[]{"test", "-f", HDFS_READY}, 10).exitCode() != 0) {
+                return Optional.empty();
+            }
+            if (currentContainer.resolveContainerId().isPresent() && !attachFloci(name)) {
+                return Optional.empty();
+            }
+            return Optional.of(lifecycleManager.resolveEndpoint(name, port, name));
+        } catch (RuntimeException e) {
+            // Stopped since it was looked at, or started before its ports were published.
+            LOG.debugv(e, "Port {0} of the primary node of EMR cluster {1} is not reachable: {2}", port, clusterId,
+                    e.getMessage());
+            return Optional.empty();
+        }
     }
 
     // Whether the container became ready by the deadline, false when it stopped first, or the step did, or a teardown

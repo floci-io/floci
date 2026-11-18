@@ -413,6 +413,13 @@ existing provider counts; tasks from a previous deployment do not cover the new 
 With no launch type, no strategy and no cluster default, a task keeps Floci's `FARGATE` default: a
 local cluster has no container instances, so an EC2 default would have nowhere to place it.
 
+A `REPLICA` service task placed on the `EC2` launch type, or on a capacity provider other than
+`FARGATE` and `FARGATE_SPOT`, runs on an `ACTIVE` container instance of the cluster: the one
+running the fewest tasks, among the instances registered for that capacity provider when any are,
+otherwise among those registered for none. `DescribeTasks` then reports its
+`containerInstanceArn`. A cluster with no container instance to offer still runs the task, without
+one, where AWS would leave it unplaced. Placement constraints and strategies are not evaluated.
+
 #### Task metadata endpoint
 
 Floci serves the [task metadata endpoint version
@@ -506,11 +513,14 @@ Deliberate limits:
 | `DeleteService` | Delete a service (supports `force`) |
 | `DescribeServices` | Describe one or more services (includes `deployments`, see below) |
 | `ListServices` | List service ARNs in a cluster |
-| `ListServicesByNamespace` | List services filtered by Cloud Map namespace |
+| `ListServicesByNamespace` | List the Region's services whose Service Connect configuration joined a Cloud Map namespace, given by name or ARN (a service with no namespace of its own joins its cluster's default); pages with `maxResults` and `nextToken` |
 
 `ListServices` filters on `launchType` and `schedulingStrategy` as well as `cluster`, and pages
-with `maxResults` and `nextToken`. Unlike every other ECS listing, which pages a hundred at a
-time, a request that names no `maxResults` gets ten ARNs and a `nextToken`.
+with `maxResults` and `nextToken`. Like `ListServicesByNamespace`, and unlike every other ECS
+listing, which pages a hundred at a time, a request that names no `maxResults` gets ten ARNs and
+a `nextToken`. A service joins the namespace its Service Connect configuration names, or its
+cluster's default when it names none, at the time the configuration is set: a later change to the
+cluster default does not move it.
 
 With persistent storage, services survive a restart but their tasks do not: task state is
 held in memory. The service scheduler starts at boot, so within a few seconds of startup every
@@ -559,6 +569,17 @@ Known differences from AWS:
   and rolls the running tasks: a replacement on the new deployment normally starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
+- A task of a service with `loadBalancers` that runs on a container instance is registered in a
+  target group of target type `instance` as ECS registers it on AWS: the container instance's
+  `ec2InstanceId` on the container's host port. The load balancer and its health checks reach
+  that instance port at the task's container. When another task on the same instance already holds
+  the host port, as when Floci runs in Docker and publishes no host ports so the tasks share a
+  container port, the target gets a port from the ECS agent's dynamic range (32768 to 60999)
+  instead, and `networkBindings` keeps reporting the published port. The container's other
+  published host ports are taken on the instance too where free, so a target group health check on
+  one of them reaches the container. The task holds these ports until it is `STOPPED`, through its
+  deregistration delay, so a replacement on the same instance gets other ones. An `ip` target
+  group, or a task with no container instance, gets the container's own address.
 - A rolling deployment of a service with `loadBalancers` stops a stale task only once every
   replacement's targets report `healthy`. A replacement that never turns healthy holds the
   deployment.
@@ -786,6 +807,12 @@ re-registered `containerInstanceArn` all round-trip. The agent version is report
 `agentVersion`. An instance also reports `registeredAt` and a `version` counter that each state
 change increments.
 
+The container instance's `ec2InstanceId` is the `instanceId` of the `instanceIdentityDocument` the
+agent registers with, so it names the EC2 instance the agent runs on, as on AWS. A registration
+without a document gets a generated `i-floci-...` id; one whose document is not JSON or names no
+`instanceId` fails with `InvalidParameterException`. Floci does not check
+`instanceIdentityDocumentSignature`.
+
 `DeregisterContainerInstance` leaves the instance in the cluster as `INACTIVE` rather than
 dropping it, so a later `DescribeContainerInstances` still answers for it, as on AWS. A cluster's
 `registeredContainerInstancesCount` counts only the `ACTIVE` and `DRAINING` instances.
@@ -1006,6 +1033,12 @@ so Floci runs a small proxy container that holds that address on the task's netw
 in `169.254.0.0/16`, without which it would have no route to the endpoint at all. Docker only
 allows both of those on a user-defined network.
 
+A task under security-group enforcement gets its credentials the same way. Its containers share the
+helper's protected namespace, so the helper takes the one link-local address for the whole task, and
+the helper's ruleset always lets TCP to `169.254.170.2:80` through. AWS security groups do not
+filter traffic to the ECS task metadata endpoints either. The exception covers that one listener
+and nothing else on the network.
+
 ```bash
 docker network create floci-net
 
@@ -1023,7 +1056,7 @@ Credentials a task sets for itself always win. Floci drops only the baseline `AW
 environment credentials before the container endpoint and leaving them in place would silently
 shadow the role. Anything the task definition sets explicitly is left alone.
 
-In three cases a task that asks for a role gets none. It starts without the relative URI and keeps
+In two cases a task that asks for a role gets none. It starts without the relative URI and keeps
 whatever baseline credentials Floci would have injected anyway. Usually that is the emulator's
 default account, but if Floci itself was started with AWS credentials in its environment those are
 forwarded into the task instead, and Floci logs a warning once per process when it does that.
@@ -1036,9 +1069,6 @@ for reasons that have nothing to do with the role's policy.
   names a different account: Floci looks the role up in the account the request authenticated as
   and requires an exact ARN match, so a cross-account `taskRoleArn` never resolves.
 - **No user-defined Docker network is configured.** The endpoint has nowhere to listen.
-- **The task runs under security-group enforcement.** Its containers join an isolated helper
-  namespace rather than the shared network the proxy sits on, so the endpoint would not be
-  reachable.
 
 Each of these logs a warning naming the task and the role it asked for.
 

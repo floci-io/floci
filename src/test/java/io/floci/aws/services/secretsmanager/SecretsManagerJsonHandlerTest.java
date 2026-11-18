@@ -644,6 +644,12 @@ class SecretsManagerJsonHandlerTest {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}";
 
+    /** The same grant, with the wildcard written as one of a list of principals. */
+    private static final String LIST_RESOURCE_POLICY =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Principal\":{\"AWS\":[\"arn:aws:iam::123456789012:root\",\"*\"]},"
+            + "\"Action\":\"secretsmanager:GetSecretValue\",\"Resource\":\"*\"}]}";
+
     private String createSecretReturningArn(String name) {
         ObjectNode request = MAPPER.createObjectNode();
         request.put("Name", name);
@@ -1396,6 +1402,17 @@ class SecretsManagerJsonHandlerTest {
     void putResourcePolicyBlocksAWildcardPrincipalWhenBlockPublicPolicyIsSet() {
         createSecret("blocked-policy");
         Response response = putResourcePolicy("blocked-policy", RESOURCE_POLICY, true);
+
+        assertThat(response.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) response.getEntity()).type(), is("PublicPolicyException"));
+    }
+
+    @Test
+    void putResourcePolicyBlocksAWildcardPrincipalWrittenAsAList() {
+        // The principal may be written as a list of principals, and a wildcard among them
+        // is everyone.
+        createSecret("blocked-list-policy");
+        Response response = putResourcePolicy("blocked-list-policy", LIST_RESOURCE_POLICY, true);
 
         assertThat(response.getStatus(), is(400));
         assertThat(((AwsErrorResponse) response.getEntity()).type(), is("PublicPolicyException"));

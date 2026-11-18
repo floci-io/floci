@@ -84,6 +84,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1326,6 +1327,10 @@ class EmrClusterStorageTest {
         verify(spec).withJavaTrustStore();
         verify(spec).withEmbeddedDns();
         verify(spec).withJoinedNetwork("floci-network");
+        // Its web interfaces, which Floci's application UI links reach, on the host's loopback interface alone.
+        verify(spec).withLoopbackPortBinding(EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT, 0);
+        verify(spec).withLoopbackPortBinding(EmrServerlessSparkRunner.JOB_HISTORY_WEB_PORT, 0);
+        verify(spec).withLoopbackPortBinding(EmrClusterStorage.NODE_MANAGER_WEB_PORT, 0);
         // Its configuration names the primary node, listens where HDFS does and offers what it was given.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
                 "\"<property><name>yarn.resourcemanager.hostname</name><value>$FLOCI_HDFS_HOST</value></property>\"",
@@ -1403,6 +1408,27 @@ class EmrClusterStorageTest {
         assertNull(started.flociEndpoint());
         verify(spec, never()).withEnv(eq("FLOCI_YARN_MEMORY_MB"), anyString());
         verify(spec, never()).withHostDockerInternalOnLinux();
+        verify(spec, never()).withLoopbackPortBinding(anyInt(), anyInt());
+    }
+
+    @Test
+    void aPrimaryNodesWebInterfaceIsReachedOnceTheNodeIsReady() {
+        ContainerLifecycleManager.EndpointInfo published = new ContainerLifecycleManager.EndpointInfo("localhost",
+                32801);
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveEndpoint(hdfsName, EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT, hdfsName))
+                .thenReturn(published);
+        when(currentContainer.resolveContainerId()).thenReturn(Optional.empty());
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+
+        // Starting: its HDFS_READY is not there yet.
+        assertTrue(storage.webInterface("j-1", EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT).isEmpty());
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+
+        assertEquals(Optional.of(published),
+                storage.webInterface("j-1", EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT));
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        assertTrue(storage.webInterface("j-1", EmrClusterStorage.RESOURCE_MANAGER_WEB_PORT).isEmpty());
     }
 
     @Test

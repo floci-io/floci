@@ -27,6 +27,7 @@ import io.floci.aws.services.rds.container.RdsBackendGate;
 import io.floci.aws.services.rds.container.RdsContainerHandle;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.export.SnapshotExportSource;
+import io.floci.aws.services.rds.model.BlueGreenDeployment;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterEndpoint;
@@ -1868,6 +1869,232 @@ class RdsServiceTest {
 
         rdsService.deleteDbInstance("protected-db");
         assertThrows(AwsException.class, () -> rdsService.getDbInstance("protected-db"));
+    }
+
+    @Test
+    void advertiseRequestedPortReportsRequestedInstancePortAndKeepsProxyInRange() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+
+        DbInstance instance = createInstanceWithPort("advertised", 5432);
+
+        assertEquals(5432, instance.getEndpoint().port());
+        assertTrue(instance.getProxyPort() >= 7000 && instance.getProxyPort() <= 7099);
+        assertEquals(5432, rdsService.getDbInstance("advertised").getEndpoint().port());
+    }
+
+    @Test
+    void advertiseRequestedPortReportsRequestedClusterPort() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+
+        rdsService.createDbCluster("advertised-cluster", "aurora-mysql", "8.0", "admin", "password",
+                "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                null, false, 3306);
+
+        DbCluster cluster = rdsService.getDbCluster("advertised-cluster");
+        assertEquals(3306, cluster.getEndpoint().port());
+        assertEquals(3306, cluster.getReaderEndpoint().port());
+        assertTrue(cluster.getProxyPort() >= 7000 && cluster.getProxyPort() <= 7099);
+    }
+
+    @Test
+    void requestedPortOutsideProxyRangeIsReportedAsProxyPortWhenFlagOff() {
+        DbInstance instance = createInstanceWithPort("not-advertised", 5432);
+
+        assertEquals(instance.getProxyPort(), instance.getEndpoint().port());
+    }
+
+    /** Each restore branch rebuilds the endpoint, so each one needs its own run. */
+    @ParameterizedTest
+    @CsvSource({"false,AVAILABLE", "true,AVAILABLE", "false,STOPPED"})
+    void advertisedRequestedPortSurvivesRestartThroughJsonStorage(
+            boolean mock, DbInstanceStatus status, @TempDir Path tempDir) {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        when(rdsConfig.mock()).thenReturn(mock);
+        Path instanceFile = tempDir.resolve("instances.json");
+        Path clusterFile = tempDir.resolve("clusters.json");
+        PersistentStorage<String, DbInstance> instances =
+                new PersistentStorage<>(instanceFile, new TypeReference<Map<String, DbInstance>>() {});
+        PersistentStorage<String, DbCluster> clusters =
+                new PersistentStorage<>(clusterFile, new TypeReference<Map<String, DbCluster>>() {});
+        RdsService first = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        first.createDbInstance("restart-instance", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        first.createDbCluster("restart-cluster", "aurora-mysql", "8.0", "admin", "password",
+                "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                null, false, 3306);
+        DbInstance instance = first.getDbInstance("restart-instance");
+        DbCluster cluster = first.getDbCluster("restart-cluster");
+        instance.setStatus(status);
+        cluster.setStatus(status);
+        if (status == DbInstanceStatus.STOPPED) {
+            // A stopped record only has its endpoint rebuilt when its port is no longer claimable,
+            // as with a record that has no port.
+            instance.setProxyPort(0);
+            cluster.setProxyPort(0);
+        }
+        instances.put("us-east-1::restart-instance", instance);
+        clusters.put("us-east-1::restart-cluster", cluster);
+
+        // Fresh storage objects read back from disk, so only what the JSON carries survives.
+        PersistentStorage<String, DbInstance> reloadedInstances =
+                new PersistentStorage<>(instanceFile, new TypeReference<Map<String, DbInstance>>() {});
+        reloadedInstances.load();
+        PersistentStorage<String, DbCluster> reloadedClusters =
+                new PersistentStorage<>(clusterFile, new TypeReference<Map<String, DbCluster>>() {});
+        reloadedClusters.load();
+        assertEquals(5432, reloadedInstances.get("us-east-1::restart-instance").orElseThrow().getRequestedPort());
+        RdsService restarted = newService(containerManager, proxyManager, reloadedInstances,
+                reloadedClusters, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+
+        assertEquals(5432, restarted.getDbInstance("restart-instance").getEndpoint().port());
+        assertEquals(3306, restarted.getDbCluster("restart-cluster").getEndpoint().port());
+        assertEquals(3306, restarted.getDbCluster("restart-cluster").getReaderEndpoint().port());
+    }
+
+    @Test
+    void managedSecretCarriesTheConnectablePortNotTheAdvertisedOne() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        when(secretsManager.createSecret(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new Secret());
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secretsManager);
+
+        DbInstance instance = service.createDbInstance("secret-instance", "postgres", "13", "admin",
+                null, "dbname", "db.t3.micro", 20, false, null, null, null, null, false, true, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        DbCluster cluster = service.createDbCluster("secret-cluster", "aurora-mysql", "8.0", "admin",
+                null, "dbname", false, null, null, null, false, null, null, null, null, true, null,
+                null, false, 3306);
+
+        ArgumentCaptor<String> secretString = ArgumentCaptor.forClass(String.class);
+        verify(secretsManager, times(2)).createSecret(any(), secretString.capture(), any(), any(),
+                any(), any(), any(), any());
+        assertEquals(5432, instance.getEndpoint().port());
+        assertEquals(3306, cluster.getEndpoint().port());
+        assertTrue(secretString.getAllValues().get(0).contains("\"port\":" + instance.getProxyPort()));
+        assertTrue(secretString.getAllValues().get(1).contains("\"port\":" + cluster.getProxyPort()));
+    }
+
+    @Test
+    void clusterMemberReportsTheClusterRequestedPort() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        rdsService.createDbCluster("member-cluster", "aurora-mysql", "8.0", "admin", "password",
+                "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                null, false, 3306);
+
+        DbInstance member = rdsService.createDbInstance("member", "aurora-mysql", "8.0", null, null,
+                "dbname", "db.r5.large", 20, false, null, null, "member-cluster", null, false, false,
+                null, Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null);
+
+        assertEquals(3306, member.getEndpoint().port());
+    }
+
+    @Test
+    void theAdvertisedPortFollowsTheEndpointThroughABlueGreenSwitchoverAndARestart(@TempDir Path tempDir) {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        when(rdsConfig.mock()).thenReturn(true);
+        Path instanceFile = tempDir.resolve("instances.json");
+        PersistentStorage<String, DbInstance> instances =
+                new PersistentStorage<>(instanceFile, new TypeReference<Map<String, DbInstance>>() {});
+        RdsService service = newService(containerManager, proxyManager, instances, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        DbInstance blue = service.createDbInstance("bg-blue", "postgres", "16.3", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true,
+                new DbInstanceSettings(null, null, 1, null, null, null), null, 5432);
+        BlueGreenDeployment deployment = service.createBlueGreenDeployment(
+                new RdsService.BlueGreenDeploymentRequest("bg", blue.getDbInstanceArn(), "17.4", null, null, null,
+                        null, null, Map.of()), "us-east-1");
+
+        service.switchoverBlueGreenDeployment(deployment.getBlueGreenDeploymentIdentifier(), null, "us-east-1");
+        assertEquals(5432, service.getDbInstance("bg-blue").getEndpoint().port());
+
+        PersistentStorage<String, DbInstance> reloaded =
+                new PersistentStorage<>(instanceFile, new TypeReference<Map<String, DbInstance>>() {});
+        reloaded.load();
+        RdsService restarted = newService(containerManager, proxyManager, reloaded, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+
+        DbInstance production = restarted.getDbInstance("bg-blue");
+        assertEquals("17.4", production.getEngineVersion());
+        assertEquals(5432, production.getEndpoint().port(), "the upgraded instance keeps the blue Port");
+        DbInstance retired = restarted.getDbInstance("bg-blue-old1");
+        assertEquals(retired.getProxyPort(), retired.getEndpoint().port(),
+                "the old blue keeps the endpoint green had, which asked for no Port");
+    }
+
+    @Test
+    void theConnectablePortIsTheProxysOnlyWhileTheEndpointAdvertisesTheRequestedPort() {
+        DbInstance plain = createInstanceWithPort("plain", 5432);
+        assertEquals(plain.getEndpoint().port(), rdsService.connectablePort(plain));
+
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        DbInstance advertising = createInstanceWithPort("advertising", 5432);
+        DbCluster cluster = rdsService.createDbCluster("advertising-cluster", "aurora-mysql", "8.0", "admin",
+                "password", "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                null, false, 3306);
+
+        assertEquals(5432, advertising.getEndpoint().port());
+        assertEquals(advertising.getProxyPort(), rdsService.connectablePort(advertising));
+        assertEquals(3306, cluster.getEndpoint().port());
+        assertEquals(cluster.getProxyPort(), rdsService.connectablePort(cluster));
+    }
+
+    /** A stopped record keeps its proxy port across a restart, and must still follow a changed setting. */
+    @ParameterizedTest
+    @CsvSource({"true,false", "false,true"})
+    void aStoppedDatabaseFollowsTheSettingAcrossARestart(boolean before, boolean after, @TempDir Path tempDir) {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(before);
+        Path instanceFile = tempDir.resolve("instances.json");
+        Path clusterFile = tempDir.resolve("clusters.json");
+        PersistentStorage<String, DbInstance> instances =
+                new PersistentStorage<>(instanceFile, new TypeReference<Map<String, DbInstance>>() {});
+        PersistentStorage<String, DbCluster> clusters =
+                new PersistentStorage<>(clusterFile, new TypeReference<Map<String, DbCluster>>() {});
+        RdsService first = newService(containerManager, proxyManager, instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        DbInstance instance = first.createDbInstance("stopped-instance", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, 5432);
+        DbCluster cluster = first.createDbCluster("stopped-cluster", "aurora-mysql", "8.0", "admin", "password",
+                "dbname", false, null, null, null, false, null, null, null, null, false, null,
+                null, false, 3306);
+        instance.setStatus(DbInstanceStatus.STOPPED);
+        cluster.setStatus(DbInstanceStatus.STOPPED);
+        instances.put("us-east-1::stopped-instance", instance);
+        clusters.put("us-east-1::stopped-cluster", cluster);
+        int instanceProxyPort = instance.getProxyPort();
+        int clusterProxyPort = cluster.getProxyPort();
+
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(after);
+        PersistentStorage<String, DbInstance> reloadedInstances =
+                new PersistentStorage<>(instanceFile, new TypeReference<Map<String, DbInstance>>() {});
+        reloadedInstances.load();
+        PersistentStorage<String, DbCluster> reloadedClusters =
+                new PersistentStorage<>(clusterFile, new TypeReference<Map<String, DbCluster>>() {});
+        reloadedClusters.load();
+        RdsService restarted = newService(containerManager, proxyManager, reloadedInstances, reloadedClusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+
+        DbInstance stoppedInstance = restarted.getDbInstance("stopped-instance");
+        DbCluster stoppedCluster = restarted.getDbCluster("stopped-cluster");
+        assertEquals(instanceProxyPort, stoppedInstance.getProxyPort(), "the proxy port was reclaimed unchanged");
+        assertEquals(after ? 5432 : instanceProxyPort, stoppedInstance.getEndpoint().port());
+        assertEquals(after ? 3306 : clusterProxyPort, stoppedCluster.getEndpoint().port());
+        assertEquals(after ? 3306 : clusterProxyPort, stoppedCluster.getReaderEndpoint().port());
+    }
+
+    private DbInstance createInstanceWithPort(String id, int port) {
+        return rdsService.createDbInstance(id, "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, port);
     }
 
     @Test
@@ -8225,6 +8452,34 @@ class RdsServiceTest {
                 .orElseThrow();
         assertNull(failed.getEndpoint());
         assertEquals(0, failed.getProxyPort());
+    }
+
+    @Test
+    void retryOfEndpointlessInstanceAndClusterAdvertisesTheRequestedPort() {
+        when(rdsConfig.advertiseRequestedPort()).thenReturn(true);
+        InMemoryStorage<String, DbInstance> instances = new InMemoryStorage<>();
+        InMemoryStorage<String, DbCluster> clusters = new InMemoryStorage<>();
+        DbInstance instance = persistedInstance("legacy", "123456789012", "secret", 7000);
+        instance.setStatus(DbInstanceStatus.FAILED);
+        instance.setEndpoint(null);
+        instance.setProxyPort(0);
+        instance.setRequestedPort(5432);
+        instances.put("legacy", instance);
+        DbCluster cluster = persistedCluster("123456789012", "secret", 7000);
+        cluster.setStatus(DbInstanceStatus.FAILED);
+        cluster.setEndpoint(null);
+        cluster.setReaderEndpoint(null);
+        cluster.setProxyPort(0);
+        cluster.setRequestedPort(3306);
+        clusters.put("cluster1", cluster);
+        RdsContainerManager manager = mock(RdsContainerManager.class);
+        when(manager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("recovered-container", "arn", "legacy", "127.0.0.1", 15432));
+        RdsService service = newService(manager, mock(RdsProxyManager.class), instances, clusters,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        assertEquals(5432, service.ensureInstanceBackend("legacy", "us-east-1").getEndpoint().port());
+        assertEquals(3306, service.ensureClusterBackend("cluster1", "us-east-1").getEndpoint().port());
     }
 
     @Test
