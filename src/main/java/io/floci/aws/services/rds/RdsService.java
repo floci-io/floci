@@ -1041,7 +1041,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 putInstanceForScope(accountId, effectiveRegion, id, instance);
 
                 if (!mock && hasBackend(backendHost, backendPort)) {
-                    final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+                    final String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
                     InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                     proxyStartAttempted = true;
                     proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
@@ -1923,7 +1923,7 @@ public class RdsService implements Resettable, ResourceProvider {
         replica.setDbInstanceAutomatedBackupsArn(instanceBackupArn(effectiveRegion, source.getDbiResourceId()));
         replica.setStatus(DbInstanceAutomatedBackup.REPLICATING);
         replica.setInstance(source);
-        replica.setRegion(regionFromArn(source.getDbInstanceArn()));
+        replica.setRegion(regionResolver.regionOf(source.getDbInstanceArn()));
         replica.setEarliestTime(now);
         replica.setLatestTime(now);
         replica.setBackupRetentionPeriod(retention);
@@ -2116,7 +2116,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private void retainReplicatedBackups(DbInstance instance) {
         Instant now = Instant.now();
         for (String replicaArn : instance.getAutomatedBackupReplicationArns()) {
-            String key = dbResourceKey(regionFromArn(replicaArn), instance.getDbiResourceId());
+            String key = dbResourceKey(regionResolver.regionOf(replicaArn), instance.getDbiResourceId());
             instanceAutomatedBackups.get(key).ifPresent(replica -> {
                 replica.setStatus(DbInstanceAutomatedBackup.RETAINED);
                 replica.setLatestTime(now);
@@ -2227,7 +2227,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         DbInstance source = resolveReadReplicaSource(sourceRef, effectiveRegion);
         String sourceId = source.getDbInstanceIdentifier();
-        String sourceRegion = regionFromArn(source.getDbInstanceArn());
+        String sourceRegion = regionResolver.regionOf(source.getDbInstanceArn());
         boolean sameRegion = sourceRegion.equals(effectiveRegion);
         if (source.getDbClusterIdentifier() != null && !source.getDbClusterIdentifier().isBlank()) {
             throw new AwsException("InvalidParameterValue",
@@ -2443,7 +2443,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     /** The other end of a replication link as AWS names it: identifier in-Region, ARN across. */
     private String replicationLinkName(DbInstance from, DbInstance to) {
-        return regionFromArn(from.getDbInstanceArn()).equals(regionFromArn(to.getDbInstanceArn()))
+        return regionResolver.regionOf(from.getDbInstanceArn()).equals(regionResolver.regionOf(to.getDbInstanceArn()))
                 ? to.getDbInstanceIdentifier() : to.getDbInstanceArn();
     }
 
@@ -2452,13 +2452,13 @@ public class RdsService implements Resettable, ResourceProvider {
         replica.setReadReplicationStatus(READ_REPLICATION_REPLICATING);
         replica.setStatus(DbInstanceStatus.CREATING);
         putInstanceForScope(accountIdFromArn(replica.getDbInstanceArn()),
-                regionFromArn(replica.getDbInstanceArn()), replica.getDbInstanceIdentifier(), replica);
+                regionResolver.regionOf(replica.getDbInstanceArn()), replica.getDbInstanceIdentifier(), replica);
         String replicaName = replicationLinkName(source, replica);
         if (!source.getReadReplicaDbInstanceIdentifiers().contains(replicaName)) {
             source.getReadReplicaDbInstanceIdentifiers().add(replicaName);
         }
         putInstanceForScope(accountIdFromArn(source.getDbInstanceArn()),
-                regionFromArn(source.getDbInstanceArn()), source.getDbInstanceIdentifier(), source);
+                regionResolver.regionOf(source.getDbInstanceArn()), source.getDbInstanceIdentifier(), source);
     }
 
     /** Drops the replica's link to its source and the source's link back, if the source exists. */
@@ -2473,7 +2473,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstance source = findLinkedInstance(accountId, replica, sourceRef);
         if (source != null && source.getReadReplicaDbInstanceIdentifiers()
                 .remove(replicationLinkName(source, replica))) {
-            putInstanceForScope(accountId, regionFromArn(source.getDbInstanceArn()),
+            putInstanceForScope(accountId, regionResolver.regionOf(source.getDbInstanceArn()),
                     source.getDbInstanceIdentifier(), source);
         }
     }
@@ -2487,13 +2487,13 @@ public class RdsService implements Resettable, ResourceProvider {
             for (DbInstance candidate : instances.scan(k -> true)) {
                 if (linkName.equalsIgnoreCase(candidate.getDbInstanceArn())
                         && accountId.equals(accountIdFromArn(candidate.getDbInstanceArn()))) {
-                    return findInstanceForScope(accountId, regionFromArn(candidate.getDbInstanceArn()),
+                    return findInstanceForScope(accountId, regionResolver.regionOf(candidate.getDbInstanceArn()),
                             candidate.getDbInstanceIdentifier());
                 }
             }
             return null;
         }
-        return findInstanceForScope(accountId, regionFromArn(from.getDbInstanceArn()), linkName);
+        return findInstanceForScope(accountId, regionResolver.regionOf(from.getDbInstanceArn()), linkName);
     }
 
     /**
@@ -2519,7 +2519,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 replica.setReadReplicaSourceDbInstanceIdentifier(null);
                 replica.setReadReplicationStatus(null);
             }
-            putInstanceForScope(accountId, regionFromArn(replica.getDbInstanceArn()),
+            putInstanceForScope(accountId, regionResolver.regionOf(replica.getDbInstanceArn()),
                     replica.getDbInstanceIdentifier(), replica);
         }
         instance.getReadReplicaDbInstanceIdentifiers().clear();
@@ -3543,7 +3543,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private String resourceRegionOrDefault(String resourceName) {
         return AwsArnUtils.isArn(resourceName)
-                ? regionFromArn(resourceName) : regionResolver.getDefaultRegion();
+                ? regionResolver.regionOf(resourceName) : regionResolver.getDefaultRegion();
     }
 
     /**
@@ -3572,7 +3572,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     // The secret's ARN names its own account and region, neither of which a
                     // startup backfill has a request context to infer.
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
-                    backfillManagedSecretKey(instance, regionFromArn(instance.getDbInstanceArn()));
+                    backfillManagedSecretKey(instance, regionResolver.regionOf(instance.getDbInstanceArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -3584,7 +3584,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
                 try {
                     secretsManagerService.markOwnedByService(secretArn, MANAGED_SECRET_OWNING_SERVICE);
-                    backfillManagedSecretKey(cluster, regionFromArn(cluster.getDbClusterArn()));
+                    backfillManagedSecretKey(cluster, regionResolver.regionOf(cluster.getDbClusterArn()));
                 } catch (RuntimeException e) {
                     LOG.debugv(e, "Could not mark master user secret {0} as service-managed", secretArn);
                 }
@@ -3609,7 +3609,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     continue;
                 }
                 String accountId = accountIdFromArn(instance.getDbInstanceArn());
-                String region = regionFromArn(instance.getDbInstanceArn());
+                String region = regionResolver.regionOf(instance.getDbInstanceArn());
                 String engineIdentifier;
                 String clusterId = instance.getDbClusterIdentifier();
                 if (clusterId != null && !clusterId.isBlank()) {
@@ -3941,7 +3941,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setStatus(DbInstanceStatus.FAILED);
         recordRuntimeFailureEvent(instance);
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        String region = regionFromArn(instance.getDbInstanceArn());
+        String region = regionResolver.regionOf(instance.getDbInstanceArn());
         putInstanceForScope(accountId, region, instance.getDbInstanceIdentifier(), instance);
         try {
             proxyManager.stopProxy(rdsResourceRelayKey(
@@ -4326,7 +4326,7 @@ public class RdsService implements Resettable, ResourceProvider {
      */
     public List<String> defaultVpcSecurityGroupIds(DbInstance instance) {
         try {
-            return RdsSecurityGroups.vpcDefault(ec2Service, regionFromArn(instance.getDbInstanceArn()),
+            return RdsSecurityGroups.vpcDefault(ec2Service, regionResolver.regionOf(instance.getDbInstanceArn()),
                     instance.getVpcId());
         } catch (AwsException e) {
             LOG.debugv("No default security group to report for DB instance {0} in {1}: {2}",
@@ -4765,7 +4765,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String effectiveMasterUser = instance.getMasterUsername() != null
                     ? instance.getMasterUsername() : "root";
             final String accountId = accountIdFromArn(instance.getDbInstanceArn());
-            final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+            final String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                     instanceBackendIdentity(instance).runtimeId(),
                     instance.getEngine(),
@@ -5008,7 +5008,7 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setContainerPort(handle != null ? handle.getPort() : 0);
         if (handle != null) {
             final String accountId = accountIdFromArn(cluster.getDbClusterArn());
-            final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
+            final String clusterRegion = regionResolver.regionOf(cluster.getDbClusterArn());
             proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
                     cluster.getDbClusterArn(),
                     cluster.getEngine(), cluster.isIamDatabaseAuthenticationEnabled(), cluster.getProxyPort(),
@@ -5080,7 +5080,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 String effectiveMasterUser = instance.getMasterUsername() != null
                         ? instance.getMasterUsername() : "root";
                 final String accountId = accountIdFromArn(instance.getDbInstanceArn());
-                final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+                final String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
                 InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                 proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                         backendIdentity.runtimeId(),
@@ -5165,7 +5165,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String clusterId = instance.getDbClusterIdentifier();
         if (clusterId != null && !clusterId.isBlank()) {
             DbCluster cluster = findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
-                    regionFromArn(instance.getDbInstanceArn()), clusterId);
+                    regionResolver.regionOf(instance.getDbInstanceArn()), clusterId);
             if (cluster != null) {
                 return new InstanceBackendIdentity(
                         cluster.getDbClusterArn(), cluster.getDbClusterResourceId());
@@ -5257,7 +5257,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveMasterUser = instance.getMasterUsername() != null
                 ? instance.getMasterUsername() : "root";
         final String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+        final String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
         InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
         int relayPort = instance.getProxyPort();
         DbEndpoint relayEndpoint = instance.getEndpoint();
@@ -5307,7 +5307,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private RdsContainerHandle startInstanceContainer(DbInstance instance) {
         boolean neverStarted = instance.isBackendNeverStarted();
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        String region = regionFromArn(instance.getDbInstanceArn());
+        String region = regionResolver.regionOf(instance.getDbInstanceArn());
         String id = instance.getDbInstanceIdentifier();
         if (neverStarted) {
             instance.setBackendNeverStarted(false);
@@ -5384,7 +5384,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveMasterUser = cluster.getMasterUsername() != null
                 ? cluster.getMasterUsername() : "root";
         final String accountId = accountIdFromArn(cluster.getDbClusterArn());
-        final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
+        final String clusterRegion = regionResolver.regionOf(cluster.getDbClusterArn());
         int relayPort = cluster.getProxyPort();
         DbEndpoint relayEndpoint = cluster.getEndpoint();
         boolean allocatedRelayPort = false;
@@ -5578,7 +5578,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         if (isRegisteredProxyTarget(
-                "RDS_INSTANCE", id, regionFromArn(instance.getDbInstanceArn()))) {
+                "RDS_INSTANCE", id, regionResolver.regionOf(instance.getDbInstanceArn()))) {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is registered with a DB proxy target group.", 400);
         }
@@ -5885,7 +5885,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (!mock && hasBackend(cluster.getContainerHost(), cluster.getContainerPort())) {
                 String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
                 final String accountId = accountIdFromArn(cluster.getDbClusterArn());
-                final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
+                final String clusterRegion = regionResolver.regionOf(cluster.getDbClusterArn());
                 try {
                     proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
                             cluster.getDbClusterArn(),
@@ -6036,7 +6036,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 : null;
         containerManager.configureAutoPause(cluster.getDbClusterArn(), secondsUntilAutoPause,
                 new ClusterAutoPause(accountIdFromArn(cluster.getDbClusterArn()),
-                        regionFromArn(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier()));
+                        regionResolver.regionOf(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier()));
     }
 
     /**
@@ -6532,7 +6532,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB cluster " + id + " still has DB instances.", 400);
         }
         if (isRegisteredProxyTarget(
-                "TRACKED_CLUSTER", id, regionFromArn(cluster.getDbClusterArn()))) {
+                "TRACKED_CLUSTER", id, regionResolver.regionOf(cluster.getDbClusterArn()))) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " is registered with a DB proxy target group.", 400);
         }
@@ -6650,7 +6650,7 @@ public class RdsService implements Resettable, ResourceProvider {
             global.setStorageEncrypted(source.isStorageEncrypted());
             global.getMembers().add(new GlobalClusterMember(source.getDbClusterArn(), true));
             source.setGlobalClusterIdentifier(global.getGlobalClusterIdentifier());
-            putClusterForScope(accountId, regionFromArn(source.getDbClusterArn()),
+            putClusterForScope(accountId, regionResolver.regionOf(source.getDbClusterArn()),
                     source.getDbClusterIdentifier(), source);
         } else {
             if (!hasText(engine)) {
@@ -6733,14 +6733,14 @@ public class RdsService implements Resettable, ResourceProvider {
                 throw new AwsException("InvalidParameterCombination",
                         "Cannot specify database name for cross region replication cluster", 400);
             }
-            String primaryRegion = regionFromArn(primary.getDbClusterArn());
+            String primaryRegion = regionResolver.regionOf(primary.getDbClusterArn());
             if (primaryRegion.equals(effectiveRegion)) {
                 throw new AwsException("InvalidParameterCombination",
                         "A secondary cluster must be in a different Region than the primary cluster "
                         + primary.getDbClusterIdentifier() + " (" + primaryRegion + ").", 400);
             }
             for (GlobalClusterMember member : global.getMembers()) {
-                if (regionFromArn(member.getDbClusterArn()).equals(effectiveRegion)) {
+                if (regionResolver.regionOf(member.getDbClusterArn()).equals(effectiveRegion)) {
                     throw new AwsException("InvalidParameterCombination",
                             "Global cluster " + global.getGlobalClusterIdentifier()
                             + " already has a cluster in " + effectiveRegion + ".", 400);
@@ -6835,7 +6835,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 DbCluster cluster = findClusterByArn(accountId, member.getDbClusterArn());
                 if (cluster != null) {
                     cluster.setGlobalClusterIdentifier(newId);
-                    putClusterForScope(accountId, regionFromArn(cluster.getDbClusterArn()),
+                    putClusterForScope(accountId, regionResolver.regionOf(cluster.getDbClusterArn()),
                             cluster.getDbClusterIdentifier(), cluster);
                 }
             }
@@ -6849,7 +6849,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 DbCluster cluster = findClusterByArn(accountId, member.getDbClusterArn());
                 if (cluster != null) {
                     cluster.setEngineVersion(engineVersion);
-                    putClusterForScope(accountId, regionFromArn(cluster.getDbClusterArn()),
+                    putClusterForScope(accountId, regionResolver.regionOf(cluster.getDbClusterArn()),
                             cluster.getDbClusterIdentifier(), cluster);
                 }
             }
@@ -6898,7 +6898,7 @@ public class RdsService implements Resettable, ResourceProvider {
         global.getMembers().remove(member);
         putGlobalCluster(accountId, global);
         cluster.setGlobalClusterIdentifier(null);
-        putClusterForScope(accountId, regionFromArn(cluster.getDbClusterArn()),
+        putClusterForScope(accountId, regionResolver.regionOf(cluster.getDbClusterArn()),
                 cluster.getDbClusterIdentifier(), cluster);
         return global;
     }
@@ -7001,7 +7001,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                        DbCluster cluster, boolean asPrimary) {
         synchronized (this) {
             GlobalCluster global = requireGlobalCluster(accountId, globalClusterIdentifier);
-            String region = regionFromArn(cluster.getDbClusterArn());
+            String region = regionResolver.regionOf(cluster.getDbClusterArn());
             if (asPrimary && global.findPrimary().isPresent()) {
                 throw new AwsException("InvalidParameterCombination",
                         "Global cluster " + global.getGlobalClusterIdentifier()
@@ -7013,7 +7013,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         + " has no primary cluster to replicate from.", 400);
             }
             for (GlobalClusterMember member : global.getMembers()) {
-                if (regionFromArn(member.getDbClusterArn()).equals(region)) {
+                if (regionResolver.regionOf(member.getDbClusterArn()).equals(region)) {
                     throw new AwsException("InvalidParameterCombination",
                             "Global cluster " + global.getGlobalClusterIdentifier()
                             + " already has a cluster in " + region + ".", 400);
@@ -7022,7 +7022,7 @@ public class RdsService implements Resettable, ResourceProvider {
             global.getMembers().add(new GlobalClusterMember(cluster.getDbClusterArn(), asPrimary));
             putGlobalCluster(accountId, global);
             cluster.setGlobalClusterIdentifier(global.getGlobalClusterIdentifier());
-            putClusterForScope(accountId, regionFromArn(cluster.getDbClusterArn()),
+            putClusterForScope(accountId, regionResolver.regionOf(cluster.getDbClusterArn()),
                     cluster.getDbClusterIdentifier(), cluster);
         }
     }
@@ -7147,7 +7147,7 @@ public class RdsService implements Resettable, ResourceProvider {
         for (DbCluster candidate : clusters.scan(k -> true)) {
             if (arn.equalsIgnoreCase(candidate.getDbClusterArn())
                     && accountId.equals(accountIdFromArn(candidate.getDbClusterArn()))) {
-                return findClusterForScope(accountId, regionFromArn(candidate.getDbClusterArn()),
+                return findClusterForScope(accountId, regionResolver.regionOf(candidate.getDbClusterArn()),
                         candidate.getDbClusterIdentifier());
             }
         }
@@ -7531,7 +7531,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 String effectiveMasterUser = masterUser != null ? masterUser : "root";
                 final String targetId = target.getRdsResourceId();
                 final boolean isCluster = "TRACKED_CLUSTER".equals(target.getType());
-                final String targetRegion = regionFromArn(proxy.getDbProxyArn());
+                final String targetRegion = regionResolver.regionOf(proxy.getDbProxyArn());
                 proxyManager.startProxy(dbProxyRelayKey(proxy), backendRuntimeId, engine, proxy.isIamAuth(),
                         proxy.getProxyPort(), backendHost, backendPort, proxy.getEndpointHost(),
                         effectiveMasterUser, masterPassword, dbName,
@@ -7816,7 +7816,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public synchronized void clearDbProxyTargetGroupByArn(String targetGroupArn) {
-        clearDbProxyTargetGroupByArn(targetGroupArn, regionFromArn(targetGroupArn));
+        clearDbProxyTargetGroupByArn(targetGroupArn, regionResolver.regionOf(targetGroupArn));
     }
 
     public synchronized void clearDbProxyTargetGroupByArn(String targetGroupArn, String region) {
@@ -7840,7 +7840,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         validateResourceRegion(targetGroupArn, effectiveRegion, "DB proxy target group");
         DbProxyTargetGroup targetGroup = proxyTargetGroups.scan(k -> true).stream()
-                .filter(candidate -> effectiveRegion.equals(regionFromArn(candidate.getTargetGroupArn())))
+                .filter(candidate -> effectiveRegion.equals(regionResolver.regionOf(candidate.getTargetGroupArn())))
                 .filter(candidate -> Objects.equals(targetGroupArn, candidate.getTargetGroupArn()))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
@@ -7982,7 +7982,7 @@ public class RdsService implements Resettable, ResourceProvider {
      * override applies only to instances created after it.
      */
     public InstanceCertificate instanceCertificate(DbInstance instance) {
-        String region = regionFromArn(instance.getDbInstanceArn());
+        String region = regionResolver.regionOf(instance.getDbInstanceArn());
         String identifier = instance.getCaCertificateIdentifier() != null
                 ? instance.getCaCertificateIdentifier() : RdsCaCertificates.DEFAULT_FOR_NEW_LAUNCHES;
         return RdsCaCertificates.find(region, identifier)
@@ -9649,10 +9649,6 @@ public class RdsService implements Resettable, ResourceProvider {
         return effectiveRegion(region) + "::" + dbProxyName;
     }
 
-    private String regionFromArn(String arn) {
-        return AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion());
-    }
-
     private void validateProxyTargetScope(
             String targetArn, String proxyAccountId, String proxyRegion,
             String resourceType, String resourceId) {
@@ -9881,7 +9877,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     400);
         }
         String accountId = accountIdFromArn(proxy.getDbProxyArn());
-        String proxyRegion = regionFromArn(proxy.getDbProxyArn());
+        String proxyRegion = regionResolver.regionOf(proxy.getDbProxyArn());
         if (!"TRACKED_CLUSTER".equals(target.getType())
                 && !"RDS_INSTANCE".equals(target.getType())) {
             throw new AwsException("InvalidDBProxyStateFault",
@@ -9998,7 +9994,8 @@ public class RdsService implements Resettable, ResourceProvider {
                     cluster.setEndpoint(endpoint);
                     cluster.setReaderEndpoint(endpoint);
                     putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
-                            regionFromArn(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(), cluster);
+                            regionResolver.regionOf(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(),
+                            cluster);
                 } else if (cluster.getEndpoint() != null
                         && cluster.getEndpoint().port() != reportedPort(port, cluster.getRequestedPort())) {
                     // advertise-requested-port changed across the restart: report the port it names now, at the
@@ -10008,12 +10005,13 @@ public class RdsService implements Resettable, ResourceProvider {
                     cluster.setEndpoint(endpoint);
                     cluster.setReaderEndpoint(endpoint);
                     putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
-                            regionFromArn(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(), cluster);
+                            regionResolver.regionOf(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(),
+                            cluster);
                 }
                 continue;
             }
             String accountId = accountIdFromArn(cluster.getDbClusterArn());
-            String clusterRegion = regionFromArn(cluster.getDbClusterArn());
+            String clusterRegion = regionResolver.regionOf(cluster.getDbClusterArn());
             String storageResourceId = resolvedClusterStorageResourceId(cluster);
             String dockerVolumeName = resolvedClusterDockerVolumeName(cluster);
             cluster.setContainerStorageResourceId(storageResourceId);
@@ -10122,7 +10120,8 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setProxyPort(port);
                     instance.setEndpoint(advertised(proxyEndpoint(port), instance.getRequestedPort()));
                     putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
-                            regionFromArn(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(), instance);
+                            regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(),
+                            instance);
                 } else if (instance.getEndpoint() != null
                         && instance.getEndpoint().port() != reportedPort(port, instance.getRequestedPort())) {
                     // advertise-requested-port changed across the restart: report the port it names now, at the
@@ -10130,12 +10129,13 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setEndpoint(new DbEndpoint(instance.getEndpoint().address(),
                             reportedPort(port, instance.getRequestedPort())));
                     putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
-                            regionFromArn(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(), instance);
+                            regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(),
+                            instance);
                 }
                 continue;
             }
             String accountId = accountIdFromArn(instance.getDbInstanceArn());
-            String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+            String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
             String clusterId = instance.getDbClusterIdentifier();
             if (clusterId != null && !clusterId.isBlank()) {
                 DbCluster owningCluster = findClusterForScope(accountId, instanceRegion, clusterId);
@@ -10298,7 +10298,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     && Objects.equals(proxyAccountId, defaultAccountId())) {
                 try {
                     proxy.setVpcId(resolveDbProxyVpc(
-                            proxy.getVpcSubnetIds(), regionFromArn(proxy.getDbProxyArn())));
+                            proxy.getVpcSubnetIds(), regionResolver.regionOf(proxy.getDbProxyArn())));
                 } catch (AwsException migrationFailure) {
                     LOG.warnv(migrationFailure,
                             "Could not derive VPC for persisted RDS proxy {0}; preserving existing state",
@@ -10360,7 +10360,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void persistRestoredProxy(DbProxy proxy) {
         String accountId = AwsArnUtils.accountOrDefault(proxy.getDbProxyArn(), defaultAccountId());
-        String proxyKey = dbProxyKey(regionFromArn(proxy.getDbProxyArn()), proxy.getDbProxyName());
+        String proxyKey = dbProxyKey(regionResolver.regionOf(proxy.getDbProxyArn()), proxy.getDbProxyName());
         if (proxies instanceof AccountAwareStorageBackend<DbProxy> aware) {
             Optional<DbProxy> canonical = aware.getForAccount(accountId, proxyKey);
             if (canonical.isPresent() && !sameProxyScope(canonical.get(), proxy)) {
@@ -10405,7 +10405,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private DbProxyTargetGroup ensureRestoredDefaultTargetGroup(DbProxy proxy) {
         String defaultAccountId = defaultAccountId();
         String accountId = AwsArnUtils.accountOrDefault(proxy.getDbProxyArn(), defaultAccountId);
-        String region = regionFromArn(proxy.getDbProxyArn());
+        String region = regionResolver.regionOf(proxy.getDbProxyArn());
         String proxyKey = dbProxyKey(region, proxy.getDbProxyName());
         Predicate<DbProxyTargetGroup> legacyOwner = candidate ->
                 targetGroupCanMigrateToProxy(candidate, proxy);
@@ -10568,7 +10568,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private DbCluster getClusterForRestore(DbProxy proxy, String clusterId) {
         DbCluster cluster = findClusterForScope(
                 accountIdFromArn(proxy.getDbProxyArn()),
-                regionFromArn(proxy.getDbProxyArn()), clusterId);
+                regionResolver.regionOf(proxy.getDbProxyArn()), clusterId);
         if (cluster == null) {
             throw new AwsException("DBClusterNotFoundFault",
                     "DB cluster " + clusterId + " not found.", 404);
@@ -10579,7 +10579,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private DbInstance getInstanceForRestore(DbProxy proxy, String instanceId) {
         DbInstance instance = findInstanceForScope(
                 accountIdFromArn(proxy.getDbProxyArn()),
-                regionFromArn(proxy.getDbProxyArn()), instanceId);
+                regionResolver.regionOf(proxy.getDbProxyArn()), instanceId);
         if (instance == null) {
             throw new AwsException("DBInstanceNotFoundFault",
                     "DB instance " + instanceId + " not found.", 404);
@@ -10768,7 +10768,7 @@ public class RdsService implements Resettable, ResourceProvider {
     /** The overrides of a standalone instance's DB parameter group, which its engine runs with. */
     private Map<String, String> instanceEngineParameters(DbInstance instance) {
         return instanceEngineParameters(accountIdFromArn(instance.getDbInstanceArn()),
-                regionFromArn(instance.getDbInstanceArn()), instance.getParameterGroupName());
+                regionResolver.regionOf(instance.getDbInstanceArn()), instance.getParameterGroupName());
     }
 
     /**
@@ -10804,14 +10804,14 @@ public class RdsService implements Resettable, ResourceProvider {
         String writerId = cluster.resolveWriterIdentifier();
         DbInstance writer = writerId == null ? null : findInstanceForScope(
                 accountIdFromArn(cluster.getDbClusterArn()),
-                effectiveRegion(regionFromArn(cluster.getDbClusterArn())), writerId);
+                effectiveRegion(regionResolver.regionOf(cluster.getDbClusterArn())), writerId);
         return clusterEngineParameters(cluster, writer == null ? null : writer.getParameterGroupName());
     }
 
     private Map<String, String> clusterEngineParameters(
             DbCluster cluster, String writerParameterGroupName) {
         String accountId = accountIdFromArn(cluster.getDbClusterArn());
-        String region = regionFromArn(cluster.getDbClusterArn());
+        String region = regionResolver.regionOf(cluster.getDbClusterArn());
         Map<String, String> parameters = new HashMap<>(
                 clusterEngineParameters(accountId, region, cluster.getParameterGroupName()));
         parameters.putAll(instanceEngineParameters(accountId, region, writerParameterGroupName));
@@ -13095,7 +13095,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String id = instance.getDbInstanceIdentifier();
         String effectiveMasterUser = instance.getMasterUsername() != null ? instance.getMasterUsername() : "root";
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
-        String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+        String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
         InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
         proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                 backendIdentity.runtimeId(),

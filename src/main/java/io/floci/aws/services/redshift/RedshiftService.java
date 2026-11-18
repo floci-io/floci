@@ -756,7 +756,7 @@ public class RedshiftService implements ManagedSecretRotator {
         }
 
         boolean nameTaken = integrations.scan(k -> true).stream()
-                .filter(existing -> region.equals(integrationRegion(existing)))
+                .filter(existing -> region.equals(regionResolver.regionOf(existing.getIntegrationArn())))
                 .anyMatch(existing -> integrationName.equals(existing.getIntegrationName()));
         if (nameTaken) {
             throw new AwsException("IntegrationAlreadyExistsFault",
@@ -2361,12 +2361,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private boolean isInRequestRegion(Integration integration) {
-        return integrationRegion(integration).equals(regionResolver.getRegion());
-    }
-
-    /** The Region an integration was created in, which its ARN names. */
-    private String integrationRegion(Integration integration) {
-        return AwsArnUtils.regionOrDefault(integration.getIntegrationArn(), regionResolver.getDefaultRegion());
+        return regionResolver.inRequestRegion(integration.getIntegrationArn());
     }
 
     /**

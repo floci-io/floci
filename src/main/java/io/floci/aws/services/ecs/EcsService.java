@@ -6631,7 +6631,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * task does ({@link #taskRegion}): it breaks no lookup, and it is seen in one region rather than all.
      */
     private String regionOf(TaskDefinition td) {
-        return AwsArnUtils.regionOrDefault(td.getTaskDefinitionArn(), regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(td.getTaskDefinitionArn());
     }
 
     /**
