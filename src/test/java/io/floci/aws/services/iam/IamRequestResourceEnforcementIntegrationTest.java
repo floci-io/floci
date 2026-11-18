@@ -1680,14 +1680,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     void aBudgetIsCheckedOnTheArnItsNameGives() {
         String name = "res-budget-" + suffix();
         String other = name + "-other";
-        for (String budget : List.of(name, other)) {
-            adminJson("budgets", "AWSBudgetServiceGateway.CreateBudget")
-                    .body("{\"AccountId\":\"" + ACCOUNT + "\",\"Budget\":" + budget(budget, null) + "}").post("/")
-                    .then().statusCode(200);
-            cleanup.register(() -> adminJson("budgets", "AWSBudgetServiceGateway.DeleteBudget")
-                    .body("{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + budget + "\"}").post("/"));
-        }
-        String arn = "arn:aws:budgets::" + ACCOUNT + ":budget/" + name;
+        String arn = createdBudget(name, null);
+        createdBudget(other, null);
         adminJson("budgets", "AWSBudgetServiceGateway.TagResource").body("{\"ResourceARN\":\"" + arn
                 + "\",\"ResourceTags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}").post("/").then().statusCode(200);
 
@@ -1701,6 +1695,40 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + budget(other, arn) + "}"), "budgets:ModifyBudget");
         budgets(user, "UpdateBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"NewBudget\":" + budget(name, null) + "}")
                 .statusCode(200);
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Budgets holds on the budget a request names, as TagResource
+     * leaves them, so an allow on one team's tag lets the caller read that team's budget and not another's.
+     */
+    @Test
+    void aBudgetsResourceTagConditionReadsTheTagsOfTheBudget() {
+        String web = "[{\"Key\":\"team\",\"Value\":\"web\"}]";
+        String tagged = "res-budget-tagged-" + suffix();
+        String other = "res-budget-untagged-" + suffix();
+        String taggedArn = createdBudget(tagged, web);
+        createdBudget(other, web);
+        adminJson("budgets", "AWSBudgetServiceGateway.TagResource").body("{\"ResourceARN\":\"" + taggedArn
+                + "\",\"ResourceTags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}").post("/").then().statusCode(200);
+
+        User user = user("res-budget-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"budgets:ViewBudget\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        budgets(user, "DescribeBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(budgets(user, "DescribeBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + other
+                + "\"}"), "budgets:ViewBudget");
+    }
+
+    /** The ARN of the budget {@code name} an administrator creates, with the {@code tags} list if any. */
+    private String createdBudget(String name, String tags) {
+        adminJson("budgets", "AWSBudgetServiceGateway.CreateBudget")
+                .body("{\"AccountId\":\"" + ACCOUNT + "\",\"Budget\":" + budget(name, null)
+                        + (tags == null ? "" : ",\"ResourceTags\":" + tags) + "}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("budgets", "AWSBudgetServiceGateway.DeleteBudget")
+                .body("{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + name + "\"}").post("/"));
+        return "arn:aws:budgets::" + ACCOUNT + ":budget/" + name;
     }
 
     /**
