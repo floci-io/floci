@@ -179,7 +179,8 @@ public class SchedulerService implements StoredResourceArns {
                         "ScheduleGroup not found: " + effectiveName, 404));
     }
 
-    public void deleteScheduleGroup(String name, String region) {
+    /** Synchronized with {@link #recordFire}, so a fire recorded during the cascade cannot restore a schedule. */
+    public synchronized void deleteScheduleGroup(String name, String region) {
         validateName(name);
         if (DEFAULT_GROUP.equals(name)) {
             throw new AwsException("ValidationException",

@@ -19,9 +19,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -83,6 +86,43 @@ class SchedulerServiceTest {
         created.setCreationDate(recreated.getCreationDate().minusSeconds(60));
         service.recordFire(created, REGION, Instant.parse("2026-04-21T12:00:00Z"));
         assertNull(service.getSchedule("gone", null, REGION).getLastFiredAt());
+    }
+
+    // Catches: a fire recorded while a group delete cascades through its schedules writing one back,
+    // so it lived on in a deleted group and kept firing. The delete holds the lock until it is done.
+    @Test
+    void aFireIsNotRecordedWhileItsGroupIsBeingDeleted() throws Exception {
+        CountDownLatch deleting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        InMemoryStorage<String, Schedule> schedules = new InMemoryStorage<>() {
+            @Override
+            public void delete(String key) {
+                deleting.countDown();
+                try {
+                    release.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                super.delete(key);
+            }
+        };
+        SchedulerService schedulers = new SchedulerService(new InMemoryStorage<>(), schedules,
+                new RegionResolver(REGION, "000000000000"));
+        schedulers.createScheduleGroup("team", Map.of(), REGION);
+        Schedule created = schedulers.createSchedule(newRequest("in-group", "team", "rate(1 hour)",
+                new FlexibleTimeWindow("OFF", null),
+                new Target("arn:t", "arn:aws:iam::000000000000:role/r", null, null)), REGION);
+
+        Thread groupDelete = Thread.ofVirtual().start(() -> schedulers.deleteScheduleGroup("team", REGION));
+        assertTrue(deleting.await(5, TimeUnit.SECONDS), "the cascade should reach the schedule");
+        Thread fire = Thread.ofVirtual().start(
+                () -> schedulers.recordFire(created, REGION, Instant.parse("2026-04-21T12:00:00Z")));
+        assertFalse(fire.join(Duration.ofMillis(300)), "recording a fire should wait for the delete");
+        release.countDown();
+        groupDelete.join();
+        fire.join();
+
+        assertTrue(schedules.scan(key -> true).isEmpty(), "the deleted group's schedule must stay deleted");
     }
 
     // Catches BL-385 across a real restart: the last fire written to disk is there when the stores are
