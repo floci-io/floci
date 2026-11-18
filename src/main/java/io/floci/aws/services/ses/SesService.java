@@ -1572,7 +1572,7 @@ public class SesService {
         return result;
     }
 
-    private static final String UNSUBSCRIBE_PLACEHOLDER = "{{amazonSESUnsubscribeUrl}}";
+    private static final String UNSUBSCRIBE_PLACEHOLDER = SesTemplateService.UNSUBSCRIBE_PLACEHOLDER;
 
     private static boolean hasListManagement(ListManagementOptions listManagement) {
         return listManagement != null && listManagement.contactListName() != null

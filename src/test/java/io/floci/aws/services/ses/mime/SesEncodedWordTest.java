@@ -1,4 +1,4 @@
-package io.floci.aws.services.ses.address;
+package io.floci.aws.services.ses.mime;
 
 import org.junit.jupiter.api.Test;
 
@@ -37,5 +37,11 @@ class SesEncodedWordTest {
 
         assertEquals("=?UTF-8?B?YfCfmIDwn5iA8J+YgPCfmIDwn5iA8J+YgPCfmIA=?="
                 + " =?UTF-8?B?8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA8J+YgPCfmIDwn5iA?=", encoded);
+    }
+
+    @Test
+    void encodeText_escapesOnlyTheTextSpecialsInAQWord() {
+        assertEquals("=?UTF-8?Q?Al_B.(x)=3D=5F=3F=E5=B1=B1?=", SesEncodedWord.encodeText("Al B.(x)=_?山"));
+        assertEquals("=?UTF-8?B?YeWxsQ==?=", SesEncodedWord.encodeText("a山"));
     }
 }

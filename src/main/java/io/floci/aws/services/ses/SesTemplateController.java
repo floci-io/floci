@@ -165,7 +165,7 @@ public class SesTemplateController {
             }
             String templateDataRaw = templateDataNode.asText("");
             String rendered = templateService.renderTestTemplate(templateName, templateDataRaw,
-                    region);
+                    region, regionResolver.getAccountId());
             ObjectNode result = objectMapper.createObjectNode();
             result.put("RenderedTemplate", rendered);
             return Response.ok(result).build();
