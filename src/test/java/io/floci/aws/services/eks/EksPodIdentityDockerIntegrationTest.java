@@ -16,8 +16,8 @@ import io.floci.aws.services.eks.model.CreatePodIdentityAssociationRequest;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EksPodIdentityProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -28,7 +28,6 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,22 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(EksPodIdentityDockerIntegrationTest.Profile.class)
+@TestProfile(EksPodIdentityProfile.class)
 class EksPodIdentityDockerIntegrationTest {
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.eks.pod-identity-webhook", "true",
-                    "floci.tls.enabled", "true",
-                    "floci.tls.aws-https-port", "0",
-                    "quarkus.http.test-port", "4510",
-                    "quarkus.http.test-ssl-port", "4511",
-                    "floci.port", "4595",
-                    "floci.base-url", "http://localhost:4595");
-        }
-    }
 
     private static final Logger LOG = Logger.getLogger(EksPodIdentityDockerIntegrationTest.class);
     private static final String TEST_IMAGE = "alpine:3.21";

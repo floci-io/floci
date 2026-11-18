@@ -10,9 +10,9 @@ import io.floci.aws.services.eks.model.CreatePodIdentityAssociationRequest;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.EksPodIdentityProfile;
 import io.floci.aws.testing.EksTestNode;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -43,27 +43,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * after a Floci restart answers again only while the add-on is stored.
  *
  * <p>The cluster is started through {@link EksClusterManager} directly, on the webhook and TLS
- * settings the Pod Identity forward needs, so this class keeps a profile of its own rather than
- * {@code RdsMockProfile}, which the other real-cluster classes share. The add-on is created and deleted through the EKS API, as a client would.
+ * settings the Pod Identity forward needs, which {@link EksPodIdentityProfile} holds, rather than on
+ * {@code RdsMockProfile}, which the other real-cluster classes share. The add-on is created and
+ * deleted through the EKS API, as a client would.
  */
 @QuarkusTest
-@TestProfile(EksPodIdentityAgentDockerIntegrationTest.Profile.class)
+@TestProfile(EksPodIdentityProfile.class)
 class EksPodIdentityAgentDockerIntegrationTest {
-
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.eks.mock", "false",
-                    "floci.services.eks.pod-identity-webhook", "true",
-                    "floci.tls.enabled", "true",
-                    "floci.tls.aws-https-port", "0",
-                    "quarkus.http.test-port", "4510",
-                    "quarkus.http.test-ssl-port", "4511",
-                    "floci.port", "4595",
-                    "floci.base-url", "http://localhost:4595");
-        }
-    }
 
     private static final Logger LOG = Logger.getLogger(EksPodIdentityAgentDockerIntegrationTest.class);
     private static final String ACCOUNT = "000000000000";

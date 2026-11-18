@@ -7,8 +7,8 @@ import io.floci.aws.services.appsync.GraphqlSidecarClient;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
-import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
+import io.floci.aws.testing.SidecarIamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
@@ -27,14 +28,12 @@ import software.amazon.awssdk.services.eventbridge.model.Target;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static io.floci.aws.services.eventbridge.EventBridgeAppSyncFixtures.policy;
 import static io.floci.aws.services.eventbridge.EventBridgeAppSyncFixtures.trust;
-import static io.floci.aws.testing.CfnRequests.cfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -42,25 +41,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real SDK delivery through a CFN rule, GraphQL sidecar, resolver callback and DynamoDB. */
 @QuarkusTest
-@TestProfile(EventBridgeAppSyncSidecarIntegrationTest.EnforcedSidecars.class)
+@TestProfile(SidecarIamEnforcementProfile.class)
 class EventBridgeAppSyncSidecarIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-west-2";
-    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261104/" + REGION + "/cloudformation/aws4_request";
     private static final String OPERATION = "mutation Publish($id: ID!) { publish(id: $id) { id caller } }";
     private static final String SCHEMA = "type Message { id: ID! caller: String } type Query { unused: String } "
             + "type Mutation { publish(id: ID!): Message }";
     private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    public static class EnforcedSidecars extends SidecarContainersProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            Map<String, String> overrides = new HashMap<>(containerOverrides());
-            overrides.put("floci.services.iam.enforcement-enabled", "true");
-            return overrides;
-        }
-    }
 
     @Inject
     IamService iam;
@@ -75,12 +64,12 @@ class EventBridgeAppSyncSidecarIntegrationTest {
     private EventBridgeClient events;
     private DynamoDbClient dynamo;
     private SqsClient sqs;
+    private CloudFormationClient cloudFormation;
     private boolean stackCreated;
 
     @BeforeAll
     static void requireSidecar() {
         SidecarContainersProfile.requireDockerAndImage("floci.services.appsync.graphql-image");
-        RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
     @BeforeEach
@@ -95,6 +84,7 @@ class EventBridgeAppSyncSidecarIntegrationTest {
         events = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.of(REGION));
         dynamo = AwsTestClients.create(DynamoDbClient.builder(), "test", Region.of(REGION));
         sqs = AwsTestClients.create(SqsClient.builder(), "test", Region.of(REGION));
+        cloudFormation = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.of(REGION));
         RequestScopes.runAs(ACCOUNT, REGION, () -> {
             iam.createRole(targetRoleName, "/", trust("events", "arn:aws:events:" + REGION + ":" + ACCOUNT + ":rule/" + rule, ACCOUNT),
                     null, 3600, Map.of());
@@ -114,36 +104,38 @@ class EventBridgeAppSyncSidecarIntegrationTest {
         target.putObject("AppSyncParameters").put("GraphQLOperation", OPERATION);
         target.putObject("InputTransformer").putObject("InputPathsMap").put("id", "$.detail.id");
         ((ObjectNode) target.path("InputTransformer")).put("InputTemplate", "{\"id\":<id>}");
-        cfn("CreateStack", stack).header("Authorization", AUTH).formParam("TemplateBody", MAPPER.writeValueAsString(template))
-                .formParam("Parameters.member.1.ParameterKey", "RuleName").formParam("Parameters.member.1.ParameterValue", rule)
-                .formParam("Parameters.member.2.ParameterKey", "TableName").formParam("Parameters.member.2.ParameterValue", table)
-                .formParam("Parameters.member.3.ParameterKey", "TargetRole").formParam("Parameters.member.3.ParameterValue", roleArn(targetRoleName))
-                .formParam("Parameters.member.4.ParameterKey", "DataRole").formParam("Parameters.member.4.ParameterValue", roleArn(dataRoleName))
-                .when().post("/").then().statusCode(200);
+        String templateBody = MAPPER.writeValueAsString(template);
+        cloudFormation.createStack(request -> request.stackName(stack).templateBody(templateBody).parameters(
+                parameter -> parameter.parameterKey("RuleName").parameterValue(rule),
+                parameter -> parameter.parameterKey("TableName").parameterValue(table),
+                parameter -> parameter.parameterKey("TargetRole").parameterValue(roleArn(targetRoleName)),
+                parameter -> parameter.parameterKey("DataRole").parameterValue(roleArn(dataRoleName))));
         stackCreated = true;
-        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack, AUTH);
-        assertEquals("CREATE_COMPLETE", state.status(), state.reason());
+        CfnStackWaits.awaitStatus(cloudFormation, stack, "CREATE_COMPLETE");
     }
 
     @AfterEach
     void cleanUp() {
-        try {
-            if (stackCreated) {
-                cfn("DeleteStack", stack).header("Authorization", AUTH).post("/").then().statusCode(200);
-                CfnStackWaits.awaitStackDeleted(stack, AUTH);
+        // The clients close whatever the cleanup throws, each even if another fails to close.
+        EventBridgeClient eventsClient = events;
+        DynamoDbClient dynamoClient = dynamo;
+        SqsClient sqsClient = sqs;
+        CloudFormationClient cloudFormationClient = cloudFormation;
+        try (eventsClient; dynamoClient; sqsClient; cloudFormationClient) {
+            try {
+                if (stackCreated) {
+                    CfnStackWaits.deleteStack(cloudFormationClient, stack);
+                }
+            } finally {
+                if (targetRoleName != null) {
+                    RequestScopes.runAs(ACCOUNT, REGION, () -> {
+                        iam.deleteRolePolicy(targetRoleName, "invoke");
+                        iam.deleteRole(targetRoleName);
+                        iam.deleteRolePolicy(dataRoleName, "invoke");
+                        iam.deleteRole(dataRoleName);
+                    });
+                }
             }
-        } finally {
-            if (targetRoleName != null) {
-                RequestScopes.runAs(ACCOUNT, REGION, () -> {
-                    iam.deleteRolePolicy(targetRoleName, "invoke");
-                    iam.deleteRole(targetRoleName);
-                    iam.deleteRolePolicy(dataRoleName, "invoke");
-                    iam.deleteRole(dataRoleName);
-                });
-            }
-            if (events != null) { events.close(); }
-            if (dynamo != null) { dynamo.close(); }
-            if (sqs != null) { sqs.close(); }
         }
     }
 

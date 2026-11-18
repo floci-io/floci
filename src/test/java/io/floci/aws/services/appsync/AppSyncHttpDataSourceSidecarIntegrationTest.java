@@ -6,6 +6,7 @@ import io.floci.aws.testing.AppSyncHttpTestPolicies;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
+import io.floci.aws.testing.SidecarIamEnforcementProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -23,7 +24,6 @@ import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 
 import java.time.Duration;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -36,22 +36,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** SDK management, real GraphQL/Node sidecars, resolver callbacks and signed local AWS requests. */
 @QuarkusTest
-@TestProfile(AppSyncHttpDataSourceSidecarIntegrationTest.EnforcedSidecars.class)
+@TestProfile(SidecarIamEnforcementProfile.class)
 class AppSyncHttpDataSourceSidecarIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
     private static final String TARGET_REGION = "us-west-2";
-
-    public static class EnforcedSidecars extends SidecarContainersProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            Map<String, String> overrides = new HashMap<>(containerOverrides());
-            overrides.put("floci.services.iam.enforcement-enabled", "true");
-            overrides.put("floci.auth.validate-signatures", "true");
-            return overrides;
-        }
-    }
 
     @Inject
     IamService iam;

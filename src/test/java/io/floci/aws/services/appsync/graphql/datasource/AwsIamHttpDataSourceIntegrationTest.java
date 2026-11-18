@@ -8,9 +8,9 @@ import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.scheduler.SchedulerService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.testing.AppSyncHttpTestPolicies;
+import io.floci.aws.testing.SidecarIamEnforcementProfile;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.RestAssured;
@@ -42,20 +42,13 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.verify;
 
 @QuarkusTest
-@TestProfile(AwsIamHttpDataSourceIntegrationTest.EnforcedSignatures.class)
+@TestProfile(SidecarIamEnforcementProfile.class)
 class AwsIamHttpDataSourceIntegrationTest {
 
     private static final String ACCOUNT = "724600001234";
     private static final String API_REGION = "us-east-1";
     private static final String TARGET_REGION = "us-west-2";
     private static final String API_ARN = "arn:aws:appsync:" + API_REGION + ":" + ACCOUNT + ":apis/example";
-
-    public static class EnforcedSignatures implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "true", "floci.auth.validate-signatures", "true");
-        }
-    }
 
     @Inject
     AppSyncDataSourceInvokers invokers;
