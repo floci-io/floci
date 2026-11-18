@@ -13,6 +13,7 @@ import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalI
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -25,6 +26,13 @@ class ApiGatewayAuthorizerCfnUpdateIntegrationTest {
 
     private static final String SETTINGS = "\"Name\":\"n1\",\"AuthorizerResultTtlInSeconds\":60";
     private static final String CHANGED = "\"Name\":\"n2\"";
+    /** A Cognito authorizer created without an AuthorizerUri, after Auth; {@code uri} is appended to its properties. */
+    private static String cognito(String uri) {
+        return ",\"Cog\":{\"Type\":\"AWS::ApiGateway::Authorizer\",\"DependsOn\":\"Auth\",\"Properties\":{"
+                + "\"RestApiId\":{\"Ref\":\"ApiA\"},\"Type\":\"COGNITO_USER_POOLS\",\"Name\":\"cog\","
+                + "\"ProviderARNs\":[\"arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_x\"],"
+                + "\"IdentitySource\":\"method.request.header.Authorization\"" + uri + "}}";
+    }
 
     private static CloudFormationClient client() {
         return AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
@@ -40,21 +48,25 @@ class ApiGatewayAuthorizerCfnUpdateIntegrationTest {
         String stack = "apigw-cfn-authorizer-inplace-it";
         CloudFormationClient cf = client();
         try {
-            CfnStackWaits.createStack(cf, stack, template("ApiA", SETTINGS, ""), "CREATE_COMPLETE");
+            CfnStackWaits.createStack(cf, stack, template("ApiA", SETTINGS, cognito("")), "CREATE_COMPLETE");
             String apiId = physicalId(cf, stack, "ApiA");
             String authorizerId = physicalId(cf, stack, "Auth");
+            String cognitoId = physicalId(cf, stack, "Cog");
 
             CfnStackWaits.updateStack(cf, stack,
-                    template("ApiA", CHANGED, CfnStackWaits.failingResourceAfter("Auth")),
+                    template("ApiA", CHANGED, cognito(",\"AuthorizerUri\":\"u2\"")
+                            + CfnStackWaits.failingResourceAfter("Cog")),
                     "UPDATE_ROLLBACK_COMPLETE");
+            given().when().get("/restapis/" + apiId + "/authorizers/" + cognitoId).then().statusCode(200)
+                    .body("authorizerUri", nullValue());
             assertEquals(authorizerId, physicalId(cf, stack, "Auth"));
             given().when().get("/restapis/" + apiId + "/authorizers/" + authorizerId).then().statusCode(200)
                     .body("name", equalTo("n1")).body("authorizerResultTtlInSeconds", equalTo(60));
 
-            CfnStackWaits.updateStack(cf, stack, template("ApiA", CHANGED, ""), "UPDATE_COMPLETE");
+            CfnStackWaits.updateStack(cf, stack, template("ApiA", CHANGED, cognito("")), "UPDATE_COMPLETE");
             assertEquals(authorizerId, physicalId(cf, stack, "Auth"));
             given().when().get("/restapis/" + apiId + "/authorizers").then().statusCode(200)
-                    .body("item", hasSize(1));
+                    .body("item", hasSize(2));
             given().when().get("/restapis/" + apiId + "/authorizers/" + authorizerId).then().statusCode(200)
                     .body("name", equalTo("n2")).body("authorizerResultTtlInSeconds", equalTo(300));
         } finally {
