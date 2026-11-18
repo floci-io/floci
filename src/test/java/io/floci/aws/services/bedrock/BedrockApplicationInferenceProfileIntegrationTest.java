@@ -65,6 +65,36 @@ class BedrockApplicationInferenceProfileIntegrationTest {
     }
 
     @Test
+    void tagResourceRequiresAndValidatesTagsWithoutChangingApplicationProfileTags() {
+        String name = "tag-resource-validation-" + UUID.randomUUID();
+        String arn = given().contentType("application/json").body("""
+                        {"inferenceProfileName":"%s","modelSource":{"copyFrom":"%s"},
+                         "tags":[{"key":"team","value":"original"}]}
+                        """.formatted(name, MODEL_ARN))
+                .when().post("/inference-profiles")
+                .then().statusCode(201).extract().path("inferenceProfileArn");
+
+        try (BedrockClient client = client("000000000000", REGION)) {
+            try {
+                given().contentType("application/json").body("""
+                                {"resourceARN":"%s"}
+                                """.formatted(arn))
+                        .when().post("/tagResource")
+                        .then().statusCode(400).body("__type", equalTo("ValidationException"));
+                given().contentType("application/json").body("""
+                                {"resourceARN":"%s","tags":[{"key":"bad?key","value":"changed"}]}
+                                """.formatted(arn))
+                        .when().post("/tagResource")
+                        .then().statusCode(400).body("__type", equalTo("ValidationException"));
+                assertEquals(List.of(Tag.builder().key("team").value("original").build()),
+                        client.listTagsForResource(request -> request.resourceARN(arn)).tags());
+            } finally {
+                client.deleteInferenceProfile(request -> request.inferenceProfileIdentifier(arn));
+            }
+        }
+    }
+
+    @Test
     void directCreateAllowsWhitespaceKeyAndMaximumTagLengths() {
         String name = "boundary-tags-" + UUID.randomUUID();
         String maxKey = "k".repeat(128);

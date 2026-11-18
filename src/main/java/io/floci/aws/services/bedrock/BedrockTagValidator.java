@@ -5,8 +5,8 @@ import io.floci.aws.core.common.AwsException;
 
 import java.util.regex.Pattern;
 
-/** Validates the Bedrock {@code CreateInferenceProfile} TagList shape. */
-public final class ApplicationInferenceProfileTagValidator {
+/** Validates the Bedrock TagList shape. */
+public final class BedrockTagValidator {
 
     private static final int TAG_LIST_MAX = 200;
     private static final int TAG_KEY_MIN = 1;
@@ -14,7 +14,15 @@ public final class ApplicationInferenceProfileTagValidator {
     private static final int TAG_VALUE_MAX = 256;
     private static final Pattern TAG_PATTERN = Pattern.compile("[a-zA-Z0-9\\s._:/=+@-]*");
 
-    private ApplicationInferenceProfileTagValidator() {
+    private BedrockTagValidator() {
+    }
+
+    public static void validateRequired(JsonNode tags, String keyProperty, String valueProperty,
+                                        String errorCode, String propertyName) {
+        if (tags == null || tags.isNull()) {
+            throw invalid(errorCode, propertyName + " is required.");
+        }
+        validate(tags, keyProperty, valueProperty, errorCode, propertyName);
     }
 
     public static void validate(JsonNode tags, String keyProperty, String valueProperty,

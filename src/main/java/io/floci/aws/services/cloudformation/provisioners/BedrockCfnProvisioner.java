@@ -6,8 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.bedrock.ApplicationInferenceProfileTagValidator;
 import io.floci.aws.services.bedrock.BedrockService;
+import io.floci.aws.services.bedrock.BedrockTagValidator;
 import io.floci.aws.services.bedrock.model.ApplicationInferenceProfile;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -103,7 +103,7 @@ public class BedrockCfnProvisioner implements CfnResourceProvisioner {
         if (resolved == null || !resolved.isArray()) {
             throw new AwsException("ValidationError", TYPE + " Tags must be an array.", 400);
         }
-        ApplicationInferenceProfileTagValidator.validate(resolved, "Key", "Value", "ValidationError",
+        BedrockTagValidator.validate(resolved, "Key", "Value", "ValidationError",
                 TYPE + " Tags");
         Map<String, String> tags = new LinkedHashMap<>();
         for (JsonNode tag : resolved) {

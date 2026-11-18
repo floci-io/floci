@@ -199,6 +199,34 @@ class CloudFormationBedrockApplicationInferenceProfileIntegrationTest {
     }
 
     @Test
+    void tagsConditionSelectingNoValueCreatesAnUntaggedProfile() {
+        String stackName = STACK + "-no-tags";
+        String name = PROFILE_NAME + "-no-tags";
+        String template = """
+                {"Conditions":{"UseTags":{"Fn::Equals":["enabled","disabled"]}},
+                 "Resources":{"Profile":{"Type":"AWS::Bedrock::ApplicationInferenceProfile",
+                   "Properties":{"InferenceProfileName":"%s",
+                     "ModelSource":{"CopyFrom":"%s"},
+                     "Tags":{"Fn::If":["UseTags",[{"Key":"team","Value":"ignored"}],
+                       {"Ref":"AWS::NoValue"}]}}}},
+                 "Outputs":{"ProfileRef":{"Value":{"Ref":"Profile"}}}}
+                """.formatted(name, SOURCE_ARN);
+        try (CloudFormationClient cfn = AwsTestClients.create(CloudFormationClient.builder(), ACCOUNT, REGION);
+             BedrockClient bedrock = AwsTestClients.create(BedrockClient.builder(), ACCOUNT, REGION)) {
+            try {
+                Stack created = CfnStackWaits.createStack(cfn, stackName, template, "CREATE_COMPLETE");
+                String id = CfnStackWaits.output(created, "ProfileRef");
+                GetInferenceProfileResponse profile = bedrock.getInferenceProfile(request -> request
+                        .inferenceProfileIdentifier(id));
+                assertEquals(List.of(), bedrock.listTagsForResource(request -> request
+                        .resourceARN(profile.inferenceProfileArn())).tags());
+            } finally {
+                CfnStackWaits.deleteStack(cfn, stackName);
+            }
+        }
+    }
+
+    @Test
     void externallyDeletedPriorProfileBlocksReplacementCreation() {
         String stackName = STACK + "-deleted-prior";
         String name = PROFILE_NAME + "-deleted-prior";

@@ -271,7 +271,7 @@ public class BedrockController {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = readTree(body);
         bedrockService.tagResource(textOrNull(request, "resourceARN"),
-                BedrockService.parseTagList(request.get("tags")), region);
+                bedrockTagResourceTags(request.get("tags")), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -415,7 +415,12 @@ public class BedrockController {
     }
 
     private static Map<String, String> applicationProfileTags(JsonNode tags) {
-        ApplicationInferenceProfileTagValidator.validate(tags, "key", "value", "ValidationException", "tags");
+        BedrockTagValidator.validate(tags, "key", "value", "ValidationException", "tags");
+        return BedrockService.parseTagList(tags);
+    }
+
+    private static Map<String, String> bedrockTagResourceTags(JsonNode tags) {
+        BedrockTagValidator.validateRequired(tags, "key", "value", "ValidationException", "tags");
         return BedrockService.parseTagList(tags);
     }
 }
