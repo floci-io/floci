@@ -12,6 +12,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.DestinationType;
 import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
@@ -51,12 +52,14 @@ class ElastiCacheLogDeliveryIntegrationTest {
     @Test
     void createAndDescribeReportTheRequestedLogDeliveryConfigurations() {
         String groupId = "log-delivery-" + UUID.randomUUID().toString().substring(0, 8);
-        try (ElastiCacheClient client = client()) {
+        String logGroup = "/aws/ec/slow-" + groupId;
+        try (ElastiCacheClient client = client(); CloudWatchLogsClient logs = logs()) {
+            logs.createLogGroup(r -> r.logGroupName(logGroup));
             List<LogDeliveryConfiguration> created = client.createReplicationGroup(r -> r
                     .replicationGroupId(groupId).replicationGroupDescription("log delivery").engine("redis")
                     .logDeliveryConfigurations(
                             c -> c.logType(LogType.SLOW_LOG).destinationType(DestinationType.CLOUDWATCH_LOGS)
-                                    .destinationDetails(d -> d.cloudWatchLogsDetails(l -> l.logGroup("/aws/ec/slow")))
+                                    .destinationDetails(d -> d.cloudWatchLogsDetails(l -> l.logGroup(logGroup)))
                                     .logFormat(LogFormat.JSON).enabled(true),
                             c -> c.logType(LogType.ENGINE_LOG).destinationType(DestinationType.KINESIS_FIREHOSE)
                                     .destinationDetails(d -> d.kinesisFirehoseDetails(k -> k.deliveryStream("engine")))
@@ -66,7 +69,7 @@ class ElastiCacheLogDeliveryIntegrationTest {
             List<LogDeliveryConfiguration> expected = List.of(
                     LogDeliveryConfiguration.builder().logType(LogType.SLOW_LOG)
                             .destinationType(DestinationType.CLOUDWATCH_LOGS)
-                            .destinationDetails(d -> d.cloudWatchLogsDetails(l -> l.logGroup("/aws/ec/slow")))
+                            .destinationDetails(d -> d.cloudWatchLogsDetails(l -> l.logGroup(logGroup)))
                             .logFormat(LogFormat.JSON).status(LogDeliveryConfigurationStatus.ACTIVE).build(),
                     LogDeliveryConfiguration.builder().logType(LogType.ENGINE_LOG)
                             .destinationType(DestinationType.KINESIS_FIREHOSE)
@@ -75,6 +78,30 @@ class ElastiCacheLogDeliveryIntegrationTest {
             assertEquals(expected, created);
             assertEquals(expected, client.describeReplicationGroups(r -> r.replicationGroupId(groupId))
                     .replicationGroups().getFirst().logDeliveryConfigurations());
+            client.deleteReplicationGroup(r -> r.replicationGroupId(groupId));
+            logs.deleteLogGroup(r -> r.logGroupName(logGroup));
+        }
+    }
+
+    @Test
+    void aMissingCloudWatchLogsGroupSettlesTheConfigurationToErrorWithoutCreatingIt() {
+        String groupId = "log-missing-" + UUID.randomUUID().toString().substring(0, 8);
+        String logGroup = "/aws/ec/missing-" + groupId;
+        try (ElastiCacheClient client = client(); CloudWatchLogsClient logs = logs()) {
+            client.createReplicationGroup(r -> r.replicationGroupId(groupId).replicationGroupDescription("missing")
+                    .engine("redis").logDeliveryConfigurations(c -> c.logType(LogType.SLOW_LOG)
+                            .destinationType(DestinationType.CLOUDWATCH_LOGS)
+                            .destinationDetails(d -> d.cloudWatchLogsDetails(l -> l.logGroup(logGroup)))
+                            .logFormat(LogFormat.JSON).enabled(true)));
+
+            LogDeliveryConfiguration expected = LogDeliveryConfiguration.builder().logType(LogType.SLOW_LOG)
+                    .destinationType(DestinationType.CLOUDWATCH_LOGS)
+                    .destinationDetails(d -> d.cloudWatchLogsDetails(l -> l.logGroup(logGroup)))
+                    .logFormat(LogFormat.JSON).status(LogDeliveryConfigurationStatus.ERROR)
+                    .message("Destination log group " + logGroup + " does not exist.").build();
+            assertEquals(List.of(expected), client.describeReplicationGroups(r -> r.replicationGroupId(groupId))
+                    .replicationGroups().getFirst().logDeliveryConfigurations());
+            assertEquals(List.of(), logs.describeLogGroups(r -> r.logGroupNamePrefix(logGroup)).logGroups());
             client.deleteReplicationGroup(r -> r.replicationGroupId(groupId));
         }
     }
@@ -103,6 +130,12 @@ class ElastiCacheLogDeliveryIntegrationTest {
             assertThrows(ReplicationGroupNotFoundException.class,
                     () -> client.describeReplicationGroups(r -> r.replicationGroupId(groupId)));
         }
+    }
+
+    private CloudWatchLogsClient logs() {
+        return CloudWatchLogsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
+                .build();
     }
 
     private ElastiCacheClient client() {

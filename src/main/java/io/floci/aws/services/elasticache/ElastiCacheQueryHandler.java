@@ -3,6 +3,7 @@ package io.floci.aws.services.elasticache;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.BackupWindows;
@@ -185,26 +186,21 @@ public class ElastiCacheQueryHandler {
     private static List<LogDeliveryConfiguration> parseLogDeliveryConfigurations(
             MultivaluedMap<String, String> params) {
         List<LogDeliveryConfiguration> configurations = new ArrayList<>();
-        for (String prefix : List.of("LogDeliveryConfigurations.LogDeliveryConfigurationRequest.",
-                "LogDeliveryConfigurations.member.")) {
-            for (int index = 1; hasMember(params, prefix + index + "."); index++) {
-                String member = prefix + index + ".";
-                if ("false".equalsIgnoreCase(params.getFirst(member + "Enabled"))) {
-                    continue;
-                }
-                configurations.add(new LogDeliveryConfiguration(
-                        oneOf(params, member + "LogType", "LogType", LOG_TYPES),
-                        oneOf(params, member + "DestinationType", "DestinationType", LOG_DESTINATION_TYPES),
-                        params.getFirst(member + "DestinationDetails.CloudWatchLogsDetails.LogGroup"),
-                        params.getFirst(member + "DestinationDetails.KinesisFirehoseDetails.DeliveryStream"),
-                        oneOf(params, member + "LogFormat", "LogFormat", LOG_FORMATS)));
+        for (AwsQueryLists.IndexedMember entry
+                : AwsQueryLists.members(params, "LogDeliveryConfigurations", "LogDeliveryConfigurationRequest")) {
+            String member = entry.prefix() + ".";
+            if ("false".equalsIgnoreCase(params.getFirst(member + "Enabled"))) {
+                continue;
             }
+            configurations.add(new LogDeliveryConfiguration(
+                    oneOf(params, member + "LogType", "LogType", LOG_TYPES),
+                    oneOf(params, member + "DestinationType", "DestinationType", LOG_DESTINATION_TYPES),
+                    params.getFirst(member + "DestinationDetails.CloudWatchLogsDetails.LogGroup"),
+                    params.getFirst(member + "DestinationDetails.KinesisFirehoseDetails.DeliveryStream"),
+                    oneOf(params, member + "LogFormat", "LogFormat", LOG_FORMATS),
+                    "active", null));
         }
         return configurations;
-    }
-
-    private static boolean hasMember(MultivaluedMap<String, String> params, String memberPrefix) {
-        return params.keySet().stream().anyMatch(name -> name.startsWith(memberPrefix));
     }
 
     private static String oneOf(MultivaluedMap<String, String> params, String param, String field,
@@ -1329,7 +1325,8 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             }
             xml.end("DestinationDetails")
                     .elem("LogFormat", c.logFormat())
-                    .elem("Status", "active")
+                    .elem("Status", c.status())
+                    .elem("Message", c.message())
                     .end("LogDeliveryConfiguration");
         }
         return xml.end("LogDeliveryConfigurations").build();
