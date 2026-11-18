@@ -28,6 +28,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -145,6 +146,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 : ruleNameOf(ctx.stablePhysicalName(null, r.getLogicalId(), 64, false));
 
         String busName = ctx.resolveOptional(props, "EventBusName");
+        // What the record holds before this update changes it, for the rollback snapshot.
+        Map<String, String> priorRecord = new HashMap<>(r.getAttributes());
         String description = ctx.resolveOptional(props, "Description");
         String roleArn = ctx.resolveOptional(props, "RoleArn");
         String scheduleExpression = ctx.resolveOptional(props, "ScheduleExpression");
@@ -168,13 +171,16 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", rule.getArn());
         r.getAttributes().put("RuleName", ruleName);
         // The bus as the template gave it, name or ARN. The physical id carries it too; this copy is
-        // what a delete reads for a rule saved before the physical id did.
+        // what a delete reads for a rule saved before the physical id did. A template that names no
+        // bus drops it, so a rule moved to the default bus is not deleted from the bus it left.
         if (busName != null && !busName.isBlank()) {
             r.getAttributes().put("EventBusName", busName);
+        } else {
+            r.getAttributes().remove("EventBusName");
         }
 
         if (ctx.isUpdate()) {
-            snapshotTargetsBeforeUpdate(r, ruleName, busName, ctx.region());
+            snapshotTargetsBeforeUpdate(r, ruleName, busName, ctx.region(), ctx.priorPhysicalId(), priorRecord);
         }
         try {
             if (!targets.isEmpty()) {
@@ -275,13 +281,23 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      * resource is. Only taken on an update, because a create has nothing to restore to.
      *
      * <p>The rule name, its bus and the region travel with the targets because the rollback hook is
-     * handed the stack resource alone, and those three are how targets are addressed.
+     * handed the stack resource alone, and those three are how targets are addressed. So do the
+     * physical id and the {@code EventBusName}, {@code Arn} and {@code RuleName} attributes the
+     * resource held before this update, which a rollback puts back: the engine only keeps the last
+     * good record of a resource whose own update failed, so a rule that a later resource's failure
+     * rolls back would otherwise keep the record of the attempt, naming a bus and an ARN the rule
+     * no longer has.
      */
-    private void snapshotTargetsBeforeUpdate(StackResource r, String ruleName, String busName, String region) {
+    private void snapshotTargetsBeforeUpdate(StackResource r, String ruleName, String busName, String region,
+                                             String priorPhysicalId, Map<String, String> priorRecord) {
         ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("ruleName", ruleName);
         snapshot.put("busName", busName);
         snapshot.put("region", region);
+        snapshot.put("priorPhysicalId", priorPhysicalId);
+        snapshot.put("priorEventBusName", priorRecord.get("EventBusName"));
+        snapshot.put("priorArn", priorRecord.get("Arn"));
+        snapshot.put("priorRuleName", priorRecord.get("RuleName"));
         snapshot.set("targets", MAPPER.valueToTree(
                 eventBridgeService.listTargetsByRule(ruleName, busName, region)));
         r.getAttributes().put(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR, snapshot.toString());
@@ -322,6 +338,29 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * Carries the snapshot of a rule's failed undo onto the record the engine puts back. A rule
+     * whose own update failed, and whose target restore failed with it, keeps that update's
+     * snapshot on the attempt, while the record the engine restores is the last committed one, which
+     * still holds the snapshot an earlier update left. With the attempt's snapshot on it, a
+     * ContinueUpdateRollback undoes the update that failed; without it, the earlier snapshot would be
+     * read and would put back the targets, id, bus, ARN and name the rule had before that earlier
+     * update. An attempt with no snapshot of a failed undo has nothing owed, so the earlier snapshot
+     * goes. The id and attributes the engine restored are left as they are.
+     */
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        if (!"AWS::Events::Rule".equals(previous.getResourceType())) {
+            return;
+        }
+        String failedUndo = attempted.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
+        if (failedUndo != null && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+            previous.getAttributes().put(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR, failedUndo);
+        } else {
+            previous.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
+        }
+    }
+
+    /**
      * An event bus update that failed after its tag snapshot may already have changed tags, so the
      * engine keeps that attempt for {@link #rollbackUpdate} instead of putting the previous resource
      * back over it. A failure before the snapshot changed nothing and is left to the engine.
@@ -333,7 +372,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts the rule's targets back to what the snapshot holds and spends it. Exact rather than
+     * Puts the rule's targets back to what the snapshot holds and spends it, with the physical id
+     * and the bus, ARN and name attributes of the record the update replaced. Exact rather than
      * additive: a target the failed update added is removed, and every snapshotted target is put
      * again, so one the update modified goes back to the configuration it was found with.
      *
@@ -382,7 +422,24 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         if (!restored.isEmpty()) {
             eventBridgeService.restoreAcceptedTargets(ruleName, busName, restored, region);
         }
+        String priorPhysicalId = snapshotText(snapshot, "priorPhysicalId");
+        if (priorPhysicalId != null) {
+            resource.setPhysicalId(priorPhysicalId);
+            restoreAttribute(resource, "EventBusName", snapshot, "priorEventBusName");
+            restoreAttribute(resource, "Arn", snapshot, "priorArn");
+            restoreAttribute(resource, "RuleName", snapshot, "priorRuleName");
+        }
         resource.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
+    }
+
+    /** Puts an attribute back to the value the snapshot holds for it, or drops it when the prior record had none. */
+    private static void restoreAttribute(StackResource resource, String attribute, JsonNode snapshot, String field) {
+        String prior = snapshotText(snapshot, field);
+        if (prior == null) {
+            resource.getAttributes().remove(attribute);
+        } else {
+            resource.getAttributes().put(attribute, prior);
+        }
     }
 
     /** A snapshotted string, or null when the rule carried none. */

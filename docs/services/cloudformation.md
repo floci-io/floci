@@ -357,7 +357,10 @@ operations take the rule name and the bus separately, so split the value at the 
 `DescribeRule` or `DeleteRule`. `Fn::GetAtt` still gives `RuleName` and `Arn`. A rule saved by an
 earlier Floci keeps its bare name as its id until an update changes the rule. An update that moves a
 rule to another bus, or renames it, creates the rule on that bus or under that name and leaves the
-old rule where it was.
+old rule where it was. When such an update is rolled back, the old rule is the stack's again, with its
+targets, and its id, bus, ARN and name are the old ones again. The rule the update created, under the
+new name or on the new bus, stays without targets, so a stack delete leaves it behind, and fails to
+delete a bus of the stack that still holds it.
 
 ## EventBridge archives
 

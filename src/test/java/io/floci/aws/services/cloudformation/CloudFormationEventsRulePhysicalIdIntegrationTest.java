@@ -56,6 +56,55 @@ class CloudFormationEventsRulePhysicalIdIntegrationTest {
         assertThrows(ResourceNotFoundException.class, () -> events.describeEventBus(r -> r.name(bus)));
     }
 
+    @Test
+    void aRolledBackMoveToTheDefaultBusKeepsTheRulesIdArnAndNameAndTheStackDeleteRemovesItFromItsBus() {
+        EventBridgeClient events = stack.client(EventBridgeClient.builder());
+        String name = stack.name() + "-rule";
+        String bus = stack.name() + "-bus";
+        events.createEventBus(r -> r.name(bus));
+        try {
+            stack.create(ruleOnBus(name, bus, "", ""));
+            stack.update(ruleOnBus(name, null, CfnStackWaits.failingResourceAfter("Rule"), ""),
+                    "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals(bus + "|" + name, physicalId("Rule"));
+
+            // A later update that leaves the rule alone still reads its attributes.
+            Stack later = stack.update(ruleOnBus(name, bus, "", """
+                    , "Outputs": {"RuleArn": {"Value": {"Fn::GetAtt": ["Rule", "Arn"]}},
+                                  "RuleName": {"Value": {"Fn::GetAtt": ["Rule", "RuleName"]}}}"""),
+                    "UPDATE_COMPLETE");
+            assertEquals(events.describeRule(r -> r.name(name).eventBusName(bus)).arn(),
+                    CfnStackWaits.output(later, "RuleArn"));
+            assertEquals(name, CfnStackWaits.output(later, "RuleName"));
+
+            CfnStackWaits.deleteStack(stack.client(CloudFormationClient.builder()), stack.name());
+
+            assertThrows(ResourceNotFoundException.class,
+                    () -> events.describeRule(r -> r.name(name).eventBusName(bus)));
+        } finally {
+            // The failed update created the rule on the default bus and the rollback leaves it there.
+            deleteRuleIfPresent(events, name, null);
+            deleteRuleIfPresent(events, name, bus);
+            events.deleteEventBus(r -> r.name(bus));
+        }
+    }
+
+    /** A stack with one named rule on {@code bus} (the default bus when null), then {@code more} after it. */
+    private static String ruleOnBus(String name, String bus, String more, String outputs) {
+        return """
+                {"Resources": {"Rule": {"Type": "AWS::Events::Rule", "Properties": {"Name": "%s", %s
+                   "EventPattern": {"source": ["my.source"]}}}%s}%s}"""
+                .formatted(name, bus == null ? "" : "\"EventBusName\": \"" + bus + "\",", more, outputs);
+    }
+
+    private static void deleteRuleIfPresent(EventBridgeClient events, String name, String bus) {
+        try {
+            events.deleteRule(r -> r.name(name).eventBusName(bus));
+        } catch (ResourceNotFoundException expected) {
+            // the rule never reached this bus, or the stack already removed it
+        }
+    }
+
     private String physicalId(String logicalId) {
         return stack.client(CloudFormationClient.builder()).describeStackResources(r -> r.stackName(stack.name()))
                 .stackResources().stream()
