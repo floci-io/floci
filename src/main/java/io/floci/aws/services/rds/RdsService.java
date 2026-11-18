@@ -60,6 +60,7 @@ import io.floci.aws.services.rds.model.DbSubnetGroup;
 import io.floci.aws.services.rds.model.EventSubscription;
 import io.floci.aws.services.rds.model.GlobalCluster;
 import io.floci.aws.services.rds.model.GlobalClusterMember;
+import io.floci.aws.services.rds.model.LogExportChanges;
 import io.floci.aws.services.rds.model.OptionGroup;
 import io.floci.aws.services.rds.model.OptionGroupOption;
 import io.floci.aws.services.rds.model.PointInTimeRestoreRequest;
@@ -11946,6 +11947,45 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.getDbClusterIdentifier());
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
+
+    public synchronized DbCluster setClusterSnapshotAndLogSettings(String region, String clusterId,
+            Boolean copyTagsToSnapshot, List<String> exports, LogExportChanges changes) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        if (copyTagsToSnapshot != null) {
+            cluster.setCopyTagsToSnapshot(copyTagsToSnapshot);
+        }
+        if (exports != null) {
+            cluster.setEnabledCloudwatchLogsExports(exports);
+        }
+        if (changes != null) {
+            cluster.setEnabledCloudwatchLogsExports(changes.applyTo(cluster.getEnabledCloudwatchLogsExports()));
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    public static void validatePromotionTier(Integer tier) {
+        if (tier != null && (tier < 0 || tier > 15)) {
+            throw new AwsException("InvalidParameterValue", "PromotionTier must be between 0 and 15.", 400);
+        }
+    }
+
+    public synchronized DbInstance setInstancePromotionTier(String region, String instanceId, int tier) {
+        validatePromotionTier(tier);
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        instance.setPromotionTier(tier);
+        putInstanceForScope(currentAccountId(), effectiveRegion, instance.getDbInstanceIdentifier(), instance);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    public synchronized int clusterMemberPromotionTier(DbCluster cluster, String memberId) {
+        DbInstance member = findInstanceForScope(accountIdFromArn(cluster.getDbClusterArn()),
+                effectiveRegion(regionFromArn(cluster.getDbClusterArn())), memberId);
+        return member == null ? 1 : member.getPromotionTier();
+    }
+
     private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");
 
     /**
