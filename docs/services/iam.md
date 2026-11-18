@@ -449,6 +449,44 @@ violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
 `src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
 generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
+### What a malformed policy ARN answers
+
+`PolicyArn` is `arnType` on every operation that takes one, 20 to 2048 characters and no pattern,
+so the declared check refuses a shorter value and nothing holds the rest to parsing as an ARN. What
+AWS answers beyond that length is recorded rather than published, and it is two sentences rather
+than one, both `ValidationError` with a 400 and a sender fault.
+
+- Attaching names the value: `ARN <value> is not valid.` Recorded on `AttachRolePolicy` for a bare
+  policy name on 2026-11-03, and on `AttachUserPolicy`, `AttachGroupPolicy` and `AttachRolePolicy`
+  for a value that is no ARN at all on 2026-11-06.
+- Everything else answers `Invalid ARN:  Could not be parsed!`, which is wholly fixed: the slot the
+  value would fill renders empty, so two spaces follow the colon and the request's value never
+  appears in it. Recorded on the three `Detach*Policy` operations on 2026-11-06, on
+  `ListEntitiesForPolicy` on 2026-11-03 and on `GetPolicy` on 2026-10-29.
+
+The remaining operations that take the member, the tag and version families among them, carry no
+recording and answer the parse sentence with those eight: one member read by one parser answers one
+way, and the attach side is the exception the recordings name. That is this emulator's reading
+under the standing decision rather than a measurement. A value that parses as an ARN and names no
+policy is unchanged by all of this, still the 404 `NoSuchEntity` each operation already answered.
+
+An older recording disagrees about the attach side and is no longer followed. LocalStack's
+AWS-validated snapshots have `AttachUserPolicy` and `AttachRolePolicy` answering the parse sentence
+for a 21-character value that is no ARN and for a bare policy name, validated 2025-03-06 and
+2025-06-19, where all three 2026 recordings have the attach side naming the value. Two
+AWS-validated sources disagree on one operation and one class of input, seventeen months apart, so
+the reading here is that AWS reworded that side between them and the newer recordings are what this
+emulator follows. A recording that shows otherwise moves this paragraph and `IamArnShapes`.
+
+`PolicySourceArn`, which the two principal simulators resolve an entity from, carries the same type
+and one more recorded case: a value of `*` answers `InvalidInput` 400, `Invalid Entity Arn: * does
+not clearly define entity type and name.`, where the member's declared minimum is 20 and that value
+is one character, so AWS's entity parse runs ahead of its length check for it. Recorded on
+`SimulatePrincipalPolicy` on 2026-11-03. `GetContextKeysForPrincipalPolicy` takes the same member
+through the same resolver and answers it the same way, which is a reading rather than a recording.
+A value that clears 20 characters and parses as no ARN keeps the sentence its own capture settled,
+`Invalid ARN provided in the request: <value>`, and a value under 20 keeps the declared length.
+
 ### Permission Boundaries
 
 | Action | Description |
