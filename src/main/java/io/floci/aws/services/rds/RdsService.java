@@ -11980,7 +11980,7 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
     }
 
-    public synchronized int clusterMemberPromotionTier(DbCluster cluster, String memberId) {
+    public int clusterMemberPromotionTier(DbCluster cluster, String memberId) {
         DbInstance member = findInstanceForScope(accountIdFromArn(cluster.getDbClusterArn()),
                 effectiveRegion(regionFromArn(cluster.getDbClusterArn())), memberId);
         return member == null ? 1 : member.getPromotionTier();

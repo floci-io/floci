@@ -1,9 +1,11 @@
 package io.floci.aws.services.rds;
 
 import io.floci.aws.testing.RdsMockProfile;
+import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,10 @@ import software.amazon.awssdk.services.rds.model.RdsException;
 import java.net.URI;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,6 +36,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RdsSettingsRoundTripIntegrationTest {
     @TestHTTPResource
     URI endpoint;
+    @Inject
+    RdsService service;
     private RdsClient client;
     private String cluster;
     private String member;
@@ -46,16 +54,19 @@ class RdsSettingsRoundTripIntegrationTest {
     @AfterEach
     void cleanup() {
         try {
-            client.deleteDBInstance(r -> r.dbInstanceIdentifier(member).skipFinalSnapshot(true));
-        } catch (RdsException ignored) {
-            // Some cases intentionally reject creation before a resource exists.
+            try {
+                client.deleteDBInstance(r -> r.dbInstanceIdentifier(member).skipFinalSnapshot(true));
+            } catch (RdsException ignored) {
+                // Some cases intentionally reject creation before a resource exists.
+            }
+            try {
+                client.deleteDBCluster(r -> r.dbClusterIdentifier(cluster).skipFinalSnapshot(true));
+            } catch (RdsException ignored) {
+                // A create rejected before mutation leaves no cluster to delete.
+            }
+        } finally {
+            client.close();
         }
-        try {
-            client.deleteDBCluster(r -> r.dbClusterIdentifier(cluster).skipFinalSnapshot(true));
-        } catch (RdsException ignored) {
-            // A create rejected before mutation leaves no cluster to delete.
-        }
-        client.close();
     }
 
     private DBCluster createCluster(boolean configured) {
@@ -130,6 +141,19 @@ class RdsSettingsRoundTripIntegrationTest {
         assertEquals(15, client.modifyDBInstance(r -> r.dbInstanceIdentifier(member).promotionTier(15))
                 .dbInstance().promotionTier());
         assertEquals(15, describeCluster().dbClusterMembers().getFirst().promotionTier());
+    }
+
+    @Test
+    void clusterDescribeDoesNotWaitForServiceMonitor() throws Exception {
+        createCluster(false);
+        client.createDBInstance(r -> r.dbInstanceIdentifier(member).dbClusterIdentifier(cluster)
+                .engine("aurora-postgresql").dbInstanceClass("db.r6g.large").promotionTier(7));
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            synchronized (ClientProxy.unwrap(service)) {
+                Future<DBCluster> response = executor.submit(this::describeCluster);
+                assertEquals(7, response.get(10, TimeUnit.SECONDS).dbClusterMembers().getFirst().promotionTier());
+            }
+        }
     }
 
     @Test
