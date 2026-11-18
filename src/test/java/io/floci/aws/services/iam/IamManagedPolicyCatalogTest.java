@@ -134,6 +134,8 @@ class IamManagedPolicyCatalogTest {
     @Test
     void policiesRetiredByAwsButPreviouslyResolvableAreRetained() {
         assertDoesNotThrow(() -> iamService.getPolicy("arn:aws:iam::aws:policy/AWSLambdaFullAccess"));
+        assertDoesNotThrow(() -> iamService.getPolicy("arn:aws:iam::aws:policy/AWSIoTEventsFullAccess"));
+        assertDoesNotThrow(() -> iamService.getPolicy("arn:aws:iam::aws:policy/AWSIoTEventsReadOnlyAccess"));
     }
 
     /**

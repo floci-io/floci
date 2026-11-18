@@ -5,12 +5,16 @@ Run with: pytest tools/aws -q  (or: make aws-data-test)
 from __future__ import annotations
 
 import json
+import subprocess
 import urllib.error
 from pathlib import Path
 
 import pytest
 
 import regen_managed_policies as m
+
+# Read before the autouse fixture below narrows it for the fixture dataset.
+REAL_RETAINED = m.RETAINED
 
 READ_ONLY = {"Statement": [{"Action": "s3:Get*", "Effect": "Allow", "Resource": "*"}], "Version": "2012-10-17"}
 SERVICE_ROLE = {"Statement": [{"Action": "ec2:Describe*", "Effect": "Allow", "Resource": "*"}], "Version": "2012-10-17"}
@@ -30,6 +34,12 @@ def policy(name: str, path: str = "/", version: str = "v1", created: str = "2020
            updated: str | None = "2020-01-01T00:00:00+00:00", deprecated: bool = False) -> dict:
     return {"name": name, "arn": None if deprecated else f"arn:aws:iam::aws:policy{path}{name}",
             "version": version, "createdate": created, "updatedate": updated, "deprecated": deprecated}
+
+
+@pytest.fixture(autouse=True)
+def retained_fixture_policy(monkeypatch):
+    # The fixture dataset models one retained policy; the real list names policies it does not carry.
+    monkeypatch.setattr(m, "RETAINED", ("AWSLambdaFullAccess",))
 
 
 @pytest.fixture
@@ -223,6 +233,36 @@ def test_a_failing_check_names_what_the_dataset_adds_removes_and_changes(dataset
     assert "added: BrandNewPolicy" in out
     assert "removed: AmazonEC2RoleforSSM" in out
     assert "changed: AmazonS3ReadOnlyAccess" in out
+
+
+def test_a_failing_check_names_a_policy_whose_path_alone_changed(dataset: Path, vendored: Path, capsys):
+    policies = json.loads((dataset / "aws/managed_policies.json").read_text())["policies"]
+    for entry in policies:
+        if entry["name"] == "AmazonEC2RoleforSSM":
+            entry["arn"] = "arn:aws:iam::aws:policy/moved/AmazonEC2RoleforSSM"
+    (dataset / "aws/managed_policies.json").write_text(json.dumps({"policies": policies}))
+
+    assert m.main(["--check", "--dataset", str(dataset), "--resources", str(vendored)]) == 1
+
+    out = capsys.readouterr().out
+    assert "0 added, 0 removed, 1 changed" in out
+    assert "changed: AmazonEC2RoleforSSM" in out
+
+
+def test_a_dataset_that_is_not_its_own_checkout_has_no_commit(tmp_path: Path):
+    repository = tmp_path / "repository"
+    copied = repository / "local/aws/iam-dataset"
+    copied.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    "commit", "-q", "--allow-empty", "-m", "enclosing"], check=True)
+
+    assert m.dataset_commit(copied) is None
+    assert m.dataset_commit(repository) is not None
+
+
+def test_the_retained_policies_include_every_deprecated_policy_floci_served():
+    assert {"AWSLambdaFullAccess", "AWSIoTEventsFullAccess", "AWSIoTEventsReadOnlyAccess"} <= set(REAL_RETAINED)
 
 
 def test_check_without_the_dataset_verifies_shape_only(tmp_path: Path, vendored: Path, capsys):

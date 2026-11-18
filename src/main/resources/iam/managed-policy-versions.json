@@ -1938,6 +1938,16 @@
     "createDate": "2020-02-20T21:21:00Z",
     "updateDate": "2020-06-25T17:01:56Z"
   },
+  "AWSIoTEventsFullAccess": {
+    "defaultVersionId": "v1",
+    "createDate": "2019-01-10T22:51:57Z",
+    "updateDate": "2019-01-10T22:51:57Z"
+  },
+  "AWSIoTEventsReadOnlyAccess": {
+    "defaultVersionId": "v2",
+    "createDate": "2019-01-10T22:50:00Z",
+    "updateDate": "2019-09-23T17:22:04Z"
+  },
   "AWSIoTFleetHubFederationAccess": {
     "defaultVersionId": "v5",
     "createDate": "2020-12-15T08:08:00Z",
