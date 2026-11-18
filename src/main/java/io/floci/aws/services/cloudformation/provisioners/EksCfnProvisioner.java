@@ -178,9 +178,11 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         JsonNode types = resolved.path("ClusterLogging").path("EnabledTypes");
         types.forEach(entry -> {
             String type = entry.path("Type").asText("");
-            if (!type.isBlank()) {
-                enabled.add(type);
+            if (type.isBlank()) {
+                throw new AwsException("ValidationError",
+                        "AWS::EKS::Cluster Logging.ClusterLogging.EnabledTypes entry has no Type", 400);
             }
+            enabled.add(type);
         });
         return new Logging(List.of(new LogSetup(enabled, true)));
     }
