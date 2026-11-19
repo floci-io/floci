@@ -389,7 +389,7 @@ With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster ro
 
 Floci records the configuration and does nothing more with it yet. It does not create the node role's access
 entry, install the built-in node pools, serve the EBS provisioner or create load balancers, and
-`UpdateClusterConfig` is not implemented. [#8914](https://github.com/floci-io/floci/issues/8914) plans each.
+`UpdateClusterConfig` refuses these members. [#8914](https://github.com/floci-io/floci/issues/8914) plans each.
 
 ## Node group inputs
 
