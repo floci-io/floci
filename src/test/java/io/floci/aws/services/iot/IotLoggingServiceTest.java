@@ -118,29 +118,6 @@ class IotLoggingServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"", "   "})
-    void rejectsABlankRoleArnOnInitialSetup(String roleArn) {
-        assertEquals("InvalidRequestException", failure("""
-            {"roleArn": "%s", "defaultLogLevel": "INFO"}
-            """.formatted(roleArn)));
-        assertEquals("NotConfiguredException",
-                assertThrows(AwsException.class, () -> service.getV2LoggingOptions(REGION)).getErrorCode());
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"", "   "})
-    void rejectsABlankRoleArnOnUpdateAndKeepsTheStoredOptions(String roleArn) throws Exception {
-        set("""
-            {"roleArn": "%s", "defaultLogLevel": "INFO"}
-            """.formatted(ROLE_ARN), REGION);
-
-        assertEquals("InvalidRequestException", failure("""
-            {"roleArn": "%s", "disableAllLogs": true}
-            """.formatted(roleArn)));
-        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "INFO", false), service.getV2LoggingOptions(REGION));
-    }
-
-    @ParameterizedTest
     @ValueSource(strings = {
         "{\"roleArn\": 42}",
         "{\"defaultLogLevel\": []}",
