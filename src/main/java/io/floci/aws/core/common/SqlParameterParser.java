@@ -240,6 +240,49 @@ public final class SqlParameterParser {
         return false;
     }
 
+    /**
+     * {@code sql} with each comment replaced by a single space, applying the same literal,
+     * identifier, comment, and dollar-quote skipping as {@link #parse}, so a comment marker
+     * inside any of those is kept. A line comment's terminating newline is kept.
+     */
+    public static String stripComments(String sql, Options options) {
+        StringBuilder out = new StringBuilder(sql.length());
+        int len = sql.length();
+        int i = 0;
+        while (i < len) {
+            char c = sql.charAt(i);
+
+            if (startsLineComment(sql, i, options)) {
+                int end = sql.indexOf('\n', i);
+                i = end < 0 ? len : end;
+                out.append(' ');
+                continue;
+            }
+
+            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                i = skipBlockComment(sql, i, !options.mysqlComments());
+                out.append(' ');
+                continue;
+            }
+
+            int end = i;
+            if (c == '\'' || c == '"' || (options.allowBackticks() && c == '`')) {
+                end = skipQuoted(sql, i, c, options);
+            } else if (c == '$') {
+                end = skipDollarQuoted(sql, i);
+            }
+            if (end > i) {
+                out.append(sql, i, end);
+                i = end;
+                continue;
+            }
+
+            out.append(c);
+            i++;
+        }
+        return out.toString();
+    }
+
     private static boolean startsLineComment(String sql, int start, Options options) {
         boolean mysql = options.mysqlComments();
         if (mysql && sql.charAt(start) == '#') {

@@ -14,6 +14,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -24,13 +25,22 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiFunction;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class SpectrumQueryPreparation {
     private static final Logger LOG = Logger.getLogger(SpectrumQueryPreparation.class);
     private static final String DUPLICATE_SCHEMA = "42P06";
+    private static final Pattern JOIN = Pattern.compile("\\bJOIN\\b", Pattern.CASE_INSENSITIVE);
+    // Each batch is inserted on its own, so a view that groups or aggregates would keep a partial row per batch.
+    private static final Pattern AGGREGATE = Pattern.compile(
+            "\\b(?:GROUP\\s+BY|HAVING|DISTINCT)\\b|\\b(?:COUNT|SUM|AVG|MIN|MAX|MEDIAN|LISTAGG|STDDEV\\w*|VAR_\\w+|VARIANCE"
+                    + "|BOOL_AND|BOOL_OR|ARRAY_AGG|APPROXIMATE|PERCENTILE_\\w+)\\s*\\(",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"");
     private final ExternalCatalogRegistry registry;
     private final KinesisSchemaRegistry kinesisSchemas;
+    private final KinesisStreamingViews views;
     private final ExternalTableMaterializer materializer;
     private final ExternalStatementParser parser;
     private final GlueService glue;
@@ -57,8 +67,9 @@ public class SpectrumQueryPreparation {
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
                                     ExternalTableMaterializer materializer, ExternalStatementParser parser,
                                     GlueService glue, ExternalMetadataWriter metadata,
-                                    ExternalCatalogLocks catalogLocks, Instance<RedshiftService> redshift) {
-        this(registry, kinesisSchemas, materializer, parser, glue, metadata, catalogLocks,
+                                    ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
+                                    Instance<RedshiftService> redshift) {
+        this(registry, kinesisSchemas, materializer, parser, glue, metadata, catalogLocks, views,
                 (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
     }
 
@@ -73,6 +84,17 @@ public class SpectrumQueryPreparation {
                              ExternalTableMaterializer materializer, ExternalStatementParser parser,
                              GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
                              BiFunction<String, String, String> clusterRegion) {
+        this(registry, kinesisSchemas, materializer, parser, glue, metadata, catalogLocks,
+                new KinesisStreamingViews(new KinesisViewRegistry(
+                        AccountAwareStorageBackend.<KinesisViewBinding>inMemory("000000000000")),
+                        null, null, null, Clock.systemUTC()), clusterRegion);
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
+                             ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                             GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
+                             KinesisStreamingViews views, BiFunction<String, String, String> clusterRegion) {
+        this.views = views;
         this.clusterRegion = clusterRegion;
         this.registry = registry;
         this.kinesisSchemas = kinesisSchemas;
@@ -109,6 +131,7 @@ public class SpectrumQueryPreparation {
             String state = switch (exception.getErrorCode()) {
                 case "AlreadyExistsException" -> "42P07";
                 case "EntityNotFoundException" -> "42P01";
+                case "ResourceNotFoundException" -> "42P01";
                 case "AccessDenied", "AccessDeniedException" -> "42501";
                 case "InvalidInputException" -> "42601";
                 default -> "58030";
@@ -135,6 +158,11 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.DropTable table -> bindings(session).containsKey(table.schemaName());
             case ExternalStatement.DropSchema schema -> bindings(session).containsKey(schema.schemaName())
                     || kinesisBindings(session).containsKey(schema.schemaName());
+            case ExternalStatement.CreateStreamingView view -> streamSource(view.select(), session).isPresent();
+            case ExternalStatement.RefreshView view ->
+                    views.find(session, view.viewSchema(), view.viewName()).isPresent();
+            case ExternalStatement.DropView view ->
+                    views.find(session, view.viewSchema(), view.viewName()).isPresent();
             case null -> false;
         };
     }
@@ -144,6 +172,9 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.AddPartitions ignored -> "ALTER TABLE";
             case ExternalStatement.DropTable ignored -> "DROP TABLE";
             case ExternalStatement.DropSchema ignored -> "DROP SCHEMA";
+            case ExternalStatement.CreateStreamingView ignored -> "CREATE MATERIALIZED VIEW";
+            case ExternalStatement.RefreshView ignored -> "REFRESH MATERIALIZED VIEW";
+            case ExternalStatement.DropView ignored -> "DROP MATERIALIZED VIEW";
             case null, default -> "CREATE EXTERNAL";
         };
     }
@@ -162,6 +193,26 @@ public class SpectrumQueryPreparation {
             rejectTransaction(session);
             dropKinesisSchema(schema, kinesis.get(schema.schemaName()), session, backend);
             return true;
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.CreateStreamingView view
+                && streamSource(view.select(), session).isPresent()) {
+            createStreamingView(view, kinesis, session, backend);
+            return true;
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.RefreshView refresh) {
+            Optional<KinesisViewBinding> view = views.find(session, refresh.viewSchema(), refresh.viewName());
+            if (view.isPresent()) {
+                refreshStreamingView(view.get(), kinesis, session, backend);
+                return true;
+            }
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.DropView drop) {
+            Optional<KinesisViewBinding> view = views.find(session, drop.viewSchema(), drop.viewName());
+            if (view.isPresent()) {
+                rejectTransaction(session);
+                views.drop(view.get(), drop.ifExists(), drop.cascade(), backend);
+                return true;
+            }
         }
         Map<String, ExternalSchemaBinding> bindings = bindings(session);
         if (statement.orElse(null) instanceof ExternalStatement.CreateTable && session.inTransaction()) {
@@ -451,16 +502,72 @@ public class SpectrumQueryPreparation {
     private void dropKinesisSchema(ExternalStatement.DropSchema statement, KinesisSchemaBinding binding,
                                    SpectrumSession session, BackendSql backend) {
         requireSchemaOwner(backend, binding.schemaName());
+        // CASCADE takes the streaming views that read the schema with it; RESTRICT stops on their staging tables.
+        List<KinesisViewBinding> dependents = views.overSchema(session, binding.schemaName());
+        StringBuilder dropViews = new StringBuilder();
+        if (statement.cascade()) {
+            for (KinesisViewBinding dependent : dependents) {
+                dropViews.append(KinesisStreamingViews.dropSql(dependent, true, true)).append("; ");
+            }
+        }
         // One implicit PostgreSQL transaction keeps the local schema and its SVV metadata in sync.
-        backend.execute("DROP SCHEMA " + (statement.ifExists() ? "IF EXISTS " : "")
+        backend.execute(dropViews + "DROP SCHEMA " + (statement.ifExists() ? "IF EXISTS " : "")
                 + ExternalTableMaterializer.quote(binding.schemaName()) + (statement.cascade() ? " CASCADE" : " RESTRICT")
                 + "; " + metadata.purgeSql(binding.schemaName()));
+        if (statement.cascade()) {
+            dependents.forEach(views::unbindIfCurrent);
+        }
         // a concurrent drop and re-create of the name may have bound a newer schema meanwhile
         if (binding.equals(kinesisSchemas.find(session.accountId(), session.clusterKey(), session.databaseName(),
                 binding.schemaName()).orElse(null))) {
             kinesisSchemas.unbind(session.accountId(), session.clusterKey(), session.databaseName(),
                     binding.schemaName());
         }
+    }
+
+    private Optional<ExternalReferenceScanner.Reference> streamSource(String select, SpectrumSession session) {
+        return ExternalReferenceScanner.scan(select, kinesisBindings(session).keySet()).stream().findFirst();
+    }
+
+    private void createStreamingView(ExternalStatement.CreateStreamingView view,
+                                     Map<String, KinesisSchemaBinding> kinesis, SpectrumSession session,
+                                     BackendSql backend) {
+        if (session.inTransaction()) {
+            throw new SpectrumSqlException("0A000",
+                    "CREATE MATERIALIZED VIEW over a stream inside a transaction is not supported");
+        }
+        if (view.autoRefresh()) {
+            throw new SpectrumSqlException("0A000",
+                    "AUTO REFRESH YES is not supported; refresh the view with REFRESH MATERIALIZED VIEW");
+        }
+        String unquoted = STRING_LITERAL.matcher(view.select()).replaceAll("''");
+        if (JOIN.matcher(unquoted).find()) {
+            throw new SpectrumSqlException("0A000", "A streaming materialized view cannot contain a JOIN");
+        }
+        if (AGGREGATE.matcher(unquoted).find()) {
+            throw new SpectrumSqlException("0A000",
+                    "A streaming materialized view cannot group or aggregate: each refresh batch is inserted on its own");
+        }
+        Set<ExternalReferenceScanner.Reference> streams =
+                ExternalReferenceScanner.scan(view.select(), kinesis.keySet());
+        if (streams.size() != 1) {
+            throw new SpectrumSqlException("0A000", "A streaming materialized view reads exactly one stream");
+        }
+        ExternalReferenceScanner.Reference stream = streams.iterator().next();
+        views.create(view, stream.table(), kinesis.get(stream.schema()), session, catalogRegion(session), backend);
+    }
+
+    private void refreshStreamingView(KinesisViewBinding view, Map<String, KinesisSchemaBinding> kinesis,
+                                      SpectrumSession session, BackendSql backend) {
+        if (session.inTransaction()) {
+            throw new SpectrumSqlException("25001",
+                    "REFRESH MATERIALIZED VIEW of a streaming view cannot run inside a transaction block");
+        }
+        KinesisSchemaBinding schema = kinesis.get(view.streamSchema());
+        if (schema == null) {
+            throw new SpectrumSqlException("42P01", "external schema \"" + view.streamSchema() + "\" does not exist");
+        }
+        views.refresh(view, schema, catalogRegion(session), backend);
     }
 
     private Map<String, KinesisSchemaBinding> kinesisBindings(SpectrumSession session) {
@@ -483,6 +590,7 @@ public class SpectrumQueryPreparation {
     public void forgetRuntime(String accountId, String clusterKey) {
         registry.removeCluster(accountId, clusterKey);
         kinesisSchemas.removeCluster(accountId, clusterKey);
+        views.forgetCluster(accountId, clusterKey);
         materializer.forgetCluster(clusterKey);
     }
 
