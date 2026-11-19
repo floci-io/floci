@@ -840,12 +840,11 @@ class IotMqttEnabledIntegrationTest {
             assertEquals(topic, queued.topic());
             assertArrayEquals(json("{\"seq\":1}"), queued.payload());
             assertEquals(1, queued.qos());
-            device.assertNoPublish();
 
             try (MqttTestClient publisher = connectMqtt("persistent-live-pub")) {
                 publisher.publish(topic, json("{\"seq\":2}"), 1);
             }
-            assertArrayEquals(json("{\"seq\":2}"), device.takePublish().payload(), "the subscription was reinstated");
+            device.assertNextPublish(topic, json("{\"seq\":2}"));
         }
     }
 
@@ -861,18 +860,26 @@ class IotMqttEnabledIntegrationTest {
             publisher.publish(topic, json("{}"), 1);
         }
 
+        byte[] marker = json("{\"marker\":true}");
         try (MqttTestClient device = MqttTestClient.connect(clientId, true)) {
             assertFalse(device.sessionPresent());
-            device.assertNoPublish();
+            device.subscribe(topic, 1);
+            try (MqttTestClient publisher = connectMqtt("persistent-discarded-pub")) {
+                publisher.publish(topic, marker, 1);
+            }
+            device.assertNextPublish(topic, marker);
         }
         awaitSessionsEnded(clientId, 2);
 
+        String markerTopic = "devices/" + clientId + "/marker";
         try (MqttTestClient device = MqttTestClient.connect(clientId, false)) {
             assertFalse(device.sessionPresent());
+            device.subscribe(markerTopic, 1);
             try (MqttTestClient publisher = connectMqtt("persistent-discarded-pub")) {
                 publisher.publish(topic, json("{}"), 1);
+                publisher.publish(markerTopic, marker, 1);
             }
-            device.assertNoPublish();
+            device.assertNextPublish(markerTopic, marker);
         }
     }
 
@@ -904,10 +911,10 @@ class IotMqttEnabledIntegrationTest {
     }
 
     @Test
-    void mqtt5SessionWithAnExpiryIntervalResumesUntilTheIntervalElapses() throws Exception {
+    void mqtt5SessionWithAnExpiryIntervalResumesWithItsQueuedMessages() throws Exception {
         String clientId = uniqueClientId("mqtt5-persistent");
         String topic = "devices/" + clientId + "/commands";
-        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 1L)) {
+        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 60L)) {
             assertFalse(device.sessionPresent());
             device.subscribe(topic, 1);
         }
@@ -916,17 +923,11 @@ class IotMqttEnabledIntegrationTest {
             publisher.publish(topic, json("{}"), 1);
         }
 
-        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 1L)) {
+        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 60L)) {
             assertTrue(device.sessionPresent());
             MqttPublish queued = device.takePublish();
             assertEquals(topic, queued.topic());
             assertEquals(1, queued.qos());
-        }
-        awaitSessionsEnded(clientId, 2);
-        Thread.sleep(2_000);
-
-        try (Mqtt5TestClient device = Mqtt5TestClient.connect(clientId, false, 1L)) {
-            assertFalse(device.sessionPresent(), "the session expired");
         }
     }
 
@@ -1192,11 +1193,10 @@ class IotMqttEnabledIntegrationTest {
                     .orElseThrow(() -> new AssertionError("No MQTT publish received"));
         }
 
-        void assertNoPublish() throws InterruptedException {
-            MqttPublish unexpected = publishes.poll(500, TimeUnit.MILLISECONDS);
-            if (unexpected != null) {
-                throw new AssertionError("Unexpected MQTT publish on " + unexpected.topic());
-            }
+        void assertNextPublish(String topic, byte[] payload) throws InterruptedException {
+            MqttPublish next = takePublish();
+            assertEquals(topic, next.topic());
+            assertArrayEquals(payload, next.payload());
         }
 
         void awaitDisconnected() throws InterruptedException {

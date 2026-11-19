@@ -123,6 +123,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -842,15 +843,30 @@ class IotMqttBrokerServiceTest {
     }
 
     @Test
+    void aStoredSessionEndsWhenItsExpiryTimerFires() throws Exception {
+        List<ExpiryTimer> timers = brokerCapturingExpiryTimers();
+        broker.handleEndpoint(mqtt5Endpoint("expired", 60), false);
+        broker.disconnectClient("expired", false);
+
+        assertEquals(List.of(60_000L), delays(timers));
+        timers.get(0).fire();
+        MqttEndpoint reconnected = mqtt5Endpoint("expired", 60);
+        broker.handleEndpoint(reconnected, false);
+
+        verify(reconnected).accept(eq(false), any(MqttProperties.class));
+    }
+
+    @Test
     void anEarlierSessionsExpiryDoesNotEndASessionStoredAfterIt() throws Exception {
-        startBrokerRecordingPublishes();
-        broker.handleEndpoint(mqtt5Endpoint("re-expiring", 1), false);
-        broker.disconnectClient("re-expiring", false);
+        List<ExpiryTimer> timers = brokerCapturingExpiryTimers();
         broker.handleEndpoint(mqtt5Endpoint("re-expiring", 60), false);
         broker.disconnectClient("re-expiring", false);
+        broker.handleEndpoint(mqtt5Endpoint("re-expiring", 120), false);
+        broker.disconnectClient("re-expiring", false);
 
-        Thread.sleep(1_500);
-        MqttEndpoint resumed = mqtt5Endpoint("re-expiring", 60);
+        assertEquals(List.of(60_000L, 120_000L), delays(timers));
+        timers.get(0).fire();
+        MqttEndpoint resumed = mqtt5Endpoint("re-expiring", 120);
         broker.handleEndpoint(resumed, false);
 
         verify(resumed).accept(eq(true), any(MqttProperties.class));
@@ -906,16 +922,16 @@ class IotMqttBrokerServiceTest {
 
     @Test
     void aSessionResumedAsItsExpiryRunsOutKeepsItsMessagesAndSubscriptions() throws Exception {
-        startBrokerRecordingPublishes();
+        List<ExpiryTimer> timers = brokerCapturingExpiryTimers();
         String topic = "devices/expiring/commands";
-        MqttEndpoint first = mqtt5Endpoint("resumed-expiring", 1);
+        MqttEndpoint first = mqtt5Endpoint("resumed-expiring", 60);
         broker.handleEndpoint(first, false);
         subscribeQos1(first, topic);
         broker.disconnectClient("resumed-expiring", false);
         broker.publish(topic, "stored".getBytes(StandardCharsets.UTF_8), 1);
-        MqttEndpoint resuming = mqtt5Endpoint("resumed-expiring", 1);
+        MqttEndpoint resuming = mqtt5Endpoint("resumed-expiring", 60);
         when(resuming.accept(anyBoolean(), any())).thenAnswer(invocation -> {
-            Thread.sleep(1_500);
+            timers.get(0).fire();
             return resuming;
         });
 
@@ -944,12 +960,12 @@ class IotMqttBrokerServiceTest {
 
     @Test
     void aDisconnectSessionExpiryReplacesTheOneFromConnect() throws Exception {
-        startBrokerRecordingPublishes();
+        List<ExpiryTimer> timers = brokerCapturingExpiryTimers();
         MqttEndpoint device = mqtt5Endpoint("disconnect-extends", 1);
         broker.handleEndpoint(device, false);
 
         disconnectWithSessionExpiry(device, 60);
-        Thread.sleep(1_500);
+        assertEquals(List.of(60_000L), delays(timers));
         MqttEndpoint reconnected = mqtt5Endpoint("disconnect-extends", 60);
         broker.handleEndpoint(reconnected, false);
 
@@ -971,7 +987,7 @@ class IotMqttBrokerServiceTest {
 
     @Test
     void connackReportsASessionExpiryIntervalOnlyWhenItLowersTheRequestedOne() throws Exception {
-        startBrokerRecordingPublishes();
+        List<ExpiryTimer> timers = brokerCapturingExpiryTimers();
         MqttEndpoint capped = mqtt5Endpoint("expiry-capped", 7200);
         MqttEndpoint kept = mqtt5Endpoint("expiry-kept", 60);
 
@@ -985,6 +1001,9 @@ class IotMqttBrokerServiceTest {
         ArgumentCaptor<MqttProperties> keptConnack = ArgumentCaptor.forClass(MqttProperties.class);
         verify(kept).accept(eq(false), keptConnack.capture());
         assertNull(keptConnack.getValue().getProperty(MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value()));
+        broker.disconnectClient("expiry-capped", false);
+        broker.disconnectClient("expiry-kept", false);
+        assertEquals(List.of(3_600_000L, 60_000L), delays(timers), "the stored sessions expire after the granted interval");
     }
 
     /**
@@ -2045,6 +2064,11 @@ class IotMqttBrokerServiceTest {
 
     /** Starts the broker over a real {@link IotService} whose one rule writes every metrics publish to DynamoDB. */
     private void startBrokerWithRuleWriting(DynamoDbItemAccess items) throws Exception {
+        serveIotWithRuleWriting(items);
+        broker.startIfEnabled();
+    }
+
+    private void serveIotWithRuleWriting(DynamoDbItemAccess items) throws Exception {
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
@@ -2064,7 +2088,31 @@ class IotMqttBrokerServiceTest {
                 {"sql": "SELECT * FROM 'devices/+/metrics'",
                  "actions": [{"dynamoDBv2": {"putItem": {"tableName": "metrics"}, "roleArn": "r"}}]}
                 """), "eu-west-1");
-        broker.startIfEnabled();
+    }
+
+    private record ExpiryTimer(long delayMillis, long id, Handler<Long> handler) {
+        void fire() {
+            handler.handle(id);
+        }
+    }
+
+    private List<ExpiryTimer> brokerCapturingExpiryTimers() throws Exception {
+        List<ExpiryTimer> timers = new CopyOnWriteArrayList<>();
+        Vertx timerVertx = mock(Vertx.class, AdditionalAnswers.delegatesTo(vertx));
+        doAnswer(invocation -> {
+            long delay = invocation.getArgument(0);
+            Handler<Long> handler = invocation.getArgument(1);
+            long id = vertx.setTimer(delay, handler);
+            timers.add(new ExpiryTimer(delay, id, handler));
+            return id;
+        }).when(timerVertx).setTimer(anyLong(), any());
+        broker = new IotMqttBrokerService(config, timerVertx, iotService, customAuthorizer, registry, nanoTime::get);
+        serveIotWithRuleWriting(mock(DynamoDbItemAccess.class));
+        return timers;
+    }
+
+    private static List<Long> delays(List<ExpiryTimer> timers) {
+        return timers.stream().map(ExpiryTimer::delayMillis).toList();
     }
 
     /** Starts the broker over a real {@link IotService} whose recorder sees every publish the broker hands it. */
