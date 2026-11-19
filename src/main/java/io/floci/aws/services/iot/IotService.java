@@ -1222,12 +1222,13 @@ public class IotService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "MQTT client is not connected: " + clientId, 404));
     }
 
-    public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken) {
+    public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken, String region) {
         validateMqttClientId(clientId);
-        if (!mqttBrokerService.hasSession(clientId)) {
+        String accountId = regionResolver.getAccountId();
+        if (!mqttBrokerService.hasSession(accountId, region, clientId)) {
             throw new AwsException("ResourceNotFoundException", "MQTT client has no session: " + clientId, 404);
         }
-        return paginate(mqttBrokerService.listSubscriptions(clientId), maxResults, nextToken);
+        return paginate(mqttBrokerService.listSubscriptions(accountId, region, clientId), maxResults, nextToken);
     }
 
     public void sendDirectMessage(String clientId, String topic, byte[] payload) {

@@ -146,7 +146,7 @@ public class IotMqttBrokerService implements Resettable {
     final WorkerExecutor ruleWorker;
     private final Map<String, ClientSession> sessionsByClient = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Subscription>> subscriptionsByClient = new ConcurrentHashMap<>();
-    private final Map<String, StoredSession> storedSessions = new ConcurrentHashMap<>();
+    private final Map<HistoryKey, StoredSession> storedSessions = new ConcurrentHashMap<>();
     /** Serializes admitting and ending sessions and the versionNumbers they take; never held across endpoint I/O. */
     private final Object sessionLock = new Object();
     /** The last lifecycle event versionNumber per client id; neither a state reset nor a broker restart clears it. */
@@ -396,7 +396,7 @@ public class IotMqttBrokerService implements Resettable {
                 return false;
             }
             if (cleanSession) {
-                discardStoredSession(clientId);
+                discardStoredSession(session.historyKey());
                 subscriptionsByClient.remove(clientId);
             }
         }
@@ -442,12 +442,16 @@ public class IotMqttBrokerService implements Resettable {
         }
     }
 
-    boolean hasSession(String clientId) {
-        return getConnection(clientId).isPresent() || storedSessions.containsKey(clientId);
+    boolean hasSession(String accountId, String region, String clientId) {
+        return getConnection(clientId).isPresent() || storedSessions.containsKey(new HistoryKey(accountId, region, clientId));
     }
 
-    List<String> listSubscriptions(String clientId) {
-        return subscriptionsByClient.getOrDefault(clientId, Map.of()).keySet().stream()
+    List<String> listSubscriptions(String accountId, String region, String clientId) {
+        StoredSession stored = storedSessions.get(new HistoryKey(accountId, region, clientId));
+        Map<String, Subscription> subscriptions = sessionsByClient.containsKey(clientId) || stored == null
+                ? subscriptionsByClient.getOrDefault(clientId, Map.of())
+                : stored.subscriptions();
+        return subscriptions.keySet().stream()
                 .sorted()
                 .toList();
     }
@@ -536,8 +540,9 @@ public class IotMqttBrokerService implements Resettable {
      * socket's, or for a WebSocket client the one the bridge recorded at the upgrade, as the
      * bridge's own socket is loopback. {@code connectNanos} is when the CONNECT arrived, which
      * the keep-alive runs from. A CONNECT without a clean session resumes the client id's
-     * persistent session created over the same MQTT version: the CONNACK reports it present and
-     * its stored messages follow; any other CONNECT discards it.
+     * persistent session created in the same account and region over the same MQTT version: the
+     * CONNACK reports it present and its stored messages follow; any other CONNECT from that
+     * account and region discards it, and one from elsewhere leaves it stored.
      */
     private void admit(MqttEndpoint endpoint, IotService.RegisteredDevice device, String clientIp, int clientPort,
                        long connectNanos) {
@@ -574,13 +579,16 @@ public class IotMqttBrokerService implements Resettable {
                     new AtomicInteger());
             ClientSession previous = sessionsByClient.put(clientId, session);
             boolean takeover = previous != null && previous.endpoint() != endpoint;
-            StoredSession stored = storedSessions.get(clientId);
+            StoredSession stored = storedSessions.get(session.historyKey());
             sessionPresent = !cleanSession && (takeover
-                    ? previous.sessionExpirySeconds() > 0 && sameMqttVersion(previous.protocolVersion(), protocolVersion)
+                    ? previous.sessionExpirySeconds() > 0 && previous.historyKey().equals(session.historyKey())
+                            && sameMqttVersion(previous.protocolVersion(), protocolVersion)
                     : stored != null && sameMqttVersion(stored.protocolVersion(), protocolVersion));
             if (!sessionPresent) {
-                discardStoredSession(clientId);
+                discardStoredSession(session.historyKey());
                 subscriptionsByClient.remove(clientId);
+            } else if (!takeover) {
+                subscriptionsByClient.put(clientId, stored.subscriptions());
             }
             if (takeover) {
                 endSession(previous, DUPLICATE_CLIENTID);
@@ -619,7 +627,7 @@ public class IotMqttBrokerService implements Resettable {
             List<QueuedMessage> resumed = List.of();
             synchronized (sessionLock) {
                 if (sessionsByClient.get(clientId) == session) {
-                    StoredSession stored = discardStoredSession(clientId);
+                    StoredSession stored = discardStoredSession(session.historyKey());
                     resumed = stored == null ? List.of() : stored.queued();
                 }
             }
@@ -868,13 +876,12 @@ public class IotMqttBrokerService implements Resettable {
     private void fanOut(String topic, byte[] payload, int qos, MqttProperties properties) {
         byte[] safePayload = payload == null ? new byte[0] : payload.clone();
         if (qos > 0) {
-            storedSessions.forEach((clientId, stored) -> {
-                Map<String, Subscription> subscriptions = subscriptionsByClient.get(clientId);
-                if (subscriptions == null || grantedQos(subscriptions.values(), topic) < 1) {
+            storedSessions.forEach((key, stored) -> {
+                if (grantedQos(stored.subscriptions().values(), topic) < 1) {
                     return;
                 }
                 synchronized (sessionLock) {
-                    if (storedSessions.get(clientId) == stored) {
+                    if (storedSessions.get(key) == stored) {
                         stored.queued().add(new QueuedMessage(topic, safePayload, properties));
                     }
                 }
@@ -947,7 +954,7 @@ public class IotMqttBrokerService implements Resettable {
                 if (sessionExpirySeconds > 0) {
                     store(session, sessionExpirySeconds);
                 } else {
-                    discardStoredSession(session.clientId());
+                    discardStoredSession(session.historyKey());
                 }
             }
             if (sessionExpirySeconds == 0) {
@@ -959,23 +966,25 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     private void store(ClientSession session, long sessionExpirySeconds) {
-        String clientId = session.clientId();
-        StoredSession unresumed = discardStoredSession(clientId);
+        HistoryKey key = session.historyKey();
+        StoredSession unresumed = discardStoredSession(key);
         long expiryTimer = vertx.setTimer(TimeUnit.SECONDS.toMillis(sessionExpirySeconds), timer -> {
             synchronized (sessionLock) {
-                StoredSession stored = storedSessions.get(clientId);
-                if (stored != null && stored.expiryTimer() == timer && !sessionsByClient.containsKey(clientId)) {
-                    storedSessions.remove(clientId);
-                    subscriptionsByClient.remove(clientId);
+                StoredSession stored = storedSessions.get(key);
+                ClientSession live = sessionsByClient.get(key.clientId());
+                if (stored != null && stored.expiryTimer() == timer && (live == null || !live.historyKey().equals(key))) {
+                    storedSessions.remove(key);
                 }
             }
         });
-        storedSessions.put(clientId, new StoredSession(session.protocolVersion(),
+        Map<String, Subscription> subscriptions = subscriptionsByClient.remove(key.clientId());
+        storedSessions.put(key, new StoredSession(session.protocolVersion(),
+                subscriptions == null ? new ConcurrentHashMap<>() : subscriptions,
                 unresumed == null ? new ArrayList<>() : unresumed.queued(), expiryTimer));
     }
 
-    private StoredSession discardStoredSession(String clientId) {
-        StoredSession stored = storedSessions.remove(clientId);
+    private StoredSession discardStoredSession(HistoryKey key) {
+        StoredSession stored = storedSessions.remove(key);
         if (stored != null) {
             vertx.cancelTimer(stored.expiryTimer());
         }
@@ -1124,7 +1133,8 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /** A disconnected persistent session; its queue is only touched under the session lock. */
-    private record StoredSession(int protocolVersion, List<QueuedMessage> queued, long expiryTimer) {
+    private record StoredSession(int protocolVersion, Map<String, Subscription> subscriptions, List<QueuedMessage> queued,
+                                 long expiryTimer) {
     }
 
     private record QueuedMessage(String topic, byte[] payload, MqttProperties properties) {

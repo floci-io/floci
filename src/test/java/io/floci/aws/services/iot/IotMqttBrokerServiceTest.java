@@ -790,6 +790,38 @@ class IotMqttBrokerServiceTest {
     }
 
     @Test
+    void aPersistentSessionIsResumedOnlyFromTheAccountAndRegionThatCreatedIt() throws Exception {
+        startBrokerRecordingPublishes();
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        String topic = "devices/scoped/commands";
+        MqttEndpoint first = persistentEndpoint("scoped");
+        broker.handleEndpoint(first, false);
+        subscribeQos1(first, topic);
+        broker.disconnectClient("scoped", false);
+        broker.publish(topic, "stored".getBytes(StandardCharsets.UTF_8), 1);
+
+        when(config.defaultAccountId()).thenReturn("222222222222");
+        MqttEndpoint otherAccount = persistentEndpoint("scoped");
+        broker.handleEndpoint(otherAccount, false);
+        broker.disconnectClient("scoped", true);
+
+        assertFalse(broker.hasSession("222222222222", "us-east-1", "scoped"));
+        assertTrue(broker.hasSession("111111111111", "us-east-1", "scoped"));
+        assertEquals(List.of(topic), broker.listSubscriptions("111111111111", "us-east-1", "scoped"));
+        when(config.defaultAccountId()).thenReturn("111111111111");
+        MqttEndpoint resumed = persistentEndpoint("scoped");
+        broker.handleEndpoint(resumed, false);
+
+        verify(otherAccount).accept(eq(false), any(MqttProperties.class));
+        verify(otherAccount, never()).publish(eq(topic), any(), any(), anyBoolean(), anyBoolean(), anyInt(),
+                any(MqttProperties.class));
+        verify(resumed).accept(eq(true), any(MqttProperties.class));
+        verify(resumed).publish(eq(topic), eq(Buffer.buffer("stored")), eq(MqttQoS.AT_LEAST_ONCE),
+                eq(false), eq(false), anyInt(), any(MqttProperties.class));
+    }
+
+    @Test
     void anEarlierSessionsExpiryDoesNotEndASessionStoredAfterIt() throws Exception {
         startBrokerRecordingPublishes();
         broker.handleEndpoint(mqtt5Endpoint("re-expiring", 1), false);
@@ -1056,7 +1088,7 @@ class IotMqttBrokerServiceTest {
             deleting.shutdown();
             reconnecting.shutdown();
         }
-        assertEquals(List.of("devices/reconnecting/commands"), racing.listSubscriptions("reconnecting"));
+        assertEquals(List.of("devices/reconnecting/commands"), racing.listSubscriptions(config.defaultAccountId(), config.defaultRegion(), "reconnecting"));
     }
 
     @Test
