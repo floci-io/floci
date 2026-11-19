@@ -128,6 +128,15 @@ public final class RdsRequests {
                 .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
     }
 
+    public static RequestSpecification createAuroraPostgresCluster(String id) {
+        return rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("EngineVersion", "16.3")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret99password");
+    }
+
     public static void deleteInstance(String id) {
         rds("DeleteDBInstance")
                 .formParam("DBInstanceIdentifier", id)

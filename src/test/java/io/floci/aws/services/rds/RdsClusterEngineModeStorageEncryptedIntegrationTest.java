@@ -6,6 +6,7 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.RdsRequests.createAuroraPostgresCluster;
 import static io.floci.aws.testing.RdsRequests.rds;
 import static org.hamcrest.Matchers.containsString;
 
@@ -33,12 +34,7 @@ class RdsClusterEngineModeStorageEncryptedIntegrationTest {
 
     @Test
     void engineModeAndStorageEncryptedRoundTripThroughDescribe() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
+        createAuroraPostgresCluster(ID)
                 .formParam("EngineMode", "serverless")
                 .formParam("StorageEncrypted", "true")
                 .when().post("/").then().statusCode(200)
@@ -53,12 +49,7 @@ class RdsClusterEngineModeStorageEncryptedIntegrationTest {
 
     @Test
     void engineModeDefaultsToProvisionedAndStorageEncryptedDefaultsToFalseWhenOmitted() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
+        createAuroraPostgresCluster(ID)
                 .when().post("/").then().statusCode(200)
                 .body(containsString("<EngineMode>provisioned</EngineMode>"))
                 .body(containsString("<StorageEncrypted>false</StorageEncrypted>"));
