@@ -28,7 +28,7 @@ jobs:
   checks:
     name: Nightly checks (${{ matrix.group }})
     runs-on: ubuntu-latest
-    # The existing checks keep their 336-minute total plus twenty minutes for setup. The shrink check runs
+    # The existing checks keep their 339-minute total plus twenty minutes for setup. The shrink check runs
     # separately: its sixteen-minute method and two-minute setup plus twenty minutes for compilation/prefetch.
     # Combining them would exceed the hosted runner's 360-minute job limit.
     strategy:
@@ -36,7 +36,7 @@ jobs:
       matrix:
         include:
           - group: standard
-            timeout: 356
+            timeout: 359
           - group: cluster-shrink
             timeout: 38
     timeout-minutes: ${{ matrix.timeout }}
@@ -94,6 +94,14 @@ jobs:
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: |
             maven-${{ runner.os }}-
+
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - if: steps.list.outputs.count != '0'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
 
       - name: Prefetch the checks' Docker images (background)
         if: steps.list.outputs.count != '0'

@@ -1304,19 +1304,28 @@ class ResourceArnBuilderTest {
 
     // ── Kinesis ──────────────────────────────────────────────────────────────────
 
+    /** A Kinesis request is checked on the stream its StreamName or StreamARN names, read from the generated table. */
     @Test
-    void kinesisBuildsArnFromStreamName() {
+    void kinesisChecksTheStreamItsNameOrArnNames() {
         setJsonBody("{\"StreamName\":\"order-events\"}");
-        String arn = builder.build("kinesis", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:kinesis:us-east-1:000000000000:stream/order-events", arn);
-    }
-
-    @Test
-    void kinesisBuildsArnFromStreamArn() {
+        assertEquals(List.of("arn:aws:kinesis:us-east-1:000000000000:stream/order-events"),
+                builder.buildResources("kinesis", "kinesis:PutRecord", ctx, "us-east-1", ACCOUNT, "aws"));
         String fullArn = "arn:aws:kinesis:us-east-1:000000000000:stream/order-events";
         setJsonBody("{\"StreamARN\":\"" + fullArn + "\"}");
-        String arn = builder.build("kinesis", ctx, "us-east-1", "000000000000");
-        assertEquals(fullArn, arn);
+        assertEquals(List.of(fullArn),
+                builder.buildResources("kinesis", "kinesis:DescribeStreamSummary", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /** A consumer is checked on its ARN, and a tag call on the resource its ResourceARN names. */
+    @Test
+    void kinesisChecksAConsumerAndATaggedResourceOnTheirArns() {
+        String consumer = "arn:aws:kinesis:us-east-1:000000000000:stream/order-events/consumer/reader:1700000000";
+        setJsonBody("{\"ConsumerARN\":\"" + consumer + "\"}");
+        assertEquals(List.of(consumer),
+                builder.buildResources("kinesis", "kinesis:DescribeStreamConsumer", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceARN\":\"" + consumer + "\",\"Tags\":{}}");
+        assertEquals(List.of(consumer),
+                builder.buildResources("kinesis", "kinesis:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── Secrets Manager ──────────────────────────────────────────────────────────
@@ -1885,20 +1894,35 @@ class ResourceArnBuilderTest {
 
     // ── SNS ─────────────────────────────────────────────────────────────────────
 
+    /**
+     * A Query request is checked on the topic its body's TopicArn names, read from the generated table; the handler
+     * acts on the body's TopicArn, so a decoy in the query string is not checked.
+     */
     @Test
-    void snsBuildsArnFromFormBodyTopicArn() {
+    void snsChecksTheTopicAFormBodysTopicArnNames() {
         queryParams.add("TopicArn", "arn:aws:sns:us-east-1:000000000000:allowed");
         setFormBody("Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Aalerts&Message=hi");
-        String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:sns:us-east-1:000000000000:alerts", arn);
+        assertEquals(List.of("arn:aws:sns:us-east-1:000000000000:alerts"),
+                builder.buildResources("sns", "sns:Publish", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     @Test
-    void snsBuildsArnFromJsonTopicArn() {
+    void snsChecksTheTopicAJsonBodysTopicArnNames() {
         String topicArn = "arn:aws:sns:us-east-1:000000000000:alerts";
         setJsonBody("{\"TopicArn\":\"" + topicArn + "\"}");
-        String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
-        assertEquals(topicArn, arn);
+        assertEquals(List.of(topicArn), builder.buildResources("sns", "sns:GetTopicAttributes", ctx, "us-east-1",
+                ACCOUNT, "aws"));
+    }
+
+    /** A new topic is checked on the ARN its name gives, and a tag call on the topic its ResourceArn names. */
+    @Test
+    void snsChecksANewTopicOnItsNameAndATagCallOnItsResourceArn() {
+        setJsonBody("{\"Name\":\"alerts\"}");
+        assertEquals(List.of("arn:aws:sns:us-east-1:000000000000:alerts"),
+                builder.buildResources("sns", "sns:CreateTopic", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceArn\":\"arn:aws:sns:us-east-1:000000000000:alerts\",\"Tags\":[]}");
+        assertEquals(List.of("arn:aws:sns:us-east-1:000000000000:alerts"),
+                builder.buildResources("sns", "sns:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────

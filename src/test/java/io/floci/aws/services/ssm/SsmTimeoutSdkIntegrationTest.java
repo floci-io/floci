@@ -49,7 +49,7 @@ class SsmTimeoutSdkIntegrationTest extends SsmCommandIntegrationFixture {
             instance.setDockerContainerId(container.containerId());
             when(ec2.findInstanceById(account, instanceId)).thenReturn(instance);
             when(ec2.isInstanceContainerRunning(account, instanceId)).thenReturn(true);
-            SsmDirectCommandExecutor actual = new SsmDirectCommandExecutor(docker, ec2);
+            SsmDirectCommandExecutor actual = new SsmDirectCommandExecutor(docker, docker, ec2);
             when(executor.supports(account, instanceId, "AWS-RunShellScript")).thenReturn(true);
             when(executor.executeIfSupported(eq(account), eq(instanceId), eq("AWS-RunShellScript"), any(), anyInt()))
                     .thenAnswer(call -> actual.executeIfSupported(call.getArgument(0), call.getArgument(1),

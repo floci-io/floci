@@ -42,6 +42,7 @@ jobs:
   gate:
     name: Check release window
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions: {}
     outputs:
       cut: ${{ steps.window.outputs.cut }}

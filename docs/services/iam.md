@@ -2332,7 +2332,7 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge
+DynamoDB, SSM, KMS, IAM, Resource Groups, EventBridge
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
@@ -2341,7 +2341,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue and Amazon SQS they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS and Amazon Kinesis Data Streams they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -3177,7 +3177,7 @@ so a denied request gets `AccessDenied` even for a cluster that does not exist. 
 that `DbName` needs is not checked.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
-from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SNS, DynamoDB, Kinesis, Secrets
+from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, DynamoDB, Secrets
 Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
 the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
 instance profile, managed policy, MFA device, identity provider or server certificate constrains
@@ -3535,8 +3535,9 @@ floci populates:
   job runs, managed endpoints, job templates and security configurations, Cost Explorer for its anomaly monitors and
   subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
   controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
-  Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, and SQS for
-  its queues. Tag keys differing only in case are one condition key holding every value.
+  Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
+  queues, SNS for its topics and Kinesis Data Streams for its streams and consumers. Tag keys differing only in case
+  are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

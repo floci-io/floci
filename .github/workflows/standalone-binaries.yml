@@ -3,12 +3,17 @@ name: Standalone Binaries
 # Builds and smoke-tests the macOS and Windows floci-aws binaries. The Linux release binaries are
 # the native artifacts release.yml builds for the images.
 #
+# Releases build darwin-amd64 and windows-amd64 only. darwin-arm64 cannot build on the free
+# macos-latest runner (native-image analysis needs about 6.6 GB, the runner gives it 5.68 GB), so
+# Apple Silicon Macs run the darwin-amd64 binary under Rosetta 2 until a larger runner is in place.
+#
 # release.yml calls this for every version tag, and publish-binaries there uploads what it built.
 # Run it by hand (Actions > Standalone Binaries > Run workflow) to try a branch, a runner or a
 # native-image setting without cutting a release: a manual run only uploads workflow artifacts,
 # it never writes to a GitHub Release. Examples:
 #   platforms: darwin-arm64     native-args: -Dquarkus.native.native-image-xmx=6g
 #   platforms: darwin-arm64     macos-runner: macos-latest-xlarge
+#   platforms: darwin-amd64     macos-amd64-runner: macos-latest   (builds under Rosetta 2)
 #
 # Mandrel has no macOS distribution, so every binary here uses GraalVM Community, which has no
 # -H:-AOTSingleCallsiteInline option to pass.
@@ -39,10 +44,15 @@ on:
         type: string
         default: ''
       macos-runner:
-        description: Runner label for both macOS builds
+        description: Runner label for the darwin-arm64 build
         required: false
         type: string
         default: macos-latest
+      macos-amd64-runner:
+        description: Runner label for the darwin-amd64 build (an Apple Silicon one builds under Rosetta 2)
+        required: false
+        type: string
+        default: macos-15-intel
       timeout-minutes:
         # A manual run passes inputs as strings, so the jobs parse this with fromJSON.
         description: Job timeout for every build (0 keeps 60 for darwin-arm64 and 90 for the others)
@@ -112,15 +122,16 @@ jobs:
 
   build-binary-darwin-amd64:
     name: Build standalone binary (darwin-amd64)
-    # native-image cannot cross-compile. On the default Apple Silicon runner an x86_64 GraalVM runs
-    # under Rosetta 2 (floci-cli's recipe); on an Intel runner (macos-runner: macos-15-intel) the
-    # same steps run natively, without Rosetta.
+    # native-image cannot cross-compile. The default Intel runner (macos-15-intel) builds natively;
+    # on an Apple Silicon runner the same steps run an x86_64 GraalVM under Rosetta 2.
+    # Built for x86-64-v2: GraalVM's default, x86-64-v3, asks for AVX2, BMI and FMA, which Rosetta 2
+    # does not provide, so the binary would not start on the Apple Silicon Macs it is published for.
     # setup-graalvm has no architecture override, so the x86_64 JDK is installed by hand: GraalVM
     # Community, like the other binaries, pinned to 25.0.1 (the last release with a macOS x64 build)
     # and checked against its published SHA-256 before anything built with it is signed.
     needs: prepare
     if: contains(format(',{0},', inputs.platforms), ',darwin-amd64,')
-    runs-on: ${{ inputs.macos-runner || 'macos-latest' }}
+    runs-on: ${{ inputs.macos-amd64-runner || 'macos-15-intel' }}
     timeout-minutes: ${{ fromJSON(format('{0}', inputs.timeout-minutes || 0)) > 0 && fromJSON(format('{0}', inputs.timeout-minutes || 0)) || 90 }}
 
     steps:
@@ -150,7 +161,9 @@ jobs:
         # NATIVE_ARGS splits on spaces into separate Maven arguments.
         run: |
           read -ra extra <<< "$NATIVE_ARGS"
-          ${ARCH_PREFIX} mvn clean package -Dnative -DskipTests -B ${extra[@]+"${extra[@]}"}
+          ${ARCH_PREFIX} mvn clean package -Dnative -DskipTests -B \
+            -Dquarkus.native.additional-build-args-append=-march=x86-64-v2 \
+            ${extra[@]+"${extra[@]}"}
 
       - name: Verify the binary is x86_64
         run: file target/*-runner | grep -q x86_64

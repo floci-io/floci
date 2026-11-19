@@ -468,6 +468,6 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
 
     private ContainerLifecycleManager manager() {
         return new ContainerLifecycleManager(
-                dockerClient, imageCacheService, containerDetector, config);
+                dockerClient, dockerClient, imageCacheService, containerDetector, config);
     }
 }

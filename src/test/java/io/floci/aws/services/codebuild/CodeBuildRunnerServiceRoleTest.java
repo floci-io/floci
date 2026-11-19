@@ -195,7 +195,7 @@ class CodeBuildRunnerServiceRoleTest {
         when(server.start()).thenReturn(CompletableFuture.completedFuture(null));
         EcsCredentialsProxy proxy = mock(EcsCredentialsProxy.class);
 
-        CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
+        CodeBuildRunner runner = spy(new CodeBuildRunner(docker, docker, containerBuilder, lifecycle, logStreamer,
                 null, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint,
                 mock(Ec2Service.class),
                 new CodeBuildRoleCredentials(credentials, server, proxy, new EcsTaskLinkLocalAddresses())));

@@ -395,6 +395,90 @@ class FlociDockerHttpClientTest {
         }
     }
 
+    @Test
+    void streamContainerNamesTheContainerAStreamFollows() {
+        assertEquals("abc", FlociDockerHttpClient.streamContainer(request("POST /v1.43/containers/abc/wait")));
+        assertEquals("abc", FlociDockerHttpClient.streamContainer(request("GET /containers/abc/logs?follow=1")));
+        assertEquals("fn-1", FlociDockerHttpClient.streamContainer(request("POST /containers/fn-1/attach?stream=1")));
+        assertEquals("abc", FlociDockerHttpClient.streamContainer(request("GET /containers/abc/stats")));
+        // A container may be named like a collection route.
+        assertEquals("create", FlociDockerHttpClient.streamContainer(request("GET /containers/create/logs?follow=1")));
+        assertEquals("json", FlociDockerHttpClient.streamContainer(request("POST /v1.43/containers/json/wait")));
+        for (String noContainer : List.of("POST /exec/abc/start", "POST /images/create?fromImage=alpine",
+                "POST /build", "GET /events", "GET /containers/json", "GET /containers//", "DELETE /containers//",
+                "GET /images/quay.io/containers/podman/json")) {
+            assertNull(FlociDockerHttpClient.streamContainer(request(noContainer)), noContainer);
+        }
+    }
+
+    // Catches: streams reported under the wrong service, or a removed container whose id is still
+    // attributed to its old service (and kept in memory) after the remove succeeded.
+    @Test
+    @Timeout(30)
+    void gaugesCountOpenStreamsByTheServiceOfTheContainerTheyFollow() throws Exception {
+        List<Socket> accepted = new CopyOnWriteArrayList<>();
+        List<DockerHttpClient.Response> open = new CopyOnWriteArrayList<>();
+        DockerContainerServices.record("fn-1", "floci-lambda-fn",
+                ContainerStorageHelper.resourceIdentityLabels("lambda", "fn", "000000000000", "us-east-1"));
+        DockerContainerServices.record("task-1", null,
+                ContainerStorageHelper.resourceIdentityLabels("ecs", "task", "000000000000", "us-east-1"));
+        try (ServerSocket server = new ServerSocket(0)) {
+            Thread acceptor = Thread.ofVirtual().start(() -> {
+                try {
+                    while (true) {
+                        Socket socket = server.accept();
+                        accepted.add(socket);
+                        socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                + "Transfer-Encoding: chunked\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                        socket.getOutputStream().flush();
+                    }
+                } catch (IOException expected) {
+                    // The server socket closed at the end of the test.
+                }
+            });
+            try (FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()
+                    .dockerHost(URI.create("tcp://127.0.0.1:" + server.getLocalPort()))
+                    .maxConnections(8)
+                    .responseTimeout(Duration.ofSeconds(30))
+                    .connectionRequestTimeout(Duration.ofSeconds(5))
+                    .build()) {
+                for (String stream : List.of("POST /containers/fn-1/wait",
+                        "GET /containers/floci-lambda-fn/logs?follow=1",
+                        "POST /containers/task-1/wait", "POST /exec/e-1/start")) {
+                    open.add(client.execute(request(stream)));
+                }
+
+                FlociDockerHttpClient.PoolGauges held = client.gauges();
+                assertEquals(Map.of("lambda", 2, "ecs", 1, DockerContainerServices.UNATTRIBUTED, 1),
+                        held.openStreamsByService(), held.toString());
+                assertEquals(Map.of("wait", 2, "logs", 1, "exec", 1), held.openStreams(), held.toString());
+
+                // An image whose name has containers/ in it is not a container remove.
+                open.add(client.execute(request("DELETE /images/quay.io/containers/fn-1")));
+                assertEquals("lambda", DockerContainerServices.serviceOf("fn-1"));
+
+                open.add(client.execute(request("DELETE /containers/fn-1")));
+                assertEquals(DockerContainerServices.UNATTRIBUTED, DockerContainerServices.serviceOf("fn-1"));
+                assertEquals(DockerContainerServices.UNATTRIBUTED, DockerContainerServices.serviceOf("floci-lambda-fn"),
+                        "removing a container by its id forgets its name too");
+                assertEquals("ecs", DockerContainerServices.serviceOf("task-1"));
+
+                for (DockerHttpClient.Response response : open) {
+                    response.close();
+                }
+                assertEquals(Map.of(), client.gauges().openStreamsByService());
+            } finally {
+                for (Socket socket : accepted) {
+                    socket.close();
+                }
+                acceptor.interrupt();
+            }
+        } finally {
+            DockerContainerServices.forget("fn-1");
+            DockerContainerServices.forget("task-1");
+        }
+    }
+
     private static DockerHttpClient.Request request(String methodAndPath) {
         String[] parts = methodAndPath.split(" ", 2);
         return DockerHttpClient.Request.builder().method(parts[0]).path(parts[1]).build();

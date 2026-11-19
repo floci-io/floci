@@ -246,6 +246,55 @@ public final class SqlParameterParser {
      * inside any of those is kept. A line comment's terminating newline is kept.
      */
     public static String stripComments(String sql, Options options) {
+        return rewrite(sql, options, false);
+    }
+
+    /**
+     * {@code sql} with each comment replaced by a single space and each quoted string, quoted
+     * identifier, or dollar-quoted body replaced by an empty {@code ''}, tokenized as {@link #parse}
+     * does, so a keyword inside any of them is not seen by a caller that scans the rest.
+     */
+    public static String blankQuoted(String sql, Options options) {
+        return rewrite(sql, options, true);
+    }
+
+    /**
+     * The {@code [start, end)} span of each string literal and dollar-quoted body in {@code sql}, in
+     * order, tokenized as {@link #parse} does. Quoted identifiers and comments are skipped, not returned.
+     */
+    public static List<int[]> literalSpans(String sql, Options options) {
+        List<int[]> spans = new ArrayList<>();
+        int len = sql.length();
+        int i = 0;
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (startsLineComment(sql, i, options)) {
+                int end = sql.indexOf('\n', i);
+                i = end < 0 ? len : end;
+            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                i = skipBlockComment(sql, i, !options.mysqlComments());
+            } else if (c == '\'' || c == '"' || (options.allowBackticks() && c == '`')) {
+                int end = skipQuoted(sql, i, c, options);
+                if (c == '\'') {
+                    spans.add(new int[] {i, end});
+                }
+                i = end;
+            } else if (c == '$') {
+                int end = skipDollarQuoted(sql, i);
+                if (end > i) {
+                    spans.add(new int[] {i, end});
+                    i = end;
+                } else {
+                    i++;
+                }
+            } else {
+                i++;
+            }
+        }
+        return spans;
+    }
+
+    private static String rewrite(String sql, Options options, boolean blankQuoted) {
         StringBuilder out = new StringBuilder(sql.length());
         int len = sql.length();
         int i = 0;
@@ -272,7 +321,11 @@ public final class SqlParameterParser {
                 end = skipDollarQuoted(sql, i);
             }
             if (end > i) {
-                out.append(sql, i, end);
+                if (blankQuoted) {
+                    out.append("''");
+                } else {
+                    out.append(sql, i, end);
+                }
                 i = end;
                 continue;
             }
