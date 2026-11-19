@@ -1720,18 +1720,18 @@ public final class TestFixtures {
     }
 
     public static IotClient iotClient() {
-        return IotClient.builder()
-                .endpointOverride(ENDPOINT)
-                .region(REGION)
-                .credentialsProvider(CREDENTIALS)
-                .build();
+        return iotClient(CREDENTIALS);
     }
 
     public static IotClient iotClient(String accountId) {
+        return iotClient(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")));
+    }
+
+    private static IotClient iotClient(StaticCredentialsProvider credentials) {
         return IotClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .credentialsProvider(credentials)
                 .build();
     }
 
