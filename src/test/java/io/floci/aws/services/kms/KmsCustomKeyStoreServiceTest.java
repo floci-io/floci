@@ -40,7 +40,7 @@ class KmsCustomKeyStoreServiceTest {
         doThrow(new XksProxyClient.XksProxyException(
                 "XksProxyIncorrectAuthenticationCredentialException", "untrusted proxy message", 400))
                 .when(proxy).requireHealthy(any(URI.class), eq("/kms/xks/v1"), eq(ACCESS_KEY),
-                        eq(SECRET_KEY), eq(REGION), eq("ConnectCustomKeyStore"));
+                        eq(SECRET_KEY), eq(REGION), eq("ConnectCustomKeyStore"), anyString());
 
         service.connect(store.getCustomKeyStoreId(), REGION);
 
