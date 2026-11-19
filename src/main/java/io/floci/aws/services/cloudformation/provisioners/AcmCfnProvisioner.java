@@ -11,6 +11,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,12 @@ import java.util.Set;
  * certificate's options. The first is createOnly in the registry schema, so a change replaces the
  * certificate; the second updates in place through {@code UpdateCertificateOptions}, as
  * CloudFormation does.
+ *
+ * <p>A replacement creates the new certificate and leaves the displaced one to
+ * {@link ReplacementCleanup}: it is deleted once the stack update commits, after the resources that
+ * referenced it (a CloudFront distribution, an API Gateway domain) moved to the new one, because ACM
+ * refuses to delete a certificate that is still in use. A failed update deletes the new certificate
+ * and points the resource back at the old one.
  */
 @ApplicationScoped
 public class AcmCfnProvisioner implements CfnResourceProvisioner {
@@ -47,6 +54,12 @@ public class AcmCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            // The rollback undoes this update; only ContinueUpdateRollback retries the delete the
+            // last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String domainName = ctx.resolveOptional(props, "DomainName");
         if (domainName == null || domainName.isBlank()) {
             throw new AwsException("ValidationError", "AWS::CertificateManager::Certificate requires DomainName", 400);
@@ -61,9 +74,8 @@ public class AcmCfnProvisioner implements CfnResourceProvisioner {
         CertificateOptions options = new CertificateOptions(transparencyLogging, export);
 
         // DomainName, SubjectAlternativeNames, KeyAlgorithm and CertificateExport are createOnly in
-        // the schema: a change to any of them replaces the certificate, and there is no generic
-        // replacement flow, so the previous one is deleted here once the new one exists. Anything
-        // else updates in place.
+        // the schema: a change to any of them replaces the certificate, and the previous one is left
+        // to ReplacementCleanup. Anything else updates in place.
         Certificate existing = ctx.isUpdate() ? findExisting(ctx.priorPhysicalId(), ctx.region()) : null;
         String arn;
         if (existing != null && sameCreateOnlyProperties(existing, domainName, sans, keyAlgorithm, export)) {
@@ -73,12 +85,10 @@ public class AcmCfnProvisioner implements CfnResourceProvisioner {
         } else {
             arn = acmService.requestCertificate(domainName, sans, validationMethod, null,
                     keyAlgorithm, null, options, tags, ctx.region()).getArn();
-            if (existing != null) {
-                deletePriorOrUnwind(r, existing.getArn(), arn, ctx.region());
-            }
         }
         r.setPhysicalId(arn);
         r.getAttributes().put("CertificateArn", arn);
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     @Override
@@ -87,22 +97,29 @@ public class AcmCfnProvisioner implements CfnResourceProvisioner {
                 () -> acmService.deleteCertificate(physicalId, region), "ResourceNotFoundException");
     }
 
-    /**
-     * Removes the certificate a replacement supersedes. If that fails (ResourceInUseException, for
-     * one), the update fails and CloudFormationService restores the previous StackResource without
-     * ever learning the new ARN, so the certificate this attempt created is removed here and the
-     * rollback walker is told the prior one is intact.
-     */
-    private void deletePriorOrUnwind(StackResource r, String priorArn, String newArn, String region) {
-        try {
-            delete(r.getResourceType(), priorArn, region);
-        } catch (AwsException failure) {
-            LOG.warnv("Could not delete certificate {0} replaced by {1}, removing the replacement: {2}",
-                    priorArn, newArn, failure.getMessage());
-            acmService.deleteCertificate(newArn, region);
-            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
-            throw failure;
-        }
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return ReplacementCleanup.rollback(resource, this::delete);
     }
 
     private Certificate findExisting(String arn, String region) {

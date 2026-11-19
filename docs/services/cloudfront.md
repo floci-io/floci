@@ -457,6 +457,8 @@ These operations store what they are given and return it, so code that manages t
   created with no `ViewerCertificate` at all reads the same way, the default certificate on `TLSv1`.
   The `us-east-1` restriction AWS states for ACM certificates is not enforced: a certificate is
   resolved from whatever region its ARN names, as long as it exists.
+- `AWS::CloudFront::Distribution` passes `ViewerCertificate` through, on create and on update, so the
+  certificate and protocol rules above apply to a stack the same way they do to the API.
 - `ConnectionMode` is stored and returned by `GetDistribution`, `GetDistributionConfig`,
   `ListDistributions` and the create and update responses, and `AWS::CloudFront::Distribution`
   passes it through. It is held to `direct` and `tenant-only`; anything else is `InvalidArgument`

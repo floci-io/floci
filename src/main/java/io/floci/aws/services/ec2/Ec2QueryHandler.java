@@ -1825,7 +1825,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteVpc(MultivaluedMap<String, String> p, String region) {
-        service.deleteVpc(region, p.getFirst("VpcId"));
+        service.deleteVpc(region, p.getFirst("VpcId"), dryRun(p));
         return booleanResponse("DeleteVpc");
     }
 
@@ -1977,6 +1977,9 @@ public class Ec2QueryHandler {
             "elasticloadbalancing", "sns", "sqs", "kinesis-streams", "kinesis-firehose",
             "states", "events", "lambda", "glue", "athena", "iot.data", "execute-api");
 
+    // The services AWS also offers as a Gateway endpoint, each named com.amazonaws.<region>.<name>.
+    private static final List<String> GATEWAY_ENDPOINT_SERVICES = List.of("s3", "dynamodb");
+
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
         List<String> requested = getList(p, "ServiceName");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
@@ -2037,10 +2040,13 @@ public class Ec2QueryHandler {
     private List<ServiceDetail> buildServiceDetails(String region, List<String> requested, List<String> azNames) {
         List<ServiceDetail> services = new ArrayList<>();
 
-        // S3 is the one service with both offerings. The gateway keeps com.amazonaws in every
-        // partition; the interface takes the region's prefix, so in China the two are named apart.
-        String s3Gateway = "com.amazonaws." + region + ".s3";
-        String s3Interface = AwsRegionFacts.vpcEndpointServiceName(region, "s3");
+        // S3 and DynamoDB are the services with both offerings. The gateway keeps com.amazonaws in
+        // every partition; the interface takes the region's prefix, so in China S3's two are named apart.
+        Map<String, String> gatewayInterfaces = new LinkedHashMap<>();
+        for (String name : GATEWAY_ENDPOINT_SERVICES) {
+            gatewayInterfaces.put("com.amazonaws." + region + "." + name,
+                    AwsRegionFacts.vpcEndpointServiceName(region, name));
+        }
 
         // Requested service names are echoed verbatim, exactly as AWS does. The emulator
         // supports any interface service in every AZ, so a requested (often custom) name
@@ -2053,22 +2059,23 @@ public class Ec2QueryHandler {
             for (String name : INTERFACE_ENDPOINT_SERVICES) {
                 fullNames.add(AwsRegionFacts.vpcEndpointServiceName(region, name));
             }
-            fullNames.add(s3Gateway);
-            if (!s3Interface.equals(s3Gateway)) {
-                fullNames.add(s3Interface);
+            for (Map.Entry<String, String> gateway : gatewayInterfaces.entrySet()) {
+                fullNames.add(gateway.getKey());
+                if (!gateway.getValue().equals(gateway.getKey())) {
+                    fullNames.add(gateway.getValue());
+                }
             }
         }
 
         for (String full : fullNames) {
             List<String> serviceTypes;
-            if (full.equals(s3Interface) && !s3Interface.equals(s3Gateway)) {
+            String gatewayInterface = gatewayInterfaces.get(full);
+            if (gatewayInterface == null) {
                 serviceTypes = List.of("Interface");
-            } else if (full.endsWith(".s3")) {
-                serviceTypes = s3Interface.equals(s3Gateway)
-                        ? List.of("Gateway", "Interface")
-                        : List.of("Gateway");
+            } else if (gatewayInterface.equals(full)) {
+                serviceTypes = List.of("Gateway", "Interface");
             } else {
-                serviceTypes = List.of("Interface");
+                serviceTypes = List.of("Gateway");
             }
             services.add(new ServiceDetail(
                     full,
@@ -3501,6 +3508,7 @@ public class Ec2QueryHandler {
 
 
     private Response handleCreateDefaultVpc(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         Vpc vpc = service.createDefaultVpc(region);
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateDefaultVpcResponse", AwsNamespaces.EC2)
@@ -3618,7 +3626,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteSubnet(MultivaluedMap<String, String> p, String region) {
-        service.deleteSubnet(region, p.getFirst("SubnetId"));
+        service.deleteSubnet(region, p.getFirst("SubnetId"), dryRun(p));
         return booleanResponse("DeleteSubnet");
     }
 
@@ -4344,6 +4352,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateInternetGateway(MultivaluedMap<String, String> p, String region) {
         List<Tag> resourceTags = parseTagsForResource(p, "internet-gateway");
+        checkDryRun(p);
         InternetGateway igw = service.createInternetGateway(region);
         applyResourceTags(resourceTags, region, igw.getInternetGatewayId());
         XmlBuilder xml = new XmlBuilder()
@@ -4370,17 +4379,17 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteInternetGateway(MultivaluedMap<String, String> p, String region) {
-        service.deleteInternetGateway(region, p.getFirst("InternetGatewayId"));
+        service.deleteInternetGateway(region, p.getFirst("InternetGatewayId"), dryRun(p));
         return booleanResponse("DeleteInternetGateway");
     }
 
     private Response handleAttachInternetGateway(MultivaluedMap<String, String> p, String region) {
-        service.attachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"));
+        service.attachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"), dryRun(p));
         return booleanResponse("AttachInternetGateway");
     }
 
     private Response handleDetachInternetGateway(MultivaluedMap<String, String> p, String region) {
-        service.detachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"));
+        service.detachInternetGateway(region, p.getFirst("InternetGatewayId"), p.getFirst("VpcId"), dryRun(p));
         return booleanResponse("DetachInternetGateway");
     }
 
@@ -4389,7 +4398,7 @@ public class Ec2QueryHandler {
     private Response handleCreateRouteTable(MultivaluedMap<String, String> p, String region) {
         List<Tag> resourceTags = parseTagsForResource(p, "route-table");
         String vpcId = p.getFirst("VpcId");
-        RouteTable rt = service.createRouteTable(region, vpcId);
+        RouteTable rt = service.createRouteTable(region, vpcId, dryRun(p));
         applyResourceTags(resourceTags, region, rt.getRouteTableId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateRouteTableResponse", AwsNamespaces.EC2)
@@ -4420,14 +4429,14 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteRouteTable(MultivaluedMap<String, String> p, String region) {
-        service.deleteRouteTable(region, p.getFirst("RouteTableId"));
+        service.deleteRouteTable(region, p.getFirst("RouteTableId"), dryRun(p));
         return booleanResponse("DeleteRouteTable");
     }
 
     private Response handleAssociateRouteTable(MultivaluedMap<String, String> p, String region) {
         String rtId = p.getFirst("RouteTableId");
         String subnetId = p.getFirst("SubnetId");
-        RouteTableAssociation assoc = service.associateRouteTable(region, rtId, subnetId);
+        RouteTableAssociation assoc = service.associateRouteTable(region, rtId, subnetId, dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateRouteTableResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4440,6 +4449,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDisassociateRouteTable(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         service.disassociateRouteTable(region, p.getFirst("AssociationId"));
         return booleanResponse("DisassociateRouteTable");
     }
@@ -4505,7 +4515,7 @@ public class Ec2QueryHandler {
         String dest = p.getFirst("DestinationCidrBlock");
         String destIpv6 = p.getFirst("DestinationIpv6CidrBlock");
         String destPrefixList = p.getFirst("DestinationPrefixListId");
-        service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList);
+        service.deleteRoute(region, rtId, dest, destIpv6, destPrefixList, dryRun(p));
         return booleanResponse("DeleteRoute");
     }
 

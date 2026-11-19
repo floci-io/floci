@@ -408,7 +408,8 @@ public class LambdaMicrovmsController {
         node.put("state", version.state);
         node.put("status", version.status);
         node.put("createdAt", EpochSeconds.fromInstant(version.createdAt));
-        node.put("updatedAt", EpochSeconds.fromInstant(image.updatedAt));
+        node.put("updatedAt", EpochSeconds.fromInstant(
+                version.updatedAt != null ? version.updatedAt : version.createdAt));
         node.put("baseImageArn", buildSpec.baseImageArn());
         node.put("baseImageVersion", buildSpec.baseImageVersion());
         node.put("buildRoleArn", buildSpec.buildRoleArn());

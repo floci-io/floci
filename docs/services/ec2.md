@@ -430,7 +430,7 @@ naming different VPCs find nothing.
 | DescribeDhcpOptions | Lists DHCP options sets by ID or filters, with paginated results. |
 | AssociateDhcpOptions | Associates an options set with a VPC; `default` leaves the VPC with no DHCP options. |
 | DeleteDhcpOptions | Deletes an unassociated DHCP options set. |
-| DescribeVpcEndpointServices | Lists common AWS interface endpoint services and S3 (gateway and interface) in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
+| DescribeVpcEndpointServices | Lists common AWS interface endpoint services, and S3 and DynamoDB (gateway and interface), in every availability zone, named per partition (see [Partitions](../configuration/partitions.md)). A `ServiceName` filter is echoed back as asked. |
 | CreateVpcEndpoint | Creates a VPC endpoint record, including its `PolicyDocument` and the per-subnet IPv4 and IPv6 addresses named by `SubnetConfiguration.N`. `IpAddressType` defaults to `ipv4`. Interface and gateway address types are stored as metadata. Synthesized endpoint interfaces still carry IPv4 only; IPv6 networking is not emulated. An `Ipv4` value outside the named subnet's CIDR, or among the first four or the last address AWS reserves in it, is rejected with `InvalidParameterValue`. |
 | DescribeVpcEndpoints | Lists or returns stored VPC endpoints, including their IP address type. |
 | ModifyVpcEndpoint | Associates or disassociates route tables, subnets and security groups, sets or resets the endpoint policy, and updates stored `IpAddressType` metadata. Omitting the type preserves its current value; malformed types are rejected before changes are applied. `SubnetConfiguration.N` replaces the addresses pinned for a subnet, under the same address validation as CreateVpcEndpoint. `DnsOptions` is accepted and ignored. |
@@ -1327,6 +1327,21 @@ so an ordinary account accepted here can be rejected by AWS with `OperationNotPe
 A repeated grant of the same permission to the same account answers the grant already in place.
 AWS documents no duplicate error for it; this is Floci's choice. Grants are kept on the interface,
 so they go when it is deleted. `DeleteNetworkInterfacePermission` is not served.
+
+#### Interface and VPC endpoint IAM resources
+
+With IAM enforcement enabled, the generated request-resource catalog checks interface and VPC
+endpoint operations on their resource ARNs. Creating an interface also names its subnet and security
+groups; creating an endpoint also names its VPC, subnets, security groups and route tables.
+`ModifyVpcEndpoint` includes both added and removed resources. Tag requests recognize the interface
+ID prefix supplied by the pinned botocore model. Endpoint, attachment and endpoint-service IDs
+without a model-backed prefix remain checked on `*`.
+
+`DetachNetworkInterface` resolves the attachment's instance and interface in the caller's account
+and Region, then checks both resources. An attachment that cannot be resolved uses the caller's
+`instance/*` and `network-interface/*` resources for authorization before the service reports it
+missing. `DescribeNetworkInterfaces` and `DescribeNetworkInterfacePermissions` remain checked on
+`*`. These authorization checks do not establish cross-account guest-network attachment support.
 
 ### Volumes
 

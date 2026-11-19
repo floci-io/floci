@@ -7253,7 +7253,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         proxy.setTags(tags);
         proxy.setProxyPort(proxyPort);
-        proxy.setEndpointHost(mock ? "localhost" : proxyEndpointHost());
+        proxy.setEndpointHost(mock ? "localhost" : dbProxyEndpointHost());
         proxy.setStatus("available");
         Instant now = Instant.now();
         proxy.setCreatedAt(now);
@@ -9337,6 +9337,13 @@ public class RdsService implements Resettable, ResourceProvider {
         return dockerHostResolver != null ? dockerHostResolver.resolve() : "localhost";
     }
 
+    /** The host a DB proxy advertises: the configured endpoint host when set, as for instances. */
+    private String dbProxyEndpointHost() {
+        return config.services().rds().endpointHost()
+                .filter(host -> !host.isBlank())
+                .orElseGet(this::proxyEndpointHost);
+    }
+
     private void validateDbProxyCreate(String name, String engineFamily, String roleArn,
                                        List<String> subnetIds, List<DbProxyAuth> auth,
                                        String defaultAuthScheme, int idleClientTimeout) {
@@ -10332,7 +10339,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     ensureRestoredDefaultTargetGroup(proxy);
                     continue;
                 }
-                proxy.setEndpointHost(proxyEndpointHost());
+                proxy.setEndpointHost(dbProxyEndpointHost());
                 persistRestoredProxy(proxy);
                 DbProxyTargetGroup targetGroup = ensureRestoredDefaultTargetGroup(proxy);
                 if (targetGroup.getTargets().isEmpty()) {

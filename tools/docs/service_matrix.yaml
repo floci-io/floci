@@ -266,6 +266,7 @@ action_count_sources:
       - { path: services/iot/IotAuthorizerController.java, mode: rest }
       - { path: services/iot/IotDomainConfigurationController.java, mode: rest }
       - { path: services/iot/IotFleetIndexingController.java, mode: rest }
+      - { path: services/iot/IotLoggingController.java, mode: rest }
       - { path: services/iot/IotTagHandler.java, mode: tag_handler }
     rename_actions:
       RegisterCertificateWithoutCa: RegisterCertificateWithoutCA

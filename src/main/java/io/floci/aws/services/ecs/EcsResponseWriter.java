@@ -295,7 +295,7 @@ public class EcsResponseWriter {
         if (def.getSecrets() != null && !def.getSecrets().isEmpty()) {
             n.set("secrets", secretsNode(def.getSecrets()));
         }
-        if (def.getMountPoints() != null && !def.getMountPoints().isEmpty()) {
+        if (def.getMountPoints() != null) {
             ArrayNode mps = objectMapper.createArrayNode();
             for (MountPoint mp : def.getMountPoints()) {
                 ObjectNode mpNode = objectMapper.createObjectNode();
@@ -306,7 +306,7 @@ public class EcsResponseWriter {
             }
             n.set("mountPoints", mps);
         }
-        if (def.getVolumesFrom() != null && !def.getVolumesFrom().isEmpty()) {
+        if (def.getVolumesFrom() != null) {
             ArrayNode volumesFrom = objectMapper.createArrayNode();
             for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
                 ObjectNode volumeFromNode = objectMapper.createObjectNode();

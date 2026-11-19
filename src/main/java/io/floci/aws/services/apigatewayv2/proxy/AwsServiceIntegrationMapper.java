@@ -29,10 +29,11 @@ public class AwsServiceIntegrationMapper {
 
     private static final Pattern EMBEDDED_EXPRESSION = Pattern.compile("\\$\\{([^}]+)}");
     private static final String BODY = "$request.body";
+    private static final String REQUEST_PATH = "$request.path";
     private static final String STAGE_VARIABLES = "$stageVariables.";
     private static final String CONTEXT = "$context.";
     private static final List<String> SOURCE_PREFIXES = List.of("$request.header.", "$request.querystring.",
-            "$request.path.", BODY + ".", CONTEXT, STAGE_VARIABLES);
+            REQUEST_PATH + ".", BODY + ".", CONTEXT, STAGE_VARIABLES);
     private static final ObjectMapper TEMPLATE_READER = new ObjectMapper()
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
@@ -121,7 +122,7 @@ public class AwsServiceIntegrationMapper {
     }
 
     private static boolean isSupportedSource(String expression) {
-        if (expression.equals(BODY)) {
+        if (expression.equals(BODY) || expression.equals(REQUEST_PATH)) {
             return true;
         }
         for (String prefix : SOURCE_PREFIXES) {
