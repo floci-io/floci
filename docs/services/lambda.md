@@ -1042,6 +1042,8 @@ The process gets:
 
 - `AWS_LAMBDA_RUNTIME_API` on `127.0.0.1`, `_HANDLER`, `LAMBDA_TASK_ROOT` and
   the other `AWS_LAMBDA_*` variables, as with the other executors.
+- `TZ=:UTC` and `LANG=en_US.UTF-8`, as Lambda sets them. The function's own
+  `Environment` can override both.
 - The function's `Environment` variables, and an AWS SDK endpoint and region
   pointing at Floci. A function whose execution role Floci knows gets that
   role's credentials, as with the docker executor.

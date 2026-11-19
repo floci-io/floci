@@ -4,11 +4,15 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.core.common.port.PortAllocator;
 import io.floci.aws.services.iam.model.SessionCreds;
+import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
 import io.floci.aws.services.lambda.model.LambdaFunction;
+import io.floci.aws.services.lambda.model.PendingInvocation;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServerFactory;
+import io.vertx.core.Vertx;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,19 +21,25 @@ import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.File;
 import java.io.IOException;
+import java.net.ServerSocket;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -46,6 +56,20 @@ class ProcessLauncherTest {
     private static final String ACCOUNT = "123456789012";
     private static final String REGION = "us-east-1";
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:fn";
+
+    /** Answers each invocation with its event, handler and SDK endpoint, polling the Runtime API with curl. */
+    private static final String CURL_BOOTSTRAP = """
+            set -eu
+            api="http://$AWS_LAMBDA_RUNTIME_API/2018-06-01/runtime/invocation"
+            while true; do
+              headers=$(mktemp)
+              event=$(curl -sS -D "$headers" "$api/next")
+              request_id=$(grep -i '^lambda-runtime-aws-request-id:' "$headers" | tr -d '\\r' | cut -d' ' -f2)
+              rm -f "$headers"
+              curl -sS -X POST "$api/$request_id/response" \\
+                  -d "{\\"event\\":$event,\\"handler\\":\\"$_HANDLER\\",\\"endpoint\\":\\"$AWS_ENDPOINT_URL\\"}" > /dev/null
+            done
+            """;
 
     @TempDir
     Path tempDir;
@@ -101,7 +125,9 @@ class ProcessLauncherTest {
                 "AWS_LAMBDA_FUNCTION_NAME=fn",
                 "AWS_LAMBDA_FUNCTION_VERSION=$LATEST",
                 "AWS_ENDPOINT_URL=http://127.0.0.1:4566",
-                "GREETING=hello");
+                "GREETING=hello",
+                "TZ=:UTC",
+                "LANG=en_US.UTF-8");
         assertThat(env).noneMatch(line -> line.startsWith("AWS_ACCESS_KEY_ID="));
         assertThat(env).noneMatch(line -> line.startsWith("HOME="));
         verify(awsEnv).sdkBaselineEnv(eq(REGION), eq(Optional.empty()), eq("http://127.0.0.1:4566"),
@@ -136,6 +162,33 @@ class ProcessLauncherTest {
         verify(logStreamer, timeout(10_000)).streamToCloudWatchLogsForAccount(eq(ACCOUNT), eq("/aws/lambda/fn"),
                 eq("2026/01/01/[$LATEST]stream"), eq(REGION),
                 argThat(event -> event.length() == 300_000 - 256 * 1024));
+    }
+
+    @Test
+    void aBootstrapAnswersAnInvocationThroughTheRuntimeApi() throws Exception {
+        String path = System.getenv("PATH");
+        assumeTrue(path != null && Arrays.stream(path.split(File.pathSeparator))
+                .anyMatch(dir -> Files.isExecutable(Path.of(dir, "curl"))), "the bootstrap needs curl");
+        Vertx vertx = Vertx.vertx();
+        try {
+            PortAllocator ports = mock(PortAllocator.class);
+            when(ports.allocate()).thenReturn(freePort());
+            RuntimeApiServer server = new RuntimeApiServerFactory(vertx, ports).create();
+            when(runtimeApiServerFactory.create()).thenReturn(server);
+            ContainerHandle handle = launch(function(codeDirectory(CURL_BOOTSTRAP, true)));
+
+            InvokeResult result = server.enqueue(new PendingInvocation("request-1",
+                    "{\"n\":1}".getBytes(StandardCharsets.UTF_8), System.currentTimeMillis() + 60_000,
+                    FUNCTION_ARN, new CompletableFuture<>())).get(20, TimeUnit.SECONDS);
+
+            assertThat(result.getFunctionError()).isNull();
+            assertThat(new String(result.getPayload(), StandardCharsets.UTF_8)).isEqualTo(
+                    "{\"event\":{\"n\":1},\"handler\":\"function.handler\",\"endpoint\":\"http://127.0.0.1:4566\"}");
+            launched.remove(handle);
+            launcher.stop(handle);
+        } finally {
+            vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+        }
     }
 
     @Test
@@ -315,6 +368,12 @@ class ProcessLauncherTest {
         Path file = output.resolve(name);
         Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(file));
         return Files.readAllLines(file);
+    }
+
+    private static int freePort() throws IOException {
+        try (ServerSocket socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
+        }
     }
 
     private Path codeDirectory(String script, boolean executable) throws IOException {

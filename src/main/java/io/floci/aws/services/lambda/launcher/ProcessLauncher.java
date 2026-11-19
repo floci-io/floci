@@ -2,6 +2,7 @@ package io.floci.aws.services.lambda.launcher;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.FileTrees;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
@@ -27,7 +28,6 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -165,13 +165,7 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
             boolean processGone = process == null || destroy(process);
             roleCredentials.ifPresent(credentials ->
                     executionRoleCredentials.unregister(sessionAccountId, credentials.accessKeyId()));
-            try {
-                runtimeApiServer.stop().get(5, TimeUnit.SECONDS);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            } catch (ExecutionException | TimeoutException | CancellationException stopFailure) {
-                LOG.debugv("Runtime API server stop failed during launch cleanup: {0}", stopFailure.getMessage());
-            }
+            RuntimeApiServerFactory.stopBeforeRelease(runtimeApiServer);
             releaseWhenGone(runtimeApiServer, codeCopy, process, processGone);
             if (e instanceof RuntimeException runtimeException) {
                 throw runtimeException;
@@ -288,11 +282,9 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
         if (copy == null) {
             return;
         }
-        try (Stream<Path> paths = Files.walk(copy)) {
-            for (Path path : (Iterable<Path>) paths.sorted(Comparator.reverseOrder())::iterator) {
-                Files.deleteIfExists(path);
-            }
-        } catch (IOException | RuntimeException e) {
+        try {
+            FileTrees.delete(copy);
+        } catch (IOException e) {
             LOG.warnv("Could not delete the code copy {0}: {1}", copy, e.getMessage());
         }
     }
@@ -326,20 +318,11 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
                                      Optional<SessionCreds> roleCredentials) {
         List<String> env = LambdaRuntimeEnv.of(fn, LOOPBACK + ":" + runtimeApiServer.getPort(), logGroup, logStream);
         env.add("LAMBDA_TASK_ROOT=" + taskRoot);
+        // Lambda's defaults, which the Lambda images set and a host process would otherwise take from the host.
+        env.add("TZ=:UTC");
+        env.add("LANG=en_US.UTF-8");
         env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), flociEndpoint, roleCredentials, accountId));
-        if (fn.getEnvironment() != null) {
-            // Same credential rule as the docker launcher: an execution role session wins, and otherwise
-            // the function's own credentials apply only as a full triad.
-            boolean userCredentialsApply = roleCredentials.isEmpty()
-                    && ContainerLauncher.definesFullCredentialTriad(fn.getEnvironment());
-            fn.getEnvironment().forEach((key, value) -> {
-                if (!ContainerLauncher.isAwsCredentialVariable(key) || userCredentialsApply) {
-                    env.add(key + "=" + value);
-                }
-            });
-        }
-        env.removeIf(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION="));
-        env.add("AWS_LAMBDA_FUNCTION_VERSION=" + fn.getVersion());
+        LambdaRuntimeEnv.addFunctionEnvironment(env, fn, roleCredentials.isPresent());
         return env;
     }
 
