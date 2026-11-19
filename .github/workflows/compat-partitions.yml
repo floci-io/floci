@@ -172,9 +172,11 @@ jobs:
   # compression delivery test needs that library, in the commercial partition on an amd64 runner.
   sdk-test-python-amd64:
     name: sdk-test-python / amd64
+    # A dispatch that names a region is about that partition alone, so it skips this job.
     if: >-
       !github.event.repository.fork
-      && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+      && ((github.event_name == 'workflow_dispatch' && !inputs.region)
+        || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -264,6 +266,14 @@ jobs:
         uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2
         with:
           paths: test-results/*.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compat-amd64-results
+          path: test-results/
+          if-no-files-found: warn
 
       - name: Dump floci logs
         if: failure() || cancelled()
