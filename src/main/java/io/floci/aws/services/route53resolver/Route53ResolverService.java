@@ -26,6 +26,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -559,15 +560,37 @@ public class Route53ResolverService {
             return rules;
         }
         for (JsonNode filter : filters) {
-            String field = RULE_FILTER_FIELDS.get(filter.path("Name").asText("").replace("_", "").toLowerCase());
+            String name = filter.path("Name").asText("");
+            if (name.isEmpty() || name.length() > 64) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
+            }
+            List<String> values = new ArrayList<>();
+            for (JsonNode value : filter.path("Values")) {
+                if (value.asText().isEmpty() || value.asText().length() > 600) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
+                }
+                values.add(value.asText());
+            }
+            String field = RULE_FILTER_FIELDS.get(name.replace("_", "").toLowerCase(Locale.ROOT));
             if (field == null) {
                 continue;
             }
-            List<String> values = new ArrayList<>();
-            filter.path("Values").forEach(value -> values.add(value.asText()));
-            rules = rules.stream().filter(rule -> values.contains(text(rule, field))).toList();
+            boolean domain = "DomainName".equals(field);
+            rules = rules.stream()
+                    .filter(rule -> values.stream().anyMatch(value -> domain
+                            ? withoutTrailingDot(value).equalsIgnoreCase(withoutTrailingDot(text(rule, field)))
+                            : value.equals(text(rule, field))))
+                    .toList();
         }
         return rules;
+    }
+
+    /** A domain name without its trailing dot; the filter contract has one and CreateResolverRule takes either. */
+    private static String withoutTrailingDot(String domainName) {
+        if (domainName == null) {
+            return "";
+        }
+        return domainName.endsWith(".") ? domainName.substring(0, domainName.length() - 1) : domainName;
     }
 
     public ObjectNode updateResolverRule(String id, JsonNode config, String region) {

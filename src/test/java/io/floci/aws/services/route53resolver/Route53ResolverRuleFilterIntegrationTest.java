@@ -8,10 +8,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.empty;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * ListResolverRules returns the rules matching every filter, a filter matching on any of its values, and takes the
@@ -52,6 +52,27 @@ class Route53ResolverRuleFilterIntegrationTest {
         }
     }
 
+    @Test
+    void listResolverRulesMatchesADomainWithOrWithoutTheTrailingDot() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String ruleId = createRule("rule-dot-" + suffix, "FORWARD", "dot-" + suffix + ".example.com");
+        try {
+            list("{\"Name\":\"DomainName\",\"Values\":[\"dot-" + suffix + ".example.com.\"]}")
+                    .body("ResolverRules.Id", contains(ruleId));
+        } finally {
+            call("DeleteResolverRule", "{\"ResolverRuleId\":\"" + ruleId + "\"}");
+        }
+    }
+
+    @Test
+    void listResolverRulesRejectsAnEmptyFilterNameOrValue() {
+        for (String filter : new String[] {"{\"Name\":\"\",\"Values\":[\"x\"]}",
+                "{\"Name\":\"Name\",\"Values\":[\"\"]}"}) {
+            call("ListResolverRules", "{\"Filters\":[" + filter + "]}").statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+        }
+    }
+
     private static String createRule(String name, String type, String domain) {
         return call("CreateResolverRule", "{\"CreatorRequestId\":\"" + name + "\",\"Name\":\"" + name
                 + "\",\"RuleType\":\"" + type + "\",\"DomainName\":\"" + domain + "\"}")
@@ -63,12 +84,6 @@ class Route53ResolverRuleFilterIntegrationTest {
     }
 
     private static ValidatableResponse call(String action, String body) {
-        return given()
-                .contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "Route53Resolver." + action)
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + REGION
-                        + "/route53resolver/aws4_request")
-                .body(body)
-                .when().post("/").then();
+        return Route53ResolverRegionScopingIntegrationTest.call(REGION, action, body);
     }
 }
