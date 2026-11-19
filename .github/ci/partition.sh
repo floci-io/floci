@@ -16,6 +16,7 @@ not force minutes of Docker work onto the same shard.
 Deterministic: sorted inputs, greedy least-loaded bin-packing, no RNG/timestamps.
 Exit 2 on bad arguments or an unreadable input file.
 """
+import json
 import os
 import re
 import sys
@@ -23,12 +24,10 @@ import sys
 AUGMENTATION_WEIGHT = 10  # one augmentation ~ 5.4s ~ 10 average test classes
 
 # Classes that take far longer than the suite's average, keyed by class name so package renames
-# retain their weight. The EMR runner took 651s on GitHub's runners on 2026-11-12; at its old
-# 280s weight, its shard ran into Surefire's 1500s while others finished in 16 to 20 minutes.
-# Hive steps now run only in nightly checks and no longer need a routine-shard weight.
-SLOW_CLASSES = {
-    'EmrDockerRunnerDockerIntegrationTest': 650,
-}
+# retain their weight, as {"ClassName": seconds}. None today: the EMR runner (651s on GitHub's
+# runners on 2026-11-12) and the Hive steps now run only in the nightly checks. The tests pass
+# their own through PARTITION_SLOW_CLASSES, a JSON object of the same shape.
+SLOW_CLASSES = json.loads(os.environ.get('PARTITION_SLOW_CLASSES', '{}'))
 SECONDS_PER_CLASS = 1.2  # the suite's mean: 4212s over 3451 classes on 2026-11-09
 
 def weight(cls):

@@ -111,23 +111,23 @@ grep -qE '/apigateway/|/apigatewayv2/|/lambda/' "$SHARD_FILE" && ecr public.ecr.
 grep -qE '/lambdaweb/' "$SHARD_FILE" && ecr public.ecr.aws/lambda/nodejs:24
 starts SwfLambdaIntegrationTest && ecr public.ecr.aws/lambda/python:3.12
 starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/python:3.14
-# EmrDockerRunnerDockerIntegrationTest runs EMR steps and EMR Serverless job runs in the emr-7.5.0 image the runner's
+# EmrDockerRunnerNightlyIntegrationTest runs EMR steps and EMR Serverless job runs in the emr-7.5.0 image the runner's
 # default template names (EmrServerlessSparkRunner), 3.5 GB, so it is queued last, behind the Lambda runtimes;
 # Of the nightly checks, EmrHiveStepsNightlyIntegrationTest runs a cluster's other steps in it,
 # EmrServerlessCustomImageNightlyIntegrationTest builds its custom image on it,
 # EmrFlociContainerNightlyIntegrationTest runs a cluster's steps in it from Floci in a container,
 # EmrPigStepsNightlyIntegrationTest a cluster's Pig steps, EmrAppUiNightlyIntegrationTest a MapReduce step,
 # and EmrClusterShrinkNightlyIntegrationTest a cluster shrink.
-starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrServerlessCustomImageNightlyIntegrationTest \
+starts EmrDockerRunnerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrServerlessCustomImageNightlyIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrNotebookExecutionNightlyIntegrationTest \
     EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 # EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
-# HDFS in it, EmrDockerRunnerDockerIntegrationTest's and the nightly EmrFlociContainerNightlyIntegrationTest's,
+# HDFS in it, EmrDockerRunnerNightlyIntegrationTest's and the nightly EmrFlociContainerNightlyIntegrationTest's,
 # EmrPigStepsNightlyIntegrationTest's and EmrSessionServerNightlyIntegrationTest's included (an emr-spark-* cluster's
 # Hadoop comes from it too).
-starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerDockerIntegrationTest \
+starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerNightlyIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrSessionServerNightlyIntegrationTest \
     EmrNotebookExecutionNightlyIntegrationTest EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
