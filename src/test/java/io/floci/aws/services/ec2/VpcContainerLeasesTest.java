@@ -16,8 +16,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BooleanSupplier;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -99,8 +99,8 @@ class VpcContainerLeasesTest {
         assertTrue(leases.holdsVpc(ACCOUNT, REGION, "vpc-1"), "a container still present keeps the address");
 
         inspect.set(new NotFoundException("gone"));
-        awaitTrue(() -> !leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"),
-                "the address should be given back once a background look finds the container gone");
+        await("the address should be given back once a background look finds the container gone")
+                .atMost(Duration.ofSeconds(5)).until(() -> !leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"));
         verify(ec2, timeout(5_000)).releaseVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.20");
     }
 
@@ -132,15 +132,17 @@ class VpcContainerLeasesTest {
             }
             long tookMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
             assertTrue(tookMillis < 3_000, "each check should wait at most the recheck wait, took " + tookMillis + " ms");
-            awaitTrue(() -> inspects.get() == 2, "one background look should be running");
-            Thread.sleep(200);
+            // The look is still blocked in Docker, so each of the ten checks could only join it: one more
+            // inspect after the removal's own means none of them started a second look.
+            await("one background look should be running").atMost(Duration.ofSeconds(5))
+                    .until(() -> inspects.get() >= 2);
             assertEquals(2, inspects.get(), "asking again while a look runs starts no second one");
         } finally {
             daemonAnswers.countDown();
         }
 
-        awaitTrue(() -> !leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"),
-                "the address should be given back once Docker says the container is gone");
+        await("the address should be given back once Docker says the container is gone")
+                .atMost(Duration.ofSeconds(5)).until(() -> !leases.holdsSubnet(ACCOUNT, REGION, "subnet-1"));
     }
 
     // Catches: the first DeleteSubnet after an unconfirmed removal getting DependencyViolation even
@@ -214,7 +216,8 @@ class VpcContainerLeasesTest {
         leases.releaseIfGone("c2");
         daemonAnswers.countDown();
 
-        awaitTrue(() -> leases.lease("c2").isEmpty(), "the running look should also take up c2");
+        await("the running look should also take up c2").atMost(Duration.ofSeconds(5))
+                .until(() -> leases.lease("c2").isEmpty());
     }
 
     private void join(String containerId, String address) {
@@ -222,13 +225,5 @@ class VpcContainerLeasesTest {
                 .thenReturn(Optional.of(address));
         assertEquals(address, leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", containerId, "r-" + containerId)
                 .orElseThrow().address());
-    }
-
-    private static void awaitTrue(BooleanSupplier condition, String message) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (!condition.getAsBoolean()) {
-            assertTrue(System.nanoTime() < deadline, message);
-            Thread.sleep(20);
-        }
     }
 }
