@@ -22,7 +22,7 @@ public class DsqlCluster {
     private String status;
     private Instant creationTime;
     private boolean deletionProtectionEnabled;
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
     private String kmsEncryptionKey;
     private String endpoint;
     private String clientToken;

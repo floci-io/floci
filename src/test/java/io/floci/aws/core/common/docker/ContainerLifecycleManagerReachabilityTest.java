@@ -16,7 +16,10 @@ class ContainerLifecycleManagerReachabilityTest {
         DockerClient docker = mock(DockerClient.class);
         when(docker.pingCmd()).thenReturn(mock(PingCmd.class));
 
-        assertTrue(new ContainerLifecycleManager(docker, null, null, null).isDockerReachable());
+        DockerClient streaming = mock(DockerClient.class);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, streaming, null, null, null);
+
+        assertTrue(manager.isDockerReachable());
     }
 
     // Catches: a missing daemon surfacing as an exception from the probe, which callers use to tell a
@@ -28,6 +31,9 @@ class ContainerLifecycleManagerReachabilityTest {
         when(ping.exec()).thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
         when(docker.pingCmd()).thenReturn(ping);
 
-        assertFalse(new ContainerLifecycleManager(docker, null, null, null).isDockerReachable());
+        DockerClient streaming = mock(DockerClient.class);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, streaming, null, null, null);
+
+        assertFalse(manager.isDockerReachable());
     }
 }

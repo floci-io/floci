@@ -294,11 +294,11 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
-              "sqs")
+              "sqs", "sns", "kinesis", "pipes", "dsql")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
-              "resource-groups", "s3", "sns", "sts")
+HAND_BUILT = ("apigateway", "bedrock", "dynamodb", "eks", "iam", "kms", "logs", "resource-groups",
+              "s3", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
 _LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
@@ -367,6 +367,12 @@ _SNAPSHOT_KEY_EVIDENCE = (
     "customer managed key, a user must have permission to call the following operations on the customer managed key', "
     "kms:Decrypt among them; the Service Reference lists no KMS action for either restore")
 MEASURED: dict[str, tuple[list[dict], str]] = {
+    "dsql:ListClusters": (
+        [{"type": "Cluster", "fill": {}}],
+        "AWS's AccessDenied message recorded verbatim in https://github.com/floci-io/floci/pull/6328 (Aurora DSQL, "
+        "eu-west-1, 2026-10-23): a session policy denying dsql:CreateCluster and dsql:ListClusters refused both "
+        "'... on resource: arn:aws:dsql:eu-west-1:<account>:cluster/* with an explicit deny in a session policy'; the "
+        "Service Reference lists no resource type for ListClusters"),
     "dynamodb:ListTables": (
         [{"type": "table", "fill": {}}],
         "real AWS probes in https://github.com/floci-io/floci/pull/7336 (27 policy cases with real AWS STS role "

@@ -215,8 +215,14 @@ public final class UserDataPipeline {
         return text;
     }
 
+    /**
+     * @param dockerClient          copies the scripts in, creates and inspects their execs
+     * @param streamingDockerClient carries each script's output, a stream that stays open for as long as the
+     *                              script runs, so it holds a streaming lease rather than a control-plane one
+     */
     public static ExecutionResult executeUserData(
             DockerClient dockerClient,
+            DockerClient streamingDockerClient,
             String containerId,
             String contextDescription,
             String userData,
@@ -224,12 +230,13 @@ public final class UserDataPipeline {
             Consumer<String> outputLineConsumer,
             Set<ResultCallback<Frame>> activeCallbacks
     ) {
-        return executeUserData(dockerClient, containerId, contextDescription, userData, timeout,
+        return executeUserData(dockerClient, streamingDockerClient, containerId, contextDescription, userData, timeout,
                 outputLineConsumer, activeCallbacks, RetryingTarCopier.DEFAULT_BACKOFF_MS);
     }
 
     static ExecutionResult executeUserData(
             DockerClient dockerClient,
+            DockerClient streamingDockerClient,
             String containerId,
             String contextDescription,
             String userData,
@@ -238,7 +245,7 @@ public final class UserDataPipeline {
             Set<ResultCallback<Frame>> activeCallbacks,
             long archiveRetryBackoffMillis
     ) {
-        if (dockerClient == null || containerId == null || containerId.isBlank()) {
+        if (dockerClient == null || streamingDockerClient == null || containerId == null || containerId.isBlank()) {
             return ExecutionResult.skipped("No container available");
         }
         List<String> shellScripts = extractShellScripts(userData);
@@ -252,7 +259,8 @@ public final class UserDataPipeline {
             int partCount = shellScripts.size();
             String scriptContent = shellScripts.get(i);
             ExecutionResult partResult = executeSingleScript(
-                    dockerClient, containerId, contextDescription, scriptContent, partNumber, partCount,
+                    dockerClient, streamingDockerClient, containerId, contextDescription, scriptContent, partNumber,
+                    partCount,
                     effectiveTimeout, outputLineConsumer, activeCallbacks, archiveRetryBackoffMillis);
             if (!partResult.isSuccess()) {
                 return partResult;
@@ -263,6 +271,7 @@ public final class UserDataPipeline {
 
     private static ExecutionResult executeSingleScript(
             DockerClient dockerClient,
+            DockerClient streamingDockerClient,
             String containerId,
             String contextDescription,
             String scriptContent,
@@ -345,7 +354,7 @@ public final class UserDataPipeline {
             }
 
             try {
-                dockerClient.execStartCmd(execId).exec(callback);
+                streamingDockerClient.execStartCmd(execId).exec(callback);
 
                 boolean completed = latch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
                 if (!completed) {

@@ -279,7 +279,7 @@ class SesTemplateV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>InvalidTemplate</Code>"));
+            .body(containsString("<Code>InvalidParameterValue</Code>"));
     }
 
     @Test

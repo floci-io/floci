@@ -1712,11 +1712,22 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     public void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout, String region) {
-        changeMessageVisibility(queueUrl, receiptHandle, visibilityTimeout, region, false);
+        changeMessageVisibility(queueUrl, receiptHandle, null, visibilityTimeout, region, false);
     }
 
-    private void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout,
-                                         String region, boolean inBatch) {
+    /**
+     * Changes a message's visibility timeout unless its visibility is no longer
+     * {@code expectedVisibleAt}: a consumer that called ChangeMessageVisibility since keeps the
+     * timeout it set. Returns whether the timeout was changed.
+     */
+    public boolean changeMessageVisibilityIfUnchanged(String queueUrl, String receiptHandle,
+                                                      Instant expectedVisibleAt, int visibilityTimeout,
+                                                      String region) {
+        return changeMessageVisibility(queueUrl, receiptHandle, expectedVisibleAt, visibilityTimeout, region, false);
+    }
+
+    private boolean changeMessageVisibility(String queueUrl, String receiptHandle, Instant expectedVisibleAt,
+                                            int visibilityTimeout, String region, boolean inBatch) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -1725,12 +1736,14 @@ public class SqsService implements Resettable, ResourceProvider {
 
         GuardedMessageQueue messages = getOrCreateQueue(storageKey);
         messages.activity().accessed();
-        GuardedMessageQueue.HandleResult result = messages.changeVisibility(handle, visibilityTimeout, queue.isFifo());
+        GuardedMessageQueue.HandleResult result =
+                messages.changeVisibility(handle, expectedVisibleAt, visibilityTimeout, queue.isFifo());
         rejectUnusableHandle(result, receiptHandle, inBatch);
         if (result == GuardedMessageQueue.HandleResult.MESSAGE_GONE) {
             throw invalidReceiptHandle(receiptHandle,
                     "Message does not exist or is not available for visibility timeout change", inBatch);
         }
+        return result == GuardedMessageQueue.HandleResult.APPLIED;
     }
 
     private static void rejectUnusableHandle(GuardedMessageQueue.HandleResult result, String receiptHandle,
@@ -2096,7 +2109,7 @@ public class SqsService implements Resettable, ResourceProvider {
         List<BatchResultEntry> results = new ArrayList<>();
         for (ChangeVisibilityBatchEntry entry : entries) {
             try {
-                changeMessageVisibility(queueUrl, entry.receiptHandle(), entry.visibilityTimeout(), region, true);
+                changeMessageVisibility(queueUrl, entry.receiptHandle(), null, entry.visibilityTimeout(), region, true);
                 results.add(new BatchResultEntry(entry.id(), true, null, null));
             } catch (AwsException e) {
                 results.add(new BatchResultEntry(entry.id(), false, e.getErrorCode(), e.getMessage()));

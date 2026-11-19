@@ -2,6 +2,7 @@ package io.floci.aws.services.ses;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.ses.mime.SesTestSignature;
 import io.floci.aws.services.ses.model.ConfigurationSet;
 import io.floci.aws.services.ses.model.CustomVerificationEmailTemplate;
 import io.floci.aws.services.ses.model.EmailContent;
@@ -66,7 +67,7 @@ class SesServiceSmtpTest {
     @Test
     void sendCustomVerificationEmail_signatureInTheTemplateSubject_isRejectedAndNotRelayed() {
         // The scan covers the subject as well as the content, and neither reaches the relay.
-        cvetTemplate("cvet-subject", SesContentScan.signature(), "<p>clean</p>");
+        cvetTemplate("cvet-subject", SesTestSignature.value(), "<p>clean</p>");
 
         String messageId = service.sendCustomVerificationEmail("target@example.com", "cvet-subject",
                 null, "us-east-1");
@@ -78,7 +79,7 @@ class SesServiceSmtpTest {
 
     @Test
     void sendCustomVerificationEmail_signatureInTheTemplateContent_isRejectedAndNotRelayed() {
-        cvetTemplate("cvet-content", "clean", "<p>" + SesContentScan.signature() + "</p>");
+        cvetTemplate("cvet-content", "clean", "<p>" + SesTestSignature.value() + "</p>");
 
         String messageId = service.sendCustomVerificationEmail("target@example.com", "cvet-content",
                 null, "us-east-1");
@@ -186,7 +187,7 @@ class SesServiceSmtpTest {
                 .toAddresses(List.of("to@example.com"))
                 .region("us-east-1")
                 .content(new EmailContent.Simple("Subject", "clean", null, List.of(),
-                        List.of(pdfAttachment(SesContentScan.signature().getBytes(StandardCharsets.US_ASCII)))))
+                        List.of(pdfAttachment(SesTestSignature.value().getBytes(StandardCharsets.US_ASCII)))))
                 .build());
 
         SentEmail stored = storedEmail(messageId);
@@ -261,7 +262,7 @@ class SesServiceSmtpTest {
         identities.verifyEmailIdentity("bounces@example.com", "us-east-1");
         identities.verifyEmailIdentity("bounces@evil.example", "us-east-1");
         String raw = "From: from@example.com\r\nTo: to@example.com\r\nReturn-Path: <bounces@evil.example>\r\n"
-                + "Subject: " + SesContentScan.signature() + "\r\n\r\nbody\r\n";
+                + "Subject: " + SesTestSignature.value() + "\r\n\r\nbody\r\n";
 
         String messageId = service.sendEmail(SendEmailRequest.builder()
                 .source("from@example.com")

@@ -35,7 +35,7 @@ import java.util.Map;
  *   {@code floci.services.emrserverless.runner-mode=docker} run a cluster's steps and an EMR
  *   Serverless application's job runs in containers of the release's image, and
  *   {@code floci.services.emrserverless.executor-containers=2} a Spark job run's executors each in a
- *   container of its own. {@code EmrDockerRunnerDockerIntegrationTest},
+ *   container of its own. {@code EmrDockerRunnerNightlyIntegrationTest},
  *   {@code EmrServerlessHiveDockerIntegrationTest} and the EMR nightly checks rely on them.</li>
  *   <li>{@code floci.services.cloudfront.enabled=false} turns CloudFront off.
  *   {@code CloudFrontDisabledServingTest} relies on it.</li>

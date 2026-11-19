@@ -1,5 +1,6 @@
 package io.floci.aws.core.common;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -57,9 +58,11 @@ import java.util.Optional;
  * monitor or subscription; Security Hub, for the tags of a hub or a configuration policy; Control Tower, for the tags
  * of a landing zone or an enabled control; GuardDuty, for the tags of a detector or a Malware Protection plan; Cloud
  * Map, for the tags of a namespace or a service; Elastic Load Balancing, for the tags of a load balancer, a target
- * group, a listener, a rule or a Classic Load Balancer; SQS, for the tags of a queue); looked up lazily by
- * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
- * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
+ * group, a listener, a rule or a Classic Load Balancer; SQS, for the tags of a queue; SNS, for the tags of a topic;
+ * Kinesis Data Streams, for the tags of a stream or a consumer; EventBridge Pipes, for the tags of a pipe; Aurora DSQL,
+ * for the tags of a cluster); looked up lazily by {@code ResourceArnBuilder} and {@code IamConditionContextResolver}
+ * through {@code Instance<StoredResourceArns>} for the namespace a request or an ARN is of, so IAM never depends on
+ * that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
  * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone
@@ -119,6 +122,16 @@ public interface StoredResourceArns {
      */
     default Map<String, String> storedTags(String arn) {
         return Map.of();
+    }
+
+    /**
+     * {@code tags} as {@link #storedTags} answers them: in their order, a copy the caller may keep, and a tag without
+     * a value as an empty one, as a resource-tag condition key reads it.
+     */
+    static Map<String, String> withEmptyValues(Map<String, String> tags) {
+        Map<String, String> copy = new LinkedHashMap<>();
+        tags.forEach((key, value) -> copy.put(key, value == null ? "" : value));
+        return copy;
     }
 
     /**

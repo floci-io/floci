@@ -996,7 +996,9 @@ public class RdsQueryHandler {
                 optionalInt(params.getFirst("MaxAllocatedStorage")),
                 params.getFirst("StorageType"),
                 params.getFirst("CACertificateIdentifier"),
-                params.getFirst("LicenseModel"));
+                params.getFirst("LicenseModel"),
+                optionalInt(params.getFirst("Iops")),
+                optionalInt(params.getFirst("StorageThroughput")));
     }
 
     /**
@@ -3408,6 +3410,8 @@ public class RdsQueryHandler {
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
            .elem("StorageType", i.getStorageType())
+           .elem("Iops", iops(i))
+           .elem("StorageThroughput", storageThroughput(i))
            .elem("PubliclyAccessible", i.isPubliclyAccessible())
            .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", i.getPreferredMaintenanceWindow() != null
@@ -3499,6 +3503,41 @@ public class RdsQueryHandler {
                     .end("StatusInfos");
         }
         return xml.build();
+    }
+
+    /** Iops as Describe reports it: on io1, io2 and gp3, the stored value, else the gp3 baseline. */
+    private static String iops(DbInstance i) {
+        String type = i.getStorageType();
+        boolean gp3 = "gp3".equals(type);
+        if (!gp3 && !"io1".equals(type) && !"io2".equals(type)) {
+            return null;
+        }
+        if (i.getIops() != null) {
+            return i.getIops().toString();
+        }
+        return gp3 ? (gp3BaselineSteppedUp(i) ? "12000" : "3000") : null;
+    }
+
+    /** StorageThroughput as Describe reports it: on gp3 the stored value, else the baseline; 0 on any other type. */
+    private static String storageThroughput(DbInstance i) {
+        if (!"gp3".equals(i.getStorageType())) {
+            return "0";
+        }
+        if (i.getStorageThroughput() != null) {
+            return i.getStorageThroughput().toString();
+        }
+        return gp3BaselineSteppedUp(i) ? "500" : "125";
+    }
+
+    /**
+     * Whether the gp3 baseline has stepped up from 3000 IOPS / 125 MiB/s to 12000 / 500: at 400 GiB
+     * (Db2, MariaDB, MySQL, PostgreSQL) or 200 GiB (Oracle), never on SQL Server.
+     * https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage
+     */
+    private static boolean gp3BaselineSteppedUp(DbInstance i) {
+        String engine = instanceEngine(i);
+        int threshold = engine.startsWith("sqlserver") ? Integer.MAX_VALUE : engine.startsWith("oracle") ? 200 : 400;
+        return i.getAllocatedStorage() >= threshold;
     }
 
     private String vpcSecurityGroupsXml(DbInstance i) {

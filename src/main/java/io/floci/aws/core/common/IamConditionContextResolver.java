@@ -1127,7 +1127,10 @@ public class IamConditionContextResolver {
             return context;
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
-        if (!"ec2".equals(arn.service()) || !region.equals(arn.region()) || !accountId.equals(arn.accountId())) {
+        // A snapshot's and an image's ARN carries no account (arn:aws:ec2:<region>::snapshot/<id>), which is not a
+        // foreign one: EC2 reads the id in the caller's account, as it reads every other one.
+        if (!"ec2".equals(arn.service()) || !region.equals(arn.region())
+                || AwsArnUtils.isForeignAccount(arn, accountId)) {
             return context;
         }
         String[] parts = arn.resource().split("/", 2);

@@ -159,9 +159,9 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. Pipes and DSQL ARNs are minted in
-     * {@code partition}, the request's, as those services mint theirs, so a Region no partition publishes gets
-     * the deployment's partition rather than {@code aws}.
+     * The resources a request is checked against. API Gateway ARNs are minted in {@code partition}, the request's, as
+     * that service mints its own, so a Region no partition publishes gets the deployment's partition rather than
+     * {@code aws}.
      */
     public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
                                        String region, String accountId, String partition) {
@@ -185,13 +185,9 @@ public class ResourceArnBuilder {
                 : IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
             case "s3"             -> buildS3Resources(operation, path, ctx, region);
-            case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
-            case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
-            case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
-            case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
@@ -938,39 +934,6 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resource of an Aurora DSQL route, as the Service Authorization Reference names it: the cluster
-     * a cluster route names, the stream a stream route names (its cluster, to create or list streams), or
-     * the ARN a tagging route names. CreateCluster and ListClusters are checked against
-     * {@code cluster/*}, as DSQL checks them (measured).
-     */
-    private String buildDsqlArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                String partition) {
-        String cluster = "/cluster".equals(path) ? "*" : segmentAfterPrefix(path, "/cluster/");
-        if (cluster == null) {
-            cluster = segmentAfterPrefix(path, "/clusters/");
-        }
-        String streamCluster = segmentAfterPrefix(path, "/stream/");
-        if (streamCluster != null) {
-            String stream = segmentAfterPrefix(path, "/stream/" + streamCluster + "/");
-            cluster = stream == null ? streamCluster : streamCluster + "/stream/" + stream;
-        }
-        if (cluster != null) {
-            return new AwsArnUtils.Arn(partition, "dsql", region, accountId, "cluster/" + cluster).toString();
-        }
-        return taggedResource(ctx);
-    }
-
-    /** The resource of an EventBridge Pipes route: {@code pipe/<name>}, or the ARN a tagging route names. */
-    private String buildPipesArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                 String partition) {
-        String pipe = segmentAfterPrefix(path, "/v1/pipes/");
-        if (pipe != null) {
-            return new AwsArnUtils.Arn(partition, "pipes", region, accountId, "pipe/" + pipe).toString();
-        }
-        return taggedResource(ctx);
-    }
-
-    /**
      * API Gateway authorizes a management call as its HTTP method on the path it names, in the Region serving
      * it and with no account: {@code GET /restapis/abc/stages} acts on
      * {@code arn:<partition>:apigateway:<region>::/restapis/abc/stages}. The path is read as the router reads
@@ -1130,12 +1093,6 @@ public class ResourceArnBuilder {
                 .filter(arn -> region.equals(AwsArnUtils.regionOrDefault(arn, null)));
     }
 
-    /** The ARN a shared tagging route names, or {@code *} for any other route. */
-    private String taggedResource(ContainerRequestContext ctx) {
-        String arn = taggedArn(ctx);
-        return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
-    }
-
     /**
      * The ARN a shared tagging route acts on, read where its controller reads it: after {@code /tags/} or
      * {@code /v1/tags/} in the path; on {@code POST /tags}, the body's {@code resourceArn}; and on the other
@@ -1171,17 +1128,6 @@ public class ResourceArnBuilder {
         }
     }
 
-    /** The path segment right after {@code prefix}, or null when the path doesn't start with it or names none. */
-    private static String segmentAfterPrefix(String path, String prefix) {
-        if (!path.startsWith(prefix)) {
-            return null;
-        }
-        String rest = path.substring(prefix.length());
-        int slash = rest.indexOf('/');
-        String segment = slash < 0 ? rest : rest.substring(0, slash);
-        return segment.isEmpty() ? null : segment;
-    }
-
     // ── Bedrock ──────────────────────────────────────────────────────────────────
 
     /**
@@ -1198,20 +1144,6 @@ public class ResourceArnBuilder {
             resourceArn = body == null ? null : body.path("resourceArn").asText(null);
         }
         return AwsArnUtils.isArn(resourceArn) ? resourceArn : "*";
-    }
-
-    // ── SNS ─────────────────────────────────────────────────────────────────────
-    private String buildSnsArn(ContainerRequestContext ctx, String region, String accountId) {
-        String topicArn = firstFormParam(ctx, "TopicArn");
-        if (topicArn == null) {
-            JsonNode json = readJsonBody(ctx);
-            if (json != null && json.isObject() && json.hasNonNull("TopicArn")) {
-                topicArn = json.get("TopicArn").asText().trim();
-            }
-        }
-        return (topicArn != null && !topicArn.isEmpty())
-                ? topicArn
-                : AwsArnUtils.Arn.of("sns", region, accountId, "*").toString();
     }
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
@@ -1373,35 +1305,6 @@ public class ResourceArnBuilder {
             return tableName;
         }
         return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
-    }
-
-    // ── Kinesis ──────────────────────────────────────────────────────────────────
-    private String buildKinesisArn(ContainerRequestContext ctx, String region, String accountId) {
-        JsonNode json = readJsonBody(ctx);
-        if (json != null && json.isObject()) {
-            if (json.hasNonNull("StreamARN")) {
-                String streamArn = json.get("StreamARN").asText().trim();
-                if (!streamArn.isEmpty()) {
-                    return streamArn;
-                }
-            }
-            if (json.hasNonNull("StreamName")) {
-                String streamName = json.get("StreamName").asText().trim();
-                if (!streamName.isEmpty()) {
-                    if (AwsArnUtils.isArnFor(streamName, "kinesis")) {
-                        return streamName;
-                    }
-                    return AwsArnUtils.Arn.of("kinesis", region, accountId, "stream/" + streamName).toString();
-                }
-            }
-            if (json.hasNonNull("ResourceARN")) {
-                String resourceArn = json.get("ResourceARN").asText().trim();
-                if (!resourceArn.isEmpty()) {
-                    return resourceArn;
-                }
-            }
-        }
-        return AwsArnUtils.Arn.of("kinesis", region, accountId, "stream/*").toString();
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────

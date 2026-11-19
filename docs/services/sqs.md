@@ -243,3 +243,12 @@ does not begin a new delay or visibility period.
 Older stored messages without these fields still load as visible messages. Delivery state
 that an older version did not save cannot be reconstructed. Hybrid mode retains its
 configured flush window; this does not add synchronous durability to hybrid storage.
+
+### IAM resource tags
+
+With IAM enforcement enabled, queue operations use the exact queue's stored tags
+for `aws:ResourceTag` conditions. The lookup reads the ARN's account, Region and
+partition and observes tag changes immediately, including for cross-account
+requests. A matching tag does not replace the queue policy grant required for
+cross-account access; another queue's tags cannot satisfy the target queue's
+condition.

@@ -1,4 +1,4 @@
-package io.floci.aws.services.ses;
+package io.floci.aws.services.ses.mime;
 
 import org.apache.james.mime4j.codec.DecodeMonitor;
 import org.apache.james.mime4j.codec.DecoderUtil;
@@ -32,7 +32,7 @@ import java.util.Set;
  * logged, and is exposed to tests only through {@link #signature()} so no test source carries it
  * either. A message that trips the scan is likewise never persisted with its body.
  */
-final class SesContentScan {
+public final class SesContentScan {
 
     private static final Logger LOG = Logger.getLogger(SesContentScan.class);
 
@@ -68,12 +68,12 @@ final class SesContentScan {
     }
 
     /** True when any of the given texts carries the test signature. Nulls are skipped. */
-    static boolean containsTestVirus(String... texts) {
+    public static boolean containsTestVirus(String... texts) {
         return containsTestVirus(Arrays.asList(texts));
     }
 
     /** True when any of the given texts carries the test signature. Nulls are skipped. */
-    static boolean containsTestVirus(Iterable<String> texts) {
+    public static boolean containsTestVirus(Iterable<String> texts) {
         for (String text : texts) {
             if (text != null && text.contains(SIGNATURE_TEXT)) {
                 return true;
@@ -83,7 +83,7 @@ final class SesContentScan {
     }
 
     /** The outcome of scanning a raw message. */
-    enum Result {
+    public enum Result {
         CLEAN,
         REJECTED,
         /** The parser could not read the message, so only the wire bytes were checked. */
@@ -91,7 +91,7 @@ final class SesContentScan {
     }
 
     /** Scans a raw message from its wire bytes and the parse of them, {@code null} when it failed. */
-    static Result scan(byte[] mime, Message parsed) {
+    public static Result scan(byte[] mime, Message parsed) {
         if (mime == null || mime.length == 0) {
             return Result.CLEAN;
         }
@@ -113,20 +113,12 @@ final class SesContentScan {
         }
     }
 
-    /** Scans a raw message, parsing it first; the parse is shared with the send path elsewhere. */
-    static Result scan(byte[] mime) {
-        if (mime == null || mime.length == 0) {
-            return Result.CLEAN;
-        }
-        return scan(mime, SmtpRelay.parseMime(mime));
-    }
-
     /**
      * True when any part of the parsed message, forwarded messages included, carries a file name
      * whose extension SES refuses. The name is read from {@code Content-Disposition} and, failing
      * that, from the {@code name} parameter of {@code Content-Type}.
      */
-    static boolean hasBlockedAttachment(Message parsed) {
+    public static boolean hasBlockedAttachment(Message parsed) {
         if (parsed == null) {
             return false;
         }

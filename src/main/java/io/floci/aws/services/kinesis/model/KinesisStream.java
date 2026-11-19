@@ -26,7 +26,7 @@ public class KinesisStream {
     private volatile List<KinesisShard> shards = new CopyOnWriteArrayList<>();
     private int retentionPeriodHours = 24;
     private Instant streamCreationTimestamp;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
     private String encryptionType = "NONE";
     private String keyId;
     private String streamMode = "PROVISIONED";

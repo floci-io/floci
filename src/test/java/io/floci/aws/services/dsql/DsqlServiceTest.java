@@ -135,6 +135,28 @@ class DsqlServiceTest {
     }
 
     @Test
+    void iamReadsTheTagsTheClusterItsArnNamesHoldsInTheRequestsAccount() {
+        DsqlStoredResourceArns stored = new DsqlStoredResourceArns(service, new RegionResolver(REGION, ACCOUNT));
+        DsqlCluster cluster = service.createCluster(REGION, false, null, Map.of("team", "data"), null, null, null,
+                null, false);
+        String arn = cluster.getArn();
+        assertEquals(Map.of("team", "data"), stored.storedTags(arn));
+
+        service.tagResource(REGION, arn, Map.of("env", "test"));
+        service.untagResource(REGION, arn, List.of("team"));
+        assertEquals(Map.of("env", "test"), stored.storedTags(arn));
+        // Another account's cluster, another Region's, a stream of the cluster or a cluster Floci does not hold
+        // names no tags Floci holds.
+        String id = cluster.getIdentifier();
+        assertEquals(Map.of(), stored.storedTags("arn:aws:dsql:" + REGION + ":444455556666:cluster/" + id));
+        assertEquals(Map.of(), stored.storedTags("arn:aws:dsql:eu-west-2:" + ACCOUNT + ":cluster/" + id));
+        assertEquals(Map.of(), stored.storedTags(arn + "/stream/s1"));
+        assertEquals(Map.of(), stored.storedTags("arn:aws:dsql:" + REGION + ":" + ACCOUNT
+                + ":cluster/aaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assertEquals(Map.of(), stored.storedTags("arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":cluster/" + id));
+    }
+
+    @Test
     void aTagCallRefusesWhatIsNoClusterOfTheRegion() {
         DsqlCluster cluster = cluster();
         String missing = "arn:aws:dsql:" + REGION + ":" + ACCOUNT + ":cluster/aaaaaaaaaaaaaaaaaaaaaaaaaa";

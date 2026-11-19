@@ -1304,19 +1304,28 @@ class ResourceArnBuilderTest {
 
     // ── Kinesis ──────────────────────────────────────────────────────────────────
 
+    /** A Kinesis request is checked on the stream its StreamName or StreamARN names, read from the generated table. */
     @Test
-    void kinesisBuildsArnFromStreamName() {
+    void kinesisChecksTheStreamItsNameOrArnNames() {
         setJsonBody("{\"StreamName\":\"order-events\"}");
-        String arn = builder.build("kinesis", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:kinesis:us-east-1:000000000000:stream/order-events", arn);
-    }
-
-    @Test
-    void kinesisBuildsArnFromStreamArn() {
+        assertEquals(List.of("arn:aws:kinesis:us-east-1:000000000000:stream/order-events"),
+                builder.buildResources("kinesis", "kinesis:PutRecord", ctx, "us-east-1", ACCOUNT, "aws"));
         String fullArn = "arn:aws:kinesis:us-east-1:000000000000:stream/order-events";
         setJsonBody("{\"StreamARN\":\"" + fullArn + "\"}");
-        String arn = builder.build("kinesis", ctx, "us-east-1", "000000000000");
-        assertEquals(fullArn, arn);
+        assertEquals(List.of(fullArn),
+                builder.buildResources("kinesis", "kinesis:DescribeStreamSummary", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /** A consumer is checked on its ARN, and a tag call on the resource its ResourceARN names. */
+    @Test
+    void kinesisChecksAConsumerAndATaggedResourceOnTheirArns() {
+        String consumer = "arn:aws:kinesis:us-east-1:000000000000:stream/order-events/consumer/reader:1700000000";
+        setJsonBody("{\"ConsumerARN\":\"" + consumer + "\"}");
+        assertEquals(List.of(consumer),
+                builder.buildResources("kinesis", "kinesis:DescribeStreamConsumer", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceARN\":\"" + consumer + "\",\"Tags\":{}}");
+        assertEquals(List.of(consumer),
+                builder.buildResources("kinesis", "kinesis:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── Secrets Manager ──────────────────────────────────────────────────────────
@@ -1795,7 +1804,7 @@ class ResourceArnBuilderTest {
         for (String queue : queues) {
             sqs.createQueue(queue, Map.of(), "us-east-1");
         }
-        return reading(new SqsStoredResourceArns(sqs, new RegionResolver("us-east-1", ACCOUNT)));
+        return reading(new SqsStoredResourceArns(sqs));
     }
 
     /**
@@ -1885,20 +1894,35 @@ class ResourceArnBuilderTest {
 
     // ── SNS ─────────────────────────────────────────────────────────────────────
 
+    /**
+     * A Query request is checked on the topic its body's TopicArn names, read from the generated table; the handler
+     * acts on the body's TopicArn, so a decoy in the query string is not checked.
+     */
     @Test
-    void snsBuildsArnFromFormBodyTopicArn() {
+    void snsChecksTheTopicAFormBodysTopicArnNames() {
         queryParams.add("TopicArn", "arn:aws:sns:us-east-1:000000000000:allowed");
         setFormBody("Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A000000000000%3Aalerts&Message=hi");
-        String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:sns:us-east-1:000000000000:alerts", arn);
+        assertEquals(List.of("arn:aws:sns:us-east-1:000000000000:alerts"),
+                builder.buildResources("sns", "sns:Publish", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     @Test
-    void snsBuildsArnFromJsonTopicArn() {
+    void snsChecksTheTopicAJsonBodysTopicArnNames() {
         String topicArn = "arn:aws:sns:us-east-1:000000000000:alerts";
         setJsonBody("{\"TopicArn\":\"" + topicArn + "\"}");
-        String arn = builder.build("sns", ctx, "us-east-1", "000000000000");
-        assertEquals(topicArn, arn);
+        assertEquals(List.of(topicArn), builder.buildResources("sns", "sns:GetTopicAttributes", ctx, "us-east-1",
+                ACCOUNT, "aws"));
+    }
+
+    /** A new topic is checked on the ARN its name gives, and a tag call on the topic its ResourceArn names. */
+    @Test
+    void snsChecksANewTopicOnItsNameAndATagCallOnItsResourceArn() {
+        setJsonBody("{\"Name\":\"alerts\"}");
+        assertEquals(List.of("arn:aws:sns:us-east-1:000000000000:alerts"),
+                builder.buildResources("sns", "sns:CreateTopic", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceArn\":\"arn:aws:sns:us-east-1:000000000000:alerts\",\"Tags\":[]}");
+        assertEquals(List.of("arn:aws:sns:us-east-1:000000000000:alerts"),
+                builder.buildResources("sns", "sns:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────
@@ -2334,35 +2358,41 @@ class ResourceArnBuilderTest {
                 AwsRegions.partitionFor(region)).getFirst();
     }
 
+    /**
+     * An Aurora DSQL route is checked on the cluster or stream its path names, or the ARN its tagging route names,
+     * from the table; CreateCluster and ListClusters on every cluster, as DSQL checks them (measured).
+     */
     @Test
-    void dsqlRoutesResolveTheClusterTheTaggedArnOrNone() {
+    void dsqlRoutesResolveTheClusterTheStreamOrTheTaggedArn() {
         String cluster = "arn:aws:dsql:eu-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz";
-        for (String path : List.of("/cluster/abcdefghijklmnopqrstuvwxyz", "/cluster/abcdefghijklmnopqrstuvwxyz/policy",
-                "/clusters/abcdefghijklmnopqrstuvwxyz/vpc-endpoint-service-name", "/tags/" + cluster)) {
-            when(uriInfo.getPath()).thenReturn(path);
-            assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"), path);
-        }
-        // The same tagging is served at /tags, the ARN in the resourceArn query parameter or body field.
-        when(uriInfo.getPath()).thenReturn("/tags");
-        queryParams.putSingle("resourceArn", cluster);
-        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        queryParams.clear();
-        when(ctx.getMethod()).thenReturn("POST");
-        setJsonBody("{\"resourceArn\":\"" + cluster + "\",\"tags\":{}}");
-        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
         when(ctx.getMethod()).thenReturn("GET");
+        request("/cluster/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of(cluster), dsql("dsql:GetCluster", "eu-west-1", "aws"));
+        request("/cluster/abcdefghijklmnopqrstuvwxyz/policy");
+        assertEquals(List.of(cluster), dsql("dsql:GetClusterPolicy", "eu-west-1", "aws"));
+        request("/clusters/abcdefghijklmnopqrstuvwxyz/vpc-endpoint-service-name");
+        assertEquals(List.of(cluster), dsql("dsql:GetVpcEndpointServiceName", "eu-west-1", "aws"));
+        request("/tags/" + cluster.replace(":", "%3A").replace("/", "%2F"));
+        assertEquals(List.of(cluster), dsql("dsql:ListTagsForResource", "eu-west-1", "aws"));
         // A stream route names the stream, or its cluster to create or list streams.
-        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz");
-        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz/s1");
-        assertEquals(List.of(cluster + "/stream/s1"), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        // CreateCluster and ListClusters are checked against every cluster, as DSQL checks them (measured).
-        when(uriInfo.getPath()).thenReturn("/cluster");
+        request("/stream/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of(cluster), dsql("dsql:ListStreams", "eu-west-1", "aws"));
+        request("/stream/abcdefghijklmnopqrstuvwxyz/s1");
+        assertEquals(List.of(cluster + "/stream/s1"), dsql("dsql:GetStream", "eu-west-1", "aws"));
+        request("/cluster");
         assertEquals(List.of("arn:aws:dsql:eu-west-1:000000000000:cluster/*"),
-                builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/cluster/abcdefghijklmnopqrstuvwxyz");
+                dsql("dsql:ListClusters", "eu-west-1", "aws"));
+        when(ctx.getMethod()).thenReturn("POST");
+        assertEquals(List.of("arn:aws:dsql:eu-west-1:000000000000:cluster/*"),
+                dsql("dsql:CreateCluster", "eu-west-1", "aws"));
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/cluster/abcdefghijklmnopqrstuvwxyz");
         assertEquals(List.of("arn:aws-cn:dsql:polygondwanaland-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz"),
-                builder.buildResources("dsql", ctx, "polygondwanaland-west-1", "000000000000", "aws-cn"));
+                dsql("dsql:GetCluster", "polygondwanaland-west-1", "aws-cn"));
+    }
+
+    private List<String> dsql(String operation, String region, String partition) {
+        return builder.buildResources("dsql", operation, ctx, region, "000000000000", partition);
     }
 
     @Test
@@ -2547,7 +2577,7 @@ class ResourceArnBuilderTest {
                         "aws-cn"));
         request("/v1/pipes/orders");
         assertEquals(List.of("arn:aws-cn:pipes:xx-local-1:000000000000:pipe/orders"),
-                builder.buildResources("pipes", ctx, "xx-local-1", "000000000000", "aws-cn"));
+                builder.buildResources("pipes", "pipes:DescribePipe", ctx, "xx-local-1", "000000000000", "aws-cn"));
     }
 
     @Test
@@ -2587,17 +2617,25 @@ class ResourceArnBuilderTest {
         assertEquals(List.of("*"), lambda("GET", "/2017-03-31/tags/shared", "ListTags"));
     }
 
+    /** A Pipes route is checked on the pipe its path names, or the ARN its tagging route names, from the table. */
     @Test
     void pipesRoutesResolveThePipeOrTheTaggedArn() {
         String pipe = "arn:aws:pipes:us-east-1:000000000000:pipe/orders";
-        when(uriInfo.getPath()).thenReturn("/v1/pipes/orders");
-        assertEquals(pipe, builder.build("pipes", ctx, "us-east-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/v1/pipes/orders/start");
-        assertEquals(pipe, builder.build("pipes", ctx, "us-east-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/tags/" + pipe);
-        assertEquals(pipe, builder.build("pipes", ctx, "us-east-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/v1/pipes");
-        assertEquals("*", builder.build("pipes", ctx, "us-east-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/v1/pipes/orders");
+        assertEquals(List.of(pipe), pipes("pipes:DescribePipe"));
+        when(ctx.getMethod()).thenReturn("POST");
+        request("/v1/pipes/orders/start");
+        assertEquals(List.of(pipe), pipes("pipes:StartPipe"));
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/tags/" + pipe.replace(":", "%3A").replace("/", "%2F"));
+        assertEquals(List.of(pipe), pipes("pipes:ListTagsForResource"));
+        request("/v1/pipes");
+        assertEquals(List.of("*"), pipes("pipes:ListPipes"));
+    }
+
+    private List<String> pipes(String operation) {
+        return builder.buildResources("pipes", operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
     /** A durable execution's actions are checked on the execution its ARN names, which a client sends encoded. */

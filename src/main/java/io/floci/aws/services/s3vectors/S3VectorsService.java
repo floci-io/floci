@@ -49,6 +49,9 @@ public class S3VectorsService implements StoredResourceArns {
     /** S3 Vectors' not-found messages (measured on AWS). */
     private static final String NO_SUCH_BUCKET = "The specified vector bucket could not be found";
     private static final String NO_SUCH_INDEX = "The specified index could not be found";
+    /** S3 Vectors' messages for a create under a name already taken (measured on AWS). */
+    private static final String BUCKET_EXISTS = "A vector bucket with the specified name already exists";
+    private static final String INDEX_EXISTS = "An index with the specified name already exists";
     private static final Logger LOG = Logger.getLogger(S3VectorsService.class);
     private static final ObjectReader STRICT_JSON_READER =
             new ObjectMapper().reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -105,7 +108,7 @@ public class S3VectorsService implements StoredResourceArns {
         synchronized (lockFor(bucketName, region)) {
             String key = buildStorageKey(region, bucketName);
             if (store.get(key).isPresent()) {
-                throw new AwsException("ConflictException", "The vector bucket " + bucketName + " already exists.", 409);
+                throw new AwsException("ConflictException", BUCKET_EXISTS, 409);
             }
             String arn = buildBucketArn(region, bucketName);
             VectorBucket bucket = new VectorBucket(bucketName, arn,
@@ -420,7 +423,7 @@ public class S3VectorsService implements StoredResourceArns {
         synchronized (lockFor(bucketName, region)) {
             VectorBucket bucket = getVectorBucket(bucketName, region);
             if (bucket.getIndexes().containsKey(indexName)) {
-                throw new AwsException("ConflictException", "The index " + indexName + " already exists.", 409);
+                throw new AwsException("ConflictException", INDEX_EXISTS, 409);
             }
 
             String arn = buildIndexArn(region, bucketName, indexName);

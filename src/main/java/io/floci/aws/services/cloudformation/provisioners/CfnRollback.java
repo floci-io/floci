@@ -198,6 +198,14 @@ public final class CfnRollback {
      */
     public static final String APIGW_AUTHORIZER_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayAuthorizerUpdateSnapshot";
 
+    /**
+     * The deployment id and description an API Gateway stage carried before an in-place update, the
+     * stage an update created because the prior was gone, or the old API of a stage a RestApiId change
+     * moved, so a failed stack update can undo each. Written and spent by
+     * {@code ApiGatewayRestApiCfnProvisioner}.
+     */
+    public static final String APIGW_STAGE_UPDATE_SNAPSHOT_ATTR = "__FlociApiGatewayStageUpdateSnapshot";
+
     public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
 
     /**

@@ -5,6 +5,7 @@ import io.floci.aws.core.common.BackupWindows;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 
@@ -29,7 +30,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  Integer maxAllocatedStorage,
                                  String storageType,
                                  String caCertificateIdentifier,
-                                 String licenseModel) {
+                                 String licenseModel,
+                                 Integer iops,
+                                 Integer storageThroughput) {
     public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
                               String preferredBackupWindow, String preferredMaintenanceWindow,
                               Boolean copyTagsToSnapshot, Integer monitoringInterval, String monitoringRoleArn,
@@ -41,7 +44,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 preferredMaintenanceWindow, copyTagsToSnapshot, monitoringInterval, monitoringRoleArn,
                 performanceInsightsEnabled, performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, null);
+                caCertificateIdentifier, null, null, null);
     }
 
     public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
@@ -216,7 +219,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, licenseModel);
+                caCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
@@ -225,7 +228,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier, licenseModel);
+                caCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
     public DbInstanceSettings withStorageType(String resolvedStorageType) {
@@ -234,7 +237,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, resolvedStorageType,
-                caCertificateIdentifier, licenseModel);
+                caCertificateIdentifier, licenseModel, iops, storageThroughput);
     }
 
     /** The same settings with the CA certificate the service resolved. */
@@ -244,7 +247,12 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                resolvedCaCertificateIdentifier, licenseModel);
+                resolvedCaCertificateIdentifier, licenseModel, iops, storageThroughput);
+    }
+
+    /** Create's documented default: "io1, if the Iops parameter is specified". */
+    public DbInstanceSettings withIopsDefaultType() {
+        return storageType == null && iops != null && iops != 0 ? withStorageType("io1") : this;
     }
 
     public void validateStorageType() {
@@ -296,6 +304,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
             instance.setEnabledCloudwatchLogsExports(
                     logExportChanges.applyTo(instance.getEnabledCloudwatchLogsExports()));
         }
+        String previousType = instance.getStorageType();
         if (storageType != null) {
             instance.setStorageType(storageType);
         }
@@ -307,6 +316,46 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (licenseModel != null && !licenseModel.isBlank()) {
             instance.setLicenseModel(licenseModel);
+        }
+        if (iops != null) {
+            instance.setIops(iops);
+        }
+        if (storageThroughput != null) {
+            instance.setStorageThroughput(storageThroughput);
+        }
+        // One normalisation after the merge: a stored value the resulting type doesn't carry is dropped, and an
+        // Iops carried over from the other family (io <-> gp3) is dropped unless this request set one, so
+        // Describe reports the baseline rather than a figure that belonged to the old type.
+        String resolved = instance.getStorageType();
+        if (!"gp3".equals(resolved)) {
+            instance.setStorageThroughput(null);
+        }
+        if (iopsFamily(resolved) == null || (iops == null && !Objects.equals(iopsFamily(previousType), iopsFamily(resolved)))) {
+            instance.setIops(null);
+        }
+    }
+
+    private static String iopsFamily(String type) {
+        return "gp3".equals(type) ? "gp3" : "io1".equals(type) || "io2".equals(type) ? "io" : null;
+    }
+
+    /**
+     * Refuses Iops or StorageThroughput on a storage type that doesn't carry it, as the Rust reference does
+     * (InvalidParameterCombination). Rust checks on Modify only; Floci checks Create too. {@code currentType} is the instance's type on Modify, null on Create.
+     */
+    public void validateStorageMembers(String currentType) {
+        String resolved = storageType != null ? storageType : currentType;
+        if (resolved == null) {
+            return;
+        }
+        // Iops=0 is how a modify says "back to standard storage", so it is no Iops at all
+        if (iops != null && iops != 0 && iopsFamily(resolved) == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Iops can't be specified for storage type " + resolved + ".", 400);
+        }
+        if (storageThroughput != null && !"gp3".equals(resolved)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "StorageThroughput can't be specified for storage type " + resolved + ".", 400);
         }
     }
 }

@@ -1,6 +1,6 @@
-package io.floci.aws.services.ses;
+package io.floci.aws.services.ses.mime;
 
-import io.floci.aws.services.ses.SesContentScan.Result;
+import io.floci.aws.services.ses.mime.SesContentScan.Result;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -40,7 +40,7 @@ class SesContentScanTest {
     void signatureInsideAPlainMimeBodyIsFlagged() {
         String mime = "From: a@example.com\r\nTo: b@example.com\r\nSubject: x\r\n\r\n" + SIGNATURE + "\r\n";
 
-        assertEquals(Result.REJECTED, SesContentScan.scan(mime.getBytes(StandardCharsets.UTF_8)));
+        assertEquals(Result.REJECTED, scan(mime.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -58,7 +58,7 @@ class SesContentScanTest {
 
         assertFalse(new String(bytes, StandardCharsets.ISO_8859_1).contains(SIGNATURE),
                 "the fixture must only carry the signature in encoded form");
-        assertEquals(Result.REJECTED, SesContentScan.scan(bytes));
+        assertEquals(Result.REJECTED, scan(bytes));
     }
 
     @Test
@@ -76,7 +76,7 @@ class SesContentScanTest {
 
         assertFalse(new String(bytes, StandardCharsets.ISO_8859_1).contains(SIGNATURE),
                 "the fixture must only carry the signature in encoded form");
-        assertEquals(Result.REJECTED, SesContentScan.scan(bytes));
+        assertEquals(Result.REJECTED, scan(bytes));
     }
 
     @Test
@@ -114,7 +114,7 @@ class SesContentScanTest {
 
         assertFalse(new String(bytes, StandardCharsets.ISO_8859_1).contains(SIGNATURE),
                 "the fixture must only carry the signature in encoded form");
-        assertEquals(Result.REJECTED, SesContentScan.scan(bytes));
+        assertEquals(Result.REJECTED, scan(bytes));
     }
 
     @Test
@@ -130,7 +130,7 @@ class SesContentScanTest {
 
         assertFalse(new String(bytes, StandardCharsets.ISO_8859_1).contains(SIGNATURE),
                 "the fixture must only carry the signature in encoded form");
-        assertEquals(Result.REJECTED, SesContentScan.scan(bytes));
+        assertEquals(Result.REJECTED, scan(bytes));
     }
 
     @Test
@@ -140,7 +140,7 @@ class SesContentScanTest {
         String encoded = Base64.getEncoder().encodeToString(SIGNATURE.getBytes(StandardCharsets.US_ASCII));
         String mime = "From: a@example.com\r\nX-Probe: " + encoded + "\r\n\r\n" + encoded + "\r\n";
 
-        assertEquals(Result.CLEAN, SesContentScan.scan(mime.getBytes(StandardCharsets.US_ASCII)));
+        assertEquals(Result.CLEAN, scan(mime.getBytes(StandardCharsets.US_ASCII)));
     }
 
     @Test
@@ -151,7 +151,7 @@ class SesContentScanTest {
                 + "--b\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n"
                 + encoded + "\r\n--b--\r\n";
 
-        assertEquals(Result.REJECTED, SesContentScan.scan(mime.getBytes(StandardCharsets.US_ASCII)));
+        assertEquals(Result.REJECTED, scan(mime.getBytes(StandardCharsets.US_ASCII)));
     }
 
     @Test
@@ -159,14 +159,14 @@ class SesContentScanTest {
         byte[] bytes = nestedForwards(3_000);
 
         assertFalse(new String(bytes, StandardCharsets.ISO_8859_1).contains(SIGNATURE));
-        assertEquals(Result.REJECTED, SesContentScan.scan(bytes));
+        assertEquals(Result.REJECTED, scan(bytes));
     }
 
     @Test
     void nestingBeyondTheParserIsRefusedNotCrashed() {
         // mime4j nests a reader per forwarded message and overflows the stack at this depth; the
         // scan must say so rather than throw an Error or call the message clean.
-        assertEquals(Result.UNREADABLE, SesContentScan.scan(nestedForwards(100_000)));
+        assertEquals(Result.UNREADABLE, scan(nestedForwards(100_000)));
     }
 
     // message/rfc822 layers around a quoted-printable copy of the signature, so nothing on the
@@ -185,7 +185,7 @@ class SesContentScanTest {
     void base64OfCleanContentIsNotFlagged() {
         byte[] blob = Base64.getMimeEncoder().encode("nothing to see here, just a long enough clean payload".getBytes(StandardCharsets.US_ASCII));
 
-        assertEquals(Result.CLEAN, SesContentScan.scan(blob));
+        assertEquals(Result.CLEAN, scan(blob));
     }
 
     @Test
@@ -197,7 +197,7 @@ class SesContentScanTest {
                 + "--b\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n"
                 + encoded + "\r\n--b--\r\n";
 
-        assertEquals(Result.CLEAN, SesContentScan.scan(mime.getBytes(StandardCharsets.UTF_8)));
+        assertEquals(Result.CLEAN, scan(mime.getBytes(StandardCharsets.UTF_8)));
     }
 
     @Test
@@ -208,13 +208,13 @@ class SesContentScanTest {
         bytes[1] = 1;
         System.arraycopy(signature, 0, bytes, 2, signature.length);
 
-        assertEquals(Result.REJECTED, SesContentScan.scan(bytes));
+        assertEquals(Result.REJECTED, scan(bytes));
     }
 
     @Test
     void emptyInputIsNotFlagged() {
-        assertEquals(Result.CLEAN, SesContentScan.scan(new byte[0]));
-        assertEquals(Result.CLEAN, SesContentScan.scan((byte[]) null));
+        assertEquals(Result.CLEAN, scan(new byte[0]));
+        assertEquals(Result.CLEAN, scan(null));
     }
 
     // Escapes the characters of the signature that quoted-printable may encode, and soft-wraps,
@@ -244,11 +244,11 @@ class SesContentScanTest {
 
     @Test
     void attachmentNamedByDispositionOrContentTypeIsBlocked() {
-        assertTrue(SesContentScan.hasBlockedAttachment(SmtpRelay.parseMime(
+        assertTrue(SesContentScan.hasBlockedAttachment(SesMimeParser.parse(
                 multipart("Content-Disposition: attachment; filename=\"tool.exe\"\r\n"))));
-        assertTrue(SesContentScan.hasBlockedAttachment(SmtpRelay.parseMime(
+        assertTrue(SesContentScan.hasBlockedAttachment(SesMimeParser.parse(
                 multipart("Content-Type: application/octet-stream; name=\"macro.vbs\"\r\n"))));
-        assertFalse(SesContentScan.hasBlockedAttachment(SmtpRelay.parseMime(
+        assertFalse(SesContentScan.hasBlockedAttachment(SesMimeParser.parse(
                 multipart("Content-Disposition: attachment; filename=\"report.pdf\"\r\n"))));
     }
 
@@ -260,7 +260,12 @@ class SesContentScanTest {
                 + "MIME-Version: 1.0\r\nContent-Type: message/rfc822\r\n\r\n" + inner;
 
         assertTrue(SesContentScan.hasBlockedAttachment(
-                SmtpRelay.parseMime(outer.getBytes(StandardCharsets.US_ASCII))));
+                SesMimeParser.parse(outer.getBytes(StandardCharsets.US_ASCII))));
+    }
+
+    // The send path parses once and hands the parse to the scan; these cases do the same.
+    private static Result scan(byte[] mime) {
+        return SesContentScan.scan(mime, mime == null ? null : SesMimeParser.parse(mime));
     }
 
     private static byte[] multipart(String attachmentHeaders) {

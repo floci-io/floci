@@ -247,6 +247,32 @@ class IamRestRouteEnforcementIntegrationTest {
                 "pipes:TagResource");
     }
 
+    /**
+     * A Pipes route is checked on the pipe its path names, from the generated table, and an {@code aws:ResourceTag}
+     * condition reads the tags Pipes holds on it, so an allow on one team's tag lets the caller describe that team's
+     * pipe and not another's.
+     */
+    @Test
+    void aPipesResourceTagConditionReadsTheTagsOfThePipe() {
+        String tagged = pipe("route-pipe-" + suffix(), "data");
+        String other = pipe("route-pipe-" + suffix(), "web");
+        String user = user("route-pipe-tags");
+
+        policy(user, onTeam("Allow", "pipes:DescribePipe", "data"));
+        request(user, "pipes", "GET", "/v1/pipes/" + tagged, null).statusCode(200);
+        refused(request(user, "pipes", "GET", "/v1/pipes/" + other, null), "pipes:DescribePipe");
+    }
+
+    /** A stopped pipe an administrator creates between two queue ARNs, tagged with {@code team}; its name. */
+    private String pipe(String name, String team) {
+        adminOf("pipes").body("{\"Source\":\"arn:aws:sqs:us-east-1:" + ACCOUNT + ":route-source\",\"Target\":"
+                + "\"arn:aws:sqs:us-east-1:" + ACCOUNT + ":route-target\",\"RoleArn\":\"arn:aws:iam::" + ACCOUNT
+                + ":role/route-pipe\",\"DesiredState\":\"STOPPED\",\"Tags\":{\"team\":\"" + team + "\"}}")
+                .post("/v1/pipes/" + name).then().statusCode(200);
+        cleanup.register(() -> adminOf("pipes").delete("/v1/pipes/" + name).then().statusCode(200));
+        return name;
+    }
+
     @Test
     void sharedTaggingIsCheckedAsTheServiceItsArnNames() {
         // The shared tagging routes hand the request to the service its ARN names, whatever scope it is
