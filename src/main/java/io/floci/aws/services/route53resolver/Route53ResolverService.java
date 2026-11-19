@@ -64,6 +64,10 @@ public class Route53ResolverService {
      * route53resolver/2018-04-01 model). The plural {@code InvalidParametersException} this
      * service used to raise belongs to Service Catalog and exists nowhere in this model.
      */
+    private static final String INVALID_PARAMETER = "InvalidParameterException";
+    /** The DNS Firewall family's parameter-rejection error. See {@link #INVALID_PARAMETER}. */
+    private static final String VALIDATION = "ValidationException";
+
     /** The ListResolverRules filter names, lower-cased without underscores, and the rule field each one reads. */
     private static final Map<String, String> RULE_FILTER_FIELDS = Map.of(
             "creatorrequestid", "CreatorRequestId",
@@ -72,10 +76,6 @@ public class Route53ResolverService {
             "resolverendpointid", "ResolverEndpointId",
             "status", "Status",
             "type", "RuleType");
-
-    private static final String INVALID_PARAMETER = "InvalidParameterException";
-    /** The DNS Firewall family's parameter-rejection error. See {@link #INVALID_PARAMETER}. */
-    private static final String VALIDATION = "ValidationException";
 
     /** The AWS-managed domain lists available in commercial regions. */
     static final List<String> AWS_MANAGED_DOMAIN_LIST_NAMES = List.of(

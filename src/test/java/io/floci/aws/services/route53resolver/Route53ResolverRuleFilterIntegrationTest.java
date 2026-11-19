@@ -65,9 +65,11 @@ class Route53ResolverRuleFilterIntegrationTest {
     }
 
     @Test
-    void listResolverRulesRejectsAnEmptyFilterNameOrValue() {
+    void listResolverRulesRejectsAnEmptyOrOverlongFilterNameOrValue() {
         for (String filter : new String[] {"{\"Name\":\"\",\"Values\":[\"x\"]}",
-                "{\"Name\":\"Name\",\"Values\":[\"\"]}"}) {
+                "{\"Name\":\"Name\",\"Values\":[\"\"]}",
+                "{\"Name\":\"" + "n".repeat(65) + "\",\"Values\":[\"x\"]}",
+                "{\"Name\":\"Name\",\"Values\":[\"" + "v".repeat(601) + "\"]}"}) {
             call("ListResolverRules", "{\"Filters\":[" + filter + "]}").statusCode(400)
                     .body("__type", equalTo("InvalidParameterException"));
         }
