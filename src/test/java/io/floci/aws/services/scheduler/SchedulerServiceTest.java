@@ -19,7 +19,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -113,11 +112,16 @@ class SchedulerServiceTest {
                 new FlexibleTimeWindow("OFF", null),
                 new Target("arn:t", "arn:aws:iam::000000000000:role/r", null, null)), REGION);
 
-        Thread groupDelete = Thread.ofVirtual().start(() -> schedulers.deleteScheduleGroup("team", REGION));
+        Thread groupDelete = Thread.ofPlatform().start(() -> schedulers.deleteScheduleGroup("team", REGION));
         assertTrue(deleting.await(5, TimeUnit.SECONDS), "the cascade should reach the schedule");
-        Thread fire = Thread.ofVirtual().start(
+        Thread fire = Thread.ofPlatform().start(
                 () -> schedulers.recordFire(created, REGION, Instant.parse("2026-04-21T12:00:00Z")));
-        assertFalse(fire.join(Duration.ofMillis(300)), "recording a fire should wait for the delete");
+        // Without the lock the fire runs to completion here instead of parking on the service's monitor.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (fire.getState() != Thread.State.BLOCKED && fire.isAlive() && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(Thread.State.BLOCKED, fire.getState(), "recording a fire should wait for the delete");
         release.countDown();
         groupDelete.join();
         fire.join();
