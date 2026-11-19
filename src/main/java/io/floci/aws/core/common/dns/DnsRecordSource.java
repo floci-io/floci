@@ -18,8 +18,13 @@ public interface DnsRecordSource {
         return Optional.empty();
     }
 
+    /** Supplies the receiving listener's address to sources that resolve local alias targets. */
+    default Optional<DnsAnswer> resolveAuthoritative(String name, int type, String listenerAddress) {
+        return resolveAuthoritative(name, type);
+    }
+
     /** Resolves a stored resource's alias target without recursive DNS or suffix substitution. */
-    default Optional<DnsAnswer> resolveAliasTarget(String name, String hostedZoneId, int type) {
+    default Optional<DnsAnswer> resolveAliasTarget(String name, String hostedZoneId, int type, String listenerAddress) {
         return Optional.empty();
     }
 

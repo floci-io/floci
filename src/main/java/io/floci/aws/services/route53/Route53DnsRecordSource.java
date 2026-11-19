@@ -75,6 +75,11 @@ public class Route53DnsRecordSource implements DnsRecordSource {
 
     @Override
     public Optional<DnsAnswer> resolveAuthoritative(String name, int type) {
+        return resolveAuthoritative(name, type, null);
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolveAuthoritative(String name, int type, String listenerAddress) {
         if (name == null || name.isBlank() || (type != 1 && type != 2 && type != 6 && type != 16 && type != 28)) {
             return Optional.empty();
         }
@@ -121,7 +126,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
         };
         DnsAnswer answer = buildPublicRecords(name, type, zone.matchingRecords().stream()
                 .filter(record -> record.getType().equals(recordType)).toList(),
-                recordFactory);
+                recordFactory, listenerAddress);
         if (answer.responseCode() != 0) {
             return Optional.of(answer);
         }
@@ -146,7 +151,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
     }
 
     private DnsAnswer buildPublicRecords(String name, int type, List<ResourceRecordSet> sets,
-                                        Function<String, DnsRecord> recordFactory) {
+                                        Function<String, DnsRecord> recordFactory, String listenerAddress) {
         if (sets.stream().noneMatch(record -> record.getAliasTarget() != null)) {
             return buildRecords(name, sets, recordFactory, Route53DnsRecordSource::publicTtlOf);
         }
@@ -163,7 +168,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
             return DnsAnswer.refused();
         }
         DnsAnswer target = embeddedDnsServer.resolveAliasTarget(
-                alias.getDnsName(), alias.getHostedZoneId(), type).orElseGet(DnsAnswer::refused);
+                alias.getDnsName(), alias.getHostedZoneId(), type, listenerAddress).orElseGet(DnsAnswer::refused);
         if (target.responseCode() != 0 || target.records().stream().anyMatch(value -> value.type() != type)) {
             return DnsAnswer.refused();
         }

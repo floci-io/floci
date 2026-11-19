@@ -49,8 +49,12 @@ class ElbV2AliasDnsIntegrationTest {
     Vertx vertx;
 
     @ParameterizedTest
-    @CsvSource({"internal,A,1", "internet-facing,A,1", "internal,AAAA,28", "internet-facing,AAAA,28"})
-    void publicAliasValidatesItsTargetAcrossAccounts(String scheme, String type, int queryType) throws Exception {
+    @CsvSource({"internal,A,1,127.0.0.1", "internet-facing,A,1,127.0.0.1",
+            "internal,AAAA,28,127.0.0.1", "internet-facing,AAAA,28,127.0.0.1",
+            "internal,A,1,127.0.0.2", "internet-facing,A,1,127.0.0.2",
+            "internal,AAAA,28,127.0.0.2", "internet-facing,AAAA,28,127.0.0.2"})
+    void publicAliasValidatesItsTargetAcrossAccounts(
+            String scheme, String type, int queryType, String listenerAddress) throws Exception {
         try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "730000000001", Region.EU_WEST_1);
              ElasticLoadBalancingV2Client elb = AwsTestClients.create(
                      ElasticLoadBalancingV2Client.builder(), "730000000001", Region.EU_WEST_1);
@@ -66,8 +70,9 @@ class ElbV2AliasDnsIntegrationTest {
             ResourceRecordSet installed = null;
             DatagramSocket listener = null;
             try {
-                listener = dns.listen(vertx, "127.0.0.1", 0)
+                listener = dns.bind(vertx, listenerAddress, 0, false)
                         .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                assertTrue(dns.getServerIp().isEmpty(), "A host listener must not be handed to containers");
                 subnets.add(ec2.createSubnet(r -> r.vpcId(vpc).cidrBlock("10.73.1.0/24")
                         .availabilityZone("eu-west-1a")).subnet().subnetId());
                 subnets.add(ec2.createSubnet(r -> r.vpcId(vpc).cidrBlock("10.73.2.0/24")
@@ -83,19 +88,20 @@ class ElbV2AliasDnsIntegrationTest {
                         .hostedZone().id();
                 installed = alias(name, type, target.dnsName(), target.canonicalHostedZoneId());
                 change(route53, zone, ChangeAction.CREATE, installed);
-                assertValidTarget(query(listener, name, queryType), queryType);
+                assertValidTarget(query(listener, name, queryType), queryType, listenerAddress);
 
                 installed = alias(name, type, "dualstack." + target.dnsName().toUpperCase(Locale.ROOT),
                         target.canonicalHostedZoneId());
                 change(route53, zone, ChangeAction.UPSERT, installed);
-                assertValidTarget(query(listener, name.toUpperCase(Locale.ROOT) + ".", queryType), queryType);
+                assertValidTarget(query(listener, name.toUpperCase(Locale.ROOT) + ".", queryType),
+                        queryType, listenerAddress);
 
                 installed = alias(name, type, target.dnsName(), "WRONG");
                 change(route53, zone, ChangeAction.UPSERT, installed);
                 assertEquals(5, rcode(query(listener, name, queryType)));
                 installed = alias(name, type, target.dnsName(), target.canonicalHostedZoneId());
                 change(route53, zone, ChangeAction.UPSERT, installed);
-                assertValidTarget(query(listener, name, queryType), queryType);
+                assertValidTarget(query(listener, name, queryType), queryType, listenerAddress);
 
                 elb.deleteLoadBalancer(r -> r.loadBalancerArn(target.loadBalancerArn()));
                 arn = null;
@@ -147,7 +153,7 @@ class ElbV2AliasDnsIntegrationTest {
         // Vert.x and the JDK both name their UDP socket DatagramSocket.
         try (java.net.DatagramSocket client = new java.net.DatagramSocket(
                 0, InetAddress.getByName("127.0.0.1"))) {
-            client.connect(InetAddress.getByName("127.0.0.1"), listener.localAddress().port());
+            client.connect(InetAddress.getByName(listener.localAddress().host()), listener.localAddress().port());
             client.setSoTimeout(5000);
             client.send(new DatagramPacket(request, request.length));
             DatagramPacket reply = new DatagramPacket(new byte[4096], 4096);
@@ -160,7 +166,7 @@ class ElbV2AliasDnsIntegrationTest {
         return ByteBuffer.wrap(answer).getShort(2) & 15;
     }
 
-    private static void assertValidTarget(byte[] answer, int type) {
+    private static void assertValidTarget(byte[] answer, int type, String listenerAddress) {
         ByteBuffer packet = ByteBuffer.wrap(answer);
         assertEquals(0, rcode(answer), "A known stored alias target must resolve authoritatively");
         assertEquals(0x0400, packet.getShort(2) & 0x0400);
@@ -180,6 +186,6 @@ class ElbV2AliasDnsIntegrationTest {
         assertEquals(4, packet.getShort());
         byte[] value = new byte[4];
         packet.get(value);
-        assertArrayEquals(new byte[] {127, 0, 0, 1}, value);
+        assertArrayEquals(new DnsRecord.Address(1, listenerAddress).data(), value);
     }
 }

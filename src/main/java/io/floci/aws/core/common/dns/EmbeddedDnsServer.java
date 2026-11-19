@@ -378,12 +378,12 @@ public class EmbeddedDnsServer {
     }
 
     /** Only one stored resource may claim an alias target; failures cannot fall through to DNS. */
-    public Optional<DnsAnswer> resolveAliasTarget(String name, String hostedZoneId, int type) {
+    public Optional<DnsAnswer> resolveAliasTarget(String name, String hostedZoneId, int type, String listenerAddress) {
         DnsAnswer resolved = null;
         if (recordSources != null) {
             for (DnsRecordSource source : recordSources) {
                 try {
-                    Optional<DnsAnswer> candidate = source.resolveAliasTarget(name, hostedZoneId, type);
+                    Optional<DnsAnswer> candidate = source.resolveAliasTarget(name, hostedZoneId, type, listenerAddress);
                     if (candidate.isPresent()) {
                         if (resolved != null) {
                             return Optional.of(DnsAnswer.refused());
@@ -401,7 +401,7 @@ public class EmbeddedDnsServer {
     }
 
     private Optional<DnsAnswer> resolveRecordWithOwnership(String name, String myIp, int type) {
-        Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true);
+        Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true, myIp);
         if (stored.isPresent()) {
             return stored;
         }
@@ -439,7 +439,7 @@ public class EmbeddedDnsServer {
      * hosted zone that matches the same name.
      */
     QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
-        Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true);
+        Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true, myIp);
         Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
         if (emulatorName.isPresent() && stored.isEmpty()) {
             return QueryPlan.answering(emulatorName.orElseThrow());
@@ -532,10 +532,11 @@ public class EmbeddedDnsServer {
      * through to the upstream resolvers, which is what happened before any source existed.
      */
     private Optional<DnsAnswer> resolveFromRecordSources(String name, int type) {
-        return resolveFromRecordSources(name, type, false);
+        return resolveFromRecordSources(name, type, false, null);
     }
 
-    private Optional<DnsAnswer> resolveFromRecordSources(String name, int type, boolean authoritative) {
+    private Optional<DnsAnswer> resolveFromRecordSources(
+            String name, int type, boolean authoritative, String listenerAddress) {
         if (recordSources == null) {
             return Optional.empty();
         }
@@ -546,7 +547,7 @@ public class EmbeddedDnsServer {
         Optional<DnsAnswer> empty = Optional.empty();
         for (DnsRecordSource source : recordSources) {
             try {
-                Optional<DnsAnswer> answer = authoritative ? source.resolveAuthoritative(name, type)
+                Optional<DnsAnswer> answer = authoritative ? source.resolveAuthoritative(name, type, listenerAddress)
                         : source.resolve(name, type);
                 if (answer != null && answer.isPresent()) {
                     if (answer.get().isEmpty()) {

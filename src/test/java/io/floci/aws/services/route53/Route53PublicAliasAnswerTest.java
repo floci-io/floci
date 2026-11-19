@@ -49,20 +49,20 @@ class Route53PublicAliasAnswerTest {
             default -> throw new AssertionError(invalid);
         }
         List<ResourceRecordSet> records = "multiple".equals(invalid) ? List.of(record, alias()) : List.of(record);
-        assertEquals(5, source(records).resolveAuthoritative(NAME, type).orElseThrow().responseCode());
+        assertEquals(5, source(records).resolveAuthoritative(NAME, type, "192.0.2.20").orElseThrow().responseCode());
         verifyNoInteractions(dns, lookup);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void validTargetsRetainTheirTtlAndZoneAuthority(boolean explicitSimpleRecord) {
-        when(dns.resolveAliasTarget("target.example.test.", "ZOWNED", 1))
+        when(dns.resolveAliasTarget("target.example.test.", "ZOWNED", 1, "192.0.2.20"))
                 .thenReturn(Optional.of(DnsAnswer.records(List.of("192.0.2.20"), 73)));
         ResourceRecordSet record = alias();
         if (explicitSimpleRecord) {
             record.setMultiValueAnswer(false);
         }
-        DnsAnswer answer = source(List.of(record)).resolveAuthoritative(NAME, 1).orElseThrow();
+        DnsAnswer answer = source(List.of(record)).resolveAuthoritative(NAME, 1, "192.0.2.20").orElseThrow();
         assertEquals(List.of("192.0.2.20"), answer.addresses());
         assertEquals(73, answer.ttlSeconds());
         assertNotNull(answer.authority());
@@ -71,11 +71,11 @@ class Route53PublicAliasAnswerTest {
 
     @Test
     void missingTargetsAndWrongAddressFamiliesRemainRefused() {
-        when(dns.resolveAliasTarget("target.example.test.", "ZOWNED", 1)).thenReturn(Optional.empty());
-        assertEquals(5, source(List.of(alias())).resolveAuthoritative(NAME, 1).orElseThrow().responseCode());
-        when(dns.resolveAliasTarget("target.example.test.", "ZOWNED", 1)).thenReturn(
+        when(dns.resolveAliasTarget("target.example.test.", "ZOWNED", 1, "192.0.2.20")).thenReturn(Optional.empty());
+        assertEquals(5, source(List.of(alias())).resolveAuthoritative(NAME, 1, "192.0.2.20").orElseThrow().responseCode());
+        when(dns.resolveAliasTarget("target.example.test.", "ZOWNED", 1, "192.0.2.20")).thenReturn(
                 Optional.of(DnsAnswer.typedRecords(List.of(new DnsRecord.Address(28, "2001:db8::1")), 60)));
-        assertEquals(5, source(List.of(alias())).resolveAuthoritative(NAME, 1).orElseThrow().responseCode());
+        assertEquals(5, source(List.of(alias())).resolveAuthoritative(NAME, 1, "192.0.2.20").orElseThrow().responseCode());
         verifyNoInteractions(lookup);
     }
 
