@@ -2,6 +2,7 @@ package io.floci.aws.services.kms;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.SignedMarkers;
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.kms.model.KmsCustomKeyStore;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -15,12 +16,23 @@ public class KmsCustomKeyStoreService {
     private static final int MAX_PAGE_SIZE = 1000;
     private final KmsCustomKeyStoreRegistry registry;
     private final XksProxyClient proxyClient;
+    private final RequestContext requestContext;
     private final SignedMarkers markers = new SignedMarkers();
 
     @Inject
-    public KmsCustomKeyStoreService(KmsCustomKeyStoreRegistry registry, XksProxyClient proxyClient) {
+    public KmsCustomKeyStoreService(KmsCustomKeyStoreRegistry registry, XksProxyClient proxyClient, RequestContext requestContext) {
         this.registry = registry;
         this.proxyClient = proxyClient;
+        this.requestContext = requestContext;
+    }
+
+    KmsCustomKeyStoreService(KmsCustomKeyStoreRegistry registry, XksProxyClient proxyClient) {
+        this(registry, proxyClient, null);
+    }
+
+    private String requestId() {
+        return requestContext == null || requestContext.getRequestId() == null
+                ? java.util.UUID.randomUUID().toString() : requestContext.getRequestId();
     }
 
     public KmsCustomKeyStore create(String name, String endpoint, String path, String accessKeyId,
@@ -29,7 +41,7 @@ public class KmsCustomKeyStoreService {
         registry.requireCredentialEncryptionConfigured();
         var proxy = XksCustomKeyStoreValidation.proxyConfiguration(endpoint, path, accessKeyId, secretAccessKey);
         proxyClient.requireHealthy(proxy.endpoint(), proxy.path(), proxy.accessKeyId(), proxy.secretAccessKey(),
-                region, "CreateCustomKeyStore");
+                region, "CreateCustomKeyStore", requestId());
         KmsCustomKeyStore candidate = new KmsCustomKeyStore();
         candidate.setCustomKeyStoreName(name);
         candidate.setAccessKeyId(accessKeyId);
@@ -94,7 +106,7 @@ public class KmsCustomKeyStoreService {
             var config = XksCustomKeyStoreValidation.proxyConfiguration(effectiveEndpoint, effectivePath,
                     effectiveAccessKeyId, secretAccessKey == null ? registry.secretAccessKey(id, region) : secretAccessKey);
             proxyClient.requireHealthy(config.endpoint(), config.path(), config.accessKeyId(), config.secretAccessKey(),
-                    region, "UpdateCustomKeyStore");
+                    region, "UpdateCustomKeyStore", requestId());
         }
         KmsCustomKeyStore candidate = new KmsCustomKeyStore();
         candidate.setCustomKeyStoreId(id);
@@ -113,7 +125,7 @@ public class KmsCustomKeyStoreService {
         KmsCustomKeyStore store = registry.beginConnect(id, region);
         try {
             proxyClient.requireHealthy(URI.create(store.getProxyUriEndpoint()), store.getProxyUriPath(),
-                    store.getAccessKeyId(), registry.secretAccessKey(id, region), region, "ConnectCustomKeyStore");
+                    store.getAccessKeyId(), registry.secretAccessKey(id, region), region, "ConnectCustomKeyStore", requestId());
             registry.markConnected(id, region);
         } catch (AwsException e) {
             String connectionCode = e instanceof XksProxyClient.XksProxyException proxyError

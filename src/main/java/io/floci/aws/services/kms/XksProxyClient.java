@@ -102,6 +102,11 @@ public class XksProxyClient implements AutoCloseable {
      */
     public void requireHealthy(URI endpoint, String uriPath, String accessKeyId, String secretAccessKey,
                                String region, String kmsOperation) {
+        requireHealthy(endpoint, uriPath, accessKeyId, secretAccessKey, region, kmsOperation, UUID.randomUUID().toString());
+    }
+
+    public void requireHealthy(URI endpoint, String uriPath, String accessKeyId, String secretAccessKey,
+                               String region, String kmsOperation, String kmsRequestId) {
         URI target = healthUri(endpoint, uriPath, allowTestEndpoint);
         if (accessKeyId == null || !ACCESS_KEY_ID.matcher(accessKeyId).matches()
                 || secretAccessKey == null || !SECRET_ACCESS_KEY.matcher(secretAccessKey).matches()
@@ -113,7 +118,7 @@ public class XksProxyClient implements AutoCloseable {
 
         try {
             byte[] body = objectMapper.writeValueAsBytes(Map.of("requestMetadata", Map.of(
-                    "kmsRequestId", UUID.randomUUID().toString(), "kmsOperation", kmsOperation)));
+                    "kmsRequestId", kmsRequestId, "kmsOperation", kmsOperation)));
             String timestamp = AMZ_DATE.format(Instant.now());
             String date = timestamp.substring(0, 8);
             String host = target.getRawAuthority().toLowerCase(java.util.Locale.ROOT);

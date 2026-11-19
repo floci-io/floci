@@ -14,6 +14,7 @@ public class RequestContext {
     private String region;
     private String partition;
     private String accessKeyId;
+    private String requestId;
     private String sessionToken;
     private Boolean iamGovernanceBypass;
     /**
@@ -50,6 +51,14 @@ public class RequestContext {
 
     public void setPartition(String partition) {
         this.partition = partition;
+    }
+
+    public String getRequestId() {
+        return requestId;
+    }
+
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
     }
 
     public String getAccessKeyId() {
