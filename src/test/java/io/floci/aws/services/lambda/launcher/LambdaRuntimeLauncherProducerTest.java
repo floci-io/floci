@@ -1,6 +1,7 @@
 package io.floci.aws.services.lambda.launcher;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.services.lambda.launcher.kubernetes.KubernetesPodLauncher;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.inject.Instance;
@@ -27,8 +28,11 @@ class LambdaRuntimeLauncherProducerTest {
     @Mock EmulatorConfig config;
     @Mock Instance<ContainerLauncher> dockerInstance;
     @Mock Instance<KubernetesPodLauncher> kubernetesInstance;
+    @Mock Instance<ProcessLauncher> processInstance;
     @Mock ContainerLauncher containerLauncher;
     @Mock KubernetesPodLauncher kubernetesPodLauncher;
+    @Mock ProcessLauncher processLauncher;
+    @Mock ContainerDetector containerDetector;
 
     private EmulatorConfig.LambdaServiceConfig lambda;
     private final LambdaRuntimeLauncherProducer producer = new LambdaRuntimeLauncherProducer();
@@ -42,12 +46,13 @@ class LambdaRuntimeLauncherProducerTest {
         when(lambda.reconcileContainersOnStartup()).thenReturn(true);
         when(dockerInstance.get()).thenReturn(containerLauncher);
         when(kubernetesInstance.get()).thenReturn(kubernetesPodLauncher);
+        when(processInstance.get()).thenReturn(processLauncher);
     }
 
     @Test
     void dockerExecutorSelectsContainerLauncher() {
         when(lambda.executor()).thenReturn("docker");
-        assertThat(producer.launcher(config, dockerInstance, kubernetesInstance))
+        assertThat(producer.launcher(config, dockerInstance, kubernetesInstance, processInstance))
                 .isSameAs(containerLauncher);
         verify(kubernetesInstance, never()).get();
     }
@@ -55,41 +60,78 @@ class LambdaRuntimeLauncherProducerTest {
     @Test
     void kubernetesExecutorSelectsPodLauncher() {
         when(lambda.executor()).thenReturn("kubernetes");
-        assertThat(producer.launcher(config, dockerInstance, kubernetesInstance))
+        assertThat(producer.launcher(config, dockerInstance, kubernetesInstance, processInstance))
                 .isSameAs(kubernetesPodLauncher);
+        verify(dockerInstance, never()).get();
+    }
+
+    @Test
+    void processExecutorSelectsProcessLauncher() {
+        when(lambda.executor()).thenReturn("process");
+        assertThat(producer.launcher(config, dockerInstance, kubernetesInstance, processInstance))
+                .isSameAs(processLauncher);
+        verify(dockerInstance, never()).get();
+        verify(kubernetesInstance, never()).get();
+    }
+
+    @Test
+    void startupRefusesTheProcessExecutorInsideAContainer() {
+        when(lambda.executor()).thenReturn("process");
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        assertThatThrownBy(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance,
+                containerDetector))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("inside a container");
+    }
+
+    @Test
+    void startupAcceptsTheProcessExecutorOutsideAContainer() {
+        when(lambda.executor()).thenReturn("process");
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        assertThatCode(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance,
+                containerDetector))
+                .doesNotThrowAnyException();
+        verify(kubernetesInstance, never()).get();
+    }
+
+    @Test
+    void processStartupDoesNotInstantiateDocker() {
+        when(lambda.enabled()).thenReturn(true);
+        when(lambda.executor()).thenReturn("process");
+        producer.reconcileDockerContainers(new StartupEvent(), config, dockerInstance);
         verify(dockerInstance, never()).get();
     }
 
     @Test
     void executorValueIsCaseInsensitiveAndTrimmed() {
         when(lambda.executor()).thenReturn(" Kubernetes\n");
-        assertThat(producer.launcher(config, dockerInstance, kubernetesInstance))
+        assertThat(producer.launcher(config, dockerInstance, kubernetesInstance, processInstance))
                 .isSameAs(kubernetesPodLauncher);
     }
 
     @Test
     void unknownExecutorFailsWithValidValues() {
         when(lambda.executor()).thenReturn("podman");
-        assertThatThrownBy(() -> producer.launcher(config, dockerInstance, kubernetesInstance))
+        assertThatThrownBy(() -> producer.launcher(config, dockerInstance, kubernetesInstance, processInstance))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("docker, kubernetes");
+                .hasMessageContaining("docker, kubernetes, process");
     }
 
     @Test
     void startupValidationRejectsUnknownExecutorBeforeFirstInvoke() {
         when(lambda.executor()).thenReturn("podman");
-        assertThatThrownBy(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance))
+        assertThatThrownBy(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance, containerDetector))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void startupValidationAcceptsValidExecutors() {
         when(lambda.executor()).thenReturn("docker");
-        assertThatCode(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance))
+        assertThatCode(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance, containerDetector))
                 .doesNotThrowAnyException();
         verify(kubernetesPodLauncher, never()).initializeClient();
         when(lambda.executor()).thenReturn("kubernetes");
-        assertThatCode(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance))
+        assertThatCode(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance, containerDetector))
                 .doesNotThrowAnyException();
         verify(kubernetesPodLauncher).initializeClient();
     }

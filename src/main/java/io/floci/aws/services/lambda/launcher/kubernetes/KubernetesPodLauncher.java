@@ -193,22 +193,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                     addressResolver.resolve() + ":" + runtimeApiServer.getPort(), cwLogGroup, cwLogStream);
             env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), addressResolver.flociBaseUrl(),
                     Optional.empty(), AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId())));
-            if (fn.getEnvironment() != null) {
-                // Same all-or-nothing rule as ContainerLauncher: this launcher never has
-                // execution-role credentials, so the function's own Environment may only supply
-                // AWS credential vars when it defines the full triad — a partial set must never
-                // join the owner-account baseline and split its credential tuple.
-                boolean userDefinesFullCredentialTriad =
-                        ContainerLauncher.definesFullCredentialTriad(fn.getEnvironment());
-                fn.getEnvironment().forEach((k, v) -> {
-                    if (!ContainerLauncher.isAwsCredentialVariable(k) || userDefinesFullCredentialTriad) {
-                        env.add(k + "=" + v);
-                    }
-                });
-            }
-
-            env.removeIf(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION="));
-            env.add("AWS_LAMBDA_FUNCTION_VERSION=" + fn.getVersion());
+            // This launcher never has execution-role credentials.
+            LambdaRuntimeEnv.addFunctionEnvironment(env, fn, false);
 
             LambdaPodSpecFactory.ImageConfig imageConfig = imagePackage
                     ? new LambdaPodSpecFactory.ImageConfig(fn.getImageConfigEntryPoint(),
@@ -247,16 +233,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         } catch (RuntimeException e) {
             LOG.errorv(e, "Pod launch failed for function {0}; cleaning up", fn.getFunctionName());
             boolean podGone = podName == null || deletePod(namespace, podName);
-            // Stop the server before releasing its port number, or the still-listening
-            // Vert.x server makes the port unusable for every later cold start.
-            try {
-                runtimeApiServer.stop().get(5, TimeUnit.SECONDS);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            } catch (Exception stopFailure) {
-                LOG.debugv("Runtime API server stop failed during launch cleanup: {0}",
-                        stopFailure.getMessage());
-            }
+            RuntimeApiServerFactory.stopBeforeRelease(runtimeApiServer);
             // Same rule as stop(): the port number goes back to the pool only once the pod
             // is confirmed gone. A half-created pod that later reaches Running polls
             // AWS_LAMBDA_RUNTIME_API on this port, and a released port could by then be
