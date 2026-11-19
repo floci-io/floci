@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * through the EventBridge API. {@code Ref} is the connection name; {@code Fn::GetAtt} gives
  * {@code Arn}, {@code ArnForPolicy} and {@code SecretArn}. An {@code AWS::Events::ApiDestination}
  * can take the connection's ARN, a description change updates the connection in place, a dropped
- * description is cleared, dropping a property the service cannot clear is refused, a failed
+ * description stays and an empty one clears it, dropped Kms and connectivity settings are cleared, dropping a property the service cannot clear is refused, a failed
  * update rolls the connection back, and the stack delete removes the connection.
  */
 @QuarkusTest
@@ -99,16 +99,44 @@ class CloudFormationEventsConnectionIntegrationTest {
                 .getString("Description"));
     }
 
+    /** A real AWS account leaves a dropped description as it is and clears an empty one. */
     @Test
-    void aDroppedDescriptionIsCleared() throws Exception {
+    void aDroppedDescriptionStaysAndAnEmptyOneClears() throws Exception {
         String name = "orders-" + suffix();
         String stack = createStack(template(connection(name, "first"), false));
         CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
 
         updateStack(stack, template(connection(name, null), false));
         CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
+        assertEquals("first", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("Description"));
 
+        updateStack(stack, template(connection(name, ""), false));
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
         assertNull(describeConnection(name).then().statusCode(200).extract().jsonPath().getString("Description"));
+    }
+
+    /** A real AWS account clears both when a template drops them. */
+    @Test
+    void aDroppedKmsKeyAndConnectivityParametersAreCleared() throws Exception {
+        String name = "orders-" + suffix();
+        Map<String, Object> full = connection(name, null);
+        full.put("KmsKeyIdentifier", "alias/orders");
+        full.put("InvocationConnectivityParameters", Map.of("ResourceParameters", Map.of(
+                "ResourceConfigurationArn",
+                "arn:aws:vpc-lattice:us-east-1:000000000000:resourceconfiguration/rcfg-0123456789abcdef0")));
+        String stack = createStack(template(full, false));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
+        JsonPath created = describeConnection(name).then().statusCode(200).extract().jsonPath();
+        assertEquals("alias/orders", created.getString("KmsKeyIdentifier"));
+        assertFalse(created.getMap("InvocationConnectivityParameters").isEmpty());
+
+        updateStack(stack, template(connection(name, null), false));
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
+
+        JsonPath updated = describeConnection(name).then().statusCode(200).extract().jsonPath();
+        assertNull(updated.getString("KmsKeyIdentifier"));
+        assertNull(updated.get("InvocationConnectivityParameters"));
     }
 
     @Test

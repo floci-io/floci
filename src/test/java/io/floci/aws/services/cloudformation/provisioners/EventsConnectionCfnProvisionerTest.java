@@ -157,7 +157,7 @@ class EventsConnectionCfnProvisionerTest {
     }
 
     @Test
-    void aDroppedDescriptionIsCleared() {
+    void aDroppedDescriptionStaysAsItIsAsOnAws() {
         when(events.describeConnection(NAME, REGION)).thenReturn(stored());
         when(events.updateConnection(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
 
@@ -165,7 +165,19 @@ class EventsConnectionCfnProvisionerTest {
                 ctx(NAME, props("a description", "tok")));
 
         verify(events).updateConnection(eq(NAME), isNull(), eq("API_KEY"), anyString(),
-                isNull(), isNull(), eq(Set.of("Description")), eq(REGION));
+                isNull(), isNull(), eq(Set.of()), eq(REGION));
+    }
+
+    @Test
+    void anEmptyDescriptionIsPassedOnToClearIt() {
+        when(events.describeConnection(NAME, REGION)).thenReturn(stored());
+        when(events.updateConnection(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
+
+        provisioner.provision(resource("ApiDestinationConnection"), props("", "tok"),
+                ctx(NAME, props("a description", "tok")));
+
+        verify(events).updateConnection(eq(NAME), eq(""), eq("API_KEY"), anyString(),
+                isNull(), isNull(), eq(Set.of()), eq(REGION));
     }
 
     @Test

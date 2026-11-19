@@ -79,9 +79,12 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     /** Connection properties an update cannot clear (EventBridge keeps an omitted field) or replace. */
     private static final Set<String> CONNECTION_REFUSED_DROPS = Set.of(
             "Name", "AuthorizationType", "AuthParameters");
-    /** Connection properties a template that drops them clears, as CloudFormation does. */
+    /**
+     * Connection properties a template that drops them clears. A dropped {@code Description} is not
+     * among them: CloudFormation leaves it as it is, and only an explicit empty string clears it.
+     */
     private static final Set<String> CONNECTION_CLEARED_DROPS = Set.of(
-            "Description", "InvocationConnectivityParameters", "KmsKeyIdentifier");
+            "InvocationConnectivityParameters", "KmsKeyIdentifier");
 
     private final EventBridgeService eventBridgeService;
 
@@ -1034,8 +1037,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * {@code AWS::Events::Connection}: {@code Ref} is the connection name, {@code Fn::GetAtt} gives
      * {@code Arn} and {@code SecretArn}. An update changes the supplied properties in place, and a
-     * template that drops {@code Description}, {@code InvocationConnectivityParameters} or
-     * {@code KmsKeyIdentifier} clears it. EventBridge's UpdateConnection leaves an omitted
+     * template that drops {@code InvocationConnectivityParameters} or {@code KmsKeyIdentifier}
+     * clears it. A dropped {@code Description} stays as it is and an empty one clears it. These
+     * follow what a real AWS account does, checked against a stack. EventBridge's UpdateConnection leaves an omitted
      * {@code AuthorizationType} or {@code AuthParameters} as it is, so dropping one is refused rather
      * than left silently stale, and a different name is a replacement, refused too. The properties are
      * read as the resource handler reads them, so an {@code ApiKeyAuthParameters} without its

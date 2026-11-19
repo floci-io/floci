@@ -2016,8 +2016,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     /**
      * As {@link #updateConnection(String, String, String, String, String, String, String)}, and the
-     * settings named in {@code cleared} ({@code Description}, {@code InvocationConnectivityParameters}
-     * or {@code KmsKeyIdentifier}) are removed, as a CloudFormation update that drops them does.
+     * settings named in {@code cleared} ({@code InvocationConnectivityParameters} or
+     * {@code KmsKeyIdentifier}) are removed, as a CloudFormation update that drops them does.
      */
     public Connection updateConnection(String name, String description, String authorizationType,
                                        String authParameters, String invocationConnectivityParameters,
@@ -2035,7 +2035,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             connection.setAuthorizationType(authorizationType);
         }
         if (description != null) {
-            connection.setDescription(description);
+            // An empty description clears it, as the stack update that sets one does
+            connection.setDescription(description.isEmpty() ? null : description);
         }
         if (authParameters != null) {
             connection.setAuthParameters(authParameters);
@@ -2045,9 +2046,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
         if (kmsKeyIdentifier != null) {
             connection.setKmsKeyIdentifier(kmsKeyIdentifier);
-        }
-        if (cleared.contains("Description")) {
-            connection.setDescription(null);
         }
         if (cleared.contains("InvocationConnectivityParameters")) {
             connection.setInvocationConnectivityParameters(null);
