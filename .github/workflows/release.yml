@@ -224,10 +224,13 @@ jobs:
   # The Linux release binaries are the native-amd64, native-arm64 and native-arm64-baseline
   # artifacts above, which also go into the images. macOS and Windows are built only for the
   # release assets, by standalone-binaries.yml, which can also be run by hand to try a change.
+  # darwin-arm64 is left out: it cannot build on a free runner, and Apple Silicon Macs run the
+  # darwin-amd64 binary under Rosetta 2 instead.
   standalone-binaries:
     name: Standalone binaries
     uses: ./.github/workflows/standalone-binaries.yml
     with:
+      platforms: darwin-amd64,windows-amd64
       version: ${{ github.ref_name }}
 
   # ── Publish standalone binaries to the GitHub Release ────────────────────
@@ -285,7 +288,6 @@ jobs:
           stage native-amd64 floci-aws-linux-amd64
           stage native-arm64 floci-aws-linux-arm64
           stage native-arm64-baseline floci-aws-linux-arm64-baseline
-          optional binary-darwin-arm64 floci-aws-darwin-arm64
           optional binary-darwin-amd64 floci-aws-darwin-amd64
           optional binary-windows-amd64 floci-aws-windows-amd64.exe
           (cd dist && sha256sum floci-aws-* > sha256sums.txt)
