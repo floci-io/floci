@@ -182,6 +182,8 @@ Status: control plane only.
 - The first `SetV2LoggingOptions` must carry `roleArn` and `defaultLogLevel`, or it fails with `InvalidRequestException`; `disableAllLogs` defaults to `false`.
 - A later `SetV2LoggingOptions` changes only the options it carries and keeps the others.
 - A `defaultLogLevel` other than `DEBUG`, `INFO`, `ERROR`, `WARN` or `DISABLED` fails with `InvalidRequestException`, and a member of the wrong JSON type with `SerializationException`; neither changes the stored options.
+- `eventConfigurations` (the per-event-type `eventType`, `logLevel` and `logDestination` overrides) is not modeled: `SetV2LoggingOptions` accepts and drops it, and `GetV2LoggingOptions` reports none.
+- The `verbose` query parameter of `GetV2LoggingOptions` is accepted and ignored: Floci has no catalog of event types to list.
 - The options are stored only: Floci writes no IoT logs to CloudWatch Logs.
 
 ## IoT Data API {#iot-data}

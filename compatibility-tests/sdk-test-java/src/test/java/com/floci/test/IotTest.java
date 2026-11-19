@@ -87,6 +87,7 @@ import software.amazon.awssdk.services.iot.model.ListThingsRequest;
 import software.amazon.awssdk.services.iot.model.ListThingsResponse;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesRequest;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesResponse;
+import software.amazon.awssdk.services.iot.model.LogEventConfiguration;
 import software.amazon.awssdk.services.iot.model.LogLevel;
 import software.amazon.awssdk.services.iot.model.NamedShadowIndexingMode;
 import software.amazon.awssdk.services.iot.model.NotConfiguredException;
@@ -308,6 +309,8 @@ class IotTest {
             accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder()
                     .roleArn(roleArn)
                     .defaultLogLevel(LogLevel.WARN)
+                    .eventConfigurations(LogEventConfiguration.builder()
+                            .eventType("Connect").logLevel(LogLevel.DEBUG).build())
                     .build());
             accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder().disableAllLogs(true).build());
             assertThatThrownBy(() -> accountIot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder()
@@ -315,10 +318,11 @@ class IotTest {
                     .isInstanceOf(InvalidRequestException.class);
 
             GetV2LoggingOptionsResponse options =
-                    accountIot.getV2LoggingOptions(GetV2LoggingOptionsRequest.builder().build());
+                    accountIot.getV2LoggingOptions(GetV2LoggingOptionsRequest.builder().verbose(true).build());
             assertThat(options.roleArn()).isEqualTo(roleArn);
             assertThat(options.defaultLogLevel()).isEqualTo(LogLevel.WARN);
             assertThat(options.disableAllLogs()).isTrue();
+            assertThat(options.hasEventConfigurations()).isFalse();
 
             for (LogLevel level : List.of(LogLevel.DEBUG, LogLevel.INFO, LogLevel.ERROR, LogLevel.WARN,
                     LogLevel.DISABLED)) {

@@ -1,12 +1,18 @@
 package io.floci.aws.services.iot;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.services.iot.model.IotV2LoggingOptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+
+import java.nio.file.Path;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -137,5 +143,22 @@ class IotLoggingServiceTest {
         assertEquals("InvalidRequestException", assertThrows(AwsException.class, () -> set("""
             {"defaultLogLevel": "ERROR"}
             """, "eu-west-1")).getErrorCode());
+    }
+
+    @Test
+    void optionsSurviveAReloadOfPersistentStorage(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("iot-v2-logging-options.json");
+        TypeReference<Map<String, IotV2LoggingOptions>> type = new TypeReference<>() {};
+        new IotLoggingService(new PersistentStorage<>(file, type)).setV2LoggingOptions(objectMapper.readTree("""
+            {"roleArn": "%s", "defaultLogLevel": "DEBUG", "disableAllLogs": true}
+            """.formatted(ROLE_ARN)), REGION);
+
+        PersistentStorage<String, IotV2LoggingOptions> reloaded = new PersistentStorage<>(file, type);
+        reloaded.load();
+        IotLoggingService reader = new IotLoggingService(reloaded);
+
+        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "DEBUG", true), reader.getV2LoggingOptions(REGION));
+        assertEquals("NotConfiguredException",
+                assertThrows(AwsException.class, () -> reader.getV2LoggingOptions("eu-west-1")).getErrorCode());
     }
 }
