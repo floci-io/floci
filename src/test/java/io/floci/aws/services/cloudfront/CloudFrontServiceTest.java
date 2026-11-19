@@ -1868,6 +1868,11 @@ class CloudFrontServiceTest {
 
         assertEquals("The ConnectionMode specified is not valid.", onCreate.getMessage());
         assertEquals("The ConnectionMode specified is not valid.", onUpdate.getMessage());
+        // Neither refusal stored anything: no second distribution, and the first is as it was.
+        assertEquals(1, service.listDistributions(null, 100).size());
+        Distribution unchanged = service.getDistribution(created.getId());
+        assertNull(unchanged.getConfig().getConnectionMode());
+        assertEquals(created.getEtag(), unchanged.getEtag());
     }
 
     private static AwsException assertAws(

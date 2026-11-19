@@ -393,10 +393,10 @@ class CloudFrontDistributionConfigMembersTest {
 
     @Test
     void connectionModeOutsideItsEnumerationIsRefused() {
+        String originId = "origin-bad-connection-mode-" + UUID.randomUUID();
         given()
                 .contentType(ContentType.XML)
-                .body(distributionConfigBody("origin-bad-connection-mode-" + UUID.randomUUID(),
-                        "<ConnectionMode>shared</ConnectionMode>"))
+                .body(distributionConfigBody(originId, "<ConnectionMode>shared</ConnectionMode>"))
         .when()
             .post(DISTRIBUTIONS)
         .then()
@@ -404,6 +404,11 @@ class CloudFrontDistributionConfigMembersTest {
             .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidArgument")))
             .body(hasXPath("//*[local-name()='Message']",
                     equalTo("The ConnectionMode specified is not valid.")));
+        // The refused request created no distribution.
+        given().when().get(DISTRIBUTIONS).then()
+                .statusCode(200)
+                .body(hasXPath("count(//*[local-name()='Origin']/*[local-name()='Id' and text()='"
+                        + originId + "'])", equalTo("0")));
     }
 
     private static String summaryConnectionMode(String id) {

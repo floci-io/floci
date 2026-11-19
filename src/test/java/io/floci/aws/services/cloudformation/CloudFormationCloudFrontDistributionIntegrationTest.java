@@ -1,12 +1,12 @@
 package io.floci.aws.services.cloudformation;
 
-import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.cloudfront.CloudFrontService;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.KeyGroup;
 import io.floci.aws.services.cloudfront.model.OriginAccessControl;
 import io.floci.aws.services.cloudfront.model.PublicKey;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -407,36 +407,12 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
                         }
                       }
                     }
-                  },
-                  "Outputs": {
-                    "DistId": {"Value": {"Ref": "Dist"}}
                   }
                 }
                 """;
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "CreateStack")
-            .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
-
-        String described = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().asString();
-        String distributionId = XmlParser.extractFirst(described, "OutputValue", null);
+        CfnRequests.deploy("CreateStack", stackName, template, CFN_AUTH, "CREATE_COMPLETE");
+        String distributionId = CfnRequests.physicalId(stackName, "Dist", CFN_AUTH);
 
         given()
         .when()
