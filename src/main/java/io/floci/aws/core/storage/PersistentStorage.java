@@ -151,7 +151,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
         store = new ConcurrentHashMap<>();
     }
 
-    private void persistToDisk() {
+    private synchronized void persistToDisk() {
         persistCandidate(store);
     }
 
