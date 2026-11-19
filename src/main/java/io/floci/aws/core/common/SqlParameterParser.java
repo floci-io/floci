@@ -258,6 +258,42 @@ public final class SqlParameterParser {
         return rewrite(sql, options, true);
     }
 
+    /**
+     * The {@code [start, end)} span of each string literal and dollar-quoted body in {@code sql}, in
+     * order, tokenized as {@link #parse} does. Quoted identifiers and comments are skipped, not returned.
+     */
+    public static List<int[]> literalSpans(String sql, Options options) {
+        List<int[]> spans = new ArrayList<>();
+        int len = sql.length();
+        int i = 0;
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (startsLineComment(sql, i, options)) {
+                int end = sql.indexOf('\n', i);
+                i = end < 0 ? len : end;
+            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                i = skipBlockComment(sql, i, !options.mysqlComments());
+            } else if (c == '\'' || c == '"' || (options.allowBackticks() && c == '`')) {
+                int end = skipQuoted(sql, i, c, options);
+                if (c == '\'') {
+                    spans.add(new int[] {i, end});
+                }
+                i = end;
+            } else if (c == '$') {
+                int end = skipDollarQuoted(sql, i);
+                if (end > i) {
+                    spans.add(new int[] {i, end});
+                    i = end;
+                } else {
+                    i++;
+                }
+            } else {
+                i++;
+            }
+        }
+        return spans;
+    }
+
     private static String rewrite(String sql, Options options, boolean blankQuoted) {
         StringBuilder out = new StringBuilder(sql.length());
         int len = sql.length();

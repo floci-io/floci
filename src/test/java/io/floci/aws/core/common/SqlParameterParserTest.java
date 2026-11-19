@@ -28,6 +28,16 @@ class SqlParameterParserTest {
     }
 
     @Test
+    void literalSpansCoverStringsAndDollarBodiesButNotIdentifiersOrComments() {
+        String sql = "select E'\\'' , \"a'b\", $t$ x $t$ /* 'c' */ -- 'd'\n, 'e''f'";
+
+        List<String> literals = SqlParameterParser.literalSpans(sql, Options.REDSHIFT).stream()
+                .map(span -> sql.substring(span[0], span[1])).toList();
+
+        assertEquals(List.of("'\\''", "$t$ x $t$", "'e''f'"), literals);
+    }
+
+    @Test
     void rewritesNamedPlaceholdersToPositional() {
         ParsedSql parsed = SqlParameterParser.parse(
                 "select * from t where id = :id and name = :name", Options.REDSHIFT);
