@@ -264,6 +264,24 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     }
 
     @Test
+    void createAcceptsRequestPathWithoutName() {
+        String queueUrl = "http://localhost/000000000000/request-path";
+        String attributes = "{\"Path\":{\"DataType\":\"String\",\"StringValue\":\"${request.path}\"}}";
+        try (ApiGatewayV2Client client = apigw()) {
+            String api = client.createApi(b -> b.name("sqs-subtype-request-path").protocolType("HTTP")).apiId();
+            try {
+                CreateIntegrationResponse created = client.createIntegration(b -> b.apiId(api)
+                        .integrationType("AWS_PROXY").integrationSubtype(SUBTYPE)
+                        .requestParameters(Map.of("QueueUrl", queueUrl, "MessageBody", "$request.path",
+                                "MessageAttributes", attributes)));
+                assertEquals("$request.path", created.requestParameters().get("MessageBody"));
+            } finally {
+                client.deleteApi(b -> b.apiId(api));
+            }
+        }
+    }
+
+    @Test
     void restPathTreatsNullPayloadFormatVersionAsAbsent() {
         try (ApiGatewayV2Client client = apigw()) {
             String api = client.createApi(b -> b.name("sqs-subtype-null-version").protocolType("HTTP")).apiId();
@@ -471,6 +489,20 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
                     assertThat(message.messageAttributes().get("Stage").stringValue(), equalTo("test"));
                     assertThat(message.messageAttributes().get("Route").stringValue(), equalTo("POST /send"));
                     assertThat(message.messageAttributes().get("Path").stringValue(), equalTo("/test/send"));
+                });
+    }
+
+    @Test
+    void invokeResolvesRequestPathWithoutTheStage() {
+        String attributes = "{\"Path\":{\"DataType\":\"String\",\"StringValue\":\"${request.path}\"}}";
+        withSendMessageRoute("sqs-invoke-request-path",
+                queueUrl -> Map.of("QueueUrl", queueUrl, "MessageBody", "$request.path",
+                        "MessageAttributes", attributes),
+                (sqs, queueUrl, api) -> {
+                    given().post("/execute-api/" + api + "/test/send").then().statusCode(200);
+                    Message message = onlyMessage(sqs, queueUrl);
+                    assertThat(message.body(), equalTo("/send"));
+                    assertThat(message.messageAttributes().get("Path").stringValue(), equalTo("/send"));
                 });
     }
 
