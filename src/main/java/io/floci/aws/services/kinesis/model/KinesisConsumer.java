@@ -15,7 +15,7 @@ public class KinesisConsumer {
     private String consumerStatus;
     private Instant consumerCreationTimestamp;
     private String streamArn;
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public KinesisConsumer() {}
 
