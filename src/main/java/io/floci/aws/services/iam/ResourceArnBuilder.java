@@ -159,9 +159,9 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. Pipes and DSQL ARNs are minted in
-     * {@code partition}, the request's, as those services mint theirs, so a Region no partition publishes gets
-     * the deployment's partition rather than {@code aws}.
+     * The resources a request is checked against. DSQL ARNs are minted in {@code partition}, the request's, as
+     * that service mints its own, so a Region no partition publishes gets the deployment's partition rather than
+     * {@code aws}.
      */
     public List<String> buildResources(String credentialScope, ContainerRequestContext ctx,
                                        String region, String accountId, String partition) {
@@ -188,7 +188,6 @@ public class ResourceArnBuilder {
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
-            case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
@@ -954,16 +953,6 @@ public class ResourceArnBuilder {
         }
         if (cluster != null) {
             return new AwsArnUtils.Arn(partition, "dsql", region, accountId, "cluster/" + cluster).toString();
-        }
-        return taggedResource(ctx);
-    }
-
-    /** The resource of an EventBridge Pipes route: {@code pipe/<name>}, or the ARN a tagging route names. */
-    private String buildPipesArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                 String partition) {
-        String pipe = segmentAfterPrefix(path, "/v1/pipes/");
-        if (pipe != null) {
-            return new AwsArnUtils.Arn(partition, "pipes", region, accountId, "pipe/" + pipe).toString();
         }
         return taggedResource(ctx);
     }

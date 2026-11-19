@@ -2571,7 +2571,7 @@ class ResourceArnBuilderTest {
                         "aws-cn"));
         request("/v1/pipes/orders");
         assertEquals(List.of("arn:aws-cn:pipes:xx-local-1:000000000000:pipe/orders"),
-                builder.buildResources("pipes", ctx, "xx-local-1", "000000000000", "aws-cn"));
+                builder.buildResources("pipes", "pipes:DescribePipe", ctx, "xx-local-1", "000000000000", "aws-cn"));
     }
 
     @Test
@@ -2611,17 +2611,25 @@ class ResourceArnBuilderTest {
         assertEquals(List.of("*"), lambda("GET", "/2017-03-31/tags/shared", "ListTags"));
     }
 
+    /** A Pipes route is checked on the pipe its path names, or the ARN its tagging route names, from the table. */
     @Test
     void pipesRoutesResolveThePipeOrTheTaggedArn() {
         String pipe = "arn:aws:pipes:us-east-1:000000000000:pipe/orders";
-        when(uriInfo.getPath()).thenReturn("/v1/pipes/orders");
-        assertEquals(pipe, builder.build("pipes", ctx, "us-east-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/v1/pipes/orders/start");
-        assertEquals(pipe, builder.build("pipes", ctx, "us-east-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/tags/" + pipe);
-        assertEquals(pipe, builder.build("pipes", ctx, "us-east-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/v1/pipes");
-        assertEquals("*", builder.build("pipes", ctx, "us-east-1", "000000000000"));
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/v1/pipes/orders");
+        assertEquals(List.of(pipe), pipes("pipes:DescribePipe"));
+        when(ctx.getMethod()).thenReturn("POST");
+        request("/v1/pipes/orders/start");
+        assertEquals(List.of(pipe), pipes("pipes:StartPipe"));
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/tags/" + pipe.replace(":", "%3A").replace("/", "%2F"));
+        assertEquals(List.of(pipe), pipes("pipes:ListTagsForResource"));
+        request("/v1/pipes");
+        assertEquals(List.of("*"), pipes("pipes:ListPipes"));
+    }
+
+    private List<String> pipes(String operation) {
+        return builder.buildResources("pipes", operation, ctx, "us-east-1", ACCOUNT, "aws");
     }
 
     /** A durable execution's actions are checked on the execution its ARN names, which a client sends encoded. */

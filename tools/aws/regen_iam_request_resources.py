@@ -294,11 +294,11 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
-              "sqs", "sns", "kinesis")
+              "sqs", "sns", "kinesis", "pipes")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kms", "logs", "pipes",
-              "resource-groups", "s3", "sts")
+HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kms", "logs", "resource-groups",
+              "s3", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
 _LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
