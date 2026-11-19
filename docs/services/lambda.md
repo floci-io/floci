@@ -17,6 +17,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `UpdateFunctionConfiguration` | Update runtime, handler, memory, timeout, environment, architectures, tracing, layers, and more |
 | `DeleteFunction` | Remove a function |
 | `Invoke` | Invoke a function synchronously or asynchronously. A durable function starts a durable execution |
+| `InvokeWithResponseStream` | Invoke a function and stream its response as event stream frames (see Response streaming below) |
 | `CreateEventSourceMapping` | Connect SQS / Kinesis / DynamoDB Streams to a function |
 | `GetEventSourceMapping` | Get event source mapping details |
 | `ListEventSourceMappings` | List all event source mappings |
@@ -314,6 +315,22 @@ Not emulated yet:
 - The per-execution limits of 3,000 operations and 100 MB of persisted payload.
 - The `Deleting` state AWS shows for about a minute after `DeleteFunction` of a durable function.
   Floci removes it at once.
+
+## Response streaming
+
+`InvokeWithResponseStream` answers with an `application/vnd.amazon.eventstream` body. It has one
+`PayloadChunk` event for each chunk the function streams and one `InvokeComplete` event at the end.
+A function that does not stream sends its whole response as one `PayloadChunk`. Every invocation
+type runs the function, so `DryRun` and `Event` stream like `RequestResponse`.
+
+`X-Amz-Executed-Version`, `x-amzn-Remapped-Content-Type`, `Qualifier`, `X-Amz-Client-Context` and
+`X-Amz-Log-Type: Tail` are supported. With a log tail, `InvokeComplete` carries `LogResult`.
+`InvokeComplete` carries `ErrorCode` for an error of a function that does not stream, for a
+timeout, and for a stream that its container cut short.
+
+Not emulated: an error that a streaming handler throws is not reported in `InvokeComplete`.
+The runtime reports it in HTTP trailers, which the Floci runtime API does not read, so the stream
+ends as a success.
 
 ## Code signing configuration pagination
 
@@ -659,7 +676,6 @@ For a longer drain, explicitly stop with the larger timeout and then start Floci
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
-- `InvokeWithResponseStream`
 
 Code signing enforcement is not emulated: an attached configuration never gates a deployment.
 The attachment lifecycle is supported for `$LATEST`: `PutFunctionCodeSigningConfig` attaches or

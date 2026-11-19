@@ -1465,6 +1465,29 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
     public InvokeResult invoke(String region, String functionName, String queryQualifier, byte[] payload,
                                InvocationType type, String clientContext, String durableExecutionName,
                                String traceHeader, boolean logTail) {
+        InvokeTarget target = resolveInvokeTarget(region, functionName, queryQualifier);
+        LambdaFunction fn = target.function();
+        String qualifier = target.qualifier();
+        reportCustomResourceLiveness(payload);
+        InvokeResult durable = invokeIfDurable(fn, region, qualifier, durableExecutionName, payload, type,
+                traceHeader, logTail);
+        if (durable != null) {
+            return durable;
+        }
+        InvokeResult result = logTail
+                ? executorService.invoke(fn, payload, type,
+                        LambdaInvocationChain.currentDepth(), qualifier, clientContext, true)
+                : executorService.invoke(fn, payload, type,
+                        LambdaInvocationChain.currentDepth(), qualifier, clientContext);
+        result.setExecutedVersion(fn.getVersion());
+        return result;
+    }
+
+    /** The function an Invoke runs, and the qualifier it was invoked through. */
+    record InvokeTarget(LambdaFunction function, String qualifier) {
+    }
+
+    InvokeTarget resolveInvokeTarget(String region, String functionName, String queryQualifier) {
         validateInvokeQualifier(queryQualifier);
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, queryQualifier);
         String name = ref.name();
@@ -1477,17 +1500,24 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         } else {
             fn = targetResolver.resolveInvokeTarget(region, name, qualifier);
         }
+        return new InvokeTarget(fn, qualifier);
+    }
+
+    /**
+     * Runs a resolved target synchronously, handing a response the runtime streams to {@code listener}
+     * as it arrives. Every invocation type runs, as on {@code InvokeWithResponseStream}.
+     */
+    InvokeResult invokeStreaming(InvokeTarget target, String region, byte[] payload, String clientContext,
+                                 String traceHeader, boolean logTail, ResponseStreamListener listener) {
+        LambdaFunction fn = target.function();
         reportCustomResourceLiveness(payload);
-        InvokeResult durable = invokeIfDurable(fn, region, qualifier, durableExecutionName, payload, type,
-                traceHeader, logTail);
+        InvokeResult durable = invokeIfDurable(fn, region, target.qualifier(), null, payload,
+                InvocationType.RequestResponse, traceHeader, logTail);
         if (durable != null) {
             return durable;
         }
-        InvokeResult result = logTail
-                ? executorService.invoke(fn, payload, type,
-                        LambdaInvocationChain.currentDepth(), qualifier, clientContext, true)
-                : executorService.invoke(fn, payload, type,
-                        LambdaInvocationChain.currentDepth(), qualifier, clientContext);
+        InvokeResult result = executorService.invokeStreaming(fn, payload, LambdaInvocationChain.currentDepth(),
+                target.qualifier(), clientContext, logTail, listener);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -3512,6 +3542,30 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
         validateNonEmpty(qualifier, "qualifier", false);
         validateMaxLength(qualifier, "qualifier", 128);
         validatePattern(qualifier, "qualifier", QUALIFIER);
+    }
+
+    /**
+     * The violations of Invoke's Qualifier as AWS lists them, pattern first. An empty qualifier breaks the
+     * pattern and the minimum length, so it yields two.
+     */
+    static List<String> invokeQualifierViolations(String qualifier) {
+        List<String> violations = new ArrayList<>();
+        if (qualifier == null) {
+            return violations;
+        }
+        if (!QUALIFIER.matcher(qualifier).matches()) {
+            violations.add("Value '" + qualifier + "' at 'qualifier' failed to satisfy constraint: "
+                    + "Member must satisfy regular expression pattern: " + QUALIFIER.pattern());
+        }
+        if (qualifier.isEmpty()) {
+            violations.add("Value '' at 'qualifier' failed to satisfy constraint: "
+                    + "Member must have length greater than or equal to 1");
+        }
+        if (qualifier.length() > 128) {
+            violations.add("Value at 'qualifier' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 128");
+        }
+        return violations;
     }
 
     public void deleteAlias(String region, String functionName, String aliasName) {

@@ -285,6 +285,7 @@ action_count_sources:
       - { path: services/lambda/LambdaAccountSettingsController.java, mode: rest }
       - { path: services/lambda/LambdaCodeSigningController.java, mode: rest }
       - { path: services/lambda/LambdaCodeSigningConfigFunctionsController.java, mode: rest }
+      - { path: services/lambda/LambdaResponseStreamController.java, mode: rest }
       - { path: services/lambda/LambdaConcurrencyController.java, mode: rest }
       - { path: services/lambda/LambdaProvisionedConcurrencyController.java, mode: rest }
       - { path: services/lambda/LambdaEventInvokeController.java, mode: rest }
