@@ -21,6 +21,14 @@ class SesNamesTest {
     }
 
     @Test
+    void isValid_appliesTheLengthAndTheCharacters() {
+        assertTrue(SesNames.isValid("a".repeat(64)));
+        assertFalse(SesNames.isValid("a".repeat(65)));
+        assertFalse(SesNames.isValid("a b"));
+        assertFalse(SesNames.isValid(""));
+    }
+
+    @Test
     void requireMaxLength_refusesTheSixtyFifthCharacterWithTheCallersWording() {
         assertDoesNotThrow(() -> SesNames.requireMaxLength("a".repeat(64), "BadRequestException", "TenantName"));
 

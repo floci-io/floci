@@ -5,10 +5,10 @@ import io.floci.aws.core.common.AwsException;
 import java.util.regex.Pattern;
 
 /**
- * The rule SES applies to the names of templates, configuration sets, event destinations and
- * tenants: at most {@value #MAX_LENGTH} characters, all of them ASCII letters, digits, '_' or '-'.
- * The wording, the error code and the order of the two checks differ per name, so each caller
- * passes its own and keeps its own blank check.
+ * The rule SES applies to the names of templates, configuration sets, event destinations, tenants,
+ * contact lists, topics and policies: at most {@value #MAX_LENGTH} characters, all of them ASCII
+ * letters, digits, '_' or '-'. The wording, the error code and the order of the two checks differ
+ * per name, so each caller passes its own and keeps its own blank check.
  */
 final class SesNames {
 
@@ -21,6 +21,11 @@ final class SesNames {
 
     static boolean hasOnlyAllowedCharacters(String name) {
         return ALLOWED_CHARACTERS.matcher(name).matches();
+    }
+
+    /** Both halves of the rule at once, for a caller that answers them with one message or none. */
+    static boolean isValid(String name) {
+        return name.length() <= MAX_LENGTH && hasOnlyAllowedCharacters(name);
     }
 
     /** Refuses a name over the limit with {@code "<subject> cannot exceed 64 characters."}. */

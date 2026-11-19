@@ -400,7 +400,7 @@ public class SesConfigurationSetService implements SesTaggable {
 
     /** For guards that must not trip the key derivation's name validation (the tenant gate). */
     static boolean isValidName(String name) {
-        return name != null && name.length() <= SesNames.MAX_LENGTH && SesNames.hasOnlyAllowedCharacters(name);
+        return name != null && SesNames.isValid(name);
     }
 
     // ──────────────────────── Domain-pure option setters ────────────────────────
