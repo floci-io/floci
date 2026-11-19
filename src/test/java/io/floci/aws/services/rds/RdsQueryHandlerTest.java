@@ -446,6 +446,18 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_standardStorageReportsZeroThroughput() {
+        // The API refuses StorageType=standard, so only a stored record can carry it.
+        DbInstance instance = makeInstance("std");
+        instance.setStorageType("standard");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+        assertTrue(body.contains("<StorageThroughput>0</StorageThroughput>"), body);
+    }
+
+    @Test
     void describeDbInstances_oracleGp3BaselineStepsUpAt200GiB() {
         // Floci cannot create an Oracle instance, so the Oracle threshold is reachable only from here.
         // An upper-case identifier on a stored record must still read as SQL Server (always the lower tier).

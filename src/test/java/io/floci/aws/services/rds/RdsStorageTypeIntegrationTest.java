@@ -79,6 +79,7 @@ class RdsStorageTypeIntegrationTest {
                 assertEquals(200, read.statusCode());
                 assertEquals(storageType, read.xmlPath().getString(path + "StorageType"));
                 assertTrue(read.xmlPath().getList(path + "Iops").isEmpty());
+                assertEquals("0", read.xmlPath().getString(path + "StorageThroughput"));
             }
         } finally {
             delete(createdId);
