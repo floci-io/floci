@@ -37,7 +37,7 @@ public final class ReplacementCleanup {
 
     private static final Logger LOG = Logger.getLogger(ReplacementCleanup.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    public static final int MAX_ATTEMPTS = 3;
+    private static final int MAX_ATTEMPTS = 3;
 
     /** Deletes a displaced entity; the caller's own idempotent delete arm. */
     @FunctionalInterface

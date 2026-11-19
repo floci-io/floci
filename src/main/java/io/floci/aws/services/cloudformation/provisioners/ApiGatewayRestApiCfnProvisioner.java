@@ -63,6 +63,8 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     /** Where a {@link Location} names a stage: the stage name in place of the resource id. */
     private static final String STAGE_KIND = "STAGE";
     private static final String STAGE_SNAPSHOT_ATTR = CfnRollback.APIGW_STAGE_UPDATE_SNAPSHOT_ATTR;
+    /** The stage a RestApiId change left on the old API, owed a delete once the update commits. */
+    private static final String STAGE_CLEANUP_ATTR = "__FlociApiGatewayStageCleanup";
     private static final String VPC_ENDPOINT_IDS_PATH = "/endpointConfiguration/vpcEndpointIds";
 
     private final ApiGatewayService apiGatewayService;
@@ -103,6 +105,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public void delete(StackResource resource, String region) {
+        deletePendingStage(resource);
         deleteEntity(resource, resource.getPhysicalId(), region);
     }
 
@@ -168,12 +171,31 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
-        return ReplacementCleanup.hasReplacement(resource);
+        return resource.getAttributes().containsKey(STAGE_CLEANUP_ATTR) || ReplacementCleanup.hasReplacement(resource);
     }
 
     @Override
     public String updateCleanupPhysicalId(StackResource resource) {
-        return ReplacementCleanup.cleanupPhysicalId(resource);
+        ObjectNode movedStage = readStageCleanup(resource);
+        return movedStage != null ? CfnLifecycleRecords.cleanupPhysicalId(resource, movedStage)
+                : ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    private void deleteMovedStage(ObjectNode record) {
+        String name = record.path("name").asText();
+        deleteLocation(name, new Location(record.path("restApiId").asText(), name, STAGE_KIND),
+                record.path("region").asText());
+    }
+
+    /** Deletes the old stage a failed or unfinished cleanup still owes, {@code Retain} honoured. */
+    private void deletePendingStage(StackResource resource) {
+        CfnLifecycleRecords.deletePending(resource, STAGE_CLEANUP_ATTR, readStageCleanup(resource), true,
+                this::deleteMovedStage);
+    }
+
+    private static ObjectNode readStageCleanup(StackResource resource) {
+        return CfnLifecycleRecords.read(resource, STAGE_CLEANUP_ATTR,
+                "Invalid API Gateway stage cleanup record", "API Gateway stage cleanup record must be an object");
     }
 
     /**
@@ -183,13 +205,16 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         resource.getAttributes().remove(AUTHORIZER_SNAPSHOT_ATTR);
-        UpdateCleanupResult movedStage = deleteStageMovedByUpdate(resource);
-        if (movedStage == null) {
+        ObjectNode pendingStage = readStageCleanup(resource);
+        UpdateCleanupResult movedStage = pendingStage == null ? UpdateCleanupResult.notApplicable()
+                : CfnLifecycleRecords.completePending(resource, STAGE_CLEANUP_ATTR, STAGE_SNAPSHOT_ATTR,
+                        pendingStage, true, this::deleteMovedStage);
+        if (!resource.getAttributes().containsKey(STAGE_CLEANUP_ATTR)) {
             resource.getAttributes().remove(STAGE_SNAPSHOT_ATTR);
         }
         UpdateCleanupResult displaced = ReplacementCleanup.complete(resource,
                 (type, physicalId, region) -> deleteEntity(resource, physicalId, region));
-        return movedStage != null && (!displaced.applicable() || displaced.complete()) ? movedStage : displaced;
+        return movedStage.applicable() && (!displaced.applicable() || displaced.complete()) ? movedStage : displaced;
     }
 
     @Override
@@ -830,15 +855,16 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
      * RestApiId and StageName are create-only: a change to either replaces the stage. Any other
      * change patches it in place, keeping the settings the template does not model. A change to
      * RestApiId that keeps the name leaves the physical id as it was, so the stage on the old API
-     * is recorded and deleted once the update commits, unless {@code UpdateReplacePolicy: Retain}
-     * keeps it ({@link ReplacementCleanup} lists one entity per physical id, so it cannot hold this
-     * one). A new stage is refused when its name is already taken on the API, so a rollback never
-     * deletes a stage the update did not create. A stage provisioned before its location was
+     * is recorded through {@link CfnLifecycleRecords} and deleted once the update commits, unless
+     * {@code UpdateReplacePolicy: Retain} keeps it ({@link ReplacementCleanup} lists one entity per
+     * physical id, so it cannot hold this one). A new stage is refused when its name is already
+     * taken on the API, so a rollback never deletes a stage the update did not create. A stage provisioned before its location was
      * recorded is not deleted, and is not deleted as the old stage of a move either.
      */
     private void provisionStage(StackResource r, JsonNode props, ProvisionContext ctx) {
         // A snapshot describes the update in flight; one an earlier update left behind is stale.
         r.getAttributes().remove(STAGE_SNAPSHOT_ATTR);
+        deletePendingStage(r);
         if (ctx.isUpdate()) {
             ReplacementCleanup.endRollbackRetry(r);
         }
@@ -879,6 +905,8 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
             moved.put("stageName", stageName);
             moved.put("movedFromApiId", prior.restApiId());
             r.getAttributes().put(STAGE_SNAPSHOT_ATTR, moved.toString());
+            CfnLifecycleRecords.setCleanup(r, STAGE_CLEANUP_ATTR, objectMapper.createObjectNode()
+                    .put("name", stageName).put("restApiId", prior.restApiId()).put("region", region), true);
         }
         if (ctx.isUpdate()) {
             ReplacementCleanup.record(r, ctx, attributesBefore, replaces);
@@ -926,42 +954,8 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
     private void requireStageNameFree(String region, String apiId, String stageName) {
         if (stageName != null && findPrior("API stage", stageName,
                 () -> apiGatewayService.getStage(region, apiId, stageName)) != null) {
-            throw new AwsException("ConflictException", "Stage already exists: " + stageName, 409);
+            throw new AwsException("ConflictException", "Stage already exists", 409);
         }
-    }
-
-    /**
-     * Deletes the stage a RestApiId change left on the old API, once the update has committed;
-     * {@code UpdateReplacePolicy: Retain} keeps it, as it keeps any displaced entity. A failed delete
-     * is reported the way {@link ReplacementCleanup#complete} reports one, as a result the engine
-     * retries up to three attempts, with the count kept on the snapshot; null when nothing is left to
-     * retry; after the last failed attempt the old stage stays on the old API. {@link ReplacementCleanup}
-     * cannot hold this stage, which shares its physical id with the live one.
-     */
-    private UpdateCleanupResult deleteStageMovedByUpdate(StackResource resource) {
-        if ("Retain".equals(resource.getUpdateReplacePolicy())) {
-            return null;
-        }
-        JsonNode snapshot = STAGE.equals(resource.getResourceType())
-                ? CfnRollback.updateSnapshot(resource, STAGE_SNAPSHOT_ATTR) : null;
-        String movedFrom = snapshot == null ? null : CfnRollback.snapshotText(snapshot, "movedFromApiId");
-        if (movedFrom == null) {
-            return null;
-        }
-        int attempts = snapshot.path("cleanupAttempts").asInt(0);
-        if (attempts >= ReplacementCleanup.MAX_ATTEMPTS) {
-            return null;
-        }
-        String stageName = snapshot.path("stageName").asText();
-        try {
-            deleteLocation(stageName, new Location(movedFrom, stageName, STAGE_KIND),
-                    snapshot.path("region").asText());
-        } catch (RuntimeException deleteFailure) {
-            ObjectNode failed = ((ObjectNode) snapshot).put("cleanupAttempts", attempts + 1);
-            resource.getAttributes().put(STAGE_SNAPSHOT_ATTR, failed.toString());
-            return new UpdateCleanupResult(true, false, stageName, attempts + 1, deleteFailure.getMessage());
-        }
-        return null;
     }
 
     /**
@@ -993,6 +987,7 @@ public class ApiGatewayRestApiCfnProvisioner implements CfnResourceProvisioner {
             apiGatewayService.restoreStage(region, apiId, prior);
         }
         resource.getAttributes().remove(STAGE_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(STAGE_CLEANUP_ATTR);
         return true;
     }
 
