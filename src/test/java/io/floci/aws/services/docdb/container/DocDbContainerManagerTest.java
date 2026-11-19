@@ -1,6 +1,5 @@
 package io.floci.aws.services.docdb.container;
 
-import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -47,8 +46,7 @@ class DocDbContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
 
         DocDbContainerManager manager = newManager(lifecycleManager);
 
@@ -66,8 +64,7 @@ class DocDbContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("no such image: mongo:7.0"));
-        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
 
         DocDbContainerManager manager = newManager(lifecycleManager);
 
