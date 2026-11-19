@@ -112,7 +112,7 @@ class Route53ResolverRegionScopingIntegrationTest {
         }
     }
 
-    static ValidatableResponse call(String region, String action, String body) {
+    private static ValidatableResponse call(String region, String action, String body) {
         String authorization = "AWS4-HMAC-SHA256 Credential=AKID/20260101/" + region
                 + "/route53resolver/aws4_request";
         return Route53ResolverRequests.call(action, body, authorization);
