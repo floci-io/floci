@@ -63,6 +63,15 @@ public class Route53ResolverService {
      * route53resolver/2018-04-01 model). The plural {@code InvalidParametersException} this
      * service used to raise belongs to Service Catalog and exists nowhere in this model.
      */
+    /** The ListResolverRules filter names, lower-cased without underscores, and the rule field each one reads. */
+    private static final Map<String, String> RULE_FILTER_FIELDS = Map.of(
+            "creatorrequestid", "CreatorRequestId",
+            "domainname", "DomainName",
+            "name", "Name",
+            "resolverendpointid", "ResolverEndpointId",
+            "status", "Status",
+            "type", "RuleType");
+
     private static final String INVALID_PARAMETER = "InvalidParameterException";
     /** The DNS Firewall family's parameter-rejection error. See {@link #INVALID_PARAMETER}. */
     private static final String VALIDATION = "ValidationException";
@@ -539,8 +548,26 @@ public class Route53ResolverService {
         return require(ruleStore, id, "resolver rule", region).deepCopy();
     }
 
-    public List<ObjectNode> listResolverRules(String region) {
-        return recordsIn(ruleStore, region);
+    /**
+     * The rules of {@code region} matching every filter of {@code filters}, a rule matching a filter when its field
+     * equals any of the filter's values. A filter name may also be given in the legacy upper-case form
+     * ({@code CREATOR_REQUEST_ID}); a name the operation does not list filters nothing.
+     */
+    public List<ObjectNode> listResolverRules(JsonNode filters, String region) {
+        List<ObjectNode> rules = recordsIn(ruleStore, region);
+        if (filters == null || !filters.isArray()) {
+            return rules;
+        }
+        for (JsonNode filter : filters) {
+            String field = RULE_FILTER_FIELDS.get(filter.path("Name").asText("").replace("_", "").toLowerCase());
+            if (field == null) {
+                continue;
+            }
+            List<String> values = new ArrayList<>();
+            filter.path("Values").forEach(value -> values.add(value.asText()));
+            rules = rules.stream().filter(rule -> values.contains(text(rule, field))).toList();
+        }
+        return rules;
     }
 
     public ObjectNode updateResolverRule(String id, JsonNode config, String region) {
