@@ -31,7 +31,8 @@ import java.util.function.BiConsumer;
  *
  * <p>Flow:
  * <ol>
- *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation)
+ *   <li>Read client StartupMessage (handles PostgreSQL SSL negotiation), refusing one sent
+ *       without TLS when {@code rds.force_ssl} requires it
  *   <li>Challenge client with AuthenticationCleartextPassword
  *   <li>Read client password
  *   <li>Validate (IAM SigV4 or plain password)
@@ -208,12 +209,26 @@ public class PostgresProtocolHandler {
                                       boolean forwardStartupParameters, boolean databaseIamAuthentication,
                                       StartupObserver startupObserver,
                                       SessionRoleHandover roleHandover) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                forwardStartupParameters, databaseIamAuthentication, startupObserver, roleHandover, false);
+    }
+
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      StartupObserver startupObserver,
+                                      SessionRoleHandover roleHandover,
+                                      boolean requireSsl) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
         // Phase 1: Read client startup message (possibly preceded by SSL request)
         StartupMessage startup = readStartupMessage(client, backendConnector, databaseIamAuthentication,
-                tlsCertificates, handshakeTimeoutMillis);
+                tlsCertificates, handshakeTimeoutMillis, requireSsl);
         if (startup == null) {
             closeQuietly(client);
             return null;
@@ -609,7 +624,7 @@ public class PostgresProtocolHandler {
 
     private static StartupMessage readStartupMessage(Socket socket, BackendConnector backendConnector,
             boolean forwardCancel, RdsProxyTlsCertificates tlsCertificates,
-            int handshakeTimeoutMillis) throws IOException {
+            int handshakeTimeoutMillis, boolean requireSsl) throws IOException {
         Socket currentSocket = socket;
         while (true) {
             InputStream in = currentSocket.getInputStream();
@@ -645,10 +660,15 @@ public class PostgresProtocolHandler {
             }
 
             Map<String, String> params = PostgresWire.startupParameters(startup.body());
-            return new StartupMessage(currentSocket,
-                    params.getOrDefault("user", "postgres"),
-                    params.get("database"),
-                    params);
+            String user = params.getOrDefault("user", "postgres");
+            if (requireSsl && !(currentSocket instanceof SSLSocket)) {
+                sendErrorResponse(out, "FATAL", "28000", "no pg_hba.conf entry for host \""
+                        + currentSocket.getInetAddress().getHostAddress() + "\", user \"" + user
+                        + "\", database \"" + params.getOrDefault("database", user) + "\", no encryption");
+                out.flush();
+                return null;
+            }
+            return new StartupMessage(currentSocket, user, params.get("database"), params);
         }
     }
 
