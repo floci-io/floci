@@ -123,7 +123,7 @@ class SecurityGroupFirewallDockerIntegrationTest {
             assertEquals("fixture-token", fixture.stdout().trim());
 
             ContainerExec.Result legacy = ContainerExec.runMerged(docker, namespace.helperId(),
-                    Ec2MetadataProxy.startCommand("127.0.0.1", 9169), 30);
+                    preUpgradeImdsRelay("127.0.0.1", 9169), 30);
             assertEquals(0, legacy.exitCode(), "Old IMDS proxy did not start: " + legacy.summary());
 
             ContainerExec.Result removed = ContainerExec.runMerged(docker, namespace.helperId(),
@@ -188,6 +188,24 @@ class SecurityGroupFirewallDockerIntegrationTest {
                 lifecycle.removeIfExists(namespace.helperId());
             }
         }
+    }
+
+    /**
+     * The relay an older Floci started on an instance: socat on port 80 of the link-local address, with its PID in
+     * the file the routed relay retires it by, ready once an IMDSv2 token reads the instance ID through it.
+     */
+    private static String[] preUpgradeImdsRelay(String flociHost, int imdsPort) {
+        return new String[]{"sh", "-c", String.join("\n",
+                "set -eu",
+                "ip addr show dev lo | grep -q '169.254.169.254/32' || ip addr add 169.254.169.254/32 dev lo",
+                "nohup socat TCP-LISTEN:80,bind=169.254.169.254,fork,reuseaddr TCP:" + flociHost + ":" + imdsPort
+                        + " >/tmp/floci-imds-proxy.log 2>&1 &",
+                "echo $! > /tmp/floci-imds-proxy.pid",
+                "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do",
+                "  " + Ec2MetadataProxy.imdsProbeCommand("http://169.254.169.254"),
+                "  sleep 1",
+                "done",
+                "exit 1")};
     }
 
     private static ContainerExec.Result pollCurl(DockerClient docker, String helperId, String... curlArgs)
