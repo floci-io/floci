@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.dns.DnsLookupHelper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -556,16 +557,29 @@ public class Route53ResolverService {
      */
     public List<ObjectNode> listResolverRules(JsonNode filters, String region) {
         List<ObjectNode> rules = recordsIn(ruleStore, region);
-        if (filters == null || !filters.isArray()) {
+        if (filters == null || filters.isNull()) {
             return rules;
         }
+        if (!filters.isArray()) {
+            throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+        }
         for (JsonNode filter : filters) {
+            if (!filter.isObject()) {
+                throw new AwsException(INVALID_PARAMETER, "Filters must be a list of filters.", 400);
+            }
             String name = filter.path("Name").asText("");
             if (name.isEmpty() || name.length() > 64) {
                 throw new AwsException(INVALID_PARAMETER, "Filter Name must be 1 to 64 characters long.", 400);
             }
+            JsonNode filterValues = filter.path("Values");
+            if (!filterValues.isMissingNode() && !filterValues.isNull() && !filterValues.isArray()) {
+                throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+            }
             List<String> values = new ArrayList<>();
-            for (JsonNode value : filter.path("Values")) {
+            for (JsonNode value : filterValues) {
+                if (!value.isTextual()) {
+                    throw new AwsException(INVALID_PARAMETER, "Filter Values must be a list of strings.", 400);
+                }
                 if (value.asText().isEmpty() || value.asText().length() > 600) {
                     throw new AwsException(INVALID_PARAMETER, "Filter Values must be 1 to 600 characters long.", 400);
                 }
@@ -578,19 +592,12 @@ public class Route53ResolverService {
             boolean domain = "DomainName".equals(field);
             rules = rules.stream()
                     .filter(rule -> values.stream().anyMatch(value -> domain
-                            ? withoutTrailingDot(value).equalsIgnoreCase(withoutTrailingDot(text(rule, field)))
+                            ? DnsLookupHelper.normalizeTarget(value)
+                                    .equalsIgnoreCase(DnsLookupHelper.normalizeTarget(text(rule, field)))
                             : value.equals(text(rule, field))))
                     .toList();
         }
         return rules;
-    }
-
-    /** A domain name without its trailing dot; the filter contract has one and CreateResolverRule takes either. */
-    private static String withoutTrailingDot(String domainName) {
-        if (domainName == null) {
-            return "";
-        }
-        return domainName.endsWith(".") ? domainName.substring(0, domainName.length() - 1) : domainName;
     }
 
     public ObjectNode updateResolverRule(String id, JsonNode config, String region) {

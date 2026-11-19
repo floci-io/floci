@@ -75,6 +75,15 @@ class Route53ResolverRuleFilterIntegrationTest {
         }
     }
 
+    @Test
+    void listResolverRulesRejectsMalformedFilters() {
+        for (String filters : new String[] {"\"Name\"", "[\"Name\"]",
+                "[{\"Name\":\"Name\",\"Values\":\"x\"}]", "[{\"Name\":\"Name\",\"Values\":[1]}]"}) {
+            call("ListResolverRules", "{\"Filters\":" + filters + "}").statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+        }
+    }
+
     private static String createRule(String name, String type, String domain) {
         return call("CreateResolverRule", "{\"CreatorRequestId\":\"" + name + "\",\"Name\":\"" + name
                 + "\",\"RuleType\":\"" + type + "\",\"DomainName\":\"" + domain + "\"}")
