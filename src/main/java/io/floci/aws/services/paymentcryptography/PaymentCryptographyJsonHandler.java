@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyMembers.members;
+
 /**
  * The Payment Cryptography control plane.
  *
@@ -829,38 +831,6 @@ public class PaymentCryptographyJsonHandler {
                             + String.join(", ", served) + ")", 400);
         }
         return form;
-    }
-
-    /** The members of a form, as the service reads them. */
-    private static Map<String, Object> members(JsonNode node) {
-        Map<String, Object> out = new LinkedHashMap<>();
-        if (node == null || !node.isObject()) {
-            return out;
-        }
-        node.properties().forEach(entry -> out.put(entry.getKey(), value(entry.getValue())));
-        return out;
-    }
-
-    /** One member of a form, as the service reads it. */
-    private static Object value(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return null;
-        }
-        if (node.isObject()) {
-            return members(node);
-        }
-        if (node.isArray()) {
-            List<Object> values = new ArrayList<>();
-            node.forEach(child -> values.add(value(child)));
-            return values;
-        }
-        if (node.isBoolean()) {
-            return node.asBoolean();
-        }
-        if (node.isNumber()) {
-            return node.asText();
-        }
-        return node.asText();
     }
 
     /**

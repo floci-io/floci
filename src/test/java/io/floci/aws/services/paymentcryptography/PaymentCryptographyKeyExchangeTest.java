@@ -1,6 +1,8 @@
 package io.floci.aws.services.paymentcryptography;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -428,6 +430,27 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
+    void aCheckValueAlgorithmThatIsNullIsAMemberTheRequestDoesNotCarry() {
+        // The request carries the member as a null, which is the member it does not carry,
+        // so the key is translated and it is not refused for a check value algorithm named
+        // "null".
+        Exchange exchange = agreedExchange();
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
+        PaymentCryptographyKey outgoing = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        ObjectNode request = (ObjectNode) translateBody(exchange,
+                (String) wrapped.get("KeyMaterial"), outgoing);
+        request.putNull("KeyCheckValueAlgorithm");
+
+        Map<?, ?> translated = (Map<?, ?>) new PaymentCryptographyCryptoHandler(service)
+                .translateKeyMaterial(request, "us-east-1").get("WrappedKey");
+
+        assertEquals("TR31_KEY_BLOCK", translated.get("WrappedKeyMaterialFormat"));
+        assertEquals(cmacKeyCheckValue(exchange.key().getKeyMaterialHex()),
+                translated.get("KeyCheckValue"));
+    }
+
+    @Test
     void aKeyIsTranslatedUnderTheKeyTheSampleDerives() throws Exception {
         // The sample derives the one-time wrapping key with the Concat KDF of NIST SP
         // 800-56A over the shared secret, with SHA-512 and a 32-byte shared information,
@@ -480,6 +503,32 @@ class PaymentCryptographyKeyExchangeTest {
         request.put("OutgoingKeyMaterial", Map.of(
                 "Tr31KeyBlock", Map.of("WrappingKeyIdentifier", wrappingKey.getKeyId())));
         return request;
+    }
+
+    /**
+     * The body of a request that translates a block that came in under the agreed key.
+     *
+     * <p>The identifiers are the ARNs the model asks for, and the request names no check
+     * value algorithm.
+     *
+     * @param exchange the exchange the two parties made
+     * @param block the block that comes in
+     * @param wrappingKey the key the block goes out under
+     * @return the body of the request
+     */
+    private static JsonNode translateBody(Exchange exchange, String block,
+                                          PaymentCryptographyKey wrappingKey) {
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
+        material.put("PrivateKeyIdentifier", exchange.agreement().getArn());
+        material.put("CertificateAuthorityPublicKeyIdentifier", exchange.authority().getArn());
+        material.put("WrappedKeyBlock", block);
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = mapper.createObjectNode();
+        body.set("IncomingKeyMaterial", mapper.valueToTree(Map.of(
+                "DiffieHellmanTr31KeyBlock", material)));
+        body.set("OutgoingKeyMaterial", mapper.valueToTree(Map.of(
+                "Tr31KeyBlock", Map.of("WrappingKeyIdentifier", wrappingKey.getArn()))));
+        return body;
     }
 
     /**
@@ -1516,11 +1565,20 @@ class PaymentCryptographyKeyExchangeTest {
         material.put("DerivationData", Map.of(
                 "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
         return new Exchange(material,
-                createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
+                createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                agreement, authority);
     }
 
-    /** The material of a key exchange, and the key that leaves under it. */
-    private record Exchange(Map<String, Object> material, PaymentCryptographyKey key) {
+    /**
+     * The material of a key exchange, and the key that leaves under it.
+     *
+     * @param material the material of the agreement
+     * @param key the key that leaves under it
+     * @param agreement the key the two parties agreed with
+     * @param authority the key that vouches for the counterparty's certificate
+     */
+    private record Exchange(Map<String, Object> material, PaymentCryptographyKey key,
+                             PaymentCryptographyKey agreement, PaymentCryptographyKey authority) {
     }
 
 
