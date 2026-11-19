@@ -171,6 +171,51 @@ class LambdaInvokeResponseStreamTest {
     }
 
     @Test
+    void failureReportsItsTypeAndBody() throws IOException {
+        stream.onStart(null);
+        stream.onChunk("hello ".getBytes(StandardCharsets.UTF_8));
+        stream.onFailure("Error", "{\"errorMessage\":\"boom\"}");
+
+        List<Message> messages = write(new InvokeResult(200, null, new byte[0], null, "r"), false);
+
+        assertEquals(List.of("PayloadChunk", "InvokeComplete"), types(messages));
+        assertEquals("{\"ErrorCode\":\"Error\",\"ErrorDetails\":\"{\\\"errorMessage\\\":\\\"boom\\\"}\"}",
+                messages.get(1).text());
+    }
+
+    @Test
+    void failureWithoutABodyLeavesErrorDetailsOut() throws IOException {
+        stream.onStart(null);
+        stream.onFailure("Runtime.TruncatedResponse", null);
+
+        List<Message> messages = write(new InvokeResult(200, null, new byte[0], null, "r"), false);
+
+        assertEquals("{\"ErrorCode\":\"Runtime.TruncatedResponse\"}", messages.get(0).text());
+    }
+
+    @Test
+    void failureWithALogTailSendsOnlyLogResult() throws IOException {
+        stream.onStart(null);
+        stream.onFailure("Error", "{}");
+
+        List<Message> messages = write(new InvokeResult(200, null, new byte[0], "bG9ncw==", "r"), true);
+
+        assertEquals("{\"LogResult\":\"bG9ncw==\"}", messages.get(0).text());
+    }
+
+    @Test
+    void timeoutWinsOverAFailure() throws IOException {
+        stream.onStart(null);
+        stream.onFailure("Error", "{}");
+        InvokeResult result = new InvokeResult(200, "Unhandled", "{}".getBytes(StandardCharsets.UTF_8), null, "r");
+        result.setTimedOut(true);
+
+        List<Message> messages = write(result, false);
+
+        assertEquals("{\"ErrorCode\":\"Sandbox.Timeout\"}", messages.get(0).text());
+    }
+
+    @Test
     void startedCompletesOnlyForAStreamingFunction() {
         assertFalse(stream.started().isDone());
         stream.onStart(null);

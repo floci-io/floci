@@ -41,7 +41,13 @@ class LambdaInvokeWithResponseStreamIntegrationTest {
                 exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
                   if (event.contentType) responseStream.setContentType(event.contentType);
                   if (event.mode === 'log') console.log('streamed log line');
+                  if (event.mode === 'throwBefore') throw new Error('boom before');
                   responseStream.write('hello ');
+                  if (event.mode === 'throwAfter') throw new Error('boom after');
+                  if (event.mode === 'exit') {
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                    process.exit(3);
+                  }
                   responseStream.write('world');
                   responseStream.end();
                 });
@@ -103,6 +109,38 @@ class LambdaInvokeWithResponseStreamIntegrationTest {
         assertEquals("PayloadChunk", messages.get(0).type());
         assertTrue(messages.get(0).text().contains("boom"), messages.get(0).text());
         assertEquals("{\"ErrorCode\":\"Unhandled\",\"ErrorDetails\":\"\"}", messages.get(1).text());
+    }
+
+    @Test
+    void errorBeforeAnyWriteIsReportedInInvokeComplete() {
+        List<Message> messages = EventStreamMessages.decode(invoke(STREAMING, "{\"mode\":\"throwBefore\"}", "").asByteArray());
+
+        assertEquals(1, messages.size());
+        assertErrorComplete(messages.get(0), "boom before");
+    }
+
+    @Test
+    void errorAfterAWriteKeepsTheChunkAndIsReported() {
+        List<Message> messages = EventStreamMessages.decode(invoke(STREAMING, "{\"mode\":\"throwAfter\"}", "").asByteArray());
+
+        assertEquals(2, messages.size());
+        assertEquals("hello ", messages.get(0).text());
+        assertErrorComplete(messages.get(1), "boom after");
+    }
+
+    @Test
+    void runtimeExitInTheMiddleOfTheStreamIsATruncatedResponse() {
+        List<Message> messages = EventStreamMessages.decode(invoke(STREAMING, "{\"mode\":\"exit\"}", "").asByteArray());
+
+        assertEquals(2, messages.size());
+        assertEquals("hello ", messages.get(0).text());
+        assertEquals("{\"ErrorCode\":\"Runtime.TruncatedResponse\"}", messages.get(1).text());
+    }
+
+    private static void assertErrorComplete(Message complete, String message) {
+        assertEquals("InvokeComplete", complete.type());
+        assertTrue(complete.text().startsWith("{\"ErrorCode\":\"Error\",\"ErrorDetails\":\""), complete.text());
+        assertTrue(complete.text().contains(message), complete.text());
     }
 
     @Test

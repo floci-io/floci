@@ -325,12 +325,9 @@ type runs the function, so `DryRun` and `Event` stream like `RequestResponse`.
 
 `X-Amz-Executed-Version`, `x-amzn-Remapped-Content-Type`, `Qualifier`, `X-Amz-Client-Context` and
 `X-Amz-Log-Type: Tail` are supported. With a log tail, `InvokeComplete` carries `LogResult`.
-`InvokeComplete` carries `ErrorCode` for an error of a function that does not stream, for a
-timeout, and for a stream that its container cut short.
-
-Not emulated: an error that a streaming handler throws is not reported in `InvokeComplete`.
-The runtime reports it in HTTP trailers, which the Floci runtime API does not read, so the stream
-ends as a success.
+`InvokeComplete` carries `ErrorCode` for a failed invocation. An error a streaming handler throws
+also sets `ErrorDetails`, a timeout is `Sandbox.Timeout`, and a runtime that exits in the middle of
+a stream is `Runtime.TruncatedResponse`.
 
 ## Code signing configuration pagination
 
@@ -511,7 +508,7 @@ Pagination uses Lambda's shared validation: out-of-range integers return
 marker returns `InvalidParameterValueException` with `Invalid pagination key.`.
 Missing or inaccessible function references return `ResourceNotFoundException`.
 
-A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
+A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci does not read for a function URL. A handler that does not stream is answered as with `BUFFERED`.
 
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),

@@ -27,9 +27,6 @@ import java.util.concurrent.CompletionException;
  * InvokeWithResponseStream, under /2021-11-15. A separate class from {@link LambdaController}
  * because it lives under a different API version prefix, and a class-level {@code @Path} can only
  * be one literal prefix.
- *
- * <p>An error a streaming handler throws is not reported in {@code InvokeComplete}: the runtime
- * reports it in HTTP trailers, which the runtime API does not read, so the stream ends as a success.
  */
 @Path("/2021-11-15")
 public class LambdaResponseStreamController {

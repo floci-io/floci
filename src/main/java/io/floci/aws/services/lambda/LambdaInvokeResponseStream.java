@@ -29,6 +29,10 @@ final class LambdaInvokeResponseStream implements ResponseStreamListener {
     private final ObjectMapper objectMapper;
     private final CompletableFuture<String> started = new CompletableFuture<>();
     private final ResponseChunkQueue frames = new ResponseChunkQueue();
+    private volatile Failure failure;
+
+    private record Failure(String errorType, String errorBody) {
+    }
 
     LambdaInvokeResponseStream(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
@@ -44,6 +48,11 @@ final class LambdaInvokeResponseStream implements ResponseStreamListener {
         if (chunk.length > 0) {
             frames.add(frame("PayloadChunk", OCTET_STREAM, chunk));
         }
+    }
+
+    @Override
+    public void onFailure(String errorType, String errorBody) {
+        failure = new Failure(errorType, errorBody);
     }
 
     /** Completes with the content type of the stream once the runtime starts it. */
@@ -87,6 +96,11 @@ final class LambdaInvokeResponseStream implements ResponseStreamListener {
             payload.put("LogResult", result.getLogResult());
         } else if (streamed && result.isTimedOut()) {
             payload.put("ErrorCode", "Sandbox.Timeout");
+        } else if (failure != null) {
+            payload.put("ErrorCode", failure.errorType());
+            if (failure.errorBody() != null) {
+                payload.put("ErrorDetails", failure.errorBody());
+            }
         } else if (!streamed && failed) {
             payload.put("ErrorCode", "Unhandled");
             payload.put("ErrorDetails", "");
