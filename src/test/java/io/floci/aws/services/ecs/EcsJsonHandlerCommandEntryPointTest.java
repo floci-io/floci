@@ -180,11 +180,9 @@ class EcsJsonHandlerCommandEntryPointTest {
         Response absent = handler.handle("RegisterTaskDefinition", objectMapper.readTree(omitted), "us-east-1");
         JsonNode plain = objectMapper.valueToTree(absent.getEntity())
                 .path("taskDefinition").path("containerDefinitions").get(0);
-        assertTrue(plain.path("mountPoints").isMissingNode() || (plain.path("mountPoints").isArray()
-                && plain.path("mountPoints").isEmpty()),
+        assertTrue(plain.path("mountPoints").isArray() && plain.path("mountPoints").isEmpty(),
                 "an omitted mountPoints reads back as an empty array");
-        assertTrue(plain.path("volumesFrom").isMissingNode() || (plain.path("volumesFrom").isArray()
-                && plain.path("volumesFrom").isEmpty()),
+        assertTrue(plain.path("volumesFrom").isArray() && plain.path("volumesFrom").isEmpty(),
                 "an omitted volumesFrom reads back as an empty array");
     }
 }
