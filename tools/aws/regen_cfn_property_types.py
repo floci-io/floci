@@ -55,7 +55,7 @@ RESOURCE_TYPES = ["AWS::AutoScaling::LaunchConfiguration", "AWS::DSQL::Cluster",
                   "AWS::Lambda::Function", "AWS::Lambda::LayerVersion",
                   "AWS::SES::ConfigurationSetEventDestination"]
 
-# The shared shape each scalar body is written as, inline; a definition keeps its own name.
+# The shared shape each unconstrained scalar body is written as, inline; a definition keeps its own name.
 SCALAR_SHAPES = {"string": "String", "integer": "Integer", "boolean": "Boolean", "double": "Double", "json": "Json"}
 SCHEMA_SCALARS = {"string": "string", "integer": "integer", "boolean": "boolean", "number": "double"}
 SHAPE_TYPES = {"structure", "list", "map", *SCALAR_SHAPES}
@@ -146,7 +146,7 @@ def shape_for(schema: dict, resource_type: str, name: str, node: dict, shapes: d
             shapes[target] = body_of(schema, resource_type, target, schema["definitions"][definition], shapes)
         return target
     body = body_of(schema, resource_type, name, node, shapes)
-    if body["type"] in SCALAR_SHAPES:
+    if body["type"] in SCALAR_SHAPES and len(body) == 1:
         return SCALAR_SHAPES[body["type"]]
     shapes[name] = body
     return name
@@ -178,7 +178,12 @@ def body_of(schema: dict, resource_type: str, name: str, node: dict, shapes: dic
         items = node.get("items")
         member = shape_for(schema, resource_type, f"{name}[]", items, shapes) if isinstance(items, dict) else "Json"
         return {"type": "list", "member": member}
-    return {"type": SCHEMA_SCALARS.get(kind, "json")}
+    body = {"type": SCHEMA_SCALARS.get(kind, "json")}
+    if kind == "string":
+        for constraint in ("minLength", "maxLength", "pattern"):
+            if constraint in node:
+                body[constraint] = node[constraint]
+    return body
 
 
 def render(document: dict) -> str:
