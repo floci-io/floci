@@ -61,6 +61,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -1037,11 +1038,22 @@ class ResourceArnBuilderTest {
     // ── STS ──────────────────────────────────────────────────────────────────────
 
     @Test
-    void stsAssumeRoleIsAuthorizedAgainstTheRoleItNames() {
+    void stsAssumeRoleIsCheckedOnTheRoleItNamesInItsAccountFromTheTable() {
+        // STS assumes the role in the account its ARN names, so a role IAM holds there is checked alone.
         setFormBody("Action=AssumeRole&Version=2011-06-15"
                 + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
-        String arn = sts("sts:AssumeRole");
-        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+        assertEquals(List.of("arn:aws:iam::729951873967:role/Admin"), sts("sts:AssumeRole"));
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A" + ACCOUNT + "%3Arole%2Fops%2FAdmin&RoleSessionName=robin");
+        assertEquals(List.of("arn:aws:iam::" + ACCOUNT + ":role/ops/Admin"), sts("sts:AssumeRole"));
+    }
+
+    @Test
+    void stsAssumeRoleOfARoleNoAccountHoldsIsCheckedAsTheCallersToo() {
+        setFormBody("Action=AssumeRole&Version=2011-06-15"
+                + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FMissing&RoleSessionName=robin");
+        assertEquals(List.of("arn:aws:iam::729951873967:role/Missing", "arn:aws:iam::" + ACCOUNT + ":role/Missing"),
+                sts("sts:AssumeRole"));
     }
 
     @Test
@@ -1051,17 +1063,16 @@ class ResourceArnBuilderTest {
         queryParams.add("RoleArn", "arn:aws:iam::729951873967:role/Allowed");
         setFormBody("Action=AssumeRole&Version=2011-06-15"
                 + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
-        String arn = sts("sts:AssumeRole");
-        assertEquals("arn:aws:iam::729951873967:role/Admin", arn);
+        assertEquals(List.of("arn:aws:iam::729951873967:role/Admin"), sts("sts:AssumeRole"));
     }
 
     @Test
-    void stsReadsRoleArnOnlyForAssumeRole() {
+    void stsGetFederationTokenIsCheckedOnTheFederatedUserItNamesNotARoleArnItNeverReads() {
         // GetFederationToken never acts on a role, so a RoleArn added to it must not let a policy
         // scoped to that role allow it.
         setFormBody("Action=GetFederationToken&Version=2011-06-15&Name=robin"
                 + "&RoleArn=arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin");
-        assertEquals("*", sts("sts:GetFederationToken"));
+        assertEquals(List.of("arn:aws:sts::" + ACCOUNT + ":federated-user/robin"), sts("sts:GetFederationToken"));
     }
 
     @Test
@@ -1072,15 +1083,21 @@ class ResourceArnBuilderTest {
     }
 
     @Test
-    void stsRoleArnIsCheckedAsTheHandlerReadsIt() {
-        // The handler does not trim, so neither does the check.
+    void stsRoleArnFittingNoRoleFormatNamesNoRole() {
+        // The handler does not trim, and neither does the reader: a value with a leading space fits no
+        // role's ARN format, so the request is checked on every resource, which a policy naming the role
+        // does not match.
         setFormBody("Action=AssumeRole&Version=2011-06-15"
                 + "&RoleArn=+arn%3Aaws%3Aiam%3A%3A729951873967%3Arole%2FAdmin&RoleSessionName=robin");
-        assertEquals(" arn:aws:iam::729951873967:role/Admin", sts("sts:AssumeRole"));
+        assertEquals(List.of("*"), sts("sts:AssumeRole"));
     }
 
-    private String sts(String action) {
-        return builder.buildStsResources(action, ctx).getFirst();
+    private List<String> sts(String operation) {
+        IamService iam = mock(IamService.class);
+        when(iam.findRole(anyString(), anyString())).thenReturn(Optional.empty());
+        when(iam.findRole("729951873967", "Admin")).thenReturn(Optional.of(new IamRole()));
+        return reading(new StsStoredResourceArns(iam)).buildResources("sts", operation, ctx, "us-east-1", ACCOUNT,
+                "aws");
     }
 
 

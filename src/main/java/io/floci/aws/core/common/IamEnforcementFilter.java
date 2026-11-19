@@ -1801,10 +1801,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
-     * Logs, Secrets Manager and KMS targets depend on the serving operation and the request's partition, STS
-     * targets on the serving operation; API Gateway's path ARNs on the request's partition, which that service mints
-     * them in; and the targets of a namespace the table of request resources reads on {@code operation}, the one the
-     * request is dispatched as (see {@link RequestResources}).
+     * Logs, Secrets Manager and KMS targets depend on the serving operation and the request's partition; API
+     * Gateway's path ARNs on the request's partition, which that service mints them in; and the targets of a
+     * namespace the table of request resources reads on {@code operation}, the one the request is dispatched as (see
+     * {@link RequestResources}).
      */
     private List<String> targetResources(String credentialScope, String action, String operation,
                                          ContainerRequestContext ctx, String region, String accountId) {
@@ -1813,9 +1813,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         }
         if ("kms".equals(credentialScope)) {
             return arnBuilder.buildKmsResources(action, ctx, region, accountId, requestPartition());
-        }
-        if ("sts".equals(credentialScope)) {
-            return arnBuilder.buildStsResources(action, ctx);
         }
         if ("apigateway".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());

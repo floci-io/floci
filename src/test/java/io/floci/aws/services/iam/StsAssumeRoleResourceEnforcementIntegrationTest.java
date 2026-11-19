@@ -23,14 +23,16 @@ import static org.hamcrest.Matchers.not;
 
 /**
  * With {@code iam.enforcement-enabled=true}, {@code sts:AssumeRole} is authorized against the role it
- * names, so an identity policy can allow assuming one role and not another (IAM User Guide, "Granting
- * a user permissions to switch roles": the policy's Resource is the role's ARN).
+ * names, in the account its ARN names, so an identity policy can allow assuming one role and not another
+ * (IAM User Guide, "Granting a user permissions to switch roles": the policy's Resource is the role's ARN),
+ * and {@code sts:GetFederationToken} against the federated user its name names.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
 class StsAssumeRoleResourceEnforcementIntegrationTest {
 
     private static final String ACCOUNT = "111111111111";
+    private static final String OTHER_ACCOUNT = "222222222222";
 
     @TestHTTPResource
     URI baseUri;
@@ -52,6 +54,42 @@ class StsAssumeRoleResourceEnforcementIntegrationTest {
 
         assumeRole(caller, allowedArn).then().statusCode(200);
         assumeRole(caller, otherArn).then().statusCode(403);
+    }
+
+    @Test
+    void aPolicyNamingAnotherAccountsRoleAllowsAssumingThatRole() {
+        // STS assumes the role in the account its ARN names, so the policy naming that role is all
+        // the caller needs, not also one naming a role of the same name in its own account.
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String roleArn = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
+                "cross-account-" + suffix, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}""".formatted(ACCOUNT), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"iam:ListUsers","Resource":"*"}]}""");
+        String user = "cross-account-caller-" + suffix;
+        String iamAuth = auth(ACCOUNT, "iam");
+        UserCredentials caller = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), iamAuth, user);
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), iamAuth, user, "assume", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"sts:AssumeRole","Resource":"%s"}]}""".formatted(roleArn));
+
+        assumeRole(caller, roleArn).then().statusCode(200);
+    }
+
+    @Test
+    void aPolicyNamingOneFederatedUserAllowsGetFederationTokenForThatNameOnly() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String user = "federation-named-" + suffix;
+        String iamAuth = auth(ACCOUNT, "iam");
+        UserCredentials caller = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), iamAuth, user);
+        EnforcementFixtures.putUserPolicy(baseUri.getPort(), iamAuth, user, "federation", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"sts:GetFederationToken",
+                   "Resource":"arn:aws:sts::%s:federated-user/fed-%s"}]}""".formatted(ACCOUNT, suffix));
+
+        getFederationToken(caller, "fed-" + suffix).then().statusCode(200);
+        getFederationToken(caller, "other-" + suffix).then().statusCode(403);
     }
 
     @Test
@@ -108,6 +146,15 @@ class StsAssumeRoleResourceEnforcementIntegrationTest {
         return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", role, """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"iam:ListUsers","Resource":"*"}]}""");
+    }
+
+    private Response getFederationToken(UserCredentials caller, String name) {
+        return given().port(baseUri.getPort())
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", auth(caller.accessKeyId(), "sts"))
+                .formParam("Action", "GetFederationToken")
+                .formParam("Name", name)
+                .when().post("/");
     }
 
     private Response assumeRole(UserCredentials caller, String roleArn) {
