@@ -5498,6 +5498,9 @@ public class Ec2QueryHandler {
             }
             xml.end("privateIpAddressesSet");
         }
+        if (ni.getIpv6Addresses() != null && !ni.getIpv6Addresses().isEmpty()) {
+            xml.elem("ipv6Address", ni.getIpv6Addresses().getFirst());
+        }
         xml.raw(ipv6AddressesSetXml(ni.getIpv6Addresses()));
         return xml.build();
     }
