@@ -18,7 +18,6 @@ import java.io.ByteArrayInputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -164,21 +163,14 @@ class RequestResourceMembersTest {
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
         assertTrue(table.namespaces().contains("lambda"));
         assertFalse(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertFalse(table.handBuilt().contains("logs"));
+        assertEquals(Set.of("dynamodb"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
-        Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
-                "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
-                "DeleteDeliveryDestination", "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery",
-                "UpdateDeliveryConfiguration", "DeleteDelivery", "DescribeDeliveries")
-                .map(operation -> "logs:" + operation).collect(Collectors.toSet());
-        Set<String> expected = new HashSet<>(logsDelivery);
-        expected.add("logs:PutDestination");
         // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
-        expected.add("dynamodb:ListTables");
-        assertEquals(expected, table.operations().keySet().stream()
+        assertEquals(Set.of("dynamodb:ListTables"), table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
                 .collect(Collectors.toSet()),
-                "only the operations listed to read override hand-built operations");
+                "only what MEASURED gives is read in a hand-built namespace");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
         assertTrue(table.operations().containsKey("rds:CreateDBParameterGroup"));
         assertTrue(table.operations().containsKey("rds:CreateDBProxy"));
