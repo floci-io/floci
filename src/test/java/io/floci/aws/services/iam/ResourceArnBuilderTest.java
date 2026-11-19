@@ -2358,35 +2358,41 @@ class ResourceArnBuilderTest {
                 AwsRegions.partitionFor(region)).getFirst();
     }
 
+    /**
+     * An Aurora DSQL route is checked on the cluster or stream its path names, or the ARN its tagging route names,
+     * from the table; CreateCluster and ListClusters on every cluster, as DSQL checks them (measured).
+     */
     @Test
-    void dsqlRoutesResolveTheClusterTheTaggedArnOrNone() {
+    void dsqlRoutesResolveTheClusterTheStreamOrTheTaggedArn() {
         String cluster = "arn:aws:dsql:eu-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz";
-        for (String path : List.of("/cluster/abcdefghijklmnopqrstuvwxyz", "/cluster/abcdefghijklmnopqrstuvwxyz/policy",
-                "/clusters/abcdefghijklmnopqrstuvwxyz/vpc-endpoint-service-name", "/tags/" + cluster)) {
-            when(uriInfo.getPath()).thenReturn(path);
-            assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"), path);
-        }
-        // The same tagging is served at /tags, the ARN in the resourceArn query parameter or body field.
-        when(uriInfo.getPath()).thenReturn("/tags");
-        queryParams.putSingle("resourceArn", cluster);
-        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        queryParams.clear();
-        when(ctx.getMethod()).thenReturn("POST");
-        setJsonBody("{\"resourceArn\":\"" + cluster + "\",\"tags\":{}}");
-        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
         when(ctx.getMethod()).thenReturn("GET");
+        request("/cluster/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of(cluster), dsql("dsql:GetCluster", "eu-west-1", "aws"));
+        request("/cluster/abcdefghijklmnopqrstuvwxyz/policy");
+        assertEquals(List.of(cluster), dsql("dsql:GetClusterPolicy", "eu-west-1", "aws"));
+        request("/clusters/abcdefghijklmnopqrstuvwxyz/vpc-endpoint-service-name");
+        assertEquals(List.of(cluster), dsql("dsql:GetVpcEndpointServiceName", "eu-west-1", "aws"));
+        request("/tags/" + cluster.replace(":", "%3A").replace("/", "%2F"));
+        assertEquals(List.of(cluster), dsql("dsql:ListTagsForResource", "eu-west-1", "aws"));
         // A stream route names the stream, or its cluster to create or list streams.
-        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz");
-        assertEquals(List.of(cluster), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/stream/abcdefghijklmnopqrstuvwxyz/s1");
-        assertEquals(List.of(cluster + "/stream/s1"), builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        // CreateCluster and ListClusters are checked against every cluster, as DSQL checks them (measured).
-        when(uriInfo.getPath()).thenReturn("/cluster");
+        request("/stream/abcdefghijklmnopqrstuvwxyz");
+        assertEquals(List.of(cluster), dsql("dsql:ListStreams", "eu-west-1", "aws"));
+        request("/stream/abcdefghijklmnopqrstuvwxyz/s1");
+        assertEquals(List.of(cluster + "/stream/s1"), dsql("dsql:GetStream", "eu-west-1", "aws"));
+        request("/cluster");
         assertEquals(List.of("arn:aws:dsql:eu-west-1:000000000000:cluster/*"),
-                builder.buildResources("dsql", ctx, "eu-west-1", "000000000000"));
-        when(uriInfo.getPath()).thenReturn("/cluster/abcdefghijklmnopqrstuvwxyz");
+                dsql("dsql:ListClusters", "eu-west-1", "aws"));
+        when(ctx.getMethod()).thenReturn("POST");
+        assertEquals(List.of("arn:aws:dsql:eu-west-1:000000000000:cluster/*"),
+                dsql("dsql:CreateCluster", "eu-west-1", "aws"));
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/cluster/abcdefghijklmnopqrstuvwxyz");
         assertEquals(List.of("arn:aws-cn:dsql:polygondwanaland-west-1:000000000000:cluster/abcdefghijklmnopqrstuvwxyz"),
-                builder.buildResources("dsql", ctx, "polygondwanaland-west-1", "000000000000", "aws-cn"));
+                dsql("dsql:GetCluster", "polygondwanaland-west-1", "aws-cn"));
+    }
+
+    private List<String> dsql(String operation, String region, String partition) {
+        return builder.buildResources("dsql", operation, ctx, region, "000000000000", partition);
     }
 
     @Test

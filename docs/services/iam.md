@@ -2332,7 +2332,7 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-DynamoDB, SSM, KMS, IAM, Resource Groups, Aurora DSQL, EKS, API Gateway, CloudWatch Logs
+DynamoDB, SSM, KMS, IAM, Resource Groups, EKS, API Gateway, CloudWatch Logs
 and STS. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
@@ -2341,7 +2341,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams and Amazon EventBridge Pipes they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes and Aurora DSQL they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2532,8 +2532,9 @@ A Scheduler request is checked against `schedule/<group>/<name>`, the group from
 names one, as botocore documents ("If you omit this, the default schedule group is used"), or
 `schedule-group/<name>`, all from the generated table. Its tagging is checked on the group its modeled
 `/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`, from the generated table. A DSQL request
-is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN a tagging
-route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A Lambda request
+is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN its modeled
+`/tags/{resourceArn}` carries, from the generated table; `CreateCluster` and `ListClusters` against
+`cluster/*`, as DSQL checks them, `ListClusters` from a measured entry. A Lambda request
 is checked on what the table reads from it, as for the other services it reads. A function named by its
 name, its ARN, a partial ARN (`123456789012:function:my-function`, its Region optional) or its resource
 part (`function:my-function`) is the function of that name, an ARN keeping its account and Region beside
@@ -3536,8 +3537,8 @@ floci populates:
   subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
   controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
   Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
-  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers and EventBridge Pipes for its pipes.
-  Tag keys differing only in case are one condition key holding every value.
+  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes and
+  Aurora DSQL for its clusters. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in

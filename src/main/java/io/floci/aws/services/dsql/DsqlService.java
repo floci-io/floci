@@ -350,20 +350,41 @@ public class DsqlService implements Resettable {
         }
     }
 
+    /**
+     * Gives the cluster a new map holding its tags and {@code tags}, under its lock, so a lookup that takes no lock
+     * reads one whole set.
+     */
     public void tagResource(String region, String arn, Map<String, String> tags) {
         DsqlCluster cluster = clusterForArn(region, arn, "TagResource");
         synchronized (lockFor(cluster.getArn())) {
-            cluster.getTags().putAll(tags == null ? Map.of() : tags);
+            Map<String, String> merged = new LinkedHashMap<>(cluster.getTags());
+            merged.putAll(tags == null ? Map.of() : tags);
+            cluster.setTags(merged);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
         }
     }
 
+    /** Gives the cluster a new map without {@code tagKeys}, under its lock, as {@link #tagResource}. */
     public void untagResource(String region, String arn, List<String> tagKeys) {
         DsqlCluster cluster = clusterForArn(region, arn, "UntagResource");
         synchronized (lockFor(cluster.getArn())) {
-            (tagKeys == null ? List.<String>of() : tagKeys).forEach(cluster.getTags()::remove);
+            Map<String, String> remaining = new LinkedHashMap<>(cluster.getTags());
+            (tagKeys == null ? List.<String>of() : tagKeys).forEach(remaining::remove);
+            cluster.setTags(remaining);
             clusters.put(key(cluster.getRegion(), cluster.getIdentifier()), cluster);
         }
+    }
+
+    /**
+     * The tags of the cluster whose ARN is {@code arn} in {@code account}, read in place under the key the handlers
+     * read, its identifier in the ARN's Region, and matched on the whole ARN it records; none when there is no such
+     * cluster.
+     */
+    Map<String, String> clusterTagsInAccount(String account, String arn, String identifier) {
+        return AccountAwareStorageBackend.readInAccount(clusters, account,
+                        key(AwsArnUtils.parse(arn).region(), identifier))
+                .filter(cluster -> arn.equals(cluster.getArn()))
+                .map(DsqlCluster::getTags).orElse(Map.of());
     }
 
     /**
