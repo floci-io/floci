@@ -1,7 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.cloudformation.model.StackInstance;
 import io.floci.aws.services.cloudformation.model.StackSet;
@@ -11,14 +10,13 @@ import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.testing.StackSetErrors.assertNotFound;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -80,24 +78,16 @@ class StackSetLegacyRecordsTest {
 
         regions.region = OTHER_REGION;
 
-        assertNotFound(() -> service.describeStackSet(SET));
+        assertNotFound(() -> service.describeStackSet(SET), SET);
         assertEquals(List.of(), service.listStackSets());
-        assertNotFound(() -> service.listStackInstances(SET, null, null));
-        assertNotFound(() -> service.describeStackSetOperation(SET, "op-1"));
+        assertNotFound(() -> service.listStackInstances(SET, null, null), SET);
+        assertNotFound(() -> service.describeStackSetOperation(SET, "op-1"), SET);
         assertEquals(Map.of(), service.storedTags(arn(OTHER_REGION)));
 
         StackSet created = service.createStackSet(SET, "{\"Resources\":{}}", null, null, null, null);
         assertNotEquals(ID, created.getStackSetId());
         regions.region = DEFAULT_REGION;
         assertEquals(ID, service.describeStackSet(SET).getStackSetId());
-    }
-
-    /** What AWS answers for a stack set that isn't there (measured, eu-west-1 and eu-central-1, 2026-11-17). */
-    private static void assertNotFound(Executable call) {
-        AwsException missing = assertThrows(AwsException.class, call);
-        assertEquals("StackSetNotFoundException", missing.getErrorCode());
-        assertEquals("StackSet " + SET + " not found", missing.getMessage());
-        assertEquals(404, missing.getHttpStatus());
     }
 
     private static String arn(String region) {

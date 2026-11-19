@@ -539,20 +539,32 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         Set<String> ancestors = ancestorsOf(managementAccountId, accountId);
         for (RegionScopedStorage.RegionEntry<StackSet> entry : stackSets.scanEveryRegion()) {
             StackSet stackSet = entry.value();
-            // Only a stack set under its own name: one of a Region no partition publishes, kept with
-            // allow-unknown-regions, reads as the default Region's key "<Region>/<name>", and the default
-            // Region's stack set of that name is another one.
-            if (entry.key().equals(stackSet.getStackSetName())
+            String region = administratorRegion(entry);
+            if (region != null
                     && "SERVICE_MANAGED".equals(stackSet.getPermissionModel()) && stackSet.isAutoDeploymentEnabled()) {
                 try {
-                    RequestScopes.runAs(managementAccountId, entry.region(),
-                            () -> autoDeploy(stackSet, accountId, ancestors));
+                    RequestScopes.runAs(managementAccountId, region, () -> autoDeploy(stackSet, accountId, ancestors));
                 } catch (RuntimeException e) {
                     LOG.warnv(e, "Automatic deployment failed for StackSet {0} in {1}, account {2}",
-                            stackSet.getStackSetName(), entry.region(), accountId);
+                            stackSet.getStackSetName(), region, accountId);
                 }
             }
         }
+    }
+
+    /**
+     * The Region a stored stack set is reached in, null for a key that isn't one of its own. A stack set of a Region no
+     * partition publishes, kept with {@code allow-unknown-regions}, reads as the default Region's key
+     * {@code <Region>/<name>}; a name holds no slash, so that key is the one the store wrote in that Region.
+     */
+    private static String administratorRegion(RegionScopedStorage.RegionEntry<StackSet> entry) {
+        String name = entry.value().getStackSetName();
+        if (entry.key().equals(name)) {
+            return entry.region();
+        }
+        String suffix = "/" + name;
+        return entry.key().endsWith(suffix) && entry.key().length() > suffix.length()
+                ? entry.key().substring(0, entry.key().length() - suffix.length()) : null;
     }
 
     @PreDestroy

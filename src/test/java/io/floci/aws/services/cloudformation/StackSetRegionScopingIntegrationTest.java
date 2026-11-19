@@ -8,7 +8,9 @@ import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.OrganizationsFixture;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -24,6 +26,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.floci.aws.testing.StackSetErrors.assertNotFound;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.endsWith;
@@ -36,10 +39,12 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
  * A stack set is Regional, as on AWS: it is listed, described, changed and deleted only in the Region it was created
  * in, its administrator Region, and so are its instances and operations, while its instances deploy stacks in the
  * Regions they name. Its name can be used again in another Region, and automatic deployment runs in its Region,
- * whatever Region the Organizations call was sent to, the default Region for one stored before, without a Region. Each
- * test works in an account of its own.
+ * whatever Region the Organizations call was sent to, the default Region for one stored before, without a Region, and
+ * the stack set's own for one of a Region no partition publishes, served with {@code allow-unknown-regions} (from
+ * {@link SidecarContainersProfile}). Each test works in an account of its own.
  */
 @QuarkusTest
+@TestProfile(SidecarContainersProfile.class)
 class StackSetRegionScopingIntegrationTest {
 
     private static final AtomicLong ACCOUNTS = new AtomicLong(732200000000L);
@@ -47,6 +52,8 @@ class StackSetRegionScopingIntegrationTest {
     private static final String OTHER = "eu-central-1";
     /** The deployment's default Region, where the Organizations calls are sent unless a test sends one elsewhere. */
     private static final String DEFAULT_REGION = "us-east-1";
+    /** A Region no partition publishes, served with {@code allow-unknown-regions}. */
+    private static final String UNKNOWN = "polygondwanaland-west-1";
     private static final String OU_TARGET = "DeploymentTargets.OrganizationalUnitIds.member.1";
     private static final String INSTANCES = "ListStackInstancesResponse.ListStackInstancesResult.Summaries.member";
 
@@ -87,21 +94,21 @@ class StackSetRegionScopingIntegrationTest {
         cleanup.register(() -> deleteWithInstances(HOME, stackSet, "Accounts.member.1", account));
 
         assertEquals(List.of(), stackSetNames(OTHER));
-        notFound(cfn(OTHER, "DescribeStackSet").formParam("StackSetName", stackSet), stackSet);
-        notFound(cfn(OTHER, "ListStackInstances").formParam("StackSetName", stackSet), stackSet);
-        notFound(cfn(OTHER, "DescribeStackInstance").formParam("StackSetName", stackSet)
+        assertNotFound(cfn(OTHER, "DescribeStackSet").formParam("StackSetName", stackSet), stackSet);
+        assertNotFound(cfn(OTHER, "ListStackInstances").formParam("StackSetName", stackSet), stackSet);
+        assertNotFound(cfn(OTHER, "DescribeStackInstance").formParam("StackSetName", stackSet)
                 .formParam("StackInstanceAccount", account).formParam("StackInstanceRegion", OTHER), stackSet);
-        notFound(cfn(OTHER, "ListStackSetOperations").formParam("StackSetName", stackSet), stackSet);
-        notFound(cfn(OTHER, "DescribeStackSetOperation").formParam("StackSetName", stackSet)
+        assertNotFound(cfn(OTHER, "ListStackSetOperations").formParam("StackSetName", stackSet), stackSet);
+        assertNotFound(cfn(OTHER, "DescribeStackSetOperation").formParam("StackSetName", stackSet)
                 .formParam("OperationId", operation), stackSet);
-        notFound(cfn(OTHER, "UpdateStackSet").formParam("StackSetName", stackSet)
+        assertNotFound(cfn(OTHER, "UpdateStackSet").formParam("StackSetName", stackSet)
                 .formParam("UsePreviousTemplate", "true"), stackSet);
-        notFound(cfn(OTHER, "CreateStackInstances").formParam("StackSetName", stackSet)
+        assertNotFound(cfn(OTHER, "CreateStackInstances").formParam("StackSetName", stackSet)
                 .formParam("Accounts.member.1", account).formParam("Regions.member.1", HOME), stackSet);
-        notFound(cfn(OTHER, "DeleteStackInstances").formParam("StackSetName", stackSet)
+        assertNotFound(cfn(OTHER, "DeleteStackInstances").formParam("StackSetName", stackSet)
                 .formParam("Accounts.member.1", account).formParam("Regions.member.1", OTHER)
                 .formParam("RetainStacks", "false"), stackSet);
-        notFound(cfn(OTHER, "DeleteStackSet").formParam("StackSetName", stackSet), stackSet);
+        assertNotFound(cfn(OTHER, "DeleteStackSet").formParam("StackSetName", stackSet), stackSet);
 
         assertEquals(List.of(stackSet), stackSetNames(HOME));
         cfn(HOME, "DescribeStackSet").formParam("StackSetName", stackSet).post("/").then().statusCode(200)
@@ -135,7 +142,7 @@ class StackSetRegionScopingIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("NameAlreadyExistsException"));
         cfn(OTHER, "DeleteStackSet").formParam("StackSetName", stackSet).post("/").then().statusCode(200);
 
-        notFound(cfn(OTHER, "DescribeStackSet").formParam("StackSetName", stackSet), stackSet);
+        assertNotFound(cfn(OTHER, "DescribeStackSet").formParam("StackSetName", stackSet), stackSet);
         cfn(HOME, "DescribeStackSet").formParam("StackSetName", stackSet).post("/").then().statusCode(200)
                 .body("DescribeStackSetResponse.DescribeStackSetResult.StackSet.StackSetId", equalTo(home));
     }
@@ -178,7 +185,7 @@ class StackSetRegionScopingIntegrationTest {
             assertEquals(List.of("CREATE", "CREATE"), operationActions(region, stackSet));
         }
         assertEquals(List.of(), stackSetNames(DEFAULT_REGION));
-        notFound(cfn(DEFAULT_REGION, "ListStackSetOperations").formParam("StackSetName", stackSet), stackSet);
+        assertNotFound(cfn(DEFAULT_REGION, "ListStackSetOperations").formParam("StackSetName", stackSet), stackSet);
     }
 
     /**
@@ -214,6 +221,40 @@ class StackSetRegionScopingIntegrationTest {
         queueUrl(member, OTHER, "stored-before-q").statusCode(200);
         assertEquals(List.of("CREATE"), operationActions(DEFAULT_REGION, stackSet));
         assertEquals(List.of(), stackSetNames(HOME));
+    }
+
+    /**
+     * A stack set of a Region no partition publishes deploys automatically in that Region: an account moved under its
+     * target, by an Organizations call sent to {@code us-east-1}, gets its instance, and its automatic operation is
+     * recorded there.
+     */
+    @Test
+    void aStackSetOfAnUnknownRegionDeploysAutomaticallyThere() {
+        cleanup.register(organizations::cleanup);
+        String root = organizations.createWithTrustedAccess(account);
+        String target = organizations.createOu(account, root, "UnknownRegionTarget");
+        String stackSet = "unknown-region-auto";
+        cfn(UNKNOWN, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate("unknown-region-auto-q"))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .formParam("AutoDeployment.Enabled", "true")
+                .formParam("AutoDeployment.RetainStacksOnAccountRemoval", "false")
+                .post("/").then().statusCode(200);
+        cfn(UNKNOWN, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam(OU_TARGET, target)
+                .formParam("Regions.member.1", OTHER)
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> deleteWithInstances(UNKNOWN, stackSet, OU_TARGET, target));
+
+        String member = organizations.createAccount(account, "unknown-region-" + account + "@example.com",
+                "UnknownRegion");
+        organizations.moveAccount(account, member, root, target);
+
+        awaitInstance(UNKNOWN, stackSet, member);
+        queueUrl(member, OTHER, "unknown-region-auto-q").statusCode(200);
+        assertEquals(List.of("CREATE", "CREATE"), operationActions(UNKNOWN, stackSet));
     }
 
     private ValidatableResponse createStackSet(String region, String stackSet, String queue) {
@@ -256,14 +297,6 @@ class StackSetRegionScopingIntegrationTest {
                 .formParam(targetMember, target).formParam("Regions.member.1", OTHER)
                 .formParam("RetainStacks", "false").post("/");
         cfn(region, "DeleteStackSet").formParam("StackSetName", stackSet).post("/");
-    }
-
-    /** What AWS answers for a stack set that isn't there (measured, eu-west-1 and eu-central-1, 2026-11-17). */
-    private static void notFound(RequestSpecification request, String stackSet) {
-        request.post("/").then().statusCode(404)
-                .body("ErrorResponse.Error.Type", equalTo("Sender"))
-                .body("ErrorResponse.Error.Code", equalTo("StackSetNotFoundException"))
-                .body("ErrorResponse.Error.Message", equalTo("StackSet " + stackSet + " not found"));
     }
 
     private RequestSpecification cfn(String region, String action) {
