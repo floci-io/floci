@@ -761,6 +761,9 @@ floci:
       enabled: true
       job-run-duration-seconds: 0   # 0 = job runs succeed as soon as they start
       crawler-run-duration-seconds: 0   # 0 = crawls finish as soon as they start
+      runner-mode: immediate   # docker = run a glueetl job's script in a container of the image below
+      image: public.ecr.aws/glue/aws-glue-libs:5
+      # docker-network: floci_default
     ses:
       enabled: true
       # smtp-host: mailpit          # SMTP server for email relay (empty = store only)
