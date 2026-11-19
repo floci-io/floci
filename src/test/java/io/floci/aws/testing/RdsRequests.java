@@ -29,8 +29,12 @@ public final class RdsRequests {
     private RdsRequests() {}
 
     public static RequestSpecification rds(String action) {
+        return rds(action, "test");
+    }
+
+    public static RequestSpecification rds(String action, String accessKey) {
         return given().header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=test/20261011/us-east-1/rds/aws4_request")
+                        "AWS4-HMAC-SHA256 Credential=" + accessKey + "/20261011/us-east-1/rds/aws4_request")
                 .contentType(URLENC).formParam("Action", action).formParam("Version", "2014-10-31");
     }
 

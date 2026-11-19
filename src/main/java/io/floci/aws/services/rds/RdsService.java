@@ -11172,7 +11172,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String region = effectiveRegion(regionResolver.regionOf(arn));
         DbCluster cluster;
         if (resource.startsWith("cluster:")) {
-            cluster = findClusterByArn(accountId, arn);
+            cluster = findClusterForScope(accountId, region, resource.substring("cluster:".length()));
         } else {
             DbInstance instance = findInstanceByArnOrNull(accountId, region, arn);
             if (instance == null) {

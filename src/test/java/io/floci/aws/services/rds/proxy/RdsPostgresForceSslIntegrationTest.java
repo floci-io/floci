@@ -4,6 +4,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -61,28 +63,30 @@ class RdsPostgresForceSslIntegrationTest {
         }
     }
 
-    @Test
-    void auroraClusterParameterGroupForceSslRefusesPlaintextOnClusterAndMemberEndpoints() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"test", "222222222222"})
+    void auroraClusterParameterGroupForceSslRefusesPlaintextOnClusterAndMemberEndpoints(String accessKey)
+            throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String clusterGroup = "force-ssl-cpg-" + suffix;
         String memberGroup = "force-ssl-mpg-" + suffix;
         String clusterId = "force-ssl-cluster-" + suffix;
         String memberId = clusterId + "-member";
-        rds("CreateDBClusterParameterGroup")
+        rds("CreateDBClusterParameterGroup", accessKey)
                 .formParam("DBClusterParameterGroupName", clusterGroup)
                 .formParam("DBParameterGroupFamily", "aurora-postgresql16")
                 .formParam("Description", "force ssl")
         .when().post("/").then().statusCode(200);
-        createInstanceParameterGroup(memberGroup, "aurora-postgresql16");
+        createInstanceParameterGroup(memberGroup, "aurora-postgresql16", accessKey);
         try {
-            rds("ModifyDBClusterParameterGroup")
+            rds("ModifyDBClusterParameterGroup", accessKey)
                     .formParam("DBClusterParameterGroupName", clusterGroup)
                     .formParam("Parameters.member.1.ParameterName", "rds.force_ssl")
                     .formParam("Parameters.member.1.ParameterValue", "1")
                     .formParam("Parameters.member.1.ApplyMethod", "immediate")
             .when().post("/").then().statusCode(200);
-            setInstanceForceSsl(memberGroup, "0");
-            int clusterPort = rds("CreateDBCluster")
+            setInstanceForceSsl(memberGroup, "0", accessKey);
+            int clusterPort = rds("CreateDBCluster", accessKey)
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("Engine", "aurora-postgresql")
                     .formParam("DBClusterParameterGroupName", clusterGroup)
@@ -90,7 +94,7 @@ class RdsPostgresForceSslIntegrationTest {
                     .formParam("MasterUserPassword", MASTER_PASSWORD)
             .when().post("/").then().statusCode(200).extract().xmlPath()
                     .getInt("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.Port");
-            int memberPort = rds("CreateDBInstance")
+            int memberPort = rds("CreateDBInstance", accessKey)
                     .formParam("DBInstanceIdentifier", memberId)
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("DBInstanceClass", "db.r5.large")
@@ -104,20 +108,27 @@ class RdsPostgresForceSslIntegrationTest {
             assertPlaintextRefused(memberPort);
             assertThat(selectOne(memberPort, "require"), equalTo(1));
         } finally {
-            deleteInstance(memberId);
-            rds("DeleteDBCluster")
+            rds("DeleteDBInstance", accessKey)
+                    .formParam("DBInstanceIdentifier", memberId)
+                    .formParam("SkipFinalSnapshot", "true")
+            .when().post("/");
+            rds("DeleteDBCluster", accessKey)
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("SkipFinalSnapshot", "true")
             .when().post("/");
-            rds("DeleteDBClusterParameterGroup")
+            rds("DeleteDBClusterParameterGroup", accessKey)
                     .formParam("DBClusterParameterGroupName", clusterGroup)
             .when().post("/");
-            deleteInstanceParameterGroup(memberGroup);
+            deleteInstanceParameterGroup(memberGroup, accessKey);
         }
     }
 
     private static void createInstanceParameterGroup(String group, String family) {
-        rds("CreateDBParameterGroup")
+        createInstanceParameterGroup(group, family, "test");
+    }
+
+    private static void createInstanceParameterGroup(String group, String family, String accessKey) {
+        rds("CreateDBParameterGroup", accessKey)
                 .formParam("DBParameterGroupName", group)
                 .formParam("DBParameterGroupFamily", family)
                 .formParam("Description", "force ssl")
@@ -125,13 +136,21 @@ class RdsPostgresForceSslIntegrationTest {
     }
 
     private static void deleteInstanceParameterGroup(String group) {
-        rds("DeleteDBParameterGroup")
+        deleteInstanceParameterGroup(group, "test");
+    }
+
+    private static void deleteInstanceParameterGroup(String group, String accessKey) {
+        rds("DeleteDBParameterGroup", accessKey)
                 .formParam("DBParameterGroupName", group)
         .when().post("/");
     }
 
     private static void setInstanceForceSsl(String group, String value) {
-        rds("ModifyDBParameterGroup")
+        setInstanceForceSsl(group, value, "test");
+    }
+
+    private static void setInstanceForceSsl(String group, String value, String accessKey) {
+        rds("ModifyDBParameterGroup", accessKey)
                 .formParam("DBParameterGroupName", group)
                 .formParam("Parameters.member.1.ParameterName", "rds.force_ssl")
                 .formParam("Parameters.member.1.ParameterValue", value)
