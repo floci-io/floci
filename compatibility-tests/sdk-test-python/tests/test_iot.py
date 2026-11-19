@@ -530,23 +530,27 @@ def test_mqtt_persistent_session_receives_qos1_messages_queued_while_offline(uni
     client_id = f"{unique_name}-persistent"
     topic = f"devices/{unique_name}/commands"
 
-    with mqtt_connect(f"{unique_name}-watcher") as watcher:
-        mqtt_subscribe(watcher, f"$aws/events/presence/disconnected/{client_id}")
-        with mqtt_connect(client_id, clean_session=False) as device:
-            mqtt_subscribe(device, topic, qos=1)
-            device.sendall(b"\xe0\x00")
-        mqtt_read_publish(watcher)
+    try:
+        with mqtt_connect(f"{unique_name}-watcher") as watcher:
+            mqtt_subscribe(watcher, f"$aws/events/presence/disconnected/{client_id}")
+            with mqtt_connect(client_id, clean_session=False) as device:
+                mqtt_subscribe(device, topic, qos=1)
+                device.sendall(b"\xe0\x00")
+            mqtt_read_publish(watcher)
 
-    with mqtt_connect(f"{unique_name}-pub") as publisher:
-        mqtt_publish(publisher, topic, b"offline-qos0")
-        mqtt_publish(publisher, topic, b"offline-qos1", qos=1)
+        with mqtt_connect(f"{unique_name}-pub") as publisher:
+            mqtt_publish(publisher, topic, b"offline-qos0")
+            mqtt_publish(publisher, topic, b"offline-qos1", qos=1)
 
-    with mqtt_connect(client_id, clean_session=False, session_present=True) as device:
-        packet = mqtt_read_packet(device)
-        assert (packet[0] >> 1) & 0x03 == 1
-        assert mqtt_parse_publish(packet) == (topic, b"offline-qos1")
-
-    mqtt_connect(client_id).close()
+        with mqtt_connect(client_id, clean_session=False, session_present=True) as device:
+            packet = mqtt_read_packet(device)
+            assert (packet[0] >> 1) & 0x03 == 1
+            assert mqtt_parse_publish(packet) == (topic, b"offline-qos1")
+    finally:
+        try:
+            mqtt_connect(client_id).close()
+        except (OSError, AssertionError):
+            pass
 
 
 def mqtt_connect(client_id, clean_session=True, session_present=False):
