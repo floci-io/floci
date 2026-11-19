@@ -1616,6 +1616,16 @@ def test_id_prefixes_read_botocores_examples_by_the_shape_of_each_member():
     assert r.id_prefixes({"ec2": ec2}, ("security-group",)) == {}
 
 
+
+def test_vpc_endpoint_prefix_remains_unknown_when_botocore_has_none():
+    ec2 = model({"DescribeVpcEndpoints": {"VpcEndpointIds": "VpcEndpointIdList"}}, "ec2")
+    ec2["shapes"]["VpcEndpointId"] = {"type": "string"}
+    ec2["shapes"]["VpcEndpointIdList"] = {"type": "list", "member": {"shape": "VpcEndpointId"}}
+    assert r.id_prefixes({"ec2": ec2}, ("vpc-endpoint",)) == {}
+    assert r.namespace_id_prefixes("ec2", {"ec2": ec2}) == {}
+    assert r.namespace_id_prefixes("other", {"ec2": ec2}) is None
+
+
 def test_id_targets_reject_unknown_types_ambiguous_prefixes_and_malformed_members():
     import copy
 
@@ -2709,3 +2719,46 @@ def test_a_name_for_a_new_resource_does_not_select_an_existing_id():
     models = cluster_model("CreateWidget", {"WidgetName": "<p>A name for the widget.</p>"})
     resource = {"type": "widget", "fill": {}}
     assert r.with_documented("svc:CreateWidget", ["widget"], formats, models, [resource]) == [resource]
+
+
+def test_paired_added_and_removed_id_lists_both_name_acted_on_resources():
+    formats = {"security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}"}
+    named = members("AddSecurityGroupIds[]", "RemoveSecurityGroupIds[]")
+    shapes = {name: "VpcEndpointSecurityGroupIdList" for name in named}
+    resources = r.resources_for("ec2:ModifyVpcEndpoint", ["security-group"], formats, named, shapes=shapes)
+    assert resources == [
+        {"type": "security-group", "fill": {"SecurityGroupId": "AddSecurityGroupIds[]"}},
+        {"type": "security-group", "fill": {"SecurityGroupId": "RemoveSecurityGroupIds[]"}}]
+    shapes["RemoveSecurityGroupIds"] = "UnrelatedList"
+    assert len(r.resources_for("ec2:ModifyVpcEndpoint", ["security-group"], formats, named, shapes=shapes)) == 1
+
+
+def test_nested_record_id_finds_only_containing_and_adjacent_resource_types():
+    formats = {kind: "arn:${Partition}:svc:${Region}:${Account}:" + kind + "/${Id}"
+               for kind in ("interface", "instance", "subnet")}
+    shapes = {
+        "String": {"type": "string"},
+        "Interface": {"type": "structure", "members": {
+            "InterfaceId": {"shape": "String"}, "SubnetId": {"shape": "String"},
+            "Attachment": {"shape": "InterfaceAttachment"}}},
+        "InterfaceAttachment": {"type": "structure", "members": {
+            "AttachmentId": {"shape": "String"}, "InstanceId": {"shape": "String"}}}}
+    shapes["Request"] = {"type": "structure", "members": {"AttachmentId": {"shape": "String"}}}
+    models = {"svc": {"shapes": shapes, "metadata": {"protocol": "json"},
+                      "operations": {"DetachInterface": {"input": {"shape": "Request"}}}}}
+    expected = [{"type": kind, "fill": {}, "find": ["AttachmentId"]} for kind in ("instance", "interface")]
+    assert r.read_resources("svc:DetachInterface", list(formats), formats, models) == expected
+    assert r.with_nested_record_find([], list(formats), formats, members("UnrelatedId"), models) == []
+    existing = [{"type": "interface", "fill": {"Id": "InterfaceId"}}]
+    assert r.with_nested_record_find(existing, list(formats), formats, members("AttachmentId"), models) == [
+        *existing, expected[0]]
+    instance = shapes["InterfaceAttachment"]["members"].pop("InstanceId")
+    assert r.with_nested_record_find([], list(formats), formats, members("AttachmentId"), models) == []
+    shapes["InterfaceAttachment"]["members"]["InstanceId"] = instance
+    shapes["Interface"]["members"]["OtherAttachment"] = {"shape": "OtherAttachment"}
+    shapes["OtherAttachment"] = {"type": "structure", "members": {
+        "OtherAttachmentId": {"shape": "String"}, "InstanceId": {"shape": "String"}}}
+    assert r.with_nested_record_find([], list(formats), formats,
+                                     members("AttachmentId", "OtherAttachmentId"), models) == []
+    shapes["DescribeInterfaceResponse"] = shapes.pop("Interface")
+    assert r.with_nested_record_find([], list(formats), formats, members("AttachmentId"), models) == []

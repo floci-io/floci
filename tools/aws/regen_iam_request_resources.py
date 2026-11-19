@@ -107,7 +107,8 @@ network resources): a resource ARN's variable names its list member, with the re
 it acts on (`Resources`) as a fallback. A list a type's variable names is the request's targets only when the
 request names nothing else the action acts on. Botocore supplies its serialized EC2 Query name (including queryName
 and capitalization), and the id prefix botocore gives each type, in its documentation ("the instance ID (for
-example, i-0123456789abcdef0)") or its examples (`"GroupId": "sg-903004f8"`), distinguishes them. Each generated
+example, i-0123456789abcdef0)") or its examples (`"GroupId": "sg-903004f8"`), distinguishes them. Cited EC2 API
+examples supply a missing VPC endpoint prefix. Each generated
 `targets` entry preserves the request's order and duplicates, including a wildcard for each unsupported id; only
 resolved ARNs use the corresponding target's condition context. Every other request of those namespaces is read by
 the ordinary rules, its EC2 Query wire names (`ec2Query`) from botocore. `resourceTagKeys` gives every type of the
@@ -228,7 +229,10 @@ whose ARN is all an id its service mints is named by the members its service fin
 documents as its key ("Scalable targets are uniquely identified by the combination of resource ID, scalable
 dimension, and namespace"), or else a name of it where no request of the namespace gives the id (a Redshift
 Serverless namespace by its `namespaceName`), and the reader asks the service for the ARN they find, or else checks
-the ARN with its id open, as for a create. A member naming a resource the reference gives no type, whose botocore
+the ARN with its id open, as for a create. An id of a nested record also finds the containing resource and the
+resource ids held beside it: a NetworkInterface's Attachment holds AttachmentId beside InstanceId. Each selected
+reference type is found by that id, with the same typed caller fallback when no stored record exists. A member
+naming a resource the reference gives no type, whose botocore
 record holds it beside members named after types the action acts on, names those through it (`through`): a Data
 API session's `SessionData` holds its `SessionId` beside the `ClusterIdentifier` or `WorkgroupName` it runs on, and
 the reader asks the service for the ARN of the caller's resource at the other end, or else names none. A member
@@ -485,9 +489,10 @@ KNOWN_VARIABLES = {"Partition", "Region", "Account"}
 # Floci's coverage of id-list namespaces: the types of each it reads by id, which ResourceArnBuilder and the condition
 # resolver resolve with their stored tags. It states no AWS fact: the model supplies each list member and its wire
 # name, the Service Reference the action's types and ARN formats, and botocore's documentation and examples the id
-# prefix of each type (`id_prefixes`). Other ids keep a wildcard entry until their coverage grows; every request
+# prefix of each type (`id_prefixes`), supplemented by cited API examples when botocore has none. Other ids keep
+# a wildcard entry until their coverage grows; every request
 # without those lists is read by the ordinary rules.
-ID_TARGETS = {"ec2": ("instance", "network-acl", "network-interface", "route-table", "security-group")}
+ID_TARGETS = {"ec2": ("instance", "network-acl", "network-interface", "route-table", "security-group", "vpc-endpoint")}
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
@@ -2050,7 +2055,8 @@ def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dic
     <p>A re-encryption decrypts under the key its path names and encrypts under the key its body names, so both are
     acted on and both are checked. A member that names a resource of the type, with a word before it saying which of
     them it is, fills the type's variable as well, when botocore's shape for it takes an alias as well as the type's
-    ARN, which the service resolves (Payment Cryptography's `KeyArnOrKeyAliasType`)."""
+    ARN, which the service resolves (Payment Cryptography's `KeyArnOrKeyAliasType`). Paired Add/Remove ID lists
+    of the same modeled shape also name separate resources, including the resources being removed."""
     found = []
     for kind in types:
         if kind not in kept or kind not in filled or not filled[kind]:
@@ -2068,7 +2074,13 @@ def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dic
                           and stem(member).endswith(stem(variable)) and stem(selected).endswith(stem(variable))
                           and (shapes or {}).get(member) == (shapes or {}).get(selected)
                           and stem((shapes or {}).get(member, "")) == stem(variable))
-            if not sibling_id and (member not in aliased or not names_type(member, kind_stem)):
+            paired_lists = (len(filled[kind]) == 1 and members[member].endswith("[]")
+                            and members.get(selected, "").endswith("[]")
+                            and {member.removesuffix("s"), selected.removesuffix("s")}
+                            == {"Add" + variable, "Remove" + variable}
+                            and (shapes or {}).get(member) is not None
+                            and shapes[member] == shapes.get(selected))
+            if not sibling_id and not paired_lists and (member not in aliased or not names_type(member, kind_stem)):
                 continue
             if not compatible(member, variable):
                 continue
@@ -2162,7 +2174,9 @@ def id_prefixes(models: dict[str, dict], kinds: tuple[str, ...],
 def namespace_id_prefixes(namespace: str, models: dict[str, dict],
                           examples: dict[str, dict] | None = None) -> dict[str, str] | None:
     """`id_prefixes` of the types `ID_TARGETS` reads by id in the namespace; None for a namespace it reads none of."""
-    return id_prefixes(models, ID_TARGETS[namespace], examples) if namespace in ID_TARGETS else None
+    if namespace not in ID_TARGETS:
+        return None
+    return id_prefixes(models, ID_TARGETS[namespace], examples)
 
 
 def id_targets(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict],
@@ -2174,7 +2188,7 @@ def id_targets(operation: str, types: list[str], formats: dict[str, str], models
     configured = ID_TARGETS.get(namespace_of(operation))
     if configured is None:
         return None
-    known = known if known is not None else id_prefixes(models, configured)
+    known = known if known is not None else namespace_id_prefixes(namespace_of(operation), models)
     found = None
     for model in models.values():
         spec = model["operations"].get(operation.split(":", 1)[1], {})
@@ -2514,6 +2528,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
                                             requested_members(models)),
                                  types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
+    resources = with_nested_record_find(resources, types, formats, members, models)
     resources = with_find_scope(resources, models, name, formats)
     resources = with_typed_targets(resources, formats, typed_target_fields(models, name))
     resources = with_integer_members(resources, formats, models, name)
@@ -3044,6 +3059,44 @@ def with_found(resources: list[dict], types: list[str], formats: dict[str, str],
     # a request gives: a request lacking a member of its key names none.
     found = [resource for resource in resources if resource.get("type") not in by_kind and resource.get("type") not in keys]
     return found + [{"type": kind, "fill": {}, "find": list(by)} for kind, by in by_kind.items()]
+
+
+def with_nested_record_find(resources: list[dict], types: list[str], formats: dict[str, str],
+                            members: dict[str, str], models: dict[str, dict]) -> list[dict]:
+    """An id of a nested record linking two reference types selects both resource endpoints.
+
+    A NetworkInterface holds an Attachment whose AttachmentId and InstanceId identify its attachment and the
+    instance at its other end. Only a record named exactly after a reference type, holding its own id, supplies
+    this relationship; request wrappers and unrelated sibling fields do not. Existing explicit selectors win.
+    """
+    candidates: dict[str, set[str]] = {}
+    for model in models.values():
+        shapes = model["shapes"]
+        for shape_name, shape in shapes.items():
+            parents = [kind for kind in types if stem(shape_name) == stem(kind)]
+            fields = shape.get("members", {}) if shape.get("type") == "structure" else {}
+            if not parents or not any(kind_of(field) == "id" and stem(field) == stem(shape_name)
+                                      for field in fields):
+                continue
+            for child_name, spec in fields.items():
+                child = shapes[spec["shape"]]
+                nested = child.get("members", {}) if child.get("type") == "structure" else {}
+                for key, key_spec in nested.items():
+                    if members.get(key) != key or kind_of(key) != "id" or stem(key) != stem(child_name) \
+                            or shapes[key_spec["shape"]]["type"] != "string" \
+                            or any(stem(key) == stem(kind) for kind in formats):
+                        continue
+                    reached = set(parents) | {kind for field, field_spec in nested.items()
+                                              if field != key and kind_of(field) == "id"
+                                              and shapes[field_spec["shape"]]["type"] == "string"
+                                              for kind in types if stem(field) == stem(kind)}
+                    if len(reached) < 2:
+                        continue
+                    for kind in reached:
+                        candidates.setdefault(kind, set()).add(key)
+    selected = {kind for resource in resources for kind in resource.get("types", [resource.get("type")])}
+    return resources + [{"type": kind, "fill": {}, "find": sorted(keys)}
+                        for kind, keys in sorted(candidates.items()) if kind not in selected and len(keys) == 1]
 
 
 def with_find_scope(resources: list[dict], models: dict[str, dict], operation: str,
