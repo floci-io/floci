@@ -107,6 +107,10 @@ public class SesSendController {
             String fromIdentityArn = request.path("FromEmailAddressIdentityArn").asText(null);
             String configurationSetName = request.path("ConfigurationSetName").asText(null);
             String tenantName = request.path("TenantName").asText(null);
+            JsonNode content = request.path("Content");
+            if (!content.has("Raw") && !content.has("Simple") && !namesStoredTemplate(content.path("Template"))) {
+                requireInlineTemplateFields(content.path("Template"));
+            }
             List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
             ListManagementOptions listManagement =
                     parseListManagementOptions(request.path("ListManagementOptions"));
@@ -126,7 +130,6 @@ public class SesSendController {
                     .listManagement(listManagement)
                     .tenantName(tenantName)
                     .region(region);
-            JsonNode content = request.path("Content");
             String messageId;
 
             if (content.has("Raw")) {
@@ -168,6 +171,11 @@ public class SesSendController {
                 boolean hasArn = templateArn != null && !templateArn.isBlank();
                 boolean hasInline = template.has("TemplateContent");
                 int selectorCount = (hasName ? 1 : 0) + (hasArn ? 1 : 0) + (hasInline ? 1 : 0);
+                if (hasInline && selectorCount > 1) {
+                    throw new AwsException("BadRequestException",
+                            "TemplateName and TemplateArn cannot be provided when TemplateContent is provided.",
+                            400);
+                }
                 if (selectorCount > 1) {
                     throw new AwsException("BadRequestException",
                             "Content.Template must specify exactly one of TemplateName, TemplateArn, or TemplateContent.",
@@ -194,10 +202,6 @@ public class SesSendController {
                     String subject = inline.path("Subject").asText(null);
                     String text = inline.path("Text").asText(null);
                     String html = inline.path("Html").asText(null);
-                    // An empty inline template is reported before the tenant lookup on AWS; the
-                    // inline content is not a stored template resource, so only the identity and
-                    // configuration set pass through the gate.
-                    SesService.requireInlineTemplateContent(subject, text, html);
                     requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                     SendEmailRequest inlineRequest = sendRequest
                             .content(new EmailContent.InlineTemplate(subject, text, html, templateData,
@@ -240,6 +244,7 @@ public class SesSendController {
             if (bulkEntries.isMissingNode() || bulkEntries.isNull()) {
                 throw SmithyValidationErrors.badRequest(SmithyValidationErrors.notNullWithoutValue("bulkEmailEntries"));
             }
+            requireInlineTemplateFields(request.path("DefaultContent").path("Template"));
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
             if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
                 throw new AwsException("BadRequestException",
@@ -264,6 +269,10 @@ public class SesSendController {
             boolean hasArn = templateArn != null && !templateArn.isBlank();
             boolean hasInline = template.has("TemplateContent");
             int selectorCount = (hasName ? 1 : 0) + (hasArn ? 1 : 0) + (hasInline ? 1 : 0);
+            if (hasInline && selectorCount > 1) {
+                throw new AwsException("BadRequestException",
+                        "TemplateName or TemplateArn cannot be provided with EmailTemplateContent", 400);
+            }
             if (selectorCount > 1) {
                 throw new AwsException("BadRequestException",
                         "DefaultContent.Template must specify exactly one of TemplateName, TemplateArn, or TemplateContent.",
@@ -284,8 +293,6 @@ public class SesSendController {
                 subject = inline.path("Subject").asText(null);
                 text = inline.path("Text").asText(null);
                 html = inline.path("Html").asText(null);
-                // Shape validation belongs before the send's tenant lookup, as on SendEmail.
-                SesService.requireInlineTemplateContent(subject, text, html);
             }
             // AWS counts the entries after the inline content check and before it looks the stored
             // template up (probe-confirmed).
@@ -418,6 +425,25 @@ public class SesSendController {
                 throw new AwsException("BadRequestException", "Invalid email address null.", 400);
             }
         }
+    }
+
+    // AWS reports an incomplete inline template ahead of a missing or malformed sender, the
+    // destinations, the entry count, the template data, the message tags, the list management
+    // options, the feedback address and the configuration set and tenant lookups (probe-confirmed
+    // on SendEmail and SendBulkEmail). A template that also names a stored one differs by
+    // operation: SendBulkEmail still reports the incomplete content first, SendEmail reports the
+    // combination, so SendEmail skips this check for it.
+    private static void requireInlineTemplateFields(JsonNode template) {
+        if (template.has("TemplateContent")) {
+            JsonNode inline = template.path("TemplateContent");
+            SesService.requireInlineTemplateContent(inline.path("Subject").asText(null),
+                    inline.path("Text").asText(null), inline.path("Html").asText(null));
+        }
+    }
+
+    private static boolean namesStoredTemplate(JsonNode template) {
+        return !template.path("TemplateName").asText("").isBlank()
+                || !template.path("TemplateArn").asText("").isBlank();
     }
 
     private JsonNode parseTemplateData(JsonNode parent, String fieldName) {
