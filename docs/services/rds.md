@@ -705,7 +705,8 @@ pending-reboot state, so a change made with `ApplyMethod=pending-reboot`, or a n
 group, also applies from the next connection, where AWS waits for a reboot. An Aurora cluster and
 its members read the value from the DB cluster parameter group only. Floci's
 default parameter groups hold no values, so a database without the override accepts plaintext
-connections even on PostgreSQL 15 and later, where AWS's default groups set `rds.force_ssl` to `1`.
+connections even where AWS's default groups set `rds.force_ssl` to `1`: RDS for PostgreSQL 15 and
+later, and Aurora PostgreSQL 17 and later (Aurora PostgreSQL 16 and earlier default to `0`).
 
 ## Option Groups
 
