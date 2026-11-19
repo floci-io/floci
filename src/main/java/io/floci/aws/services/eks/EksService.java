@@ -777,10 +777,18 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "required configs, including computeConfig, kubernetesNetworkConfig, and blockStorage are "
                     + "all either fully enabled or fully disabled.", 400);
         }
-        if (compute != null && compute.nodePools() != null && !compute.nodePools().isEmpty()
-                && (compute.nodeRoleArn() == null || compute.nodeRoleArn().isEmpty())) {
+        if (compute == null) {
+            return;
+        }
+        boolean hasNodePools = compute.nodePools() != null && !compute.nodePools().isEmpty();
+        boolean hasNodeRole = compute.nodeRoleArn() != null && !compute.nodeRoleArn().isEmpty();
+        if (hasNodePools && !hasNodeRole) {
             throw new AwsException("InvalidParameterException",
                     "When Compute Config nodeRoleArn is null or empty, nodePool list cannot be populated", 400);
+        }
+        if (hasNodeRole && !hasNodePools) {
+            throw new AwsException("InvalidParameterException",
+                    "When Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided.", 400);
         }
     }
 

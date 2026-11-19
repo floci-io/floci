@@ -19,6 +19,7 @@ import static io.floci.aws.services.cloudformation.CfnStackTestSupport.subjectSt
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -245,6 +246,48 @@ class CloudFormationEksIntegrationTest {
             } finally {
                 CfnStackWaits.deleteStack(stack);
             }
+        }
+    }
+
+    @Test
+    void aClusterIsCreatedWithAutoModesComputeStorageAndLoadBalancing() {
+        String stack = "cfn-eks-auto-" + Long.toString(System.nanoTime(), 36);
+        String nodeRole = "arn:aws:iam::000000000000:role/eks-auto-node";
+        String autoMode = "\"ComputeConfig\": {\"Enabled\": true, \"NodePools\": [\"general-purpose\", \"system\"],"
+                + " \"NodeRoleArn\": \"" + nodeRole + "\"}, \"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}},"
+                + " \"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}";
+        // Floci doesn't model the Gateway API settings, so they are not read.
+        String gatewayApi = "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": false,"
+                + " \"GatewayApi\": {\"Crds\": {\"Managed\": true}}}}";
+        String template = "{\"Resources\": {"
+                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + autoMode + "}},"
+                + "\"Gateway\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + gatewayApi + "}}}}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, template, "CREATE_COMPLETE");
+            JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
+            assertTrue(cluster.getBoolean("cluster.computeConfig.enabled"));
+            assertEquals(List.of("general-purpose", "system"), cluster.getList("cluster.computeConfig.nodePools"));
+            assertEquals(nodeRole, cluster.getString("cluster.computeConfig.nodeRoleArn"));
+            assertTrue(cluster.getBoolean("cluster.storageConfig.blockStorage.enabled"));
+            assertTrue(cluster.getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
+            assertFalse(given().get("/clusters/" + physicalId(client, stack, "Gateway")).jsonPath()
+                    .getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aClusterEnablingOnlyAutoModesLoadBalancingFailsTheStack() {
+        String stack = "cfn-eks-auto-lb-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, subjectStack("", "", "AWS::EKS::Cluster", ROLE
+                    + "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}"),
+                    "ROLLBACK_COMPLETE");
+        } finally {
+            CfnStackWaits.deleteStack(stack);
         }
     }
 

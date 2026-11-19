@@ -374,7 +374,13 @@ Mode, please ensure that all required configs, including computeConfig, kubernet
 blockStorage are all either fully enabled or fully disabled."), and a capability the request leaves out counts
 as not enabled. A `computeConfig` that names node pools without a `nodeRoleArn` is refused with
 `InvalidParameterException` ("When Compute Config nodeRoleArn is null or empty, nodePool list cannot be
-populated").
+populated"), and one that names a `nodeRoleArn` without node pools with `InvalidParameterException` ("When
+Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided."). A `computeConfig` with
+neither is accepted, as AWS accepts it for Auto Mode without its built-in node pools.
+
+In CloudFormation, `AWS::EKS::Cluster` creates the cluster with `ComputeConfig`, `StorageConfig` and
+`KubernetesNetworkConfig.ElasticLoadBalancing`, refused the same way. A stack update that changes them is
+accepted with a warning and not applied.
 
 With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster role, passed to
 `eks.amazonaws.com`, and not yet on the node role. AWS's Service Reference lists both `ec2.amazonaws.com` and

@@ -2315,6 +2315,21 @@ class EksServiceTest {
     }
 
     @Test
+    void autoModeNodeRoleIsRefusedWithoutNodePools() {
+        String message = "When Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided.";
+        assertCreateClusterRefused(autoModeRequest("auto-null-node-pools",
+                new ComputeConfig(true, null, AUTO_MODE_NODE_ROLE), true, true), message);
+        assertCreateClusterRefused(autoModeRequest("auto-empty-node-pools",
+                new ComputeConfig(true, List.of(), AUTO_MODE_NODE_ROLE), true, true), message);
+
+        // Without built-in node pools, Auto Mode takes no node role either.
+        eksService.createCluster(autoModeRequest("auto-without-node-pools", new ComputeConfig(true, List.of(), null),
+                true, true));
+        assertEquals(new ComputeConfig(true, List.of(), null),
+                eksService.describeCluster("auto-without-node-pools").getComputeConfig());
+    }
+
+    @Test
     void createClusterWithEncryptionConfigAndLogging() {
         CreateClusterRequest req = createTestClusterRequest("enc-log-cluster");
         req.setEncryptionConfig(List.of(
