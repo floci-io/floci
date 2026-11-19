@@ -61,6 +61,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -90,6 +92,9 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
     static final TimeValue VALIDATE_AFTER_INACTIVITY = TimeValue.ofSeconds(1);
     /** Idle pooled connections are closed in the background after this long. */
     static final TimeValue EVICT_IDLE_AFTER = TimeValue.ofSeconds(30);
+
+    /** A route under {@code /containers/}, with or without the API version in front: the rest is group 1. */
+    private static final Pattern CONTAINER_ROUTE = Pattern.compile("(?:/v\\d+(?:\\.\\d+)*)?/containers/(.*)");
 
     private final CloseableHttpClient httpClient;
     private final PoolingHttpClientConnectionManager connectionManager;
@@ -379,13 +384,13 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
     private static String[] containerRoute(String path) {
         int queryStart = path.indexOf('?');
         String route = queryStart < 0 ? path : path.substring(0, queryStart);
-        int start = route.indexOf("/containers/");
-        if (start < 0) {
+        // Only a route that is itself under /containers/, not an image name such as quay.io/containers/podman.
+        Matcher matcher = CONTAINER_ROUTE.matcher(route);
+        if (!matcher.matches()) {
             return null;
         }
-        String[] segments = route.substring(start + "/containers/".length()).split("/");
-        if (segments.length == 0 || segments.length > 2 || segments[0].isEmpty() || "create".equals(segments[0])
-                || ("json".equals(segments[0]) && segments.length == 1) || "prune".equals(segments[0])) {
+        String[] segments = matcher.group(1).split("/");
+        if (segments.length == 0 || segments.length > 2 || segments[0].isEmpty()) {
             return null;
         }
         return segments;

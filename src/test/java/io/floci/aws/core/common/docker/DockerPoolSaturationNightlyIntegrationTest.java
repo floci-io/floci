@@ -3,6 +3,7 @@ package io.floci.aws.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.PullImageResultCallback;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.WaitResponse;
@@ -102,24 +103,31 @@ class DockerPoolSaturationNightlyIntegrationTest {
 
     @AfterEach
     void tearDown() throws IOException {
-        synchronized (streams) {
-            for (Closeable stream : streams) {
-                closeQuietly(stream);
-            }
-        }
-        if (control != null && dockerAvailable) {
-            synchronized (containers) {
-                for (String id : containers) {
-                    removeQuietly(id);
+        try {
+            synchronized (streams) {
+                for (Closeable stream : streams) {
+                    closeQuietly(stream);
                 }
             }
-            removeLeftovers();
-        }
-        if (control != null) {
-            control.close();
-        }
-        if (streaming != null) {
-            streaming.close();
+            if (control != null && dockerAvailable) {
+                synchronized (containers) {
+                    for (String id : containers) {
+                        removeQuietly(id);
+                    }
+                }
+                removeLeftovers();
+            }
+        } finally {
+            // A cleanup that throws still leaves no connection pool open for the rest of the run.
+            try {
+                if (control != null) {
+                    control.close();
+                }
+            } finally {
+                if (streaming != null) {
+                    streaming.close();
+                }
+            }
         }
     }
 
@@ -170,18 +178,17 @@ class DockerPoolSaturationNightlyIntegrationTest {
         control.startContainerCmd(extra).exec();
         CompletableFuture<Throwable> failure = new CompletableFuture<>();
         long begin = System.nanoTime();
-        streams.add(streaming.logContainerCmd(extra).withStdOut(true).withStdErr(true).withFollowStream(true)
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onError(Throwable throwable) {
-                        failure.complete(throwable);
-                    }
+        streams.add(followLogs(extra, new ResultCallback.Adapter<Frame>() {
+            @Override
+            public void onError(Throwable throwable) {
+                failure.complete(throwable);
+            }
 
-                    @Override
-                    public void onComplete() {
-                        failure.complete(null);
-                    }
-                }));
+            @Override
+            public void onComplete() {
+                failure.complete(null);
+            }
+        }));
         FlociDockerHttpClient.PoolGauges waiting = awaitGauges(gauges -> gauges.pending() >= 1,
                 "the extra stream to wait for a connection");
         assertEquals(2 * CONTAINERS, waiting.leased(), waiting.toString());
@@ -214,19 +221,23 @@ class DockerPoolSaturationNightlyIntegrationTest {
 
     /** The two streams a Lambda container holds on the streaming pool: its log follow and its exit wait. */
     private void followLikeLambda(String id) {
-        streams.add(streaming.logContainerCmd(id).withStdOut(true).withStdErr(true).withFollowStream(true)
-                .exec(new ResultCallback.Adapter<Frame>() {
-                    @Override
-                    public void onError(Throwable ignored) {
-                        // Expected once the test closes the stream.
-                    }
-                }));
+        streams.add(followLogs(id, new ResultCallback.Adapter<Frame>() {
+            @Override
+            public void onError(Throwable ignored) {
+                // Expected once the test closes the stream.
+            }
+        }));
         streams.add(streaming.waitContainerCmd(id).exec(new ResultCallback.Adapter<WaitResponse>() {
             @Override
             public void onError(Throwable ignored) {
                 // Expected once the test closes the stream.
             }
         }));
+    }
+
+    /** Follows a container's stdout and stderr on the streaming pool, as Lambda's log follow does. */
+    private <T extends ResultCallback<Frame>> T followLogs(String id, T callback) {
+        return streaming.logContainerCmd(id).withStdOut(true).withStdErr(true).withFollowStream(true).exec(callback);
     }
 
     private List<Long> pingMillis() {
@@ -277,8 +288,10 @@ class DockerPoolSaturationNightlyIntegrationTest {
     private void removeQuietly(String id) {
         try {
             control.removeContainerCmd(id).withForce(true).exec();
+        } catch (NotFoundException expected) {
+            LOG.debugv("Container {0} was already removed", id);
         } catch (RuntimeException e) {
-            LOG.debugv(e, "Container {0} was already removed", id);
+            LOG.warnv(e, "Container {0} could not be removed; it may be left running", id);
         }
     }
 

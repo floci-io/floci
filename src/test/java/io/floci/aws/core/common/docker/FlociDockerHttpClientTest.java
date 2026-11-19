@@ -401,8 +401,12 @@ class FlociDockerHttpClientTest {
         assertEquals("abc", FlociDockerHttpClient.streamContainer(request("GET /containers/abc/logs?follow=1")));
         assertEquals("fn-1", FlociDockerHttpClient.streamContainer(request("POST /containers/fn-1/attach?stream=1")));
         assertEquals("abc", FlociDockerHttpClient.streamContainer(request("GET /containers/abc/stats")));
+        // A container may be named like a collection route.
+        assertEquals("create", FlociDockerHttpClient.streamContainer(request("GET /containers/create/logs?follow=1")));
+        assertEquals("json", FlociDockerHttpClient.streamContainer(request("POST /v1.43/containers/json/wait")));
         for (String noContainer : List.of("POST /exec/abc/start", "POST /images/create?fromImage=alpine",
-                "POST /build", "GET /events", "GET /containers/json", "GET /containers//", "DELETE /containers//")) {
+                "POST /build", "GET /events", "GET /containers/json", "GET /containers//", "DELETE /containers//",
+                "GET /images/quay.io/containers/podman/json")) {
             assertNull(FlociDockerHttpClient.streamContainer(request(noContainer)), noContainer);
         }
     }
@@ -438,7 +442,8 @@ class FlociDockerHttpClientTest {
                     .responseTimeout(Duration.ofSeconds(30))
                     .connectionRequestTimeout(Duration.ofSeconds(5))
                     .build()) {
-                for (String stream : List.of("POST /containers/fn-1/wait", "GET /containers/floci-lambda-fn/logs?follow=1",
+                for (String stream : List.of("POST /containers/fn-1/wait",
+                        "GET /containers/floci-lambda-fn/logs?follow=1",
                         "POST /containers/task-1/wait", "POST /exec/e-1/start")) {
                     open.add(client.execute(request(stream)));
                 }
@@ -447,6 +452,10 @@ class FlociDockerHttpClientTest {
                 assertEquals(Map.of("lambda", 2, "ecs", 1, DockerContainerServices.UNATTRIBUTED, 1),
                         held.openStreamsByService(), held.toString());
                 assertEquals(Map.of("wait", 2, "logs", 1, "exec", 1), held.openStreams(), held.toString());
+
+                // An image whose name has containers/ in it is not a container remove.
+                open.add(client.execute(request("DELETE /images/quay.io/containers/fn-1")));
+                assertEquals("lambda", DockerContainerServices.serviceOf("fn-1"));
 
                 open.add(client.execute(request("DELETE /containers/fn-1")));
                 assertEquals(DockerContainerServices.UNATTRIBUTED, DockerContainerServices.serviceOf("fn-1"));
