@@ -95,7 +95,7 @@ public class LambdaExecutorService implements Resettable {
                                  EmulatorConfig config) {
         this(warmPool, objectMapper, concurrencyLimiter, destinationRouter, lambdaServiceInstance, null, clock,
                 Duration.ofSeconds(config.services().lambda().asyncRetryDelaySeconds()),
-                !"kubernetes".equalsIgnoreCase(config.services().lambda().executor().trim()),
+                "docker".equalsIgnoreCase(config.services().lambda().executor().trim()),
                 config.services().lambda().initTimeoutSeconds());
     }
 

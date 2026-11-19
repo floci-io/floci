@@ -3679,7 +3679,9 @@ public interface EmulatorConfig {
         /**
          * Execution backend for Lambda environments: {@code docker} (default) runs each
          * environment as a Docker container, {@code kubernetes} runs it as a pod in the
-         * cluster Floci is configured against (in-cluster config or local kubeconfig).
+         * cluster Floci is configured against (in-cluster config or local kubeconfig), and
+         * {@code process} runs a {@code provided.*} function's bootstrap as a process on the
+         * machine Floci runs on, for local development without Docker.
          *
          * Env var: FLOCI_SERVICES_LAMBDA_EXECUTOR
          */

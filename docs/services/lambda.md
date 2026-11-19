@@ -713,7 +713,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes; with `FLOCI_DOCKER_RESOURCE_NAMESPACE` set, the namespace follows the prefix and a short hash of it ends the volume name, e.g. `acme-<namespace>-code-<function>-<hash>-<namespace hash>`). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
 | `FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY` | `max(2, cpus/2)` | Maximum concurrent first-time code-volume populates. See the note below |
-| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
+| `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers), `kubernetes` (pods) or `process` (local processes, see [Process executor](#process-executor)) |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS` | *(unset)* | Extra pod labels as comma-separated `key=value` entries |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | *(unset)* | Host/IP pods use to reach Floci; auto-detected when Floci runs in-cluster |
@@ -857,7 +857,9 @@ services:
 
 If mounting the Docker socket is not acceptable (for example on a hardened
 Kubernetes cluster), use the [Kubernetes executor](#kubernetes-executor)
-instead — it needs no privileged access and no socket.
+instead. It needs no privileged access and no socket. On a development
+machine without Docker, the [process executor](#process-executor) runs
+`provided.*` functions as local processes.
 
 ### Kubernetes executor
 
@@ -1024,6 +1026,54 @@ entries; only clients of the emulator itself use port 4566.
   namespace at startup; run multiple Floci instances in separate namespaces.
 - Layers published by Floci versions before this feature have no stored
   archive; re-publish them once to make them downloadable by pods.
+
+### Process executor
+
+Set `FLOCI_SERVICES_LAMBDA_EXECUTOR=process` to run each Lambda execution
+environment as a process on the machine Floci runs on, without Docker. It
+follows the [custom runtime](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-custom.html)
+contract: Floci starts the package's `bootstrap` in the package directory, and
+the bootstrap polls the Lambda Runtime API at `AWS_LAMBDA_RUNTIME_API`.
+
+The process gets:
+
+- `AWS_LAMBDA_RUNTIME_API` on `127.0.0.1`, `_HANDLER`, `LAMBDA_TASK_ROOT` and
+  the other `AWS_LAMBDA_*` variables, as with the other executors.
+- The function's `Environment` variables, and an AWS SDK endpoint and region
+  pointing at Floci. A function whose execution role Floci knows gets that
+  role's credentials, as with the docker executor.
+- `PATH` from Floci's own environment. No other variable is passed, so Floci's
+  own environment variables, credentials included, do not reach the function.
+  The process can still read anything your user can, such as `~/.aws`.
+
+Its output goes to Floci's log and the function's CloudWatch Logs stream.
+Hot-reload functions run from their host directory directly.
+
+The process runs with the permissions of the user Floci runs as, with no
+isolation and no memory limit, so this executor is meant for local
+development only.
+
+Limitations:
+
+- Only `provided.*` runtimes from a .zip package or a hot-reload directory are
+  supported. Other runtimes, container images and functions with layers fail
+  to launch with a clear error.
+- A bootstrap from a .zip package is made executable when it starts, since
+  Floci does not keep file modes when it extracts a package. Other files in
+  the package keep the modes extraction gave them. A hot-reload bootstrap must
+  already be executable.
+- Floci refuses to start with this executor when it runs inside a container,
+  where the processes would run in that container instead of on your machine.
+- Invocations with `LogType=Tail` return no log tail.
+- The bootstrap runs on Linux and macOS only, and must be built for the
+  machine Floci runs on: a binary built for Lambda's Linux runs only on a
+  Linux host of the same architecture. The function's `Architectures` is
+  ignored.
+- Stopping an environment stops its bootstrap and the processes it started.
+  Processes a bootstrap left behind after it exited on its own are not
+  tracked and keep running until you stop them, and so are bootstraps still
+  running when Floci itself is killed. Nothing removes them when Floci starts
+  again, as the Docker and Kubernetes executors do for their leftovers.
 
 ### S3 virtual-hosted-style addressing inside Lambda containers
 
