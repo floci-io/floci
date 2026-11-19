@@ -50,15 +50,21 @@ class CloudWatchMetricsQueryHandlerTest {
             metricsService, mock(CloudWatchDashboardsService.class),
             mock(CloudWatchMetricStreamsService.class));
 
-    @Test
-    void aLargeMixedBatchDoesNotRescanEveryFormFieldForEachDatum() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void aLargeMixedBatchDoesNotRescanEveryFormFieldForEachDatum(boolean weighted) {
         MultivaluedMap<String, String> params = spy(new MultivaluedHashMap<String, String>());
         params.putSingle("Namespace", "LargeBatch");
         for (String list : List.of("MetricData", "EntityMetricData.member.2.MetricData")) {
             for (int index = 1; index <= 500; index++) {
                 String prefix = list + ".member." + index + ".";
                 params.putSingle(prefix + "MetricName", "Metric" + index);
-                params.putSingle(prefix + "Value", Integer.toString(index));
+                if (weighted) {
+                    params.putSingle(prefix + "Values.member.1", Integer.toString(index));
+                    params.putSingle(prefix + "Counts.member.1", "2");
+                } else {
+                    params.putSingle(prefix + "Value", Integer.toString(index));
+                }
             }
         }
 
@@ -68,8 +74,13 @@ class CloudWatchMetricsQueryHandlerTest {
         verify(metricsService).putMetricData(eq("LargeBatch"), datums.capture(), eq(REGION));
         assertEquals(1000, datums.getValue().size());
         assertEquals(500.0, datums.getValue().getLast().getValue());
+        if (weighted) {
+            assertEquals(2.0, datums.getValue().getLast().getSampleCount());
+            assertEquals(1000.0, datums.getValue().getLast().getSum());
+        }
         // Bound whole-map scans independently of the number of datums; no timing assertion.
         verify(params, atMost(3)).keySet();
+        verify(params, atMost(3)).entrySet();
     }
 
     @ParameterizedTest

@@ -21,6 +21,7 @@ final class MetricValues {
         return normalize(datum, values, counts, input.hasNonNull("Value") || input.hasNonNull("StatisticValues"));
     }
 
+    /** Parse fields indexed for one datum, so a batch never rescans the entire request per sample. */
     static List<MetricDatum> fromQuery(Map<String, List<String>> input, String prefix, MetricDatum datum) {
         List<Double> values = queryNumbers(input, prefix + "Values");
         List<Double> counts = queryNumbers(input, prefix + "Counts");
