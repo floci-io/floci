@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -1010,6 +1011,22 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 .body("message", equalTo(
                         "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause."));
         }
+    }
+
+    @Test
+    @Order(37)
+    void listsUnprojectedColumnsInTheSameOrderWhateverTheStatementOrder() {
+        String refused = "One or more parameter values were invalid: Global secondary index gsi-inc does not project ";
+        Map<List<String>, String> lists = Map.of(
+                List.of("nonproj", "lsiSk"), "[nonproj, lsiSk]",
+                List.of("lsiSk", "nonproj"), "[nonproj, lsiSk]",
+                List.of("alpha", "beta", "gamma", "delta"), "[delta, alpha, gamma, beta]",
+                List.of("x1", "x2", "x3", "x10", "x20"), "[x10, x20, x1, x2, x3]");
+
+        lists.forEach((columns, list) -> statement("SELECT " + String.join(", ", columns)
+                + " FROM \"partiql-edge-cases-index\".\"gsi-inc\" WHERE gsiPk = 'y'")
+            .statusCode(400)
+            .body("message", equalTo(refused + list)));
     }
 
     private static void putItem(String pk, String attributes) {
