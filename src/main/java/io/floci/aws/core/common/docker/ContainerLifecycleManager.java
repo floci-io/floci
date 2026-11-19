@@ -1584,6 +1584,20 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Whether the Docker daemon answers a ping, which is how a missing daemon is told apart from a
+     * container that failed for its own reasons. The one probe the container-backed services share.
+     */
+    public boolean isDockerReachable() {
+        try {
+            dockerClient.pingCmd().exec();
+            return true;
+        } catch (RuntimeException e) {
+            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * Returns the underlying control-plane DockerClient for operations not covered by this
      * manager. Prefer using manager methods when available. A stream that stays open for a
      * container's lifetime belongs on the {@link StreamingDocker} client instead.

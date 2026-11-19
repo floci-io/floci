@@ -1,7 +1,6 @@
 package io.floci.aws.services.msk;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.config.EmulatorConfig;
@@ -42,7 +41,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -548,8 +546,7 @@ class RedpandaManagerTest {
     void tryStartContainerReportsUnavailableWhenNoDaemonAnswers() {
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
-        when(lifecycleManager.getDockerClient())
-                .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
 
         assertFalse(manager.tryStartContainer(newCluster()));
     }
@@ -558,7 +555,7 @@ class RedpandaManagerTest {
     void tryStartContainerPropagatesFailuresWhileTheDaemonIsReachable() {
         when(lifecycleManager.createAndStart(any()))
                 .thenThrow(new RuntimeException("no such image: redpandadata/redpanda:latest"));
-        when(lifecycleManager.getDockerClient()).thenReturn(mock(DockerClient.class, RETURNS_DEEP_STUBS));
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
 
         RuntimeException failure = assertThrows(RuntimeException.class,
                 () -> manager.tryStartContainer(newCluster()));
