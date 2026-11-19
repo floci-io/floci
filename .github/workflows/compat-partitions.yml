@@ -90,6 +90,7 @@ jobs:
             -e FLOCI_SERVICES_IOT_MQTT_ENABLED=true \
             -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
             -e FLOCI_TLS_ENABLED=true \
+            -e FLOCI_SERVICES_STEPFUNCTIONS_ALLOW_PLAINTEXT_HTTP=true \
             -e FLOCI_SERVICES_EC2_MOCK=true \
             -e FLOCI_SERVICES_REDSHIFT_ENDPOINT_HOST=floci \
             -e FLOCI_SERVICES_RDS_ENDPOINT_HOST=floci \

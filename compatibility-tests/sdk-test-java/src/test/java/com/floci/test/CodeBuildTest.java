@@ -98,7 +98,7 @@ class CodeBuildTest {
                         .image("aws/codebuild/standard:7.0")
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
-                .serviceRole("arn:aws:iam::000000000000:role/codebuild-role")
+                .serviceRole("arn:" + TestFixtures.partition() + ":iam::000000000000:role/codebuild-role")
                 .tags(Tag.builder().key("env").value("test").build()));
 
         assertThat(resp.project().name()).isEqualTo("sdk-test-project");
@@ -233,7 +233,7 @@ class CodeBuildTest {
                         .image(CODEBUILD_TEST_IMAGE)
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
-                .serviceRole("arn:aws:iam::000000000000:role/codebuild-role"));
+                .serviceRole("arn:" + TestFixtures.partition() + ":iam::000000000000:role/codebuild-role"));
     }
 
     @Test
@@ -366,7 +366,7 @@ class CodeBuildTest {
                         .image(CODEBUILD_TEST_IMAGE)
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
-                .serviceRole("arn:aws:iam::000000000000:role/codebuild-role"));
+                .serviceRole("arn:" + TestFixtures.partition() + ":iam::000000000000:role/codebuild-role"));
     }
 
     @Test
