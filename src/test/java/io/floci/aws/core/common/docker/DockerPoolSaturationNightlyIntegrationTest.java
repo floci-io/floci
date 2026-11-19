@@ -45,9 +45,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  * ping, the streaming pool's leases and the docker-java stream threads. These are the numbers the
  * admission work (BL-212, BL-216, BL-217) is sized from.
  *
- * <p>It holds stream leases, which no response timeout releases, so it cannot drain itself: the
- * streams of quiet containers are checked to outlive twice the response timeout. The streaming pool
- * is sized for exactly the containers the ramp starts, so the stream of one more waits for a
+ * <p>It holds stream leases, which no response timeout releases, so it cannot drain itself (that
+ * these streams carry no response timeout is covered by {@link FlociDockerHttpClientTest}). The
+ * streaming pool is sized for exactly the containers the ramp starts, so the stream of one more waits for a
  * connection and fails with the lease timeout, the failure a saturated Floci reports.
  *
  * <p>Each container carries the {@code io.floci.service} label and is recorded the way
@@ -68,7 +68,7 @@ class DockerPoolSaturationNightlyIntegrationTest {
     private static final String SERVICE = "lambda";
     private static final int CONTAINERS = Integer.getInteger("docker.saturation.containers", 40);
     private static final int STEP = Math.max(1, CONTAINERS / 4);
-    /** The streaming pool's response timeout, which quiet streams must outlive. */
+    /** The streaming pool's response timeout, which its long-lived streams do not carry. */
     private static final Duration RESPONSE_TIMEOUT = Duration.ofSeconds(3);
     /** The control plane's, long enough for a create, start or remove on a loaded runner. */
     private static final Duration CONTROL_TIMEOUT = Duration.ofSeconds(60);
@@ -161,10 +161,8 @@ class DockerPoolSaturationNightlyIntegrationTest {
         LOG.infov("Docker pool saturation, {0} containers in steps of {1}:\n{2}", CONTAINERS, STEP,
                 String.join("\n", report));
 
-        // Quiet streams carry no response timeout, so a container that prints nothing keeps both.
-        Thread.sleep(RESPONSE_TIMEOUT.multipliedBy(2).toMillis());
         FlociDockerHttpClient.PoolGauges quiet = streamingTransport.gauges();
-        assertEquals(2 * CONTAINERS, quiet.leased(), "quiet streams should outlive the response timeout: " + quiet);
+        assertEquals(2 * CONTAINERS, quiet.leased(), "every container should hold both of its streams: " + quiet);
         assertEquals(Map.of("logs", CONTAINERS, "wait", CONTAINERS), quiet.openStreams());
         // docker-java reads each stream on a thread of its own, so the threads grow with the streams too.
         int streamThreads = DockerPoolGaugeLogger.countStreamThreads();
