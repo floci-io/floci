@@ -10,14 +10,19 @@ import java.util.Map;
 /**
  * A throwaway PostgreSQL 16 that wants SCRAM-SHA-256 passwords, as a shared server does, started
  * before Floci boots and set as the external DSQL backend. Without Docker the overrides point at a
- * port where nothing listens, and {@link DsqlClusterFixture#create} skips the test class; any other
- * failure to start the server fails the boot, with its cause.
+ * port where nothing listens, and {@link DsqlClusterFixture#create} skips the test class. Any other
+ * failure to start the server points them there too and sets {@link #START_FAILURE} to its cause,
+ * for the test class to fail with: the application still boots, since classes that need no
+ * PostgreSQL share it.
  */
 public final class ExternalPostgresResource implements QuarkusTestResourceLifecycleManager {
 
     private static final Logger LOG = Logger.getLogger(ExternalPostgresResource.class);
 
     public static final String PASSWORD = "floci-test";
+
+    /** Why the server did not start, when that fails the test class rather than skips it. */
+    public static final String START_FAILURE = "floci-test.dsql-external.start-failure";
 
     private ExternalPostgresServer server;
 
@@ -39,8 +44,10 @@ public final class ExternalPostgresResource implements QuarkusTestResourceLifecy
             LOG.warnv(e, "No external PostgreSQL for the DSQL tests; they skip");
             // Nothing listens on port 1; the tests skip before they create a cluster.
             port = 1;
-        } catch (SQLException e) {
-            throw new IllegalStateException("The external PostgreSQL for the DSQL tests did not start", e);
+        } catch (SQLException | RuntimeException e) {
+            LOG.errorv(e, "The external PostgreSQL for the DSQL tests did not start");
+            overrides.put(START_FAILURE, String.valueOf(e));
+            port = 1;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while the external PostgreSQL started", e);

@@ -3,6 +3,7 @@ package io.floci.aws.services.dsql;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.SidecarServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -24,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -34,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Aurora DSQL's data plane with every cluster on one external PostgreSQL server that wants
@@ -41,7 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * logs in to the cluster's own database as the cluster's backend admin.
  */
 @QuarkusTest
-@TestProfile(DsqlExternalBackendProfile.class)
+@TestProfile(SidecarServiceSettingsProfile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @Tag("docker")
 class DsqlExternalBackendIntegrationTest {
@@ -64,6 +67,9 @@ class DsqlExternalBackendIntegrationTest {
     @ConfigProperty(name = "floci.services.dsql.external.port")
     int serverPort;
 
+    @ConfigProperty(name = ExternalPostgresResource.START_FAILURE)
+    Optional<String> serverStartFailure;
+
     private static final String ROLE_ARN = "arn:aws:iam::" + DsqlClusterFixture.ACCOUNT + ":role/service/app-role";
 
     private ExternalPostgresServer.Superuser postgres;
@@ -72,6 +78,7 @@ class DsqlExternalBackendIntegrationTest {
 
     @BeforeAll
     void createCluster() {
+        serverStartFailure.ifPresent(cause -> fail("The external PostgreSQL did not start: " + cause));
         postgres = new ExternalPostgresServer.Superuser(serverPort, ExternalPostgresResource.PASSWORD);
         cluster = new DsqlClusterFixture(httpPort, endpoint);
         cluster.create(dockerClient);
