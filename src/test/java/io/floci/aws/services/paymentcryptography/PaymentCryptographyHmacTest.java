@@ -8,6 +8,9 @@ import org.bouncycastle.crypto.digests.SHA384Digest;
 import org.bouncycastle.crypto.digests.SHA512Digest;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+import java.util.Locale;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -57,6 +60,20 @@ class PaymentCryptographyHmacTest {
                 PaymentCryptographyCrypto.fromHex(MESSAGE), new SHA256Digest()).length);
         assertEquals(64, Ciphers.hmac(PaymentCryptographyCrypto.fromHex(KEY),
                 PaymentCryptographyCrypto.fromHex(MESSAGE), new SHA512Digest()).length);
+    }
+
+    @Test
+    void theCheckValueOfAKeyedHashKeyIsTheHashOfNothing() {
+        // The reference's terminology: "For HMAC keys, the KCV is computed using the hash
+        // selected at key creation on a zero-length message, taking the leftmost 3 bytes."
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.HMAC_SHA256;
+        String checkValue = PaymentCryptographyCrypto.checkValue(
+                PaymentCryptographyCrypto.fromHex(KEY), algorithm);
+        String expected = PaymentCryptographyCrypto.toHex(
+                Arrays.copyOf(Ciphers.hmac(PaymentCryptographyCrypto.fromHex(KEY),
+                        new byte[0], new SHA256Digest()), 3)).toUpperCase(Locale.ROOT);
+        assertEquals(expected, checkValue);
     }
 
     /** The keyed hash of the message under the key, in the hash. */

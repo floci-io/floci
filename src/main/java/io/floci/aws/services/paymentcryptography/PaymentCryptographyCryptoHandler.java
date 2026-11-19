@@ -165,7 +165,7 @@ public class PaymentCryptographyCryptoHandler {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("GenerateMac", request);
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
-        MacLeg leg = resolveMacLeg(request.get("GenerationAttributes"), key, region, "Generate",
+        MacLeg leg = resolveMacLeg(request.get("GenerationAttributes"), key, "Generate",
                 "generating a MAC with");
         byte[] message = blob(request, "MessageData");
         int length = macLength(request, leg, leg.longest);
@@ -182,7 +182,7 @@ public class PaymentCryptographyCryptoHandler {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("VerifyMac", request);
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
-        MacLeg leg = resolveMacLeg(request.get("VerificationAttributes"), key, region, "Verify",
+        MacLeg leg = resolveMacLeg(request.get("VerificationAttributes"), key, "Verify",
                 "verifying a MAC with");
         byte[] message = blob(request, "MessageData");
         byte[] mac = blob(request, "Mac");
@@ -487,13 +487,11 @@ public class PaymentCryptographyCryptoHandler {
      *
      * @param algorithm the algorithm the request names
      * @param key the key the mac is computed under
-     * @param region the region the request is for
      * @param mode the mode of use the operation needs
      * @param what the operation, for the message
      * @return the leg of the request
      */
-    private MacLeg hmacLeg(String algorithm, PaymentCryptographyKey key, String region,
-                           String mode, String what) {
+    private MacLeg hmacLeg(String algorithm, PaymentCryptographyKey key, String mode, String what) {
         requireMode(key, mode, what);
         requireUsage(key, MAC_USAGES, what);
         PaymentCryptographyKeyAlgorithm keyAlgorithm =
@@ -535,8 +533,8 @@ public class PaymentCryptographyCryptoHandler {
      * variants. A DUKPT MAC key is derived from the base derivation key, so that is what the
      * key has to allow.
      */
-    private MacLeg resolveMacLeg(JsonNode attributes, PaymentCryptographyKey key, String region,
-                                 String mode, String what) {
+    private MacLeg resolveMacLeg(JsonNode attributes, PaymentCryptographyKey key, String mode,
+                                 String what) {
         String variant = soleVariant(attributes);
         if (variant == null) {
             throw new AwsException("ValidationException",
@@ -559,7 +557,7 @@ public class PaymentCryptographyCryptoHandler {
                 return new MacLeg(Ciphers::iso9797Alg3, material(key), LONGEST_MAC);
             }
             if (algorithm.startsWith("HMAC")) {
-                return hmacLeg(algorithm, key, region, mode, what);
+                return hmacLeg(algorithm, key, mode, what);
             }
             if ("CMAC".equals(algorithm)) {
                 // The CMAC is the AES-CMAC of RFC 4493, which is a whole block
@@ -572,7 +570,8 @@ public class PaymentCryptographyCryptoHandler {
             }
             throw new AwsException("ValidationException",
                     "Algorithm '" + algorithm + "' not supported by this service "
-                            + "(ISO9797_ALGORITHM1, ISO9797_ALGORITHM3, CMAC)", 400);
+                            + "(ISO9797_ALGORITHM1, ISO9797_ALGORITHM3, CMAC, HMAC, "
+                            + "HMAC_SHA224, HMAC_SHA256, HMAC_SHA384, HMAC_SHA512)", 400);
         }
         if ("DukptIso9797Algorithm1".equals(variant) || "DukptIso9797Algorithm3".equals(variant)) {
             // A DUKPT MAC key is derived from the base derivation key, so that is what the key

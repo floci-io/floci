@@ -426,27 +426,18 @@ public final class Ciphers {
 
     /**
      * The encryption or decryption of whole blocks under a key, in CBC mode.
+     *
+     * <p>The cipher pads no data, so the data has to fill whole blocks, and that is the
+     * one thing this method adds to the mode it hands the work to.
      */
-    private static byte[] blocks(BlockCipher cipher, boolean encrypt, byte[] data, byte[] key, byte[] iv) {
+    private static byte[] blocks(BlockCipher cipher, boolean encrypt, byte[] data, byte[] key,
+                                 byte[] iv) {
         int size = cipher.getBlockSize();
         if (data == null || data.length % size != 0) {
             throw new IllegalArgumentException("the data is "
                     + (data == null ? "missing" : data.length + " bytes")
                     + "; it is a whole number of " + size + "-byte blocks");
         }
-        if (key == null) {
-            throw new IllegalArgumentException("key is required");
-        }
-        if (iv == null || iv.length != size) {
-            throw new IllegalArgumentException("the initialization vector is "
-                    + (iv == null ? "missing" : iv.length + " bytes") + "; it is " + size);
-        }
-        BlockCipher cbc = CBCBlockCipher.newInstance(cipher);
-        cbc.init(encrypt, new ParametersWithIV(new KeyParameter(key), iv));
-        byte[] out = new byte[data.length];
-        for (int offset = 0; offset < data.length; offset += size) {
-            cbc.processBlock(data, offset, out, offset);
-        }
-        return out;
+        return crypt(cipher, encrypt, data, key, iv, BlockMode.CBC);
     }
 }

@@ -27,6 +27,9 @@ final class PaymentCryptographyCrypto {
 
     private static final byte[] ZERO_BLOCK = new byte[16];
 
+    /** The message the check value of a keyed hash key is taken over: none at all. */
+    private static final byte[] EMPTY_MESSAGE = new byte[0];
+
     /** The hexadecimal the key material is written in. */
     private static final HexFormat HEX = HexFormat.of();
 
@@ -77,22 +80,30 @@ final class PaymentCryptographyCrypto {
     /**
      * The check value of a key of that algorithm, from the key's bytes.
      *
-     * <p>The value is the leftmost three bytes of the mac of sixteen zero bytes under the
-     * key: the CMAC of them under an AES key, the ANSI X9.24 value under a Triple DES one,
-     * and the keyed hash of them under a keyed hash key, whose kind of check value the
-     * reference's model names as the hash.
+     * <p>The value is the leftmost three bytes of the mac the reference's terminology names
+     * for the key's family: the CMAC of sixteen zero bytes under an AES key, the ANSI X9.24
+     * value of eight zero bytes under a Triple DES one, and the keyed hash of a zero-length
+     * message under a keyed hash key, whose kind of check value the reference's model names
+     * as the hash.
      */
     static byte[] checkValueBytes(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
-        byte[] mac = macOfZeroes(key, algorithm);
+        byte[] mac = macForCheckValue(key, algorithm);
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
         return value;
     }
 
-    /** The mac of sixteen zero bytes under a key, in the algorithm's own mac. */
-    private static byte[] macOfZeroes(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
+    /**
+     * The mac the check value of a key is taken from.
+     *
+     * <p>The reference's terminology names the message each family's check value is taken
+     * over: sixteen zero bytes for the CMAC of an AES key, eight zero bytes for the ANSI
+     * X9.24 value of a Triple DES one, and a zero-length message for the keyed hash of a
+     * keyed hash key.
+     */
+    private static byte[] macForCheckValue(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
         if (algorithm.hmac()) {
-            return Ciphers.hmac(key, ZERO_BLOCK, Ciphers.digestOf(algorithm.hash));
+            return Ciphers.hmac(key, EMPTY_MESSAGE, Ciphers.digestOf(algorithm.hash));
         }
         return algorithm.aes
                 ? cmac(key, ZERO_BLOCK)
