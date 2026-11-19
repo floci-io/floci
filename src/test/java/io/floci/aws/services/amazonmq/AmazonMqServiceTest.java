@@ -240,6 +240,23 @@ class AmazonMqServiceTest {
         assertEquals(List.of(), service.listBrokers());
     }
 
+    /** A broker stored before brokers were keyed by Region, and without an ARN, moves to the default Region. */
+    @Test
+    void aBrokerStoredUnderItsBareIdWithoutAnArnMovesToTheDefaultRegionOnStartup() {
+        Mockito.doReturn("eu-central-1").when(regionResolver).getDefaultRegion();
+        Broker legacy = new Broker("b-legacy", null, "legacy", "RABBITMQ", "3.13", "SINGLE_INSTANCE", "mq.t3.micro");
+        legacy.setAccountId(ACCOUNT);
+        legacy.setBrokerState(BrokerState.RUNNING);
+        brokers.put("b-legacy", legacy);
+
+        service.init();
+
+        assertEquals(List.of(AmazonMqService.brokerKey("eu-central-1", "b-legacy")),
+                List.copyOf(brokers.keys()));
+        inRegion("eu-central-1");
+        assertEquals("legacy", service.describeBroker("b-legacy").getBrokerName());
+    }
+
     /**
      * The readiness poller writes a broker back under the account and the key it is stored under, even
      * for a record that names no account, as one written before brokers carried theirs.
