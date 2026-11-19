@@ -33,6 +33,7 @@ import java.net.InetAddress;
 import java.time.Instant;
 import java.util.*;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -94,6 +95,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     private AccountAwareStorageBackend<Map<String, TargetGroup>> targetGroupStore;
     private AccountAwareStorageBackend<Map<String, Listener>> listenerStore;
     private AccountAwareStorageBackend<Map<String, Rule>> ruleStore;
+    private AccountAwareStorageBackend<Map<String, String>> tagStore;
 
     // indexes
     private final Map<String, List<String>> lbToListeners   = new ConcurrentHashMap<>(); // LB-ARN → listener ARNs
@@ -102,6 +104,22 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     // tags: resource-ARN → {key → value}
     private Map<String, Map<String, String>> tags = new ConcurrentHashMap<>();
+
+    /** DNS selects the resource owner independently of a management request's account. */
+    List<LoadBalancer> findByDnsName(String name) {
+        if (name == null || name.isBlank()) {
+            return List.of();
+        }
+        String normalized = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
+        if (normalized.regionMatches(true, 0, "dualstack.", 0, "dualstack.".length())) {
+            normalized = normalized.substring("dualstack.".length());
+        }
+        String target = normalized;
+        Collection<Map<String, LoadBalancer>> regions = allAccounts(loadBalancers, loadBalancerStore);
+        return regions.stream().flatMap(region -> region.values().stream())
+                .filter(lb -> target.equalsIgnoreCase(lb.getDnsName()))
+                .toList();
+    }
 
     @PostConstruct
     void initializeStorage()
@@ -121,19 +139,15 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         this.targetGroups = new StorageBackedMap<>(targetGroupStore);
         this.listeners = new StorageBackedMap<>(listenerStore);
         this.rules = new StorageBackedMap<>(ruleStore);
-        this.tags = storageBacked("elbv2-tags.json",
+        this.tagStore = storageFactory.create("elbv2", "elbv2-tags.json",
                 new TypeReference<Map<String, Map<String, String>>>() {});
+        this.tags = new StorageBackedMap<>(tagStore);
         normalizeRegionMaps(loadBalancers);
         normalizeRegionMaps(targetGroups);
         normalizeRegionMaps(listeners);
         normalizeRegionMaps(rules);
         normalizeRegionMaps(tags);
         rebuildIndexes();
-    }
-
-    private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference)
-    {
-        return new StorageBackedMap<>(storageFactory.create("elbv2", fileName, typeReference));
     }
 
     private <V> void normalizeRegionMaps(Map<String, Map<String, V>> resources) {
@@ -1254,21 +1268,40 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     // ── Tags ──────────────────────────────────────────────────────────────────
 
-    public void addTags(List<String> resourceArns, Map<String, String> newTags) {
+    /**
+     * Gives each resource a new map holding its tags and {@code newTags}. Tag calls run one at a time, so two of them
+     * never lose one's tags, and a lookup reads one whole set.
+     */
+    public synchronized void addTags(List<String> resourceArns, Map<String, String> newTags) {
         for (String arn : resourceArns) {
-            tags.computeIfAbsent(arn, k -> new LinkedHashMap<>()).putAll(newTags);
-            tags.put(arn, tags.get(arn));
+            Map<String, String> merged = new LinkedHashMap<>(tags.getOrDefault(arn, Map.of()));
+            merged.putAll(newTags);
+            tags.put(arn, merged);
         }
     }
 
-    public void removeTags(List<String> resourceArns, List<String> tagKeys) {
+    /** Gives each resource holding tags a new map without {@code tagKeys}, one tag call at a time. */
+    public synchronized void removeTags(List<String> resourceArns, List<String> tagKeys) {
         for (String arn : resourceArns) {
             Map<String, String> resourceTags = tags.get(arn);
             if (resourceTags != null) {
-                tagKeys.forEach(resourceTags::remove);
-                tags.put(arn, resourceTags);
+                Map<String, String> remaining = new LinkedHashMap<>(resourceTags);
+                tagKeys.forEach(remaining::remove);
+                tags.put(arn, remaining);
             }
         }
+    }
+
+    /**
+     * The tags of the load balancer, target group, listener or rule whose ARN is {@code arn}, in {@code account}, read
+     * in place under the ARN they are kept under, for IAM's lookup of stored tags. A resource's tags go with it when it
+     * is deleted, so a deleted resource's ARN reads none.
+     */
+    public Map<String, String> tagsInAccount(String account, String arn) {
+        if (tagStore == null) {
+            return tags.getOrDefault(arn, Map.of());
+        }
+        return AccountAwareStorageBackend.readInAccount(tagStore, account, arn).orElse(Map.of());
     }
 
     public Map<String, Map<String, String>> describeTags(List<String> resourceArns) {

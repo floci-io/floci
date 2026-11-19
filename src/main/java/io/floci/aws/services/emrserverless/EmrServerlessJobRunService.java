@@ -683,6 +683,11 @@ public class EmrServerlessJobRunService implements Resettable {
                     logs.s3Folder(), cloudWatchLogs(logs), driverEnvironment(sparkProperties),
                     archives(sparkProperties), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
                     executors(app, executorContainers));
+            // Its event logs, kept for its Spark History Server once it ends, as EMR Serverless keeps them in its
+            // managed storage, where the run writes them.
+            if (servesDriverUis() && logs.inManagedStorage() && writesEventLogs(sparkProperties)) {
+                job = job.keepingEventLogs();
+            }
         }
         // With honour-architectures on, its containers run for the application's architecture, "x86_64 is the default
         // option" on EMR Serverless; with it off, or where the application names none, for the Docker host's own.
@@ -704,6 +709,46 @@ public class EmrServerlessJobRunService implements Resettable {
      */
     boolean servesDriverUis() {
         return sparkRunner != null && sparkRunner.servesDriverUis(dockerNetwork);
+    }
+
+    /**
+     * Whether a driver with these Spark properties writes its event logs where the release's image has them, which a
+     * kept history holds: unless it turns them off ({@code spark.eventLog.enabled}) or sends them elsewhere
+     * ({@code spark.eventLog.dir}).
+     */
+    static boolean writesEventLogs(Map<String, String> properties) {
+        String enabled = properties.get("spark.eventLog.enabled");
+        String dir = properties.get("spark.eventLog.dir");
+        if (enabled != null && !Boolean.parseBoolean(enabled.trim())) {
+            return false;
+        }
+        if (dir == null) {
+            return true;
+        }
+        String path = dir.trim().replaceFirst("^file:(//)?", "");
+        return EmrServerlessHistories.EVENT_LOGS.equals(path.endsWith("/") ? path.substring(0, path.length() - 1)
+                : path);
+    }
+
+    /** The image a Spark History Server of a release's kept histories runs: that release's, as its runs' drivers. */
+    String historyImage(String releaseLabel) {
+        return EmrServerlessSparkRunner.image(imageTemplate, releaseLabel);
+    }
+
+    /** The Docker network its runs' containers are on, null for the global default. */
+    String dockerNetwork() {
+        return dockerNetwork;
+    }
+
+    /**
+     * The runs, of every account, whose kept history stays ({@link EmrServerlessHistories}): those that have not ended,
+     * and those that ended after {@code cutoff}.
+     */
+    synchronized Set<String> historiesKept(Instant cutoff) {
+        List<JobRun> runs = store.scanAllAccountEntries(key -> true).stream()
+                .map(entry -> entry.value().getJobRun()).toList();
+        return EmrServerlessHistories.stillKept(runs, JobRun::getJobRunId, EmrServerlessJobRunService::isTerminal,
+                JobRun::getEndedAt, cutoff);
     }
 
     /**
@@ -729,8 +774,9 @@ public class EmrServerlessJobRunService implements Resettable {
                 sparkConnectServer(session.getReleaseLabel()), null, limit, null, null,
                 driverEnvironment(sparkDefaults), archives(sparkDefaults), null, Map.of(), Map.of(), Map.of(),
                 Map.of(), Map.of(), executors(app, executorContainers));
-        return job.withPlatform(honourArchitectures ? DockerPlatforms.forArchitecture(app.getArchitecture()) : null)
-                .listeningOn(port);
+        SparkJobRunner.Job listening = job.withPlatform(
+                honourArchitectures ? DockerPlatforms.forArchitecture(app.getArchitecture()) : null).listeningOn(port);
+        return servesDriverUis() && writesEventLogs(sparkDefaults) ? listening.keepingEventLogs() : listening;
     }
 
     /**

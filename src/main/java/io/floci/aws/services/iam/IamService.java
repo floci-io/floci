@@ -203,6 +203,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
+    /** An AccessKeyId as IAM documents it: 16 to 128 characters matching {@code [\w]+}. */
+    private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile("\\w{16,128}");
     private static final String ACCOUNT_ALIAS_KEY = "account-alias";
     /** As AWS documents it: no leading or trailing dash, and no two dashes in a row. */
     private static final Pattern ACCOUNT_ALIAS_PATTERN =
@@ -485,6 +487,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Map<String, String> partnerPermissionBoundaries;
     private final Clock clock;
     private final boolean seedDeployerPrincipal;
+    private final String seededDeployerAccessKeyId;
     private final String seededAccountAlias;
     /** Guards case-insensitive IAM name uniqueness checks and their corresponding writes. */
     private final Object resourceNameLock = new Object();
@@ -581,6 +584,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-outbound-federation.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
+            config.services().iam().seedDeployerAccessKeyId(),
             config.services().iam().accountAlias().orElse(null),
             PartnerPermissionBoundaries.load(config.services().iam().partnerPermissionBoundariesPath())
                     .documentsByArn(),
@@ -712,7 +716,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
                 credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
                 serviceCredentials, accountProperties, stsPreferences, outboundFederation,
-                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), Clock.systemUTC());
+                regionResolver, seedDeployerPrincipal, DEFAULT_DEPLOYER_ACCESS_KEY_ID, seededAccountAlias, Map.of(),
+                Clock.systemUTC());
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -745,7 +750,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
                 credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
                 serviceCredentials, accountProperties, stsPreferences, outboundFederation,
-                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), clock);
+                regionResolver, seedDeployerPrincipal, DEFAULT_DEPLOYER_ACCESS_KEY_ID, seededAccountAlias, Map.of(),
+                clock);
     }
 
     /**
@@ -776,6 +782,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, OutboundWebIdentityFederation> outboundFederation,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
+               String seededDeployerAccessKeyId,
                String seededAccountAlias,
                Map<String, String> partnerPermissionBoundaries,
                Clock clock) {
@@ -803,6 +810,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.outboundFederation = outboundFederation;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
+        this.seededDeployerAccessKeyId = seededDeployerAccessKeyId;
         this.seededAccountAlias = seededAccountAlias;
         this.partnerPermissionBoundaries = Map.copyOf(partnerPermissionBoundaries);
         this.clock = clock;
@@ -885,6 +893,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void seedDefaultDeployerPrincipal() {
+        // The legacy default stays accepted so setups signing with floci / floci keep working.
+        // Any other ID IAM would not issue is refused at startup rather than seeded as a key that
+        // DeleteAccessKey and UpdateAccessKey could never take.
+        if (!DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(seededDeployerAccessKeyId)
+                && (seededDeployerAccessKeyId == null
+                        || !ACCESS_KEY_ID_PATTERN.matcher(seededDeployerAccessKeyId).matches())) {
+            throw new IllegalArgumentException("floci.services.iam.seed-deployer-access-key-id must be "
+                    + DEFAULT_DEPLOYER_ACCESS_KEY_ID + " or 16 to 128 characters matching [\\w]+, as IAM "
+                    + "requires of an access key ID: " + seededDeployerAccessKeyId);
+        }
         String adminPolicyArn = AwsManagedPolicies.arnPrefix(regionResolver.getDefaultPartition())
                 + "/AdministratorAccess";
         IamUser user = users.get(DEFAULT_DEPLOYER_USER)
@@ -900,12 +918,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             user.getAttachedPolicyArns().add(adminPolicyArn);
             users.put(DEFAULT_DEPLOYER_USER, user);
         }
-        if (accessKeys.get(DEFAULT_DEPLOYER_ACCESS_KEY_ID).isEmpty()) {
-            accessKeys.put(DEFAULT_DEPLOYER_ACCESS_KEY_ID, new AccessKey(
-                    DEFAULT_DEPLOYER_ACCESS_KEY_ID,
-                    DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
-                    DEFAULT_DEPLOYER_USER));
-            LOG.infov("Seeded default IAM deployer access key: {0}", DEFAULT_DEPLOYER_ACCESS_KEY_ID);
+        synchronized (accessKeyLock) {
+            // Under persistent storage a key seeded under an earlier ID outlives a change of ID. It
+            // signs with the same public secret, and while it exists DeleteUser refuses the user, so
+            // it goes. A key created for the deployer has a secret of its own and stays.
+            for (AccessKey earlier : userAccessKeys(DEFAULT_DEPLOYER_USER)) {
+                if (!earlier.getAccessKeyId().equals(seededDeployerAccessKeyId)
+                        && DEFAULT_DEPLOYER_SECRET_ACCESS_KEY.equals(earlier.getSecretAccessKey())) {
+                    accessKeys.delete(earlier.getAccessKeyId());
+                    LOG.infov("Deleted IAM deployer access key seeded under an earlier ID: {0}",
+                            earlier.getAccessKeyId());
+                }
+            }
+            if (accessKeys.get(seededDeployerAccessKeyId).isEmpty()) {
+                accessKeys.put(seededDeployerAccessKeyId, new AccessKey(
+                        seededDeployerAccessKeyId,
+                        DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
+                        DEFAULT_DEPLOYER_USER));
+                LOG.infov("Seeded default IAM deployer access key: {0}", seededDeployerAccessKeyId);
+            }
         }
     }
 
@@ -1525,11 +1556,40 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * TagRole's reference says the role "can be a regular role or a service-linked role".
      * Within the IAM API, {@link #deleteServiceLinkedRole} is the only way to remove such a role.
      */
+    /**
+     * The refusal AWS was recorded answering for the one change this package guards on
+     * {@code UpdateRole}: {@code <roleName> is an AWS service linked role, max session duration
+     * cannot be changed.}, 400 {@code UnmodifiableEntity}, recorded 2026-10-29 with the role's own
+     * name substituted and the rest fixed. AWS words the clause after the change it refuses rather
+     * than after the service the role is linked to, which is what tells a caller what to stop
+     * asking for.
+     *
+     * <p>The other ten actions this package guards carry no recording of their own and keep
+     * {@link #requireNotServiceLinked}'s sentence, which is this emulator's own: the clause AWS
+     * would write for each of them is not a thing that can be inferred from this one, and some of
+     * those actions may not be refused by AWS at all. {@code docs/services/iam.md} says so rather
+     * than leaving ten invented clauses behind. The same guard also stands on
+     * {@link #replaceRolePolicies}, which no IAM action reaches, so it is not one of the ten.
+     */
+    private static void requireMaxSessionDurationChangeable(IamRole role, String roleName) {
+        refuseIfServiceLinked(role, () -> roleName
+                + " is an AWS service linked role, max session duration cannot be changed.");
+    }
+
     private static void requireNotServiceLinked(IamRole role, String roleName) {
+        refuseIfServiceLinked(role, () -> "Role " + roleName + " is a service-linked role for "
+                + linkedServicePrincipal(role) + "; request the change through that service.");
+    }
+
+    /**
+     * The one place the mark is tested, each caller naming the sentence its own site answers, so a
+     * change to what counts as service-linked or to how it is refused is made once. The sentence is
+     * built only once the mark is there, since the linked service is read off a path only such a
+     * role carries.
+     */
+    private static void refuseIfServiceLinked(IamRole role, Supplier<String> refusal) {
         if (role.isServiceLinkedRole()) {
-            throw new AwsException("UnmodifiableEntity",
-                    "Role " + roleName + " is a service-linked role for " + linkedServicePrincipal(role)
-                            + "; request the change through that service.", 400);
+            throw new AwsException("UnmodifiableEntity", refusal.get(), 400);
         }
     }
 
@@ -1691,7 +1751,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             if (maxSessionDuration > 0) {
-                requireNotServiceLinked(role, roleName);
+                requireMaxSessionDurationChangeable(role, roleName);
             }
             if (description != null) {
                 role.setDescription(description);
@@ -5055,9 +5115,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return currentSession(accessKeyId).map(SessionCredential::getExpiration);
     }
 
-    /** Whether an access key ID identifies Floci's documented public deployer credential. */
-    public boolean isSeededDeployerAccessKey(String accessKeyId) {
-        return DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(accessKeyId);
+    /**
+     * Whether a secret access key is the seeded deployer's, which Floci's documentation publishes.
+     * The secret is what makes that credential public, whatever ID the key was seeded under, and
+     * only seeding creates a key with it: CreateAccessKey generates a secret of its own.
+     */
+    public boolean isSeededDeployerSecret(String secretAccessKey) {
+        return DEFAULT_DEPLOYER_SECRET_ACCESS_KEY.equals(secretAccessKey);
     }
 
     /**
@@ -5500,7 +5564,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return removed;
     }
 
-    /** Registers an ECS task-role session, outside request scope. */
+    /**
+     * Registers a session served at the container credentials endpoint, an ECS task's role or a
+     * CodeBuild build's service role, outside request scope.
+     */
     public void registerEcsTaskRoleSession(SessionCredential session) {
         if (session.getOriginAccountId() == null || session.getOriginAccountId().isBlank()
                 || session.getEcsTaskArn() == null || session.getEcsTaskArn().isBlank()) {
@@ -5514,7 +5581,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
-    /** No ECS task survives a Floci restart; discard credentials from the previous process. */
+    /**
+     * No ECS task or CodeBuild build survives a Floci restart; discard credentials from the
+     * previous process.
+     */
     public int sweepOrphanedEcsTaskRoleSessions() {
         List<SessionCredential> stored = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
                 ? aware.scanAllAccounts() : sessions.scan(key -> true);

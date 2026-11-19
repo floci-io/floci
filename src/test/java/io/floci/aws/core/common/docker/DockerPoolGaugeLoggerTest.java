@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class DockerPoolGaugeLoggerTest {
 
     private static final FlociDockerHttpClient.PoolGauges IDLE =
-            new FlociDockerHttpClient.PoolGauges(0, 3, 0, 1024, Map.of());
+            new FlociDockerHttpClient.PoolGauges(0, 3, 0, 1024, Map.of(), Map.of());
 
     // Catches: an idle emulator writing a pool line every interval, or paying for a thread scan on a
     // reading that writes nothing.
@@ -26,11 +26,13 @@ class DockerPoolGaugeLoggerTest {
     void aBusyPoolReportsEveryPoolInNameOrderWithItsStreamsAndTheStreamThreads() {
         Map<String, FlociDockerHttpClient.PoolGauges> readings = new TreeMap<>();
         readings.put("streaming", new FlociDockerHttpClient.PoolGauges(40, 0, 0, 2048,
-                new TreeMap<>(Map.of("wait", 20, "logs", 20))));
+                new TreeMap<>(Map.of("wait", 20, "logs", 20)),
+                new TreeMap<>(Map.of("lambda", 36, "unattributed", 4))));
         readings.put("control-plane", IDLE);
 
         assertEquals("control-plane leased=0 available=3 pending=0 max=1024; "
-                        + "streaming leased=40 available=0 pending=0 max=2048 streams[logs=20 wait=20]; "
+                        + "streaming leased=40 available=0 pending=0 max=2048 streams[logs=20 wait=20] "
+                        + "services[lambda=36 unattributed=4]; "
                         + "stream threads=40",
                 DockerPoolGaugeLogger.line(readings, () -> 40));
     }
@@ -38,7 +40,8 @@ class DockerPoolGaugeLoggerTest {
     // Catches: callers waiting on a full pool reading as idle because no connection is leased yet.
     @Test
     void aCallerWaitingForAConnectionIsNotIdle() {
-        FlociDockerHttpClient.PoolGauges waiting = new FlociDockerHttpClient.PoolGauges(0, 0, 2, 1, Map.of());
+        FlociDockerHttpClient.PoolGauges waiting =
+                new FlociDockerHttpClient.PoolGauges(0, 0, 2, 1, Map.of(), Map.of());
 
         assertEquals("control-plane leased=0 available=0 pending=2 max=1; stream threads=0",
                 DockerPoolGaugeLogger.line(Map.of("control-plane", waiting), () -> 0));

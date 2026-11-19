@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
@@ -10,8 +11,6 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.ServerlessCache;
@@ -82,9 +81,7 @@ class ElastiCacheServerlessCfnIntegrationTest {
     }
 
     private ElastiCacheClient client() {
-        return ElastiCacheClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
+        return AwsTestClients.create(ElastiCacheClient.builder(), "000000000000", Region.US_EAST_1, endpoint);
     }
 
     @Test

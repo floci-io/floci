@@ -6,6 +6,7 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
@@ -125,6 +126,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final RuntimeApiServerFactory runtimeApiServerFactory;
     private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
     private final EcrRegistryManager ecrRegistryManager;
     private final LambdaLayerService layerService;
     private final LaunchedContainerAwsEnv awsEnv;
@@ -143,6 +145,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                              RuntimeApiServerFactory runtimeApiServerFactory,
                              DockerHostResolver dockerHostResolver,
                              EmulatorConfig config,
+                             RegionResolver regionResolver,
                              EcrRegistryManager ecrRegistryManager,
                              LambdaLayerService layerService,
                              LaunchedContainerAwsEnv awsEnv,
@@ -156,6 +159,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         this.runtimeApiServerFactory = runtimeApiServerFactory;
         this.dockerHostResolver = dockerHostResolver;
         this.config = config;
+        this.regionResolver = regionResolver;
         this.ecrRegistryManager = ecrRegistryManager;
         this.layerService = layerService;
         this.awsEnv = awsEnv;
@@ -262,7 +266,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         String cwLogGroup  = LambdaLogDestinations.logGroup(fn);
         String cwLogStream = LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/"
                 + LambdaLogDestinations.logStreamSuffix(fn, shortId);
-        String lambdaRegion = extractRegionFromArn(fn.getFunctionArn(), config.defaultRegion());
+        String lambdaRegion = regionResolver.regionOf(fn.getFunctionArn());
         String lambdaAccountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
 
         List<String> env = LambdaRuntimeEnv.of(fn, runtimeApiEndpoint, cwLogGroup, cwLogStream);
@@ -1589,10 +1593,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     EXTENSIONS_DIR, functionName, e.getMessage());
             return List.of();
         }
-    }
-
-    private static String extractRegionFromArn(String arn, String defaultRegion) {
-        return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 
     /**

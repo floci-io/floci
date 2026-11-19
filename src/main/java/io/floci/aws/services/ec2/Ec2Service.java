@@ -16,6 +16,7 @@ import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
@@ -65,6 +66,7 @@ import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.NetworkInterfaceAssociation;
 import io.floci.aws.services.ec2.model.NetworkInterfaceAttachment;
 import io.floci.aws.services.ec2.model.NetworkInterfaceListResult;
+import io.floci.aws.services.ec2.model.NetworkInterfacePermission;
 import io.floci.aws.services.ec2.model.NetworkInterfacePrivateIpAddress;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.model.PrefixList;
@@ -345,6 +347,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final Map<String, Set<String>> capacityGroupInstanceIds = new HashMap<>();
     // CDI Instance clashes with the EC2 Instance model imported above.
     jakarta.enterprise.inject.Instance<ResourceGroupsService> resourceGroupsServices;
+    // Null in the test-shaped constructors, which fall back to the region's own partition.
+    RegionResolver regionResolver;
     private final StorageBackend<String, Host> hosts;
     private final StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways;
     // Serialises a launch onto a host against ModifyHosts/ReleaseHosts, so a host cannot be
@@ -616,7 +620,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                       Ec2EbsEncryptionService ebsEncryptionService,
                       jakarta.enterprise.inject.Instance<VpcDependencyProvider> vpcDependencyProviders,
                       jakarta.enterprise.inject.Instance<ResourceGroupsService> resourceGroupsServices,
-                      jakarta.enterprise.inject.Instance<Ec2LaunchTemplateSelections> launchTemplateSelections) {
+                      jakarta.enterprise.inject.Instance<Ec2LaunchTemplateSelections> launchTemplateSelections,
+                      RegionResolver regionResolver) {
         this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog,
                 instanceTypeCatalog, storageFactory, requestContextInstance, iamService, volumeBlockDeviceManager);
         this.vpcNetworkManager = vpcNetworkManager;
@@ -627,6 +632,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         this.vpcDependencyProviders = vpcDependencyProviders;
         this.resourceGroupsServices = resourceGroupsServices;
         this.launchTemplateSelections = launchTemplateSelections;
+        this.regionResolver = regionResolver;
     }
 
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -2039,9 +2045,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         networkAcls.delete(key(region, networkAclId));
     }
 
-    // AWS-managed prefix lists for the gateway-endpoint services (S3, DynamoDB). These are
-    // not user-created, so they're returned as static managed data per region. Querying any
-    // other service name (e.g. an interface endpoint) correctly yields no match.
+    // AWS-managed prefix lists for the gateway-endpoint services (S3, DynamoDB) and the CloudFront
+    // origin-facing servers. These are not user-created, so they're returned as static managed
+    // data per region. Querying any other service name (e.g. an interface endpoint) correctly
+    // yields no match.
     //
     // The legacy DescribePrefixLists surface projects the same objects that
     // DescribeManagedPrefixLists serves, so the two APIs cannot report different CIDRs for the
@@ -2076,6 +2083,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private static final List<String> RESERVED_PREFIX_LIST_NAME_PREFIXES =
             List.of("com.amazonaws.", "com.amazon.", "com.aws.");
 
+    private static final String CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_ID = "pl-3b927c52";
+    private static final String CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_NAME = "com.amazonaws.global.cloudfront.origin-facing";
+    /** The {@code CLOUDFRONT_ORIGIN_FACING} IPv4 ranges of ip-ranges.json (syncToken 1794843425). */
+    private static final List<String> CLOUDFRONT_ORIGIN_FACING_CIDRS = List.of(
+            "3.29.57.0/26", "3.172.0.0/18", "3.172.64.0/18", "13.124.199.0/24", "15.158.0.0/16",
+            "18.68.0.0/16", "24.110.128.0/17", "51.74.20.0/24", "51.74.21.0/24", "51.74.22.0/24",
+            "52.46.0.0/18", "52.82.128.0/23", "52.82.134.0/23", "54.182.128.0/20", "54.182.144.0/21",
+            "54.182.154.0/23", "54.182.156.0/22", "54.182.160.0/21", "54.182.172.0/22", "54.182.176.0/21",
+            "54.182.184.0/22", "54.182.188.0/23", "54.182.224.0/21", "54.182.240.0/21", "54.182.248.0/22",
+            "54.239.134.0/23", "54.239.170.0/23", "54.239.204.0/22", "54.239.208.0/21", "64.252.64.0/18",
+            "64.252.128.0/18", "70.132.0.0/18", "130.176.0.0/18", "130.176.64.0/21", "130.176.72.0/22",
+            "130.176.76.0/24", "130.176.78.0/23", "130.176.80.0/22", "130.176.86.0/23", "130.176.88.0/21",
+            "130.176.96.0/19", "130.176.128.0/21", "130.176.136.0/23", "130.176.140.0/22", "130.176.144.0/20",
+            "130.176.160.0/19", "130.176.192.0/19", "204.246.166.0/24", "205.251.218.0/24");
+
     /** AWS applies the reserved-name rule to a rename as well as a create. */
     private void requireUnreservedPrefixListName(String prefixListName) {
         for (String reserved : RESERVED_PREFIX_LIST_NAME_PREFIXES) {
@@ -2087,9 +2109,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The managed lists belong to the S3 and DynamoDB gateway endpoints, which are named
+     * The S3 and DynamoDB lists belong to the gateway endpoints, which are named
      * {@code com.amazonaws.<region>.<service>} in every partition (the CDK's
      * {@code GatewayVpcEndpointAwsService}); the reversed-suffix names apply to interface endpoints only.
+     * The CloudFront origin-facing list exists in the commercial partition only.
      */
     private List<ManagedPrefixList> awsManagedPrefixLists(String region) {
         List<ManagedPrefixList> lists = new ArrayList<>(defaultAwsManagedPrefixLists(region));
@@ -2113,6 +2136,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (catalog == null) {
                 throw new IllegalArgumentException("Expected a region-to-prefix-lists object");
             }
+            Map<String, List<PrefixList>> loaded = new HashMap<>();
             for (Map.Entry<String, List<PrefixList>> region : catalog.entrySet()) {
                 if (region.getKey().isBlank() || region.getValue() == null) {
                     throw new IllegalArgumentException("Expected a nonblank region and a list");
@@ -2123,7 +2147,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     ids.add(list.getPrefixListId());
                     names.add(list.getPrefixListName());
                 }
+                // Reserved in every partition: this runs before the deployment partition is injected.
+                ids.add(CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_ID);
+                names.add(CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_NAME);
+                List<PrefixList> retained = new ArrayList<>();
                 for (PrefixList list : region.getValue()) {
+                    if (isLegacyCloudFrontCatalogEntry(list)) {
+                        LOG.infov("Ignoring catalog entry {0} in {1}: the CloudFront origin-facing list is built in",
+                                CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_ID, region.getKey());
+                        continue;
+                    }
                     if (list == null || list.getPrefixListId() == null
                             || !list.getPrefixListId().matches("pl-(?:[0-9a-f]{8}|[0-9a-f]{17})")
                             || list.getPrefixListName() == null || list.getPrefixListName().isBlank()
@@ -2143,20 +2176,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         }
                     }
                     list.setCidrs(List.copyOf(canonicalCidrs));
+                    retained.add(list);
                 }
+                loaded.put(region.getKey(), List.copyOf(retained));
             }
-            return Map.copyOf(catalog);
+            return Map.copyOf(loaded);
         } catch (IOException | IllegalArgumentException error) {
             throw new IllegalStateException("Invalid EC2 managed prefix list catalog: " + path.get(), error);
         }
     }
 
+    /** Catalogs written before the list was built in declared it themselves; the built-in now serves it. */
+    private static boolean isLegacyCloudFrontCatalogEntry(PrefixList list) {
+        return list != null && CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_ID.equals(list.getPrefixListId())
+                && CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_NAME.equals(list.getPrefixListName());
+    }
+
     private List<ManagedPrefixList> defaultAwsManagedPrefixLists(String region) {
-        return List.of(
+        List<ManagedPrefixList> lists = new ArrayList<>(List.of(
                 awsManagedPrefixList(region, "pl-63a5400a", "com.amazonaws." + region + ".s3",
                         List.of("52.216.0.0/15", "54.231.0.0/16")),
                 awsManagedPrefixList(region, "pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
-                        List.of("3.218.182.0/24", "52.94.0.0/22")));
+                        List.of("3.218.182.0/24", "52.94.0.0/22"))));
+        if (AwsRegions.DEFAULT_PARTITION.equals(partitionForRegion(region))) {
+            lists.add(awsManagedPrefixList(region, CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_ID,
+                    CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST_NAME, CLOUDFRONT_ORIGIN_FACING_CIDRS));
+        }
+        return lists;
+    }
+
+    /** The partition a request in {@code region} is scoped to, an accepted unknown region taking the deployment's. */
+    private String partitionForRegion(String region) {
+        return regionResolver != null ? regionResolver.partitionForRegion(region) : AwsRegions.partitionFor(region);
     }
 
     private ManagedPrefixList awsManagedPrefixList(String region, String id, String name, List<String> cidrs) {
@@ -2165,7 +2216,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         list.setPrefixListName(name);
         // AWS-managed lists are owned by AWS itself, not by the calling account.
         list.setOwnerId("AWS");
-        list.setPrefixListArn(AwsArnUtils.Arn.of("ec2", region, "aws", "prefix-list/" + id).toString());
+        list.setPrefixListArn(new AwsArnUtils.Arn(partitionForRegion(region), "ec2", region, "aws",
+                "prefix-list/" + id).toString());
         list.setAddressFamily("IPv4");
         list.setState("create-complete");
         list.setMaxEntries(cidrs.size());
@@ -17298,6 +17350,172 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
         detachFromInstance(region, detached.getInstanceId(), ni.getNetworkInterfaceId());
         return detached;
+    }
+
+    // ─── Network interface permissions ───────────────────────────────────────────────
+
+    /** The permission that lets another account attach an interface to an instance of its own. */
+    public static final String INSTANCE_ATTACH = "INSTANCE-ATTACH";
+    private static final String EIP_ASSOCIATE = "EIP-ASSOCIATE";
+    /** {@code NetworkInterfacePermissionState.State} once a permission applies. */
+    private static final String PERMISSION_GRANTED = "granted";
+    private static final String NETWORK_INTERFACE_PERMISSION_ID_PREFIX = "eni-perm-";
+    private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
+    private static final Set<String> NETWORK_INTERFACE_PERMISSION_FILTERS = Set.of(
+            "network-interface-permission.network-interface-permission-id",
+            "network-interface-permission.network-interface-id",
+            "network-interface-permission.aws-account-id",
+            "network-interface-permission.aws-service",
+            "network-interface-permission.permission");
+
+    /** One page of DescribeNetworkInterfacePermissions. */
+    public record NetworkInterfacePermissionPage(List<NetworkInterfacePermission> permissions, String nextToken) {}
+
+    /**
+     * CreateNetworkInterfacePermission: the interface's owner records an {@code INSTANCE-ATTACH}
+     * grant for another account. Attachment execution does not yet consume these grants.
+     * Only the owner can grant: the interface is looked up in the caller's account, and
+     * one another account owns is {@code InvalidNetworkInterfaceID.NotFound}, as it is to every
+     * other action of that account.
+     *
+     * <p>A second grant of the same permission to the same account answers the grant already in
+     * place rather than minting another: AWS documents no duplicate error for this action, and the
+     * permission either holds or it does not. {@code EIP-ASSOCIATE} is refused as unsupported, since
+     * nothing here would honour it, and so is {@code AwsService}, which AWS documents as "Currently
+     * not supported".
+     */
+    public NetworkInterfacePermission createNetworkInterfacePermission(String region, String networkInterfaceId,
+                                                                      String awsAccountId, String awsService,
+                                                                      String permission) {
+        if (!isSet(networkInterfaceId)) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter NetworkInterfaceId", 400);
+        }
+        if (!isSet(permission)) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter Permission", 400);
+        }
+        requireParameterValue("Permission", permission, INSTANCE_ATTACH, EIP_ASSOCIATE);
+        if (EIP_ASSOCIATE.equals(permission)) {
+            throw new AwsException("UnsupportedOperation",
+                    "The EIP-ASSOCIATE network interface permission is not supported.", 400);
+        }
+        if (isSet(awsService)) {
+            throw new AwsException("UnsupportedOperation",
+                    "Network interface permissions for an AwsService are not supported.", 400);
+        }
+        if (!isSet(awsAccountId)) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter AwsAccountId", 400);
+        }
+        requireAccountId("AwsAccountId", awsAccountId);
+        ensureDefaultResources(region);
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (privateIpAllocationLock) {
+                NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+                return grantInstanceAttach(callerAccountId(), region, ni, awsAccountId);
+            }
+        }
+    }
+
+    /**
+     * DescribeNetworkInterfacePermissions: the permissions the caller has granted over the
+     * interfaces it owns in {@code region}, by id and by the five documented filters. MaxResults
+     * runs 5 to 255 and defaults to 50, as AWS documents.
+     */
+    public NetworkInterfacePermissionPage describeNetworkInterfacePermissions(
+            String region, List<String> permissionIds, List<Map.Entry<String, List<String>>> filters,
+            Integer maxResults, String nextToken) {
+        requireSupportedFilters(filterNames(filters), NETWORK_INTERFACE_PERMISSION_FILTERS);
+        if (maxResults != null && (maxResults < 5 || maxResults > 255)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 255.", 400);
+        }
+        for (String id : permissionIds) {
+            if (!id.startsWith(NETWORK_INTERFACE_PERMISSION_ID_PREFIX)) {
+                throw new AwsException("InvalidNetworkInterfacePermissionID.Malformed",
+                        "Invalid id: \"" + id + "\" (expecting \"" + NETWORK_INTERFACE_PERMISSION_ID_PREFIX + "...\")",
+                        400);
+            }
+        }
+        ensureDefaultResources(region);
+        List<NetworkInterfacePermission> held = new ArrayList<>();
+        synchronized (attachmentTopologyLock(region)) {
+            for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
+                held.addAll(ni.getPermissions());
+            }
+        }
+        for (String id : permissionIds) {
+            if (held.stream().noneMatch(perm -> id.equals(perm.getNetworkInterfacePermissionId()))) {
+                throw new AwsException("InvalidNetworkInterfacePermissionID.NotFound",
+                        "The NetworkInterfacePermission ID '" + id + "' does not exist", 400);
+            }
+        }
+        List<NetworkInterfacePermission> matching = held.stream()
+                .filter(perm -> permissionIds.isEmpty() || permissionIds.contains(perm.getNetworkInterfacePermissionId()))
+                .filter(perm -> matchesPermissionFilters(perm, filters))
+                .toList();
+        int offset = decodeToken(nextToken);
+        int pageSize = maxResults != null ? maxResults : 50;
+        int end = Math.min(offset + pageSize, matching.size());
+        List<NetworkInterfacePermission> page = offset < matching.size()
+                ? new ArrayList<>(matching.subList(offset, end)) : new ArrayList<>();
+        return new NetworkInterfacePermissionPage(page, end < matching.size() ? encodeToken(end) : null);
+    }
+
+    private boolean matchesPermissionFilters(NetworkInterfacePermission perm,
+                                             List<Map.Entry<String, List<String>>> filters) {
+        for (Map.Entry<String, List<String>> filter : filters == null ? List.<Map.Entry<String, List<String>>>of() : filters) {
+            List<String> values = filter.getValue();
+            boolean matches = switch (filter.getKey()) {
+                case "network-interface-permission.network-interface-permission-id" ->
+                        matchesValue(values, perm.getNetworkInterfacePermissionId());
+                case "network-interface-permission.network-interface-id" ->
+                        matchesValue(values, perm.getNetworkInterfaceId());
+                case "network-interface-permission.aws-account-id" -> matchesValue(values, perm.getAwsAccountId());
+                // No permission here is granted to a service, so none carries one to match.
+                case "network-interface-permission.aws-service" -> false;
+                case "network-interface-permission.permission" -> matchesValue(values, perm.getPermission());
+                default -> true;
+            };
+            if (!matches) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The grant of {@code INSTANCE-ATTACH} to {@code grantee}, minted unless one is already in place. */
+    private NetworkInterfacePermission grantInstanceAttach(String ownerAccountId, String region, NetworkInterface ni,
+                                                           String grantee) {
+        Optional<NetworkInterfacePermission> existing = ni.getPermissions().stream()
+                .filter(perm -> grantee.equals(perm.getAwsAccountId()) && INSTANCE_ATTACH.equals(perm.getPermission()))
+                .findFirst();
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        NetworkInterfacePermission granted = new NetworkInterfacePermission(
+                NETWORK_INTERFACE_PERMISSION_ID_PREFIX + randomHex(17), ni.getNetworkInterfaceId(), grantee,
+                INSTANCE_ATTACH, PERMISSION_GRANTED);
+        ni.getPermissions().add(granted);
+        putNetworkInterface(ownerAccountId, region, ni);
+        return granted;
+    }
+
+    private static void requireAccountId(String parameter, String value) {
+        if (!ACCOUNT_ID.matcher(value).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + value + ") for parameter " + parameter + " is invalid. "
+                            + "Expecting a 12-digit AWS account ID.", 400);
+        }
+    }
+
+    /** Stores an interface in its owner's partition, whichever account is calling. */
+    private void putNetworkInterface(String accountId, String region, NetworkInterface ni) {
+        if (networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware) {
+            aware.putForAccount(accountId, key(region, ni.getNetworkInterfaceId()), ni);
+        } else {
+            networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
     }
 
     /** Removes an interface from an instance's own list, the mirror of attaching it. */

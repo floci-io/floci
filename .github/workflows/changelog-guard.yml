@@ -17,6 +17,7 @@ jobs:
   guard:
     name: CHANGELOG.md is generated
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: ${{ !contains(github.event.pull_request.labels.*.name, 'changelog-edit') }}
     steps:
       - name: Reject hand edits

@@ -38,7 +38,7 @@ class ContainerLifecycleManagerTeardownTest {
     void strictRemovalRetainsLogStreamForRetryWithOptionalAnonymousVolumeCleanup(boolean removeAnonymousVolumes)
             throws Exception {
         DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         when(docker.stopContainerCmd("retry")).thenReturn(stop);
         when(stop.withTimeout(5)).thenReturn(stop);
@@ -62,11 +62,32 @@ class ContainerLifecycleManagerTeardownTest {
         verify(logStream).close();
     }
 
+    @Test
+    void confirmedRemovalAnswersWhetherTheContainerIsGoneAndKeepsTheLogStreamUntilItIs() throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        when(docker.stopContainerCmd("held")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        when(docker.removeContainerCmd("held")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+        doThrow(new IllegalStateException("daemon refused removal")).doNothing().when(remove).exec();
+        Closeable logStream = mock(Closeable.class);
+
+        assertFalse(manager.stopAndConfirmRemoved("held", logStream, 5, true));
+        verify(logStream, never()).close();
+        verify(remove).withRemoveVolumes(true);
+
+        assertTrue(manager.stopAndConfirmRemoved("held", logStream, 5, true));
+        verify(logStream).close();
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"strict", "strict-volumes", "best-effort", "stop-only"})
     void laterOwnedStopsReachDockerWhileEarlierRemovalsAreBlocked(String mode) throws Exception {
         DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         CountDownLatch ninthStop = new CountDownLatch(1);
         when(docker.stopContainerCmd(anyString())).thenReturn(stop);
@@ -139,7 +160,7 @@ class ContainerLifecycleManagerTeardownTest {
     @Test
     void aContainerThatHadAlreadyExitedCountsAsStopped() throws Exception {
         DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         when(docker.stopContainerCmd(anyString())).thenReturn(stop);
         when(stop.withTimeout(anyInt())).thenReturn(stop);
@@ -162,7 +183,7 @@ class ContainerLifecycleManagerTeardownTest {
     @Test
     void aStopLeavesTheContainerInPlaceAndCountsAnExitedOrMissingOneAsStopped() {
         DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
         StopContainerCmd stop = mock(StopContainerCmd.class);
         when(docker.stopContainerCmd(anyString())).thenReturn(stop);
         when(stop.withTimeout(anyInt())).thenReturn(stop);

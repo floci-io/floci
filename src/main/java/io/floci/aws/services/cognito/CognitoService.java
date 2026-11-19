@@ -270,7 +270,7 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
                 lambdaService,
                 acmService,
                 new VerificationCodeService(storageFactory, clock),
-                new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
+                new CognitoMessageDispatcher(sesService, snsService, regionResolver),
                 certificateManager,
                 clock,
                 emulatorConfig.services().cognito().enforceTokenValidityLimits(),

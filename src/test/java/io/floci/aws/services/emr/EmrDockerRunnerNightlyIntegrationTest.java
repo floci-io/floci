@@ -2,7 +2,6 @@ package io.floci.aws.services.emr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -25,6 +24,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
@@ -61,10 +61,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * runner mode runs each step, and an application each job run, in a container of the release's EMR Serverless image,
  * which reaches Floci's S3 and Glue from there, a job run's executors each in a container of their own, as the profile sets. The cached {@code emr-7.5.0} image keeps a local run from pulling;
  * CI pulls it (3.5 GB) the first time.
+ *
+ * <p>A nightly check: it pulls a 3.5 GB image and runs for over ten minutes, about half of a pull request shard, so
+ * it runs with {@code -Dnightly.checks.enabled=true}.
  */
 @QuarkusTest
 @TestProfile(CloudFormationSettingsProfile.class)
-class EmrDockerRunnerDockerIntegrationTest {
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+class EmrDockerRunnerNightlyIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String REGION = "us-east-1";
@@ -246,45 +250,6 @@ class EmrDockerRunnerDockerIntegrationTest {
     }
 
     @Test
-    void aClustersCoreAndTaskNodesRunItsExecutorsAndAShrinkKeepsItsHdfsData() {
-        put("side/nodes.py", """
-                import socket
-                import sys
-                from pyspark.sql import SparkSession
-                spark = SparkSession.builder.getOrCreate()
-                lines = spark.sparkContext.parallelize(range(8), 8) \\
-                    .map(lambda i: (socket.gethostname(), "line " + str(i))).cache()
-                lines.map(lambda line: line[1]).saveAsTextFile("hdfs:///kept")
-                hosts = " ".join(sorted(set(lines.map(lambda line: line[0]).collect())))
-                spark.createDataFrame([(hosts,)], ["value"]).coalesce(1).write.text(sys.argv[1])
-                """);
-        startCluster("[]", null, ",{\"Name\":\"core\",\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\","
-                + "\"InstanceCount\":2},{\"Name\":\"task\",\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\","
-                + "\"InstanceCount\":1}");
-
-        // Its executors run on its core and task nodes, each named as ListInstances names it, not on its primary node.
-        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit", s3Uri("side/nodes.py"),
-                s3Uri("hosts/")));
-        List<String> instances = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
-                .getList("Instances.PrivateDnsName");
-        for (String host : partFiles("hosts/").trim().split(" ")) {
-            assertTrue(instances.subList(1, instances.size()).contains(host), host + " among " + instances);
-        }
-
-        // A core node goes, once HDFS has moved its blocks to the one that stays, and every line is still there.
-        String core = emr("ListInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
-                .getString("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.Id");
-        emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
-                + core + "\",\"InstanceCount\":1}]}").then().statusCode(200);
-        String leaving = ContainerStorageHelper.dockerName(config, "emr-" + clusterId + "-node-1-2");
-        await("core node " + leaving + " to go").atMost(Duration.ofMinutes(5)).pollInterval(Duration.ofSeconds(1))
-                .until(() -> gone(leaving));
-        assertEquals("COMPLETED", runStep("command-runner.jar", "s3-dist-cp", "--src", "hdfs:///kept/",
-                "--dest", s3Uri("kept/")));
-        assertEquals("line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n", partFiles("kept/"));
-    }
-
-    @Test
     void aClustersHdfsWhoseDataNodeExitsStartsAgainOnItsDataForTheNextStep() {
         startCluster("[]");
         assertEquals("COMPLETED", runStep("command-runner.jar", "s3-dist-cp",
@@ -463,16 +428,6 @@ class EmrDockerRunnerDockerIntegrationTest {
                 + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}" + moreGroups + "]}}")
                 .then().statusCode(200).extract().jsonPath().getString("JobFlowId");
         cleanup.register(() -> terminateClusterAndAwaitCleanup(clusterId, emrService));
-    }
-
-    /** Whether Docker no longer has the container named so. */
-    private boolean gone(String name) {
-        try {
-            lifecycle.getDockerClient().inspectContainerCmd(name).exec();
-            return false;
-        } catch (NotFoundException e) {
-            return true;
-        }
     }
 
     /** Runs a tiny streaming fixture with one mapper and one reducer. */

@@ -213,6 +213,43 @@ class CloudFrontCfnProvisionerTest {
     }
 
     @Test
+    void copiesTheConnectionModeTheTemplateDeclares() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, json("""
+                {"DistributionConfig": {
+                   "ConnectionMode": "tenant-only",
+                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
+                                "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
+                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
+                }}
+                """), distributionCtx(null));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        assertEquals("tenant-only", sent.getValue().getConfig().getConnectionMode());
+    }
+
+    @Test
+    void leavesTheConnectionModeUnsetWhenTheTemplateOmitsIt() throws Exception {
+        when(cloudFront.createDistribution(any(), any())).thenReturn(distribution("E1DIST", "d111.cloudfront.net"));
+        StackResource r = resource(DISTRIBUTION);
+
+        provisioner.provision(r, json("""
+                {"DistributionConfig": {
+                   "Origins": [{"Id": "o1", "DomainName": "origin.example.com",
+                                "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}}],
+                   "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "redirect-to-https"}
+                }}
+                """), distributionCtx(null));
+
+        ArgumentCaptor<Distribution> sent = ArgumentCaptor.forClass(Distribution.class);
+        verify(cloudFront).createDistribution(sent.capture(), any());
+        assertNull(sent.getValue().getConfig().getConnectionMode());
+    }
+
+    @Test
     void aNonNumericOriginConnectionSettingFailsTheStackInsteadOfAServerError() {
         StackResource r = resource(DISTRIBUTION);
 

@@ -74,8 +74,8 @@ import java.util.Map;
  *   outside the subset Floci evaluates. {@code IotTopicRuleSqlStrictIntegrationTest} relies on
  *   it.</li>
  *   <li>{@code floci.partitions.allow-unknown-regions=true} gives a region label no partition
- *   publishes a namespace of its own. {@code PartitionUnknownRegionAllowedIntegrationTest} and
- *   {@code ColonRegionRejectionIntegrationTest} rely on it.</li>
+ *   publishes a namespace of its own. {@code PartitionUnknownRegionAllowedIntegrationTest},
+ *   {@code ColonRegionRejectionIntegrationTest} and {@code StackSetRegionScopingIntegrationTest} rely on it.</li>
  *   <li>{@code floci.services.ec2instanceconnect.enabled=false} turns EC2 Instance Connect off.
  *   {@code InstanceConnectEnablementIntegrationTest} relies on it.</li>
  *   <li>{@code floci.storage.services.rekognition.mode=persistent} keeps Rekognition collections on

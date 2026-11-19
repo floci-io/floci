@@ -452,6 +452,36 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_standardStorageReportsZeroThroughput() {
+        // The API refuses StorageType=standard, so only a stored record can carry it.
+        DbInstance instance = makeInstance("std");
+        instance.setStorageType("standard");
+        when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+        String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+        assertTrue(body.contains("<StorageThroughput>0</StorageThroughput>"), body);
+    }
+
+    @Test
+    void describeDbInstances_oracleGp3BaselineStepsUpAt200GiB() {
+        // Floci cannot create an Oracle instance, so the Oracle threshold is reachable only from here.
+        // An upper-case identifier on a stored record must still read as SQL Server (always the lower tier).
+        for (int[] row : new int[][] {{200, 12000, 500}, {199, 3000, 125}, {500, 3000, 125}}) {
+            DbInstance instance = makeInstance("ora");
+            instance.setEngineIdentifier(row[0] == 500 ? "SQLSERVER-SE" : "oracle-ee");
+            instance.setStorageType("gp3");
+            instance.setAllocatedStorage(row[0]);
+            when(service.listDbInstances(null, null)).thenReturn(List.of(instance));
+
+            String body = (String) handler.handle("DescribeDBInstances", params()).getEntity();
+
+            assertTrue(body.contains("<Iops>" + row[1] + "</Iops>"), body);
+            assertTrue(body.contains("<StorageThroughput>" + row[2] + "</StorageThroughput>"), body);
+        }
+    }
+
+    @Test
     void describeDbInstances_echoesPubliclyAccessible() {
         // AWS returns the requested value; a hard-coded false read back as drift for any client
         // that persists it (Terraform's aws_db_instance re-issued ModifyDBInstance every apply).

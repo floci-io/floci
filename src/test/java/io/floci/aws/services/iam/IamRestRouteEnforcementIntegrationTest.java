@@ -247,6 +247,32 @@ class IamRestRouteEnforcementIntegrationTest {
                 "pipes:TagResource");
     }
 
+    /**
+     * A Pipes route is checked on the pipe its path names, from the generated table, and an {@code aws:ResourceTag}
+     * condition reads the tags Pipes holds on it, so an allow on one team's tag lets the caller describe that team's
+     * pipe and not another's.
+     */
+    @Test
+    void aPipesResourceTagConditionReadsTheTagsOfThePipe() {
+        String tagged = pipe("route-pipe-" + suffix(), "data");
+        String other = pipe("route-pipe-" + suffix(), "web");
+        String user = user("route-pipe-tags");
+
+        policy(user, onTeam("Allow", "pipes:DescribePipe", "data"));
+        request(user, "pipes", "GET", "/v1/pipes/" + tagged, null).statusCode(200);
+        refused(request(user, "pipes", "GET", "/v1/pipes/" + other, null), "pipes:DescribePipe");
+    }
+
+    /** A stopped pipe an administrator creates between two queue ARNs, tagged with {@code team}; its name. */
+    private String pipe(String name, String team) {
+        adminOf("pipes").body("{\"Source\":\"arn:aws:sqs:us-east-1:" + ACCOUNT + ":route-source\",\"Target\":"
+                + "\"arn:aws:sqs:us-east-1:" + ACCOUNT + ":route-target\",\"RoleArn\":\"arn:aws:iam::" + ACCOUNT
+                + ":role/route-pipe\",\"DesiredState\":\"STOPPED\",\"Tags\":{\"team\":\"" + team + "\"}}")
+                .post("/v1/pipes/" + name).then().statusCode(200);
+        cleanup.register(() -> adminOf("pipes").delete("/v1/pipes/" + name).then().statusCode(200));
+        return name;
+    }
+
     @Test
     void sharedTaggingIsCheckedAsTheServiceItsArnNames() {
         // The shared tagging routes hand the request to the service its ARN names, whatever scope it is
@@ -976,11 +1002,7 @@ class IamRestRouteEnforcementIntegrationTest {
         String user = user("route-detector");
         String region = "eu-west-3";
         refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
-        String detector = given().header("Authorization", auth(ADMIN, region, "guardduty"))
-                .contentType("application/json").body("{\"enable\":true}").post("/detector")
-                .then().statusCode(200).extract().path("detectorId");
-        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
-                .delete("/detector/" + detector));
+        String detector = guardDutyDetector(region, null);
         String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":detector/" + detector;
         refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
 
@@ -993,6 +1015,42 @@ class IamRestRouteEnforcementIntegrationTest {
         policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:GetDetector", arn));
         refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
         as(user, region, "guardduty").get("/detector").then().statusCode(200);
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags GuardDuty holds on the detector a request names, as
+     * TagResource leaves them, so an allow on one team's tag lets the caller read that team's detector and not
+     * another's. An account has one detector a Region, so the two are in two Regions.
+     */
+    @Test
+    void aGuardDutyResourceTagConditionReadsTheTagsOfTheDetector() {
+        String taggedRegion = "eu-north-1";
+        String otherRegion = "eu-south-2";
+        String tagged = guardDutyDetector(taggedRegion, "web");
+        String other = guardDutyDetector(otherRegion, "web");
+        String taggedArn = "arn:aws:guardduty:" + taggedRegion + ":" + ACCOUNT + ":detector/" + tagged;
+        given().header("Authorization", auth(ADMIN, taggedRegion, "guardduty")).contentType("application/json")
+                .body("{\"tags\":{\"team\":\"data\"}}")
+                .post("/tags/{arn}", taggedArn).then().statusCode(204);
+        String user = user("route-detector-tags");
+
+        policy(user, onTeam("Allow", "guardduty:GetDetector", "data"));
+        as(user, taggedRegion, "guardduty").get("/detector/" + tagged).then().statusCode(200);
+        refused(as(user, otherRegion, "guardduty").get("/detector/" + other).then(), "guardduty:GetDetector");
+    }
+
+    /**
+     * The id of a detector an administrator creates in {@code region}, tagged with the team if one is given, deleted
+     * after the test.
+     */
+    private String guardDutyDetector(String region, String team) {
+        String detector = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json")
+                .body("{\"enable\":true" + (team == null ? "" : ",\"tags\":{\"team\":\"" + team + "\"}") + "}")
+                .post("/detector").then().statusCode(200).extract().path("detectorId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/detector/" + detector));
+        return detector;
     }
 
     /**

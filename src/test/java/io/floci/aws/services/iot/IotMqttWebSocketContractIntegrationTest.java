@@ -3,6 +3,7 @@ package io.floci.aws.services.iot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.IotMqttTlsProfile;
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -405,11 +406,11 @@ class IotMqttWebSocketContractIntegrationTest {
     // ==================== helpers ====================
 
     private String ws() {
-        return "ws://127.0.0.1:" + testHttpPort + "/mqtt";
+        return "ws://127.0.0.1:" + testHttpPort + "/mqtt" + IotWebSocketSigV4.QUERY;
     }
 
     private String wss() {
-        return "wss://127.0.0.1:" + testSslPort + "/mqtt";
+        return "wss://127.0.0.1:" + testSslPort + "/mqtt" + IotWebSocketSigV4.QUERY;
     }
 
     /**

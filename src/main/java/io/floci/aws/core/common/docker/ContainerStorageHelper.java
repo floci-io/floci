@@ -110,6 +110,13 @@ public final class ContainerStorageHelper {
         return dockerName(config, service + "-" + (volumeId != null ? volumeId : fallbackId));
     }
 
+    /** Scopes name-based resources without changing the identity of an existing data volume. */
+    public static String resourceName(EmulatorConfig config, String service, String volumeId, String fallbackId,
+                                      String accountId, String region) {
+        return resourceName(config, service, volumeId,
+                sanitizeNamePart(accountId) + "-" + sanitizeNamePart(region) + "-" + fallbackId);
+    }
+
     /**
      * Prefixes {@code baseName} with {@code floci-aws-} and the configured resource namespace,
      * which lands after the cloud token: {@code floci-aws-<namespace>-<base>}.

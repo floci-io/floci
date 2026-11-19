@@ -17,11 +17,11 @@ import static org.mockito.Mockito.when;
 class TagDispatcherTest {
 
     private static final String GROUP = "arn:aws:scheduler:us-east-1:000000000000:schedule-group/reports";
-    private static final String PIPE = "arn:aws:pipes:us-east-1:000000000000:pipe/orders";
+    private static final String REST_API = "arn:aws:apigateway:us-east-1::/restapis/abc123";
 
     private final TagHandler scheduler = handler("scheduler");
-    private final TagHandler pipes = handler("pipes");
-    private final TagDispatcher dispatcher = new TagDispatcher(List.of(scheduler, pipes),
+    private final TagHandler apiGateway = handler("apigateway");
+    private final TagDispatcher dispatcher = new TagDispatcher(List.of(scheduler, apiGateway),
             new RegionResolver("us-east-1", "000000000000"), new ObjectMapper());
 
     /**
@@ -41,11 +41,14 @@ class TagDispatcherTest {
         }
     }
 
-    /** Pipes is still built by hand, its tagged ARN read wherever the controller reads it, so every route serves it. */
+    /**
+     * API Gateway is still built by hand, its tagged ARN read wherever the controller reads it, so every route serves
+     * it.
+     */
     @Test
     void aServiceBuiltByHandIsServedOnEveryRoute() {
-        assertSame(pipes, dispatcher.resolveHandler(PIPE, sent("/tags")));
-        assertSame(pipes, dispatcher.resolveHandler(PIPE, sent("/tags/" + PIPE)));
+        assertSame(apiGateway, dispatcher.resolveHandler(REST_API, sent("/tags")));
+        assertSame(apiGateway, dispatcher.resolveHandler(REST_API, sent("/tags/" + REST_API)));
     }
 
     private static TagHandler handler(String serviceKey) {

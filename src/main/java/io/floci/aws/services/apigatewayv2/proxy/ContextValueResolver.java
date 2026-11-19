@@ -26,6 +26,7 @@ import java.util.Map;
  *   <li>{@code $context.<name>}: any other context variable the request carries</li>
  *   <li>{@code $request.header.<name>}: case-insensitive header lookup</li>
  *   <li>{@code $request.querystring.<name>}: query parameter</li>
+ *   <li>{@code $request.path}: the request path without the stage name</li>
  *   <li>{@code $request.path.<name>}: captured path parameter</li>
  *   <li>{@code $request.body}: the request body as text, null when it is empty</li>
  *   <li>{@code $request.body.<JSONPath>}: a value selected from a JSON request body</li>
@@ -91,6 +92,9 @@ public class ContextValueResolver {
         if (expression.startsWith("$request.querystring.")) {
             String name = expression.substring("$request.querystring.".length());
             return ctx.queryParams() == null ? null : ctx.queryParams().get(name);
+        }
+        if (expression.equals("$request.path")) {
+            return ctx.path();
         }
         if (expression.startsWith("$request.path.")) {
             String name = expression.substring("$request.path.".length());

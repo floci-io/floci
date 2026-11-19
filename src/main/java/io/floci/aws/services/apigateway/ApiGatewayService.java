@@ -1111,7 +1111,8 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 if (!"replace" .equals(opType) && !"add" .equals(opType)) continue;
 
                 if ("/description" .equals(path)) {
-                    stage.setDescription(value);
+                    // UpdateStage has no remove for the description, so an empty value clears it.
+                    stage.setDescription(value == null || value.isEmpty() ? null : value);
                 } else if ("/deploymentId" .equals(path)) {
                     stage.setDeploymentId(value);
                 } else if ("/tracingEnabled" .equals(path)) {
@@ -1134,6 +1135,18 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         stage.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
         stageStore.put(stageKey(region, apiId, stageName), stage);
         return stage;
+    }
+
+    /**
+     * Writes back the deployment id and description of a stage as a stack update's snapshot held
+     * them, a null description included, which a patch cannot express. For the stack rollback only.
+     */
+    public void restoreStage(String region, String apiId, Stage snapshot) {
+        Stage stage = getStage(region, apiId, snapshot.getStageName());
+        stage.setDeploymentId(snapshot.getDeploymentId());
+        stage.setDescription(snapshot.getDescription());
+        stage.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
+        stageStore.put(stageKey(region, apiId, snapshot.getStageName()), stage);
     }
 
     private static final List<String> METHOD_SETTING_KEYS = List.of(

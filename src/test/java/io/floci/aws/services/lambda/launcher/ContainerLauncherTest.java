@@ -20,6 +20,7 @@ import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.VersionComponent;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerEngineDetector;
@@ -115,6 +116,7 @@ class ContainerLauncherTest {
     Path tempDir;
 
     ContainerLauncher launcher;
+    RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
     /** Collects remote paths passed to withRemotePath across all copy mocks. */
     final List<String> capturedRemotePaths = new ArrayList<>();
     String capturedRuntimeBootstrap;
@@ -255,7 +257,7 @@ class ContainerLauncherTest {
         ContainerLauncher backgroundLauncher = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager, streamingDockerClient, logStreamer, imageResolver, runtimeApiServerFactory,
-                dockerHostResolver, config, ecrRegistryManager, layers,
+                dockerHostResolver, config, regionResolver, ecrRegistryManager, layers,
                 new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials, ec2Service);
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("background-layer");
@@ -508,7 +510,7 @@ class ContainerLauncherTest {
         ContainerReachableEndpoint endpoint =
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
         return new ContainerLauncher(builder, lifecycleManager, streamingDockerClient, logStreamer, selectedResolver,
-                runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
+                runtimeApiServerFactory, dockerHostResolver, config, regionResolver, ecrRegistryManager,
                 layerService, new LaunchedContainerAwsEnv(endpoint),
                 executionRoleCredentials, ec2Service);
     }
@@ -1262,7 +1264,8 @@ class ContainerLauncherTest {
     @Test
     void launchFunction_injectsConfiguredDefaultRegionWhenArnMissing() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("region-default"));
-        when(config.defaultRegion()).thenReturn("eu-central-1");
+        regionResolver = new RegionResolver("eu-central-1", "000000000000");
+        launcher = newLauncher(imageResolver);
 
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("region-default-fn");
@@ -2550,7 +2553,7 @@ class ContainerLauncherTest {
                 lifecycleManager,
                 streamingDockerClient,
                 new ContainerLogStreamer(streamingDockerClient, cloudWatchLogs),
-                imageResolver, runtimeApiServerFactory, dockerHostResolver, config,
+                imageResolver, runtimeApiServerFactory, dockerHostResolver, config, regionResolver,
                 ecrRegistryManager,
                 mock(LambdaLayerService.class),
                 new LaunchedContainerAwsEnv(reachableEndpoint),

@@ -1776,6 +1776,15 @@ public interface EmulatorConfig {
         boolean seedDeployerPrincipal();
 
         /**
+         * Access key ID of the seeded deployer's key. The default {@code floci} is shorter than
+         * the 16 characters IAM requires of an AccessKeyId, so DeleteAccessKey and UpdateAccessKey
+         * refuse it; an ID of 16 to 128 word characters lets the key be retired like any other.
+         * Seeding refuses to start with any other value outside that format.
+         */
+        @WithDefault("floci")
+        String seedDeployerAccessKeyId();
+
+        /**
          * Alias to seed for the default account at startup, so callers that read the account
          * alias find one without creating it first. Unset means the account has no alias, which
          * is the AWS default.
@@ -2704,6 +2713,20 @@ public interface EmulatorConfig {
         /** How long a crawl keeps the crawler RUNNING before it succeeds; 0 = a crawl finishes as soon as it starts. */
         @WithDefault("0")
         int crawlerRunDurationSeconds();
+
+        /**
+         * How a Spark ({@code glueetl}) job run executes: {@code immediate} follows Glue's state machine and runs no
+         * script; {@code docker} runs the job's script in a container of {@link #image()}, which needs a Docker daemon
+         * and about 7 GB of disk for the image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        /** The image a {@code docker} job run uses: AWS's image for running Glue 5.0 jobs locally. */
+        @WithDefault("public.ecr.aws/glue/aws-glue-libs:5") // partition-literal: configurable; ECR Public exists only in the commercial partition
+        String image();
+
+        Optional<String> dockerNetwork();
     }
 
     interface SesServiceConfig {
@@ -3697,6 +3720,25 @@ public interface EmulatorConfig {
             Optional<List<String>> labels();
 
             /**
+             * Node selector of Lambda pods, as {@code key=value} entries with label syntax.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR (comma-separated)
+             */
+            Optional<List<String>> nodeSelector();
+
+            /**
+             * Tolerations of Lambda pods, each written as the taint it tolerates in
+             * {@code kubectl taint} syntax: {@code key=value:Effect} tolerates that taint
+             * (operator {@code Equal}), {@code key:Effect} tolerates every value of the key
+             * (operator {@code Exists}), and an entry without {@code :Effect} tolerates every
+             * effect. Effects are {@code NoSchedule}, {@code PreferNoSchedule} and
+             * {@code NoExecute}.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS (comma-separated)
+             */
+            Optional<List<String>> tolerations();
+
+            /**
              * Host or IP that Lambda pods use to reach Floci (the Runtime API port range
              * and the main port). When unset, Floci auto-detects its own pod address if
              * running in-cluster; when running outside the cluster this must be set to an
@@ -4383,11 +4425,10 @@ public interface EmulatorConfig {
 
         /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call
-         * leases a connection from it, and a few streams hold one for as long as they run:
-         * CodeBuild phase execs, EKS audit followers and ECS Exec sessions. The streams a Lambda
-         * container holds for its whole lifetime live in the separate streaming pool. Once
-         * long-lived connections fill this pool, create, start, stop and remove wait for a free
-         * connection, including the calls that would release one, so the emulator stalls.
+         * leases a connection from it; streams that stay open while a container or a command runs
+         * live in the separate streaming pool. Once this pool is full, create, start, stop and
+         * remove wait for a free connection, including the calls that would release one, so the
+         * emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100. Connections are opened on demand, so a
          * small stack never approaches the limit.
@@ -4397,8 +4438,11 @@ public interface EmulatorConfig {
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived streams that occupy a slot for a container's entire lifetime: container log
-         * follow, and for each Lambda container its exit watcher and one exec per extension.
+         * long-lived streams that occupy a slot for a container's entire lifetime or a long
+         * command's run: container log follow, for each Lambda container its exit watcher and one
+         * exec per extension, and the output of each CodeBuild phase, SSM command, ECS Exec
+         * session, EKS audit follower, ECR garbage collection, user data script and EMR bootstrap
+         * action.
          * Total live containers is unbounded across distinct functions (each {@code WarmPool}
          * caps only per-function), so this pool is sized generously rather than tied to any
          * single function's warm-pool cap.
@@ -4422,8 +4466,9 @@ public interface EmulatorConfig {
 
         /**
          * How long a Docker call waits for the daemon's response before it fails, in seconds, for
-         * both pools. The limit is per attempt: a control-plane request that is safe to repeat is
-         * tried up to six times. Requests that hold a stream open for as long as a container runs (container
+         * both pools. It bounds the whole call: a request that is safe to repeat is retried after a
+         * transient connection error only while no retry would start past the limit, counted from
+         * the first attempt. Requests that hold a stream open for as long as a container runs (container
          * waits, exec and attach output, followed logs, streamed stats, events, image pulls and
          * builds) are exempt, since they can stay silent while healthy.
          */

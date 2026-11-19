@@ -49,7 +49,8 @@ class Route53ResolverEndpointInterfacesTest {
         subnet.setVpcId("vpc-aaa");
         when(ec2.describeSubnets(eq(REGION), anyList(), any())).thenReturn(List.of(subnet));
         return new Route53ResolverService(new InMemoryStorage<>(), endpoints, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), ipRequests, new InMemoryStorage<>(), objectMapper, ec2);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), ipRequests,
+                new InMemoryStorage<>(), objectMapper, ec2);
     }
 
     private NetworkInterface eni() {

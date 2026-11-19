@@ -354,6 +354,17 @@ class RedshiftSqlInterceptorTest {
     }
 
     @Test
+    void shouldReadABackslashQuoteInAnEscapeStringAsPartOfTheLiteral() {
+        String sql = "CREATE TABLE t (a VARCHAR(20) DEFAULT E'\\'', b INT DISTKEY, c VARCHAR(20) DEFAULT ' DISTKEY ');";
+
+        String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+
+        assertTrue(!rewritten.contains("b INT DISTKEY"), "Should remove column-level DISTKEY: " + rewritten);
+        assertTrue(rewritten.contains("DEFAULT E'\\''"), "Should keep the escape string: " + rewritten);
+        assertTrue(rewritten.contains("' DISTKEY '"), "Should keep DISTKEY inside the literal: " + rewritten);
+    }
+
+    @Test
     void shouldNotTouchABinaryTypeOutsideTableDdl() {
         String sql = "SELECT CAST(x AS VARBYTE(10)) FROM t";
 

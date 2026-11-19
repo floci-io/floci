@@ -111,7 +111,7 @@ public class EksPodIdentityAssociationService {
                             && tags.equals(previous.tags())) {
                         return previous;
                     }
-                    throw invalid("clientRequestToken was already used with different parameters");
+                    throw invalid(EksAddonService.TOKEN_REUSED);
                 }
             }
         }
@@ -190,7 +190,7 @@ public class EksPodIdentityAssociationService {
             if (matches) {
                 return current;
             }
-            throw invalid("clientRequestToken was already used with different parameters");
+            throw invalid(EksAddonService.TOKEN_REUSED);
         }
 
         String newRoleArn = current.roleArn();

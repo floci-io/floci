@@ -1,5 +1,7 @@
 package io.floci.aws.services.dsql.dataplane;
 
+import io.floci.aws.core.common.PostgresWire;
+
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -117,8 +119,8 @@ public final class DsqlStatements {
 
     /** {@code sys._reject} raising {@code state} with {@code message}, as a statement. */
     public static String reject(String state, String message, String detail) {
-        return "SELECT sys._reject(" + literal(state) + ", " + literal(message)
-                + (detail == null ? "" : ", " + literal(detail)) + ")";
+        return "SELECT sys._reject(" + PostgresWire.quoteLiteral(state) + ", " + PostgresWire.quoteLiteral(message)
+                + (detail == null ? "" : ", " + PostgresWire.quoteLiteral(detail)) + ")";
     }
 
     /**
@@ -348,8 +350,8 @@ public final class DsqlStatements {
         if (roleName == null) {
             return null;
         }
-        String call = "CALL sys.aws_iam_" + (grant ? "grant" : "revoke") + "(" + literal(roleName) + ", "
-                + literal(tokens.get(5).value()) + ")";
+        String call = "CALL sys.aws_iam_" + (grant ? "grant" : "revoke") + "("
+                + PostgresWire.quoteLiteral(roleName) + ", " + PostgresWire.quoteLiteral(tokens.get(5).value()) + ")";
         return new Statement(call, grant ? "AWS IAM GRANT" : "AWS IAM REVOKE");
     }
 
@@ -387,7 +389,8 @@ public final class DsqlStatements {
         }
         String table = text.substring(tokens.get(tableStart).start() - base, tokens.get(at - 1).end() - base);
         String call = "SELECT job_id FROM sys.create_index_async(" + dollarQuoted(statement) + ", "
-                + (indexName == null ? "NULL" : literal(indexName)) + ", " + literal(table) + ")";
+                + (indexName == null ? "NULL" : PostgresWire.quoteLiteral(indexName)) + ", "
+                + PostgresWire.quoteLiteral(table) + ")";
         return new Statement(call, null);
     }
 
@@ -514,7 +517,7 @@ public final class DsqlStatements {
             if (specifier || name.type() != Type.WORD && name.type() != Type.QUOTED_IDENTIFIER) {
                 return null;
             }
-            names.add(literal(identifier(name)));
+            names.add(PostgresWire.quoteLiteral(identifier(name)));
             if (i + 1 < tokens.size() && !",".equals(tokens.get(i + 1).text())) {
                 return null;
             }
@@ -1214,10 +1217,6 @@ public final class DsqlStatements {
             case WORD -> token.folded();
             default -> token.text();
         };
-    }
-
-    static String literal(String value) {
-        return "'" + value.replace("'", "''") + "'";
     }
 
     private static String dollarQuoted(String value) {

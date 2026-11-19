@@ -395,6 +395,11 @@ and an explicit `Deny` always wins. Both `Action` and `NotAction` elements are h
 Unless the trust policy grants the call on its own within the role's account (below), the caller's own identity
 policy must allow `sts:AssumeRole` too, evaluated against the role's ARN, so a policy can
 allow assuming one role and not another. Other STS actions are evaluated against `*`, whatever `RoleArn` they carry.
+That evaluation sees the request's `sts:RoleSessionName`, and `sts:ExternalId` when the caller passes `ExternalId`,
+as the trust policy does: the [Service Authorization Reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_awssecuritytokenservice.html)
+lists both among the condition keys of `AssumeRole`, so an identity policy can require a session name, such as
+`"sts:RoleSessionName": "${aws:username}"`, or an external ID, and a `Deny` conditioned on either applies only when
+it matches.
 
 The trust policy is the role's resource-based policy, and IAM enforcement evaluates it as it does a bucket or a
 queue policy, with the role as its resource, since a trust policy names no `Resource`. Within the role's account, an
@@ -487,7 +492,7 @@ The response resolves both header and query-string credentials, including the qu
 so a presigned request reports the same caller identity. A nonblank Authorization header retains
 precedence over query credentials.
 
-When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
+When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded access key (`floci` unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` sets another) return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
 
 When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks presigned query
 credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`

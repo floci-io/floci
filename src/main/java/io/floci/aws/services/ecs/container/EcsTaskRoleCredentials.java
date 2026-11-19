@@ -20,9 +20,11 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Mints, rotates, and revokes the IAM sessions vended through the ECS task-role credential
- * endpoint. Modeled on {@code Ec2InstanceCredentials}: unlike a persisted STS session, a task
- * credential is owned by one exact task and cannot outlive it or a Floci restart.
+ * Mints, rotates, and revokes the IAM sessions vended through the container credentials endpoint
+ * ({@code AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}), for an ECS task's role and for a CodeBuild
+ * build's service role alike. Modeled on {@code Ec2InstanceCredentials}: unlike a persisted STS
+ * session, such a credential is owned by one exact workload, a task or a build, keyed by its ARN,
+ * and cannot outlive it or a Floci restart.
  */
 @ApplicationScoped
 public class EcsTaskRoleCredentials {
@@ -39,8 +41,8 @@ public class EcsTaskRoleCredentials {
     private final IamService iamService;
     private final long ttlSeconds;
 
-    /** taskArn -> the task's current issued session and the relative URI it was published at. */
-    private final Map<String, Issued> byTaskArn = new ConcurrentHashMap<>();
+    /** workload ARN -> the workload's current issued session and the relative URI it was published at. */
+    private final Map<String, Issued> byWorkloadArn = new ConcurrentHashMap<>();
     /** relative URI path -> the session it resolves to, for the credentials endpoint's lookup. */
     private final Map<String, Issued> byPath = new ConcurrentHashMap<>();
 
@@ -58,14 +60,30 @@ public class EcsTaskRoleCredentials {
      * created the task by the time containers are started.
      */
     public synchronized Optional<String> issue(String taskArn, String roleArn, String accountId, Instant now) {
-        Issued current = taskArn == null ? null : byTaskArn.get(taskArn);
+        String taskSessionName = taskArn == null || !taskArn.contains("/")
+                ? taskArn : taskArn.substring(taskArn.lastIndexOf('/') + 1);
+        return issue(taskArn, roleArn, accountId, taskSessionName, now);
+    }
+
+    /**
+     * Issues a session for a container workload's role, named {@code sessionName}, or returns its
+     * current one if it has not entered its rotation window, as {@link #issue(String, String, String,
+     * Instant)} does for a task. Returns empty, minting nothing, for a role that does not exist under
+     * the workload's account.
+     *
+     * @param workloadArn the ARN of the one task or build the session belongs to, which revokes it
+     * @param sessionName the role session name {@code GetCallerIdentity} answers the session under
+     */
+    public synchronized Optional<String> issue(String workloadArn, String roleArn, String accountId,
+                                               String sessionName, Instant now) {
+        Issued current = workloadArn == null ? null : byWorkloadArn.get(workloadArn);
         if (current != null && (!current.session.getRoleArn().equals(roleArn)
                 || !current.session.getOriginAccountId().equals(accountId))) {
             revoke(current);
             current = null;
         }
-        if (taskArn == null || taskArn.isBlank() || roleArn == null || roleArn.isBlank()
-                || accountId == null || accountId.isBlank()) {
+        if (workloadArn == null || workloadArn.isBlank() || roleArn == null || roleArn.isBlank()
+                || accountId == null || accountId.isBlank() || sessionName == null) {
             return Optional.empty();
         }
         Optional<IamRole> role = resolveRole(roleArn, accountId);
@@ -92,11 +110,10 @@ public class EcsTaskRoleCredentials {
         SessionCredential session = new SessionCredential(
                 "ASIA" + random(UPPER_ALPHANUMERIC, 16), randomBase64(30), randomBase64(48),
                 roleArn, now.plusSeconds(ttlSeconds), null, accountId);
-        session.setEcsTaskArn(taskArn);
-        String taskSessionName = taskArn.contains("/") ? taskArn.substring(taskArn.lastIndexOf('/') + 1) : taskArn;
-        session.setRoleSessionName(taskSessionName);
+        session.setEcsTaskArn(workloadArn);
+        session.setRoleSessionName(sessionName);
         if (role.get().getRoleId() != null) {
-            session.setAssumedRoleId(role.get().getRoleId() + ":" + taskSessionName);
+            session.setAssumedRoleId(role.get().getRoleId() + ":" + sessionName);
         }
         iamService.registerEcsTaskRoleSession(session);
 
@@ -111,7 +128,7 @@ public class EcsTaskRoleCredentials {
         }
         Issued issued = new Issued(session, path, role.get().getRoleId(), previous);
         byPath.put(path, issued);
-        byTaskArn.put(taskArn, issued);
+        byWorkloadArn.put(workloadArn, issued);
         return Optional.of(path);
     }
 
@@ -122,19 +139,23 @@ public class EcsTaskRoleCredentials {
             return Optional.empty();
         }
         return issue(issued.session.getEcsTaskArn(), issued.session.getRoleArn(),
-                issued.session.getOriginAccountId(), now).map(renewedPath -> byPath.get(renewedPath).session);
+                issued.session.getOriginAccountId(), issued.session.getRoleSessionName(), now)
+                .map(renewedPath -> byPath.get(renewedPath).session);
     }
 
-    /** Revokes the task's credentials on task stop, exit, or a launch that failed part way through. */
-    public synchronized void revoke(String taskArn) {
-        Issued issued = taskArn == null ? null : byTaskArn.get(taskArn);
+    /**
+     * Revokes a workload's credentials, every generation of them: on a task's stop, exit, or a
+     * launch that failed part way through, and on a build's end, however it ends.
+     */
+    public synchronized void revoke(String workloadArn) {
+        Issued issued = workloadArn == null ? null : byWorkloadArn.get(workloadArn);
         if (issued != null) {
             revoke(issued);
         }
     }
 
     private void revoke(Issued issued) {
-        byTaskArn.remove(issued.session.getEcsTaskArn(), issued);
+        byWorkloadArn.remove(issued.session.getEcsTaskArn(), issued);
         byPath.remove(issued.path, issued);
         iamService.unregisterSession(issued.session.getOriginAccountId(), issued.session.getAccessKeyId());
         for (SessionCredential previous : issued.previous) {

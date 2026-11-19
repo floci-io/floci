@@ -898,6 +898,42 @@ with `UpdateUser` carries all of them to the new name, along with its login prof
 group membership. Unlike AWS, Floci does not rewrite policy documents that name the user's ARN, so a
 resource or trust policy that referred to the old name still refers to it after a rename.
 
+### What a session's token costs, and when it is refused
+
+AWS holds a session token to one limit: STS "has replaced the packed policy size and the overall
+session token size limits with a single token size limit of 4,096 bytes", so "the assembled session
+token must fit within 4,096 bytes" and "the separate packed policy limit, which made failures hard
+to predict, has been removed". A request whose token will not fit is refused with
+`PackedPolicyTooLarge` 400, whose "error message reports the session token size and the maximum
+allowed size, both in bytes": `Serialized token too large for session. Token size of <N> bytes
+exceeds the maximum allowed limit of 4096 bytes.` What a session that does fit consumed is
+published as a percentage. `SessionTokenUtilization` is "the percentage of the 4,096-byte limit
+consumed", and `PackedPolicySize` "now reports the same value as SessionTokenUtilization", kept
+"for backward compatibility" where the API reference marks it deprecated.
+
+This emulator refused nothing and published that member as a flat zero on every session, so a
+caller could neither see what its session cost nor be told it was over. Both are answered now, on
+the four operations that carry state into the token they mint: `AssumeRole`, `AssumeRoleWithSAML`,
+`AssumeRoleWithWebIdentity` and `GetFederationToken`. The refusal is read before anything is
+minted, which is where AWS answers it. A token asked through `MinimumSessionTokenSize` to be the
+limit itself therefore leaves nothing to carry a policy or a tag on top of it, and a request that
+asks for both is refused. `GetDelegatedAccessToken` carries no such state, and the member stays out
+of its response as the model deprecates it there. `SessionTokenSize` and `SessionTokenUtilization`,
+the two members the model now carries beside `PackedPolicySize`, are not published yet.
+
+The measure is this emulator's own and the number will differ from AWS's. It is the token this
+emulator will mint for the request, whose length `MinimumSessionTokenSize` can ask to be raised,
+plus the state the request asks to carry into it in UTF-8 bytes: the inline document, every policy
+ARN, and every tag key and value. AWS assembles the real thing instead, and its size follows the
+input in neither direction. STS "serializes and compresses your session policies and tags when
+assembling the token", where "compression results vary based on the actual content, not just its
+length" and "two sets of tags with identical character counts can produce different token sizes",
+so a repetitive set can assemble smaller than the bytes it was written in. The one size recorded
+here ran larger than its input: for a request of 50 tags with 124-character keys and 256-character
+values, every field inside its own limit, AWS reported 26092 bytes against the limit of 4096, where
+those fields are about 19000 bytes of input. A recording of a second size would let the measure be
+calibrated, and that is the only thing this reading waits on.
+
 ### Policy Simulation
 
 | Action | Description |
@@ -2243,6 +2279,15 @@ When enabled, Floci creates the `floci-deployer` user if it does not already exi
 
 Requests signed with the seeded access key return the deployer user ARN from `sts:GetCallerIdentity`.
 
+The default access key ID, `floci`, is shorter than IAM allows: `DeleteAccessKey` and `UpdateAccessKey` take an `AccessKeyId` of 16 to 128 characters matching `[\w]+`, so the AWS SDKs and Floci refuse the default with a validation error, and `DeleteUser` then refuses the user with `DeleteConflict` while the key exists. To provision with the deployer and then retire it, set an ID in IAM's format, for example (any value other than `floci` must be in that format, or Floci refuses to start):
+
+```bash
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID=AKIAFLOCIDEPLOYER001
+```
+
+The secret access key stays `floci`. Seeding runs at every start, so under persistent storage a retired deployer comes back on the next start unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` is turned off. When the ID changes, seeding deletes the deployer's key seeded under the earlier ID, so an install that already seeded `floci` can then retire the deployer; keys created for the deployer with `CreateAccessKey` are kept.
+
 ## IAM Enforcement Mode
 
 By default Floci accepts any credentials without enforcing IAM policies — all requests are allowed through regardless of what policies are attached to the calling identity. This preserves backward compatibility and keeps the default setup frictionless.
@@ -2287,8 +2332,8 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3,
-SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge
-Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
+DynamoDB, SSM, KMS, IAM, Resource Groups, EKS, API Gateway, CloudWatch Logs
+and STS. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
@@ -2296,7 +2341,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda and AWS Glue they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes and Aurora DSQL they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2486,9 +2531,10 @@ A Scheduler request is checked against `schedule/<group>/<name>`, the group from
 `GroupName` on a create or an update, from `groupName` otherwise, and the `default` group when neither
 names one, as botocore documents ("If you omit this, the default schedule group is used"), or
 `schedule-group/<name>`, all from the generated table. Its tagging is checked on the group its modeled
-`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`. A DSQL request
-is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN a tagging
-route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A Lambda request
+`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`, from the generated table. A DSQL request
+is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN its modeled
+`/tags/{resourceArn}` carries, from the generated table; `CreateCluster` and `ListClusters` against
+`cluster/*`, as DSQL checks them, `ListClusters` from a measured entry. A Lambda request
 is checked on what the table reads from it, as for the other services it reads. A function named by its
 name, its ARN, a partial ARN (`123456789012:function:my-function`, its Region optional) or its resource
 part (`function:my-function`) is the function of that name, an ARN keeping its account and Region beside
@@ -2505,6 +2551,14 @@ layer version's number read as the number Lambda parses, so `01` is checked as `
 request on the ARN it names. A managed MicroVM image named by its name is checked in the caller's
 account, where the Service Reference puts the type; named by its ARN, in `aws`, the account that ARN
 names.
+
+An SQS request is checked on the queue its `QueueUrl` reaches, found as SQS's handlers find it, and
+`CreateQueue` and `GetQueueUrl` on the queue their `QueueName` names, all from the generated table.
+`StartMessageMoveTask` is checked for its own action on each queue ARN it carries, a named destination
+included, and on nothing more when it names no destination and the messages go back to the queues they
+came from. `ListQueues`, and `CancelMessageMoveTask`, whose `TaskHandle` names no queue, are checked on
+`*`, so a grant scoped to a queue, or to the account's queues, does not allow cancelling a move task: it
+takes a grant on `*`.
 
 An EKS request is checked in the caller's account, where EKS looks everything up. A cluster route is
 checked against the ARN EKS holds the cluster under, or `cluster/<name>` in the request's Region for
@@ -3125,7 +3179,7 @@ so a denied request gets `AccessDenied` even for a cluster that does not exist. 
 that `DbName` needs is not checked.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
-from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
+from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, DynamoDB, Secrets
 Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
 the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
 instance profile, managed policy, MFA device, identity provider or server certificate constrains
@@ -3481,8 +3535,11 @@ floci populates:
   custom action types, DataSync for its agents, locations and tasks, Global Accelerator for its accelerators, listeners
   and endpoint groups, EMR Serverless for its applications, job runs and sessions, EMR on EKS for its virtual clusters,
   job runs, managed endpoints, job templates and security configurations, Cost Explorer for its anomaly monitors and
-  subscriptions, and Security Hub for its hubs and configuration policies. Tag keys differing only in case are one
-  condition key holding every value.
+  subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
+  controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, Elastic
+  Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
+  queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes and
+  Aurora DSQL for its clusters. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
@@ -3689,6 +3746,13 @@ floci populates:
   given a JSON null is absent, never the cluster's stored value. The actions, members and protocol come from
   the same `request-condition-keys.json`. A boolean member given anything but a boolean or its text is refused
   before it is read (see [EKS](eks.md)), so the key never misses a value the cluster takes.
+- `sts:RoleSessionName` and `sts:ExternalId`: the `RoleSessionName` and `ExternalId` an `AssumeRole` request
+  passes, as given, for the caller's identity-based policies, permissions boundary, session policy and SCPs, as
+  the role's trust policy reads them (see [STS](sts.md)); `sts:ExternalId` is absent when the request passes none.
+  The actions and request members come from the same `request-condition-keys.json`.
+  `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are not signed, so no identity-based policy is
+  evaluated for them. `sts:SourceIdentity`, `sts:TransitiveTagKeys`, `aws:RequestTag/<key>` and `aws:TagKeys`
+  are not populated for `AssumeRole`: Floci does not model source identity or session tags.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor
@@ -3895,6 +3959,26 @@ Four deviations to be aware of:
   service-linked mark comes from the action that minted the role rather than from its path. Such
   a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
 
+## Service-linked role refusals
+
+A service-linked role is immutable, and this package refuses eleven actions on one. Only one of
+those refusals is recorded, and it is worded differently from the rest: `UpdateRole` changing
+`MaxSessionDuration` answers `UnmodifiableEntity` 400 with `<roleName> is an AWS service linked
+role, max session duration cannot be changed.`, recorded 2026-10-29, where the clause names the
+change refused rather than the service the role is linked to.
+
+The other ten keep this package's own sentence, `Role <name> is a service-linked role for
+<principal>; request the change through that service.` Nothing records them, the clause AWS would
+write for each cannot be inferred from the one that is recorded, and AWS may not refuse all of them
+this way at all, so inventing ten clauses would put words in AWS's mouth. A recording for any of
+them moves that action alone. The same guard stands on one path no IAM action reaches, the policy
+replacement an IAM Identity Center permission set provisions a role through, which is why ten
+actions carry the sentence where eleven call sites test the mark.
+
+The description is not one of the eleven: AWS documents it as editable on any role, and both
+`UpdateRole` carrying only a description and `UpdateRoleDescription` are taken here, with the guard
+standing on the duration.
+
 ## Partitions
 
 IAM is global, so its ARNs take the partition of the region a request is signed for:
@@ -3910,6 +3994,7 @@ of the role it was issued for, whatever region later calls are signed for. See [
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
 | `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
+| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` | `floci` | Access key ID of the seeded deployer's key: `floci`, or 16 to 128 word characters, which make it deletable |
 | `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` | _(unset)_ | Seed an account alias at startup; unset means the account has no alias |
 | `FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH` | _(unset)_ | A JSON file of partner account id to boundary ARN to policy document, standing in for the permissions boundaries AWS registers for a delegation partner by email; unset means none is registered |
 

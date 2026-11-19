@@ -62,7 +62,7 @@ public class Route53ResolverJsonHandler {
                         service.deleteResolverRule(text(request, "ResolverRuleId"), region));
                 case "GetResolverRule" -> resolverRuleResponse(
                         service.getResolverRule(text(request, "ResolverRuleId"), region));
-                case "ListResolverRules" -> handleListResolverRules(region);
+                case "ListResolverRules" -> handleListResolverRules(request, region);
                 case "UpdateResolverRule" -> resolverRuleResponse(
                         service.updateResolverRule(text(request, "ResolverRuleId"), request.path("Config"), region));
 
@@ -73,6 +73,11 @@ public class Route53ResolverJsonHandler {
                 case "GetResolverRuleAssociation" -> resolverRuleAssociationResponse(
                         service.getResolverRuleAssociation(text(request, "ResolverRuleAssociationId"), region));
                 case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations(region);
+
+                case "UpdateResolverDnssecConfig" -> dnssecConfigResponse(service.updateResolverDnssecConfig(
+                        request, region, accountId));
+                case "GetResolverDnssecConfig" -> dnssecConfigResponse(service.getResolverDnssecConfig(
+                        text(request, "ResourceId"), region));
 
                 case "TagResource" -> {
                     service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);
@@ -171,10 +176,10 @@ public class Route53ResolverJsonHandler {
         return Response.ok(objectMapper.createObjectNode().set("ResolverRule", rule)).build();
     }
 
-    private Response handleListResolverRules(String region) {
+    private Response handleListResolverRules(JsonNode request, String region) {
         ObjectNode result = objectMapper.createObjectNode();
         ArrayNode rules = result.putArray("ResolverRules");
-        for (ObjectNode rule : service.listResolverRules(region)) {
+        for (ObjectNode rule : service.listResolverRules(request.get("Filters"), region)) {
             rules.add(rule);
         }
         return Response.ok(result).build();
@@ -194,5 +199,9 @@ public class Route53ResolverJsonHandler {
             associations.add(association);
         }
         return Response.ok(result).build();
+    }
+
+    private Response dnssecConfigResponse(ObjectNode config) {
+        return Response.ok(objectMapper.createObjectNode().set("ResolverDNSSECConfig", config)).build();
     }
 }

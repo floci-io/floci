@@ -19,7 +19,7 @@ class DsqlStatementsTest {
 
         assertEquals(1, statements.size());
         assertEquals("SELECT job_id FROM sys.create_index_async($dsql$CREATE UNIQUE INDEX  IF NOT EXISTS t_u"
-                + " ON probe.t (n) WHERE n > 0$dsql$, 't_u', 'probe.t')", statements.get(0).sql());
+                + " ON probe.t (n) WHERE n > 0$dsql$, E't_u', E'probe.t')", statements.get(0).sql());
         assertNull(statements.get(0).commandTag());
     }
 
@@ -29,10 +29,10 @@ class DsqlStatementsTest {
                 "AWS IAM GRANT App_Role TO 'arn:aws:iam::123456789012:role/app';"
                         + " aws iam revoke \"Mixed\" from 'arn:aws:iam::123456789012:role/o''x'");
 
-        assertEquals("CALL sys.aws_iam_grant('app_role', 'arn:aws:iam::123456789012:role/app')",
+        assertEquals("CALL sys.aws_iam_grant(E'app_role', E'arn:aws:iam::123456789012:role/app')",
                 statements.get(0).sql());
         assertEquals("AWS IAM GRANT", statements.get(0).commandTag());
-        assertEquals("CALL sys.aws_iam_revoke('Mixed', 'arn:aws:iam::123456789012:role/o''x')",
+        assertEquals("CALL sys.aws_iam_revoke(E'Mixed', E'arn:aws:iam::123456789012:role/o''x')",
                 statements.get(1).sql());
         assertEquals("AWS IAM REVOKE", statements.get(1).commandTag());
     }
@@ -115,10 +115,10 @@ class DsqlStatementsTest {
 
     @Test
     void dropRoleBecomesTheCallThatRefusesAMappedRole() {
-        assertEquals("CALL sys.drop_roles(ARRAY['app_role', 'Mixed']::text[], false)",
+        assertEquals("CALL sys.drop_roles(ARRAY[E'app_role', E'Mixed']::text[], false)",
                 DsqlStatements.rewrite("DROP ROLE App_Role, \"Mixed\"").get(0).sql());
         DsqlStatements.Statement user = DsqlStatements.rewrite("drop user if exists u").get(0);
-        assertEquals("CALL sys.drop_roles(ARRAY['u']::text[], true)", user.sql());
+        assertEquals("CALL sys.drop_roles(ARRAY[E'u']::text[], true)", user.sql());
         assertEquals("DROP ROLE", user.commandTag());
         assertEquals("DROP ROLE", DsqlStatements.rewrite("DROP GROUP g").get(0).commandTag());
     }
@@ -205,7 +205,7 @@ class DsqlStatementsTest {
         DsqlStatements.Query rewritten = DsqlStatements.rewriteQuery(
                 "SELECT 1; AWS IAM GRANT app TO 'arn:aws:iam::123456789012:role/app'");
 
-        assertEquals("SELECT 1;\nCALL sys.aws_iam_grant('app', 'arn:aws:iam::123456789012:role/app')",
+        assertEquals("SELECT 1;\nCALL sys.aws_iam_grant(E'app', E'arn:aws:iam::123456789012:role/app')",
                 rewritten.sql());
         assertEquals(Arrays.asList(null, "AWS IAM GRANT"), rewritten.commandTags());
         assertEquals(true, rewritten.overridesTags());

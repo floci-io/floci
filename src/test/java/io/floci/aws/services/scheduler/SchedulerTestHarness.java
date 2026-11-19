@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.scheduler.model.Schedule;
 import io.floci.aws.services.sqs.SqsService;
 import io.restassured.response.Response;
@@ -113,12 +114,14 @@ final class SchedulerTestHarness {
         Schedule schedule = schedulerService.getSchedule(scheduleName, null, REGION);
         SchedulerService scopedSchedulerService = mock(SchedulerService.class);
         when(scopedSchedulerService.listAllSchedules()).thenReturn(List.of(schedule));
-        return track(new ScheduleDispatcher(scopedSchedulerService, scheduleInvoker, sqsService, config));
+        return track(new ScheduleDispatcher(scopedSchedulerService, scheduleInvoker, sqsService, config,
+                new RegionResolver(config)));
     }
 
     /** A dispatcher over every schedule the service holds. */
     ScheduleDispatcher unscopedDispatcher() {
-        return track(new ScheduleDispatcher(schedulerService, scheduleInvoker, sqsService, config));
+        return track(new ScheduleDispatcher(schedulerService, scheduleInvoker, sqsService, config,
+                new RegionResolver(config)));
     }
 
     String createStateMachine(String name, String definition) {

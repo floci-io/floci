@@ -592,12 +592,17 @@ restores, point-in-time copies and read replicas. It also survives persistent, h
 reloads. Legacy records without the member retain the existing `gp2` fallback.
 
 Storage type changes apply immediately to control-plane metadata; the backing container volume's
-performance is unchanged. `Iops`, `StorageThroughput` and `MultiAZ` changes remain unimplemented.
+performance is unchanged. `MultiAZ` changes remain unimplemented. `Iops` and `StorageThroughput` are stored from Create and
+Modify and described for the storage types that carry them (`Iops` on io1, io2 and gp3, throughput on gp3);
+every other type reports `StorageThroughput` as `0`; a gp3 instance that named neither reports the
+[gp3 baseline](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#gp3-storage).
+`Iops` on a type without provisioned IOPS (`Iops=0` is allowed) and `StorageThroughput` on any type but gp3 are
+refused with `InvalidParameterCombination`; a create that names `Iops` and no type defaults to io1.
 Omitted create requests retain Floci's existing `gp2` default, which differs from the current
 [AWS create default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html).
 Floci's snapshot and point-in-time copies inherit the source type when the request omits it, rather
 than applying the [AWS restore default](https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_RestoreDBInstanceFromDBSnapshot.html).
-Floci does not enforce every engine-specific storage allocation, IOPS restriction or regional
+Floci does not enforce every engine-specific storage allocation, IOPS range or ratio, or regional
 storage-type availability. Magnetic `standard` storage is refused.
 
 ### Storage autoscaling threshold changes
@@ -691,10 +696,22 @@ one only Aurora has, is skipped with a warning in the database log. A formula va
 `require_secure_transport` and `skip_grant_tables`, which would lock out Floci's proxy (it talks
 to the server without TLS). When the server refuses a value and stops, the instance, or every
 member of the cluster, reports `incompatible-parameters` and Floci logs the server's error; correct
-the group and reboot to start it again. A PostgreSQL or Aurora PostgreSQL database takes one value
-from its groups, layered and applied the same way: `rds.logical_replication` of `1` starts the
-server with `wal_level=logical`, as on RDS. Its other parameter group values, and those of SQL
-Server, are not applied yet.
+the group and reboot to start it again. A PostgreSQL or Aurora PostgreSQL database takes two values
+from its groups. `rds.logical_replication` of `1`, layered and applied the same way, starts the
+server with `wal_level=logical`, as on RDS. `rds.force_ssl` is described below. Its other parameter
+group values, and those of SQL Server, are not applied yet.
+
+With `rds.force_ssl` set to `1` in a PostgreSQL instance's DB parameter group, or in an Aurora
+PostgreSQL cluster's DB cluster parameter group, the auth proxy refuses a connection that does not
+negotiate TLS, as AWS does, with `FATAL: no pg_hba.conf entry for host "...", user "...",
+database "...", no encryption` (SQLSTATE `28000`). The value is read for each new connection, so
+a change to the group applies without a reboot, as the parameter is dynamic on AWS. Floci keeps no
+pending-reboot state, so a change made with `ApplyMethod=pending-reboot`, or a newly associated
+group, also applies from the next connection, where AWS waits for a reboot. An Aurora cluster and
+its members read the value from the DB cluster parameter group only. Floci's
+default parameter groups hold no values, so a database without the override accepts plaintext
+connections even where AWS's default groups set `rds.force_ssl` to `1`: RDS for PostgreSQL 15 and
+later, and Aurora PostgreSQL 17 and later (Aurora PostgreSQL 16 and earlier default to `0`).
 
 ## Option Groups
 
@@ -1316,7 +1333,8 @@ a non-CA server certificate followed by Floci's shared root CA, so strict TLS
 clients can validate an end-entity certificate rather than being asked to accept a CA as a server.
 The server certificate's Subject Alternative Names cover every advertised DB instance, cluster,
 or RDS Proxy host: the Docker bridge IP, `host.docker.internal`, `localhost`, or whatever
-`rds.endpointHost` resolves to.
+`rds.endpointHost` resolves to. A PostgreSQL database whose parameter group sets `rds.force_ssl`
+to `1` refuses connections that do not negotiate TLS; see [Parameter groups](#parameter-groups).
 
 The shared CA is the same one used by ACM, IoT, and EKS. It is persisted at
 `{storage.persistent-path}/tls/floci-root-ca.crt`, with its owner-only private key in

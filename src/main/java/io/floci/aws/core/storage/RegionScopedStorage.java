@@ -53,6 +53,18 @@ public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
                 .or(() -> regionlessHere(key) ? delegate.get(key) : Optional.empty());
     }
 
+    /**
+     * The value {@code region}'s view holds under {@code key} in {@code accountId}, whatever the request's account and
+     * Region, read in place as {@link AccountAwareStorageBackend#readInAccount} reads it: for a lookup that must leave
+     * the store as it is, as IAM's reads of the tags of the resource an ARN names must. A regionless key is read for
+     * the default Region only, as {@link #get} reads it there.
+     */
+    public Optional<V> readInAccount(String accountId, String region, String key) {
+        return AccountAwareStorageBackend.readInAccount(delegate, accountId, prefix(region) + key)
+                .or(() -> regionlessIn(region, key)
+                        ? AccountAwareStorageBackend.readInAccount(delegate, accountId, key) : Optional.empty());
+    }
+
     @Override
     public void delete(String key) {
         if (regionlessHere(key)) {
@@ -70,6 +82,24 @@ public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
             }
         }
         return values;
+    }
+
+    /** A value of {@link #scanEveryRegion}: the Region whose view holds it, and its key there. */
+    public record RegionEntry<V>(String region, String key, V value) {}
+
+    /**
+     * The request's account's values of every Region, each with the Region whose view holds it, a regionless key's
+     * being the default Region's: for a worker that acts on every Region's resources, each in its own Region.
+     */
+    public List<RegionEntry<V>> scanEveryRegion() {
+        List<RegionEntry<V>> entries = new ArrayList<>();
+        for (String stored : delegate.keys()) {
+            boolean prefixed = regionPrefixed(stored);
+            String region = prefixed ? stored.substring(0, stored.indexOf('/')) : regions.getDefaultRegion();
+            String key = prefixed ? stored.substring(region.length() + 1) : stored;
+            delegate.get(stored).ifPresent(value -> entries.add(new RegionEntry<>(region, key, value)));
+        }
+        return entries;
     }
 
     @Override
@@ -128,19 +158,28 @@ public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
     }
 
     private String prefix() {
-        return regions.getRegion() + "/";
+        return prefix(regions.getRegion());
+    }
+
+    private static String prefix(String region) {
+        return region + "/";
     }
 
     private boolean defaultRegion() {
         return regions.getRegion().equals(regions.getDefaultRegion());
     }
 
-    /**
-     * Whether {@code key} may also be stored regionless, as it was before this view, and is read here that way:
-     * only in the default Region, and only when it doesn't start with a Region, as a stored key of this view does.
-     */
     private boolean regionlessHere(String key) {
-        return key != null && defaultRegion() && !regionPrefixed(key);
+        return regionlessIn(regions.getRegion(), key);
+    }
+
+    /**
+     * Whether {@code key} may also be stored regionless, as it was before this view, and is read that way in
+     * {@code region}: only in the default Region, and only when it doesn't start with a Region, as a stored key of this
+     * view does.
+     */
+    private boolean regionlessIn(String region, String key) {
+        return key != null && region.equals(regions.getDefaultRegion()) && !regionPrefixed(key);
     }
 
     /** Whether {@code key} starts with a Region and a slash, as every key this view stores does. */

@@ -481,7 +481,10 @@ through 2^360. They reject incomplete `StatisticValues` sets and datums combinin
 `StatisticValues` before storing any part of the batch. Missing statistics return `MissingParameter`;
 invalid values and non-object statistics return `InvalidParameterValue`; combining scalar and
 statistics returns `InvalidParameterCombination`. JSON bodies use the corresponding SDK exception
-shape names. The console's supported numeric values use the same bounds.
+shape names. `Values` accepts 1 to 150 numeric samples with optional matching, nonnegative
+`Counts`; omitted counts default to one. The public JSON and Query APIs normalize these weighted
+samples without expanding their counts and reject combinations with `Value` or `StatisticValues`.
+The console's supported numeric values use the same bounds.
 
 **Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
 
@@ -560,6 +563,15 @@ Updating a metric alarm preserves its current state, state reason, state timesta
 Tags supplied to `PutMetricAlarm` apply only when creating an alarm; use `TagResource` and
 `UntagResource` to change existing tags. `SetAlarmState` requires `StateReason` and rejects
 missing or unknown state values before changing the alarm.
+
+`PutMetricAlarm` refuses an `EvaluationInterval` on an alarm configured with `MetricName` or `Metrics`
+with `InvalidParameterCombination`: the API reference allows it only with `EvaluationCriteria`, which
+Floci does not model and accepts without keeping the interval. Over Query and through CloudFormation an
+integer outside 10 to 3600, of any size, is a `ValidationError`; a value that is not an integer is an
+`InvalidParameterValue` over Query, a `SerializationException` over JSON and CBOR (as is a number beyond
+32 bits) and a failed resource through CloudFormation. AWS documents none of these answers. An
+`AWS::CloudWatch::Alarm` fails the same way on create and on update, so a stack that sets the property
+cannot change that alarm until its template drops it.
 
 `StateTransitionedTimestamp` records when an alarm's `StateValue` last changed, while
 `StateUpdatedTimestamp` moves on every state update, including one that keeps the value.

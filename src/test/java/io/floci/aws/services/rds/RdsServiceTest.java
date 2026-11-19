@@ -7894,6 +7894,47 @@ class RdsServiceTest {
         return rdsService.createDbClusterSnapshot(snapshotId, "aurora-cluster", Map.of("owner", "platform"));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void clusterSnapshotCopyRefusesMissingDataWithoutCreatingATarget(boolean mockMode) {
+        when(rdsConfig.mock()).thenReturn(mockMode);
+        Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
+        StorageFactory factory = mock(StorageFactory.class);
+        when(factory.create(eq("rds"), any(), any())).thenAnswer(invocation -> stores.computeIfAbsent(
+                invocation.getArgument(1), name -> AccountAwareStorageBackend.inMemory("123456789012")));
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                factory, null, null, null, null, kmsService, null);
+        service.createDbCluster("copy-source", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("CLUSTER_DUMP");
+        DbClusterSnapshot source = service.createDbClusterSnapshot("source-snapshot", "copy-source", Map.of());
+        stores.get("rds-snapshot-data.json").clear();
+
+        AwsException failure = assertThrows(AwsException.class, () ->
+                service.copyDbClusterSnapshot(source.getDbClusterSnapshotArn(), "target-snapshot", false, null));
+
+        assertEquals("DBClusterSnapshotNotFoundFault", failure.getErrorCode());
+        assertEquals(404, failure.getHttpStatus());
+        assertEquals(1, service.describeDbClusterSnapshots("source-snapshot", null, null).size());
+        assertEquals("DBClusterSnapshotNotFoundFault", assertThrows(AwsException.class, () ->
+                service.describeDbClusterSnapshots("target-snapshot", null, null)).getErrorCode());
+        assertTrue(stores.get("rds-snapshot-data.json").scan(key -> true).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "CLUSTER_DUMP"})
+    void clusterSnapshotCopyPreservesPresentDataIncludingEmptyPayloads(String payload) {
+        rdsService.createDbCluster("copy-source", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn(payload);
+        rdsService.createDbClusterSnapshot("source-snapshot", "copy-source", Map.of());
+
+        DbClusterSnapshot copy = rdsService.copyDbClusterSnapshot("source-snapshot", "target-snapshot", false, null);
+
+        assertEquals("available", copy.getStatus());
+        assertEquals(payload, rdsService.snapshotExportSource(copy.getDbClusterSnapshotArn(), "us-east-1").sqlDump());
+    }
+
     @Test
     void createDbClusterSnapshotRecordsTheClusterAndItsData() {
         DbClusterSnapshot snapshot = clusterSnapshotOfNewCluster("csnap");
@@ -8888,6 +8929,46 @@ class RdsServiceTest {
         assertEquals("default", targetGroup.getTargetGroupName());
         assertTrue(targetGroup.getTargets().isEmpty());
         assertTrue(targetGroup.getTargetGroupArn().contains(":target-group:prx-tg-"));
+    }
+
+    @Test
+    void proxyAndItsTargetGroupSurviveRestartThroughJsonStorage(@TempDir Path tempDir) {
+        Path proxyFile = tempDir.resolve("rds-proxies.json");
+        Path targetGroupFile = tempDir.resolve("rds-proxy-target-groups.json");
+        TypeReference<Map<String, DbProxy>> proxyType = new TypeReference<>() {};
+        TypeReference<Map<String, DbProxyTargetGroup>> targetGroupType = new TypeReference<>() {};
+        RdsService first = proxyStoreService(regionResolver, config,
+                new PersistentStorage<>(proxyFile, proxyType),
+                new PersistentStorage<>(targetGroupFile, targetGroupType),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        DbProxy proxy = first.createDbProxy("restart-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        DbProxyTargetGroup targetGroup = first.configureDbProxyTargetGroup("restart-proxy", "default",
+                70, 30, 45, "SET search_path TO app", List.of("EXCLUDE_VARIABLE_SETS"), "us-east-1");
+
+        PersistentStorage<String, DbProxy> reloadedProxies = new PersistentStorage<>(proxyFile, proxyType);
+        reloadedProxies.load();
+        PersistentStorage<String, DbProxyTargetGroup> reloadedTargetGroups =
+                new PersistentStorage<>(targetGroupFile, targetGroupType);
+        reloadedTargetGroups.load();
+        assertEquals("restart-proxy",
+                reloadedTargetGroups.get("us-east-1::restart-proxy").orElseThrow().getDbProxyName());
+        RdsService restarted = proxyStoreService(regionResolver, config, reloadedProxies, reloadedTargetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+
+        DbProxy restoredProxy = restarted.getDbProxy("restart-proxy");
+        assertEquals(proxy.getDbProxyArn(), restoredProxy.getDbProxyArn());
+        assertEquals(proxy.getProxyPort(), restoredProxy.getProxyPort());
+        DbProxyTargetGroup restoredGroup =
+                restarted.describeDbProxyTargetGroups("restart-proxy").iterator().next();
+        assertEquals("restart-proxy", restoredGroup.getDbProxyName());
+        assertEquals(targetGroup.getTargetGroupArn(), restoredGroup.getTargetGroupArn());
+        assertEquals(70, restoredGroup.getMaxConnectionsPercent());
+        assertEquals(30, restoredGroup.getMaxIdleConnectionsPercent());
+        assertEquals(45, restoredGroup.getConnectionBorrowTimeout());
+        assertEquals("SET search_path TO app", restoredGroup.getInitQuery());
+        assertEquals(List.of("EXCLUDE_VARIABLE_SETS"), restoredGroup.getSessionPinningFilters());
     }
 
     @Test

@@ -21,17 +21,23 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -42,8 +48,9 @@ import static org.mockito.Mockito.when;
 /**
  * The links GetDashboardForJobRun and GetResourceDashboard give in the docker runner mode
  * ({@link EmrServerlessAppUis}): while a Spark run's attempt, or a session, has not ended, its driver's live Spark UI,
- * on a host of its own that routes to where Floci reaches the driver's UI, once the driver runs; any other, Floci's
- * page.
+ * on a host of its own that routes to where Floci reaches the driver's UI, once the driver runs; once it has ended, for
+ * 30 days, its kept history's Spark History Server, which starts on a link and stops once no link to it is valid; any
+ * other, Floci's page.
  */
 class EmrServerlessAppUisTest {
 
@@ -54,9 +61,12 @@ class EmrServerlessAppUisTest {
     private static final String PAGE = BASE_URL + EmrServerlessDashboards.PATH + "?";
     private static final ContainerLifecycleManager.EndpointInfo DRIVER_UI =
             new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 41040);
+    private static final ContainerLifecycleManager.EndpointInfo HISTORY_SERVER =
+            new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 41808);
 
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private final FakeDriverRunner runner = new FakeDriverRunner();
+    private final FakeHistories histories = new FakeHistories();
     private final Executor threads = task -> Thread.ofPlatform().daemon().start(task);
     private final MutableClock clock = new MutableClock();
     private final RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
@@ -78,7 +88,7 @@ class EmrServerlessAppUisTest {
                 jobRuns, iamService, regionResolver, null, objectMapper, clock, BASE_URL, runner, threads, null,
                 (host, port) -> null);
         appUis = new EmrServerlessAppUis(new EmrServerlessDashboards(BASE_URL, clock, new byte[32]), jobRuns, sessions,
-                regionResolver, BASE_URL + "/", clock);
+                histories, regionResolver, BASE_URL + "/", clock);
     }
 
     @AfterEach
@@ -194,6 +204,148 @@ class EmrServerlessAppUisTest {
     }
 
     @Test
+    void onceItsRunHasEndedItsLinkOpensItsKeptHistoryUntilItsThirtyDaysHavePassed() {
+        String applicationId = application("SPARK");
+        String jobRunId = jobRuns.startJobRun(applicationId, sparkRun()).getJobRunId();
+        awaitRun(applicationId, jobRunId, "RUNNING");
+        // Its driver kept its event logs, in the volume the runner made for them.
+        assertTrue(runner.jobs.get(jobRunId).keepsEventLogs());
+        histories.keptRuns.add(jobRunId);
+        runner.end(jobRunId).complete(SparkJobRunner.Outcome.exitedWith(0));
+        awaitRun(applicationId, jobRunId, "SUCCESS");
+
+        URI url = URI.create(appUis.jobRunUrl(applicationId, jobRunId, 1));
+
+        assertTrue(url.getAuthority().matches("[a-z2-7]{26}-18080\\.emr-serverless-ui\\.localhost:4566"),
+                url.toString());
+        AppUiRoute starting = appUis.route(url.getAuthority(), "http");
+        assertEquals(503, starting.status());
+        assertEquals(EmrServerlessAppUis.HISTORY_NOT_READY, starting.refusal());
+        // The server runs the release's image, on the runs' network.
+        assertEquals(List.of("server " + jobRunId + " public.ecr.aws/emr-serverless/spark/emr-7.13.0:latest"),
+                histories.events);
+        histories.servers.put(jobRunId, HISTORY_SERVER);
+        AppUiRoute route = appUis.route(url.getAuthority(), "http");
+        assertNull(route.refusal());
+        assertEquals(41808, route.port());
+        assertEquals(EmrServerlessAppUis.HISTORY_NOT_READY, route.unanswered());
+        // A live link's port is none of a history link's.
+        assertEquals(404, appUis.route(url.getAuthority().replace("-18080.", "-4040."), "http").status());
+
+        clock.advance(EmrServerlessHistories.KEPT);
+        assertTrue(appUis.jobRunUrl(applicationId, jobRunId, 1).startsWith(PAGE));
+    }
+
+    @Test
+    void aRunThatWritesNoEventLogsWhereTheyAreKeptKeepsNoneAndASessionDoes() {
+        String applicationId = application("SPARK");
+        StartJobRunRequest unmanaged = sparkRun();
+        unmanaged.setConfigurationOverrides(Map.of("monitoringConfiguration",
+                Map.of("managedPersistenceMonitoringConfiguration", Map.of("enabled", false))));
+        String unmanagedRun = jobRuns.startJobRun(applicationId, unmanaged).getJobRunId();
+        StartJobRunRequest off = sparkRun();
+        off.getJobDriver().getSparkSubmit().setSparkSubmitParameters("--conf spark.eventLog.enabled=false");
+        String offRun = jobRuns.startJobRun(applicationId, off).getJobRunId();
+        StartJobRunRequest elsewhere = sparkRun();
+        elsewhere.getJobDriver().getSparkSubmit().setSparkSubmitParameters("--conf spark.eventLog.dir=s3://logs/");
+        String elsewhereRun = jobRuns.startJobRun(applicationId, elsewhere).getJobRunId();
+        StartJobRunRequest same = sparkRun();
+        same.getJobDriver().getSparkSubmit().setSparkSubmitParameters(
+                "--conf spark.eventLog.dir=file:/var/log/spark/apps/");
+        String sameRun = jobRuns.startJobRun(applicationId, same).getJobRunId();
+        String sessionId = sessions.startSession(applicationId, sessionRequest()).getSessionId();
+        for (String run : List.of(unmanagedRun, offRun, elsewhereRun, sameRun)) {
+            awaitRun(applicationId, run, "RUNNING");
+        }
+        awaitSession(applicationId, sessionId, "IDLE");
+
+        assertFalse(runner.jobs.get(unmanagedRun).keepsEventLogs());
+        // A run that turns its event logs off, or sends them elsewhere, leaves nothing for a kept history to show.
+        assertFalse(runner.jobs.get(offRun).keepsEventLogs());
+        assertFalse(runner.jobs.get(elsewhereRun).keepsEventLogs());
+        assertTrue(runner.jobs.get(sameRun).keepsEventLogs());
+        assertTrue(runner.jobs.get(sessionId).keepsEventLogs());
+    }
+
+    @Test
+    void whereDockerCannotTellWhetherAHistoryIsKeptItsLinkAsksToTryAgain() {
+        String applicationId = application("SPARK");
+        String jobRunId = jobRuns.startJobRun(applicationId, sparkRun()).getJobRunId();
+        awaitRun(applicationId, jobRunId, "RUNNING");
+        runner.end(jobRunId).complete(SparkJobRunner.Outcome.exitedWith(0));
+        awaitRun(applicationId, jobRunId, "SUCCESS");
+        histories.keptFailure = new IllegalStateException("Docker is not answering");
+
+        URI url = URI.create(appUis.jobRunUrl(applicationId, jobRunId, 1));
+
+        // Not taken for a history that has gone.
+        assertTrue(url.getAuthority().contains("-18080."), url.toString());
+        AppUiRoute route = appUis.route(url.getAuthority(), "http");
+        assertEquals(503, route.status());
+        assertEquals(EmrServerlessAppUis.HISTORY_NOT_READY, route.refusal());
+    }
+
+    @Test
+    void theContainerServingAKeptHistoryStopsOnceNoLinkToItIsValid() {
+        String applicationId = application("SPARK");
+        String jobRunId = jobRuns.startJobRun(applicationId, sparkRun()).getJobRunId();
+        awaitRun(applicationId, jobRunId, "RUNNING");
+        histories.keptRuns.add(jobRunId);
+        runner.end(jobRunId).complete(SparkJobRunner.Outcome.exitedWith(0));
+        awaitRun(applicationId, jobRunId, "SUCCESS");
+        appUis.jobRunUrl(applicationId, jobRunId, 1);
+
+        appUis.reap(jobRunId);
+        assertFalse(histories.events.contains("stopped " + jobRunId));
+        clock.advance(EmrServerlessDashboards.VALIDITY);
+        appUis.reap(jobRunId);
+
+        assertTrue(histories.events.contains("stopped " + jobRunId));
+        // The histories within their 30 days stay, the run's among them.
+        assertTrue(histories.lastSweep.test(jobRunId));
+    }
+
+    @Test
+    void aKeptHistoryGoesOnceItsThirtyDaysHavePassedAndEveryHistoryOnAReset() {
+        String applicationId = application("SPARK");
+        String jobRunId = jobRuns.startJobRun(applicationId, sparkRun()).getJobRunId();
+        awaitRun(applicationId, jobRunId, "RUNNING");
+        appUis.removeExpiredHistories();
+        // A run that has not ended keeps its history, as its driver writes it.
+        assertTrue(histories.lastSweep.test(jobRunId));
+        runner.end(jobRunId).complete(SparkJobRunner.Outcome.exitedWith(0));
+        awaitRun(applicationId, jobRunId, "SUCCESS");
+
+        clock.advance(EmrServerlessHistories.KEPT.minusSeconds(1));
+        appUis.removeExpiredHistories();
+        assertTrue(histories.lastSweep.test(jobRunId));
+        clock.advance(Duration.ofSeconds(2));
+        appUis.removeExpiredHistories();
+        assertFalse(histories.lastSweep.test(jobRunId));
+        // A run or session that has gone has no history to keep.
+        assertFalse(histories.lastSweep.test("00fnosuchrun0001"));
+
+        appUis.clear();
+        assertFalse(histories.lastSweep.test(jobRunId));
+    }
+
+    @Test
+    void anEndedSessionsLinkOpensItsKeptHistory() {
+        String applicationId = application("SPARK");
+        String sessionId = sessions.startSession(applicationId, sessionRequest()).getSessionId();
+        awaitSession(applicationId, sessionId, "IDLE");
+        histories.keptRuns.add(sessionId);
+        histories.servers.put(sessionId, HISTORY_SERVER);
+        sessions.terminateSession(applicationId, sessionId);
+        Session terminated = awaitSession(applicationId, sessionId, "TERMINATED");
+
+        URI url = URI.create(appUis.sessionUrl(applicationId, terminated));
+
+        assertTrue(url.getAuthority().contains("-18080.emr-serverless-ui."), url.toString());
+        assertEquals(41808, appUis.route(url.getAuthority(), "http").port());
+    }
+
+    @Test
     void inTheImmediateRunnerModeEveryLinkOpensFlocisPage() {
         IamService iamService = mock(IamService.class);
         when(iamService.resolveCallerArn(any())).thenReturn(Optional.empty());
@@ -201,7 +353,7 @@ class EmrServerlessAppUisTest {
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), applications, iamService, regionResolver, null,
                 objectMapper, 60, clock);
         EmrServerlessAppUis pages = new EmrServerlessAppUis(new EmrServerlessDashboards(BASE_URL, clock,
-                new byte[32]), immediate, sessions, regionResolver, BASE_URL, clock);
+                new byte[32]), immediate, sessions, histories, regionResolver, BASE_URL, clock);
         String applicationId = application("SPARK");
         String jobRunId = immediate.startJobRun(applicationId, sparkRun()).getJobRunId();
 
@@ -274,6 +426,46 @@ class EmrServerlessAppUisTest {
         return request;
     }
 
+    /** Kept histories as Docker would hold them: which are kept, and which have a server that answers. */
+    private static final class FakeHistories extends EmrServerlessHistories {
+        final Set<String> keptRuns = ConcurrentHashMap.newKeySet();
+        final Map<String, ContainerLifecycleManager.EndpointInfo> servers = new ConcurrentHashMap<>();
+        final List<String> events = new CopyOnWriteArrayList<>();
+        volatile Predicate<String> lastSweep;
+        volatile RuntimeException keptFailure;
+
+        FakeHistories() {
+            super(null, null, null, Runnable::run);
+        }
+
+        @Override
+        boolean kept(String runId) {
+            if (keptFailure != null) {
+                throw keptFailure;
+            }
+            return keptRuns.contains(runId);
+        }
+
+        @Override
+        Optional<ContainerLifecycleManager.EndpointInfo> server(String runId, String accountId, String region,
+                                                               String image, String network) {
+            if (!servers.containsKey(runId)) {
+                events.add("server " + runId + " " + image);
+            }
+            return Optional.ofNullable(servers.get(runId));
+        }
+
+        @Override
+        void stop(String runId) {
+            events.add("stopped " + runId);
+        }
+
+        @Override
+        void removeAllBut(Predicate<String> kept) {
+            lastSweep = kept;
+        }
+    }
+
     /**
      * Runs each driver as the Docker runner would, its Spark UI reachable from once it starts until it ends: once
      * {@link #starting} completes, and until it is stopped or told how it ends.
@@ -281,10 +473,12 @@ class EmrServerlessAppUisTest {
     private static final class FakeDriverRunner implements SparkJobRunner {
         volatile CompletableFuture<Void> starting = CompletableFuture.completedFuture(null);
         final Map<String, CompletableFuture<Outcome>> ends = new ConcurrentHashMap<>();
+        final Map<String, Job> jobs = new ConcurrentHashMap<>();
         private final Map<String, ContainerLifecycleManager.EndpointInfo> driverUis = new ConcurrentHashMap<>();
 
         @Override
         public Outcome run(Job job, Progress progress) {
+            jobs.put(job.runId(), job);
             starting.join();
             if (progress.cancelled()) {
                 return Outcome.halted();

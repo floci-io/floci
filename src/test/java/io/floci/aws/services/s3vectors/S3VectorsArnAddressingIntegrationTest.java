@@ -116,29 +116,52 @@ class S3VectorsArnAddressingIntegrationTest {
     }
 
     /**
-     * CreateVectorBucket and CreateIndex take a name without checking it, so what they make stays reachable by that
-     * name and by the ARN they gave it.
+     * CreateVectorBucket and CreateIndex refuse a name outside S3 Vectors' naming rules, which are the same for both,
+     * with "Invalid vector bucket name" or "Invalid index name", as it does (measured on AWS). The index name is
+     * checked before its bucket is looked for.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"Arn-name", "arn_name", "-arn-name", "arn-name-", ".arn-name", "arn-name.", "arn..name",
+            "arn.-name", "arn-.name", "192.168.5.4", "sthree-arn-name", "arn-name-s3alias", "arn-name--x-s3"})
+    void aNameOutsideTheNamingRulesIsRefusedOnCreate(String name) {
+        refused(post("/CreateVectorBucket", "{\"vectorBucketName\":\"" + name + "\"}"), "Invalid vector bucket name");
+        refused(post("/CreateIndex", index(bucketName(), name)), "Invalid index name");
+        post("/ListVectorBuckets", "{}").statusCode(200).body("vectorBuckets.vectorBucketName", not(hasItem(name)));
+    }
+
+    /** A name of fewer than 3 or more than 63 characters gets the length message first (measured on AWS). */
+    @ParameterizedTest
+    @ValueSource(ints = {2, 64})
+    void aNameOfAnotherLengthIsRefusedOnCreate(int length) {
+        String name = "a".repeat(length);
+        String limit = " failed to satisfy constraint: Member must have length between 3 and 63, inclusive";
+        refused(post("/CreateVectorBucket", "{\"vectorBucketName\":\"" + name + "\"}"),
+                "1 validation error detected. Value with length " + length + " at '/vectorBucketName'" + limit);
+        refused(post("/CreateIndex", index(bucketName(), name)),
+                "1 validation error detected. Value with length " + length + " at '/indexName'" + limit);
+    }
+
+    /**
+     * Names the rules take, though their documentation lists only letters, numbers and hyphens for a bucket: dots
+     * between labels, hyphens running together, labels of numbers only, and S3's reserved prefix {@code xn--}
+     * (measured on AWS).
      */
     @Test
-    void aBucketAndAnIndexAreReachedByTheNamesAndArnsTheyWereGiven() {
-        String bucket = "Arn_" + UUID.randomUUID().toString().substring(0, 8);
-        String arn = post("/CreateVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200)
-                .extract().path("vectorBucketArn");
+    void aNameOfDottedLabelsIsTakenOnCreate() {
+        String id = UUID.randomUUID().toString().substring(0, 8);
+        List<String> names = List.of("arn." + id + ".v2", "ar--n-" + id, "123." + id, "xn--arn-" + id);
         try {
-            String index = post("/CreateIndex", "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"My_Index\","
-                    + "\"dataType\":\"float32\",\"dimension\":2,\"distanceMetric\":\"cosine\"}").statusCode(200)
-                    .extract().path("indexArn");
-
-            post("/GetVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200)
-                    .body("vectorBucket.vectorBucketName", equalTo(bucket));
-            post("/ListIndexes", byBucketArn(arn)).statusCode(200)
-                    .body("indexes.indexName", equalTo(List.of("My_Index")));
-            post("/GetIndex", byIndexArn(index)).statusCode(200)
-                    .body("index.indexName", equalTo("My_Index"));
-            post("/DeleteIndex", byIndexArn(index)).statusCode(200);
+            for (String name : names) {
+                post("/CreateVectorBucket", "{\"vectorBucketName\":\"" + name + "\"}").statusCode(200);
+            }
+            post("/CreateIndex", index(names.getFirst(), "1.2.3")).statusCode(200);
+            post("/ListIndexes", "{\"vectorBucketName\":\"" + names.getFirst() + "\"}").statusCode(200)
+                    .body("indexes.indexName", equalTo(List.of("1.2.3")));
         } finally {
-            post("/DeleteIndex", "{\"vectorBucketName\":\"" + bucket + "\",\"indexName\":\"My_Index\"}");
-            post("/DeleteVectorBucket", "{\"vectorBucketName\":\"" + bucket + "\"}").statusCode(200);
+            post("/DeleteIndex", "{\"vectorBucketName\":\"" + names.getFirst() + "\",\"indexName\":\"1.2.3\"}");
+            for (String name : names) {
+                post("/DeleteVectorBucket", "{\"vectorBucketName\":\"" + name + "\"}");
+            }
         }
     }
 
@@ -166,7 +189,7 @@ class S3VectorsArnAddressingIntegrationTest {
 
     /**
      * A name no call could reach the bucket by, blank or with a slash, is refused on create, as S3 Vectors refuses it
-     * (measured on AWS), the length first. A bucket of a name AWS refuses otherwise is still made: see above.
+     * (measured on AWS), the length first.
      */
     @Test
     void aBucketNameNoCallCouldReachIsRefusedOnCreate() {

@@ -434,6 +434,29 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aRunThatKeepsItsEventLogsHasThemInAVolumeOfItsOwnAndAStepDoesNot() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        EmrServerlessSparkRunner runner = runner(builder);
+        String volume = EmrServerlessHistories.volume(config, "00f0000000000001");
+
+        runner.run(job(List.of("s3://bucket/jobs/app.jar"), Map.of()).keepingEventLogs(), progress);
+        runner.run(stepJob(Map.of()).keepingEventLogs(), progress);
+
+        // Where the release's image writes them, which its Spark History Server reads once it has ended.
+        verify(lifecycle).ensureVolume(eq(volume), argThat(labels ->
+                "00f0000000000001".equals(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))
+                        && EmrServerlessHistories.VOLUME_COMPONENT.equals(
+                                labels.get(ContainerStorageHelper.COMPONENT_LABEL))
+                        && ContainerStorageHelper.ownerIdentity(config).equals(
+                                labels.get(ContainerStorageHelper.OWNER_LABEL))));
+        verify(spec).withNamedVolume(volume, EmrServerlessHistories.EVENT_LOGS);
+        verify(lifecycle, never()).ensureVolume(eq(EmrServerlessHistories.volume(config, "s-1A2B3C4D5E6F7")),
+                any());
+    }
+
+    @Test
     void onTheHostsNetworkADriverServesNoUiForFloci() {
         SparkJobRunner.Job job = job(List.of("s3://bucket/jobs/app.jar"), Map.of());
 
