@@ -9,7 +9,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.security.MessageDigest;
-import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,6 +22,7 @@ import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRu
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireFamily;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireMode;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireUsage;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyMembers.members;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyService.isAes;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyService.isTdes;
 
@@ -219,29 +219,6 @@ public class PaymentCryptographyCryptoHandler {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("TranslateKeyMaterial", request);
         return service.translateKeyMaterial(region, members(request));
-    }
-
-    /** The members of a request, as the map the exchange reads. */
-    private static Map<String, Object> members(JsonNode node) {
-        Map<String, Object> out = new LinkedHashMap<>();
-        if (node == null || !node.isObject()) {
-            return out;
-        }
-        node.properties().forEach(entry -> out.put(entry.getKey(), member(entry.getValue())));
-        return out;
-    }
-
-    /** The value of a member, as the exchange reads it. */
-    private static Object member(JsonNode node) {
-        if (node.isObject()) {
-            return members(node);
-        }
-        if (node.isArray()) {
-            List<Object> values = new ArrayList<>();
-            node.forEach(value -> values.add(member(value)));
-            return values;
-        }
-        return node.asText();
     }
 
     /**
