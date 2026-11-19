@@ -822,6 +822,26 @@ class IotMqttBrokerServiceTest {
     }
 
     @Test
+    void aResetDiscardsADisconnectedPersistentSession() throws Exception {
+        startBrokerRecordingPublishes();
+        String topic = "devices/reset-persistent/commands";
+        MqttEndpoint first = persistentEndpoint("reset-persistent");
+        broker.handleEndpoint(first, false);
+        subscribeQos1(first, topic);
+        broker.disconnectClient("reset-persistent", false);
+        broker.publish(topic, "stored".getBytes(StandardCharsets.UTF_8), 1);
+
+        broker.clear();
+        broker.publish(topic, "after-reset".getBytes(StandardCharsets.UTF_8), 1);
+        MqttEndpoint reconnected = persistentEndpoint("reset-persistent");
+        broker.handleEndpoint(reconnected, false);
+
+        verify(reconnected).accept(eq(false), any(MqttProperties.class));
+        verify(reconnected, never()).publish(eq(topic), any(), any(), anyBoolean(), anyBoolean(), anyInt(),
+                any(MqttProperties.class));
+    }
+
+    @Test
     void anEarlierSessionsExpiryDoesNotEndASessionStoredAfterIt() throws Exception {
         startBrokerRecordingPublishes();
         broker.handleEndpoint(mqtt5Endpoint("re-expiring", 1), false);

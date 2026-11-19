@@ -47,7 +47,7 @@ Current MVP 2 limitations:
 - A QoS 1 copy sent to a subscriber is never retried, and no limit applies to how many stay unacknowledged. AWS holds further copies once a client has 100 unacknowledged and retries them for up to an hour (16 minutes for MQTT 5).
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` reports live sessions only. `ListSubscriptions` also reports the subscriptions of a disconnected persistent session.
-- A persistent session does not store the QoS 1 copies that were sent but not acknowledged when its connection dropped. Stored messages are sent all at once on reconnect, not at AWS's 10 per second, do not expire by their MQTT 5 Message Expiry Interval, and are not limited by AWS's queued messages per second quota. Sessions are in memory only: a broker restart discards them.
+- A persistent session does not store the QoS 1 copies that were sent but not acknowledged when its connection dropped. Stored messages are sent all at once on reconnect, not at AWS's 10 per second, do not expire by their MQTT 5 Message Expiry Interval, and are not limited by AWS's queued messages per second quota. Sessions are in memory only: a broker restart or an emulator reset discards them.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
 - Dynamic thing groups, job rollouts, cancellations, documents from S3, and advanced job scheduling are not yet modeled. Fleet indexing has its configuration and a bounded `SearchIndex` subset, see [Fleet Indexing](#fleet-indexing).
 

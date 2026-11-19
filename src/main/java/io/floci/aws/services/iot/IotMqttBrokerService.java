@@ -227,13 +227,16 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * The broker keeps nothing in Floci storage; a reset forgets how earlier sessions ended, and
-     * suspends rules in {@link #beforeReset()}. Live sessions stay connected.
+     * The broker keeps nothing in Floci storage; a reset forgets how earlier sessions ended and
+     * discards disconnected persistent sessions, and suspends rules in {@link #beforeReset()}.
+     * Live sessions stay connected.
      */
     @Override
     public void clear() {
         synchronized (sessionLock) {
             lastDisconnects.clear();
+            storedSessions.values().forEach(stored -> vertx.cancelTimer(stored.expiryTimer()));
+            storedSessions.clear();
         }
     }
 
