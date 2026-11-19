@@ -226,16 +226,6 @@ state gets no requests until its first health check passes. When no target is
 and those in a group with health checks disabled, so a successful request alone does
 not prove that a health check passed.
 
-The healthy-target rule matches the public
-[ALB health-check contract](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html):
-while healthy targets are available, a pending replacement must not receive requests.
-The public [TargetHealth API](https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_TargetHealth.html)
-distinguishes `initial` registration or checking from `healthy` admission.
-The mixed-target HTTP and HTTPS regression holds a replacement's first real health
-probe pending, verifies document requests reach only the healthy backend, then releases
-the probe and verifies the replacement joins routing. This checks normal admission;
-it does not narrow the separate fail-open behavior described above.
-
 ### Security groups and PrivateLink
 
 Load-balancer security-group IDs are stored and returned by `CreateLoadBalancer`,
