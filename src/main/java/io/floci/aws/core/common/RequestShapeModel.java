@@ -27,10 +27,6 @@ public record RequestShapeModel(Map<String, String> operations, Map<String, Shap
      */
     public record Shape(String type, Map<String, String> members, String element, List<String> required,
             Integer minLength, Integer maxLength, String pattern) {
-
-        public Shape(String type, Map<String, String> members, String element, List<String> required) {
-            this(type, members, element, required, null, null, null);
-        }
     }
 
     /** The vendored resource {@code name}; {@code description} names it in a failure. */
