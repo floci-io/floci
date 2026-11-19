@@ -177,6 +177,40 @@ class LambdaPodSpecFactoryTest {
     }
 
     @Test
+    void repeatedNodeSelectorKeyKeepsTheLastValue() {
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(
+                List.of("workload-type=backend", "workload-type=gpu")));
+        assertThat(stringMap(spec(buildZipPod()).path("nodeSelector")))
+                .containsExactly(Map.entry("workload-type", "gpu"));
+    }
+
+    @Test
+    void labelKeyPrefixIsLimitedTo253Characters() {
+        String longestPrefix = "a".repeat(253);
+        String overlongPrefix = "a".repeat(254);
+        when(kubernetes.labels()).thenReturn(Optional.of(
+                List.of(longestPrefix + "/ok=x", overlongPrefix + "/too-long=x")));
+        when(kubernetes.tolerations()).thenReturn(Optional.of(
+                List.of(longestPrefix + "/ok:NoSchedule", overlongPrefix + "/too-long:NoSchedule")));
+        JsonNode pod = buildZipPod();
+        assertThat(stringMap(pod.path("metadata").path("labels")))
+                .containsKey(longestPrefix + "/ok")
+                .doesNotContainKey(overlongPrefix + "/too-long");
+        assertThat(elements(spec(pod).path("tolerations")))
+                .extracting(n -> n.path("key").asText())
+                .containsExactly(longestPrefix + "/ok");
+    }
+
+    @Test
+    void nodeSelectorKeyWithOverlongPrefixFailsTheColdStart() {
+        String entry = "a".repeat(254) + "/too-long=x";
+        when(kubernetes.nodeSelector()).thenReturn(Optional.of(List.of(entry)));
+        assertThatThrownBy(this::buildZipPod)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("'" + entry + "'");
+    }
+
+    @Test
     void tolerationsAreWrittenAsTheToleratedTaint() {
         when(kubernetes.tolerations()).thenReturn(Optional.of(
                 List.of("workload-type=backend:NoSchedule", "dedicated:NoExecute", "example.com/spot")));

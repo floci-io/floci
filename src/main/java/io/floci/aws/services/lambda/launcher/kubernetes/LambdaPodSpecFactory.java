@@ -33,6 +33,8 @@ public class LambdaPodSpecFactory {
     /** Label key: optional DNS-subdomain prefix (dot-separated valid segments), then a 63-char-max name. */
     private static final Pattern LABEL_KEY =
             Pattern.compile("([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?");
+    /** A label key's DNS-subdomain prefix is at most 253 characters */
+    private static final int MAX_LABEL_KEY_PREFIX_LENGTH = 253;
     /** Label value: empty, or 63-char-max alphanumeric-bounded. */
     private static final Pattern LABEL_VALUE =
             Pattern.compile("([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?");
@@ -229,7 +231,8 @@ public class LambdaPodSpecFactory {
 
     Map<String, String> podLabels(String functionName) {
         LinkedHashMap<String, String> labels =
-                keyValues(config.services().lambda().kubernetes().labels(), entry -> LOG.warnv(
+                keyValues(config.services().lambda().kubernetes().labels(),
+                        "FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS", entry -> LOG.warnv(
                         "Ignoring invalid Lambda pod label entry ''{0}'' "
                         + "(expected key=value with Kubernetes label syntax)", entry));
         // Managed labels go last so user entries can never overwrite them — the
@@ -241,7 +244,8 @@ public class LambdaPodSpecFactory {
     }
 
     Map<String, String> podNodeSelector() {
-        return keyValues(config.services().lambda().kubernetes().nodeSelector(), entry -> {
+        return keyValues(config.services().lambda().kubernetes().nodeSelector(),
+                "FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR", entry -> {
             throw new IllegalStateException("Invalid Lambda pod node selector entry '" + entry
                     + "' in FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR (expected key=value with Kubernetes label syntax)");
         });
@@ -265,7 +269,7 @@ public class LambdaPodSpecFactory {
             int eq = taint.indexOf('=');
             String key = eq >= 0 ? taint.substring(0, eq).trim() : taint;
             String value = eq >= 0 ? taint.substring(eq + 1).trim() : null;
-            if (!LABEL_KEY.matcher(key).matches()
+            if (!isValidLabelKey(key)
                     || (value != null && !LABEL_VALUE.matcher(value).matches())
                     || (effect != null && !TAINT_EFFECTS.contains(effect))) {
                 LOG.warnv("Ignoring invalid Lambda pod toleration entry ''{0}'' "
@@ -286,7 +290,7 @@ public class LambdaPodSpecFactory {
         return tolerations;
     }
 
-    private static LinkedHashMap<String, String> keyValues(Optional<List<String>> entries,
+    private static LinkedHashMap<String, String> keyValues(Optional<List<String>> entries, String setting,
                                                            Consumer<String> onInvalid) {
         LinkedHashMap<String, String> result = new LinkedHashMap<>();
         entries.orElse(List.of()).forEach(entry -> {
@@ -296,13 +300,22 @@ public class LambdaPodSpecFactory {
             // Invalid entries are dropped, not sanitized: a silently rewritten entry
             // would no longer match the NetworkPolicy/selector or node it was written
             // for, and the API server would reject the pod at cold start otherwise.
-            if (LABEL_KEY.matcher(key).matches() && LABEL_VALUE.matcher(value).matches()) {
-                result.put(key, value);
+            if (isValidLabelKey(key) && LABEL_VALUE.matcher(value).matches()) {
+                String previous = result.put(key, value);
+                if (previous != null && !previous.equals(value)) {
+                    LOG.warnv("Entry ''{0}'' in {1} replaces the earlier value ''{2}'' for key ''{3}'' "
+                            + "(a Kubernetes label key holds one value)", entry, setting, previous, key);
+                }
             } else {
                 onInvalid.accept(entry);
             }
         });
         return result;
+    }
+
+    private static boolean isValidLabelKey(String key) {
+        int slash = key.indexOf('/');
+        return LABEL_KEY.matcher(key).matches() && slash <= MAX_LABEL_KEY_PREFIX_LENGTH;
     }
 
     /** Selector matching every pod this Floci instance's Lambda executor manages. */
