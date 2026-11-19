@@ -15,10 +15,11 @@ final class MetricValues {
     private MetricValues() {
     }
 
-    static List<MetricDatum> fromJson(JsonNode input, MetricDatum datum) {
+    static List<MetricDatum> fromJson(JsonNode input, String memberPath, MetricDatum datum) {
         List<Double> values = jsonNumbers(input.get("Values"), "Values");
         List<Double> counts = jsonNumbers(input.get("Counts"), "Counts");
-        return normalize(datum, values, counts, input.hasNonNull("Value") || input.hasNonNull("StatisticValues"));
+        return normalize(datum, memberPath + ".", values, counts,
+                input.hasNonNull("Value") || input.hasNonNull("StatisticValues"));
     }
 
     /** Parse fields indexed for one datum, so a batch never rescans the entire request per sample. */
@@ -27,7 +28,7 @@ final class MetricValues {
         List<Double> counts = queryNumbers(input, prefix + "Counts");
         boolean otherFormat = input.containsKey(prefix + "Value")
                 || input.keySet().stream().anyMatch(key -> key.startsWith(prefix + "StatisticValues."));
-        return normalize(datum, values, counts, otherFormat);
+        return normalize(datum, prefix, values, counts, otherFormat);
     }
 
     private static List<Double> jsonNumbers(JsonNode input, String field) {
@@ -82,7 +83,7 @@ final class MetricValues {
         return new ArrayList<>(numbers.values());
     }
 
-    private static List<MetricDatum> normalize(MetricDatum template, List<Double> values,
+    private static List<MetricDatum> normalize(MetricDatum template, String memberPrefix, List<Double> values,
                                                List<Double> counts, boolean otherFormat) {
         if (values == null) {
             if (counts != null) {
@@ -95,7 +96,8 @@ final class MetricValues {
                     "Values cannot be combined with Value or StatisticValues.");
         }
         if (counts != null && counts.size() != values.size()) {
-            throw CloudWatchMetricsException.invalidParameterValue("Counts and Values must have the same length.");
+            throw CloudWatchMetricsException.invalidParameterValue("The parameters " + memberPrefix
+                    + "Values and " + memberPrefix + "Counts must be of the same size.");
         }
         List<MetricDatum> result = new ArrayList<>(values.size());
         for (int i = 0; i < values.size(); i++) {

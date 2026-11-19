@@ -47,7 +47,7 @@ class MetricValuesTest {
     void largeCountsDoNotExpandTheStoredSamples() throws Exception {
         List<MetricDatum> samples = MetricValues.fromJson(
                 MAPPER.readTree("{\"Values\":[2,5],\"Counts\":[1000000000,2]}"),
-                MetricDatum.of("Latency", "Milliseconds", 0, List.of(), 123));
+                "MetricData.member.1", MetricDatum.of("Latency", "Milliseconds", 0, List.of(), 123));
         assertEquals(2, samples.size());
         assertEquals(1_000_000_000, samples.getFirst().getSampleCount());
         assertEquals(2_000_000_000, samples.getFirst().getSum());
@@ -66,7 +66,7 @@ class MetricValuesTest {
     }, delimiter = '|')
     void invalidSamplesAreRejected(String json, String code, String field) {
         AwsException error = assertThrows(AwsException.class,
-                () -> MetricValues.fromJson(MAPPER.readTree(json), new MetricDatum()));
+                () -> MetricValues.fromJson(MAPPER.readTree(json), "MetricData.member.1", new MetricDatum()));
         assertEquals(code, error.getErrorCode());
         assertTrue(error.getMessage().contains(field));
     }

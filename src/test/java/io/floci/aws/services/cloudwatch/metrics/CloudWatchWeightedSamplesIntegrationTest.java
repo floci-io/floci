@@ -105,6 +105,66 @@ class CloudWatchWeightedSamplesIntegrationTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"false,1", "false,3", "true,1", "true,3"})
+    void sdkReportsMismatchedCountsAtTheDatumPath(boolean entity, int countLength) {
+        Instant now = Instant.now();
+        String namespace = "WeightedCountMismatch/" + UUID.randomUUID();
+        List<Double> counts = countLength == 1 ? List.of(1.0) : List.of(1.0, 2.0, 3.0);
+        List<MetricDatum> datums = List.of(
+                metric("First", now).value(7.0).build(),
+                metric("Invalid", now).values(2.0, 5.0).counts(counts).build());
+        PutMetricDataRequest.Builder request = PutMetricDataRequest.builder().namespace(namespace);
+        if (entity) {
+            request.entityMetricData(
+                    EntityMetricData.builder().metricData(metric("FirstEntity", now).value(1.0).build()).build(),
+                    EntityMetricData.builder().metricData(datums).build()).strictEntityValidation(false);
+        } else {
+            request.metricData(datums);
+        }
+        String memberPath = entity ? "EntityMetricData.member.2.MetricData.member.2" : "MetricData.member.2";
+        try (CloudWatchClient client = AwsTestClients.create(
+                CloudWatchClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            InvalidParameterValueException error = assertThrows(InvalidParameterValueException.class,
+                    () -> client.putMetricData(request.build()));
+            assertEquals(400, error.statusCode());
+            assertEquals("InvalidParameterValue", error.awsErrorDetails().errorCode());
+            assertEquals("The parameters " + memberPath + ".Values and " + memberPath
+                    + ".Counts must be of the same size.", error.awsErrorDetails().errorMessage());
+            assertTrue(client.listMetrics(list -> list.namespace(namespace)).metrics().isEmpty());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,1", "false,3", "true,1", "true,3"})
+    void queryReportsMismatchedCountsAtTheDatumPath(boolean entity, int countLength) {
+        String namespace = "WeightedQueryCountMismatch/" + UUID.randomUUID();
+        String listPath = entity ? "EntityMetricData.member.2.MetricData" : "MetricData";
+        String memberPath = listPath + ".member.2";
+        RequestSpecification request = query().formParam("Namespace", namespace)
+                .formParam("StrictEntityValidation", "false")
+                .formParam(listPath + ".member.1.MetricName", "First")
+                .formParam(listPath + ".member.1.Value", "7")
+                .formParam(memberPath + ".MetricName", "Invalid")
+                .formParam(memberPath + ".Values.member.1", "2")
+                .formParam(memberPath + ".Values.member.2", "5");
+        if (entity) {
+            request.formParam("EntityMetricData.member.1.MetricData.member.1.MetricName", "FirstEntity")
+                    .formParam("EntityMetricData.member.1.MetricData.member.1.Value", "1");
+        }
+        for (int index = 1; index <= countLength; index++) {
+            request.formParam(memberPath + ".Counts.member." + index, Integer.toString(index));
+        }
+        request.when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo("The parameters " + memberPath
+                        + ".Values and " + memberPath + ".Counts must be of the same size."));
+        try (CloudWatchClient client = AwsTestClients.create(
+                CloudWatchClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            assertTrue(client.listMetrics(list -> list.namespace(namespace)).metrics().isEmpty());
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"us-east-1", "us-gov-west-1"})
     void sdkRejectsConflictingValuesBeforeStoringTheBatch(String regionName) {
         Instant now = Instant.now();
