@@ -1,10 +1,12 @@
 package io.floci.aws.core.common;
 
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.container.ContainerResponseFilter;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
+import jakarta.inject.Inject;
 
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -26,11 +28,21 @@ import java.util.concurrent.ThreadLocalRandom;
  * repeated in the other headers, so every SDK reads the same ID.
  */
 @Provider
-public class AwsRequestIdFilter implements ContainerResponseFilter {
+public class AwsRequestIdFilter implements ContainerRequestFilter, ContainerResponseFilter {
+
+    @Inject
+    RequestContext requestContext;
 
     private static final String AMZ_REQUEST_ID = "x-amz-request-id";
     private static final String AMZN_REQUEST_ID = "x-amzn-RequestId";
     private static final String AMZ_ID_2 = "x-amz-id-2";
+
+    @Override
+    public void filter(ContainerRequestContext requestContext) {
+        String requestId = newRequestId();
+        requestContext.setProperty("aws.requestId", requestId);
+        this.requestContext.setRequestId(requestId);
+    }
 
     @Override
     public void filter(ContainerRequestContext requestContext, ContainerResponseContext responseContext) {
@@ -38,6 +50,10 @@ public class AwsRequestIdFilter implements ContainerResponseFilter {
 
         // Reuse the same ID across all header variants for this response
         String requestId = existingRequestId(headers);
+        if (headers.getFirst(AMZ_REQUEST_ID) == null && headers.getFirst(AMZN_REQUEST_ID) == null) {
+            String correlatedId = this.requestContext.getRequestId();
+            if (correlatedId != null && !correlatedId.isBlank()) requestId = correlatedId;
+        }
 
         if (!headers.containsKey(AMZ_REQUEST_ID)) {
             headers.putSingle(AMZ_REQUEST_ID, requestId);
