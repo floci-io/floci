@@ -37,6 +37,9 @@ public class IotLoggingService {
         String roleArn = text(request.path("roleArn"), "roleArn");
         String defaultLogLevel = text(request.path("defaultLogLevel"), "defaultLogLevel");
         Boolean disableAllLogs = bool(request.path("disableAllLogs"), "disableAllLogs");
+        if (roleArn != null && roleArn.isBlank()) {
+            throw new AwsException("InvalidRequestException", "roleArn must not be blank.", 400);
+        }
         if (defaultLogLevel != null && !LOG_LEVELS.contains(defaultLogLevel)) {
             throw new AwsException("InvalidRequestException", "1 validation error detected: Value '" + defaultLogLevel
                     + "' at 'defaultLogLevel' failed to satisfy constraint: Member must satisfy enum value set: "

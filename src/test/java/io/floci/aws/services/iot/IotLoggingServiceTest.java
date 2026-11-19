@@ -105,7 +105,7 @@ class IotLoggingServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"TRACE", "info", ""})
+    @ValueSource(strings = {"TRACE", "info", "", "  "})
     void rejectsAnUnknownLogLevelAndKeepsTheStoredOptions(String level) throws Exception {
         set("""
             {"roleArn": "%s", "defaultLogLevel": "INFO"}
@@ -114,6 +114,29 @@ class IotLoggingServiceTest {
         assertEquals("InvalidRequestException", failure("""
             {"defaultLogLevel": "%s", "disableAllLogs": true}
             """.formatted(level)));
+        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "INFO", false), service.getV2LoggingOptions(REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void rejectsABlankRoleArnOnInitialSetup(String roleArn) {
+        assertEquals("InvalidRequestException", failure("""
+            {"roleArn": "%s", "defaultLogLevel": "INFO"}
+            """.formatted(roleArn)));
+        assertEquals("NotConfiguredException",
+                assertThrows(AwsException.class, () -> service.getV2LoggingOptions(REGION)).getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void rejectsABlankRoleArnOnUpdateAndKeepsTheStoredOptions(String roleArn) throws Exception {
+        set("""
+            {"roleArn": "%s", "defaultLogLevel": "INFO"}
+            """.formatted(ROLE_ARN), REGION);
+
+        assertEquals("InvalidRequestException", failure("""
+            {"roleArn": "%s", "disableAllLogs": true}
+            """.formatted(roleArn)));
         assertEquals(new IotV2LoggingOptions(ROLE_ARN, "INFO", false), service.getV2LoggingOptions(REGION));
     }
 
