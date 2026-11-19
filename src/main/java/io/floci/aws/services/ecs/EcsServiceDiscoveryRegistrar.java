@@ -290,7 +290,7 @@ public class EcsServiceDiscoveryRegistrar {
      * keeps it across updates, as on AWS.
      */
     static String clientDiscoveryName(String serviceArn) {
-        String serviceName = serviceArn.substring(serviceArn.lastIndexOf('/') + 1);
+        String serviceName = nameFromArn(serviceArn);
         return "aws-ecs-sc.client." + UUID.nameUUIDFromBytes(serviceArn.getBytes(StandardCharsets.UTF_8)) + "."
                 + serviceName.substring(0, Math.min(serviceName.length(), MAX_LABEL));
     }
