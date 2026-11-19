@@ -2796,7 +2796,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 parameterGroupName, dbSubnetGroupName, availabilityZone, false, effectiveRegion,
                 null, null, null, false, null,
                 engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode(),
-                snapshot.isStorageEncrypted(), port);
+                snapshot.isStorageEncrypted(), port, false);
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -2895,7 +2895,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 parameterGroupName, dbSubnetGroupName, null, false, effectiveRegion,
                 null, null, null, false, null,
                 !isBlank(engineMode) ? engineMode : source.getEngineMode(),
-                source.isStorageEncrypted(), port);
+                source.isStorageEncrypted(), port, false);
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -5766,11 +5766,28 @@ public class RdsService implements Resettable, ResourceProvider {
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                      String engineMode, boolean storageEncrypted, Integer requestedPort) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
+                engineMode, storageEncrypted, requestedPort, false);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause,
+                                     boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                     String engineMode, boolean storageEncrypted, Integer requestedPort,
+                                     boolean deletionProtection) {
         return createDbClusterWithPort(id, engineParam, engineVersion, masterUsername, masterPassword,
                 databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
                 multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
                 serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
-                engineMode, storageEncrypted, requestedPort);
+                engineMode, storageEncrypted, requestedPort, deletionProtection);
     }
 
     private DbCluster createDbClusterWithPort(String id, String engineParam, String engineVersion,
@@ -5781,7 +5798,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                               Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                               Integer serverlessV2SecondsUntilAutoPause,
                                               boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                              String engineMode, boolean storageEncrypted, Integer requestedPort) {
+                                              String engineMode, boolean storageEncrypted, Integer requestedPort,
+                                              boolean deletionProtection) {
         String provisioningKey = "cluster:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
         if (!provisioningIds.add(provisioningKey)) {
@@ -5793,7 +5811,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
                     multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
                     serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
-                    engineMode, storageEncrypted, requestedPort);
+                    engineMode, storageEncrypted, requestedPort, deletionProtection);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -5807,7 +5825,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                         Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                         Integer serverlessV2SecondsUntilAutoPause,
                                         boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                        String engineMode, boolean storageEncrypted, Integer requestedPort) {
+                                        String engineMode, boolean storageEncrypted, Integer requestedPort,
+                                        boolean deletionProtection) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -5845,6 +5864,7 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setEngineIdentifier(effectiveEngineName(engineParam).toLowerCase(Locale.ROOT));
         cluster.setEngineMode(engineMode != null && !engineMode.isBlank() ? engineMode : "provisioned");
         cluster.setStorageEncrypted(storageEncrypted);
+        cluster.setDeletionProtection(deletionProtection);
         cluster.setContainerStorageResourceId(clusterResourceId);
         if (!mock) {
             String clusterVolumeId;
@@ -6705,7 +6725,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 masterUsername, masterPassword, databaseName, iamEnabled, paramGroupName,
                 dbSubnetGroupName, availabilityZone, multiAz, region, serverlessV2MinCapacity,
                 serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause, manageMasterUserPassword,
-                masterUserSecretKmsKeyId, engineMode, storageEncrypted, null);
+                masterUserSecretKmsKeyId, engineMode, storageEncrypted, null, false);
     }
 
     public DbCluster createDbClusterInGlobalCluster(String globalClusterIdentifier, String id,
@@ -6717,7 +6737,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                                     Integer serverlessV2SecondsUntilAutoPause,
                                                     boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                                    String engineMode, boolean storageEncrypted, Integer requestedPort) {
+                                                    String engineMode, boolean storageEncrypted, Integer requestedPort,
+                                                    boolean deletionProtection) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         GlobalCluster global = requireGlobalCluster(accountId, globalClusterIdentifier);
@@ -6738,7 +6759,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     paramGroupName, dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion,
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode,
-                    storageEncrypted || global.isStorageEncrypted(), requestedPort);
+                    storageEncrypted || global.isStorageEncrypted(), requestedPort, deletionProtection);
         } else {
             if (hasText(masterUsername) || hasText(masterPassword) || manageMasterUserPassword) {
                 throw new AwsException("InvalidParameterCombination",
@@ -6773,7 +6794,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     primary.getDatabaseName(), iamEnabled, paramGroupName, dbSubnetGroupName,
                     availabilityZone, multiAz, effectiveRegion, serverlessV2MinCapacity,
                     serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause, false, null,
-                    engineMode, primary.isStorageEncrypted(), requestedPort);
+                    engineMode, primary.isStorageEncrypted(), requestedPort, deletionProtection);
         }
         try {
             attachToGlobalCluster(accountId, global.getGlobalClusterIdentifier(), cluster, primary == null);
@@ -6786,6 +6807,9 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         } catch (Exception e) {
             try {
+                if (deletionProtection) {
+                    setDeletionProtection(effectiveRegion, id, false);
+                }
                 deleteDbCluster(id, effectiveRegion);
             } catch (RuntimeException cleanupError) {
                 e.addSuppressed(cleanupError);
