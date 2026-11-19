@@ -9,6 +9,7 @@ import io.floci.aws.services.route53.model.ResourceRecord;
 import io.floci.aws.services.route53.model.ResourceRecordSet;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -27,7 +28,7 @@ class Route53PublicAliasAnswerTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"identifier", "weight", "region", "failover", "healthCheck",
-            "targetHealth", "multivalue", "ttl", "values", "type", "multiple"})
+            "multivalue", "ttl", "values", "type", "multiple"})
     void unsupportedOrMalformedStoredAliasesAreRefusedBeforeTargetLookup(String invalid) {
         ResourceRecordSet record = alias();
         int type = 1;
@@ -37,7 +38,6 @@ class Route53PublicAliasAnswerTest {
             case "region" -> record.setRegion("eu-west-1");
             case "failover" -> record.setFailover("PRIMARY");
             case "healthCheck" -> record.setHealthCheckId("health-check");
-            case "targetHealth" -> record.getAliasTarget().setEvaluateTargetHealth(true);
             case "multivalue" -> record.setMultiValueAnswer(true);
             case "ttl" -> record.setTtl(60L);
             case "values" -> record.setRecords(List.of(new ResourceRecord("192.0.2.1")));
@@ -49,16 +49,20 @@ class Route53PublicAliasAnswerTest {
             default -> throw new AssertionError(invalid);
         }
         List<ResourceRecordSet> records = "multiple".equals(invalid) ? List.of(record, alias()) : List.of(record);
-        assertEquals(5, source(records).resolveAuthoritative(NAME, type, "192.0.2.20").orElseThrow().responseCode());
+        for (boolean evaluateTargetHealth : new boolean[]{false, true}) {
+            record.getAliasTarget().setEvaluateTargetHealth(evaluateTargetHealth);
+            assertEquals(5, source(records).resolveAuthoritative(NAME, type, "192.0.2.20").orElseThrow().responseCode());
+        }
         verifyNoInteractions(dns, lookup);
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void validTargetsRetainTheirTtlAndZoneAuthority(boolean explicitSimpleRecord) {
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void validTargetsRetainTheirTtlAndZoneAuthority(boolean explicitSimpleRecord, boolean evaluateTargetHealth) {
         when(dns.resolveAliasTarget("target.example.test.", "ZOWNED", 1, "192.0.2.20"))
                 .thenReturn(Optional.of(DnsAnswer.records(List.of("192.0.2.20"), 73)));
         ResourceRecordSet record = alias();
+        record.getAliasTarget().setEvaluateTargetHealth(evaluateTargetHealth);
         if (explicitSimpleRecord) {
             record.setMultiValueAnswer(false);
         }

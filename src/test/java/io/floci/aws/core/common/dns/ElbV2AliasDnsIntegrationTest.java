@@ -2,8 +2,6 @@ package io.floci.aws.core.common.dns;
 
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import io.vertx.core.Vertx;
 import io.vertx.core.datagram.DatagramSocket;
 import jakarta.inject.Inject;
@@ -37,24 +35,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Signed management calls followed by real UDP queries through CDI-discovered DNS sources. */
 @QuarkusTest
-@TestProfile(ElbV2AliasDnsIntegrationTest.Profile.class)
 class ElbV2AliasDnsIntegrationTest {
-    /** Own the listener address for this class without changing another class's DNS singleton. */
-    public static class Profile implements QuarkusTestProfile {
-    }
-
     @Inject
     EmbeddedDnsServer dns;
     @Inject
     Vertx vertx;
 
     @ParameterizedTest
-    @CsvSource({"internal,A,1,127.0.0.1", "internet-facing,A,1,127.0.0.1",
-            "internal,AAAA,28,127.0.0.1", "internet-facing,AAAA,28,127.0.0.1",
-            "internal,A,1,127.0.0.2", "internet-facing,A,1,127.0.0.2",
-            "internal,AAAA,28,127.0.0.2", "internet-facing,AAAA,28,127.0.0.2"})
+    @CsvSource({"internal,A,1,127.0.0.1,false", "internet-facing,A,1,127.0.0.1,false",
+            "internal,AAAA,28,127.0.0.1,false", "internet-facing,AAAA,28,127.0.0.1,false",
+            "internal,A,1,127.0.0.2,false", "internet-facing,A,1,127.0.0.2,false",
+            "internal,AAAA,28,127.0.0.2,false", "internet-facing,AAAA,28,127.0.0.2,false",
+            "internal,A,1,127.0.0.1,true", "internet-facing,A,1,127.0.0.1,true",
+            "internal,AAAA,28,127.0.0.1,true", "internet-facing,AAAA,28,127.0.0.1,true",
+            "internal,A,1,127.0.0.2,true", "internet-facing,A,1,127.0.0.2,true",
+            "internal,AAAA,28,127.0.0.2,true", "internet-facing,AAAA,28,127.0.0.2,true"})
     void publicAliasValidatesItsTargetAcrossAccounts(
-            String scheme, String type, int queryType, String listenerAddress) throws Exception {
+            String scheme, String type, int queryType, String listenerAddress, boolean evaluateTargetHealth)
+            throws Exception {
         try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "730000000001", Region.EU_WEST_1);
              ElasticLoadBalancingV2Client elb = AwsTestClients.create(
                      ElasticLoadBalancingV2Client.builder(), "730000000001", Region.EU_WEST_1);
@@ -86,20 +84,20 @@ class ElbV2AliasDnsIntegrationTest {
                         .noneMatch(lb -> lb.loadBalancerArn().equals(target.loadBalancerArn())));
                 zone = route53.createHostedZone(r -> r.name(name).callerReference(UUID.randomUUID().toString()))
                         .hostedZone().id();
-                installed = alias(name, type, target.dnsName(), target.canonicalHostedZoneId());
+                installed = alias(name, type, target.dnsName(), target.canonicalHostedZoneId(), evaluateTargetHealth);
                 change(route53, zone, ChangeAction.CREATE, installed);
                 assertValidTarget(query(listener, name, queryType), queryType, listenerAddress);
 
                 installed = alias(name, type, "dualstack." + target.dnsName().toUpperCase(Locale.ROOT),
-                        target.canonicalHostedZoneId());
+                        target.canonicalHostedZoneId(), evaluateTargetHealth);
                 change(route53, zone, ChangeAction.UPSERT, installed);
                 assertValidTarget(query(listener, name.toUpperCase(Locale.ROOT) + ".", queryType),
                         queryType, listenerAddress);
 
-                installed = alias(name, type, target.dnsName(), "WRONG");
+                installed = alias(name, type, target.dnsName(), "WRONG", evaluateTargetHealth);
                 change(route53, zone, ChangeAction.UPSERT, installed);
                 assertEquals(5, rcode(query(listener, name, queryType)));
-                installed = alias(name, type, target.dnsName(), target.canonicalHostedZoneId());
+                installed = alias(name, type, target.dnsName(), target.canonicalHostedZoneId(), evaluateTargetHealth);
                 change(route53, zone, ChangeAction.UPSERT, installed);
                 assertValidTarget(query(listener, name, queryType), queryType, listenerAddress);
 
@@ -134,9 +132,10 @@ class ElbV2AliasDnsIntegrationTest {
         }
     }
 
-    private static ResourceRecordSet alias(String name, String type, String target, String zone) {
+    private static ResourceRecordSet alias(String name, String type, String target, String zone,
+                                           boolean evaluateTargetHealth) {
         return ResourceRecordSet.builder().name(name).type(type).aliasTarget(AliasTarget.builder()
-                .dnsName(target + ".").hostedZoneId(zone).evaluateTargetHealth(false).build()).build();
+                .dnsName(target + ".").hostedZoneId(zone).evaluateTargetHealth(evaluateTargetHealth).build()).build();
     }
 
     private static void change(Route53Client client, String zone, ChangeAction action, ResourceRecordSet record) {
@@ -145,11 +144,7 @@ class ElbV2AliasDnsIntegrationTest {
     }
 
     private static byte[] query(DatagramSocket listener, String name, int type) throws Exception {
-        byte[] encoded = DnsRecord.encodeName(name);
-        byte[] request = ByteBuffer.allocate(16 + encoded.length)
-                .putShort((short) 1234).putShort((short) 256).putShort((short) 1)
-                .putShort((short) 0).putShort((short) 0).putShort((short) 0)
-                .put(encoded).putShort((short) type).putShort((short) 1).array();
+        byte[] request = DnsTestQuery.query(name, type, 1234);
         // Vert.x and the JDK both name their UDP socket DatagramSocket.
         try (java.net.DatagramSocket client = new java.net.DatagramSocket(
                 0, InetAddress.getByName("127.0.0.1"))) {

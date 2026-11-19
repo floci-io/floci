@@ -163,10 +163,11 @@ public class Route53DnsRecordSource implements DnsRecordSource {
         if (record.getSetIdentifier() != null || record.getWeight() != null || record.getRegion() != null
                 || record.getFailover() != null || record.getHealthCheckId() != null
                 || Boolean.TRUE.equals(record.getMultiValueAnswer())
-                || alias.isEvaluateTargetHealth() || record.getTtl() != null
+                || record.getTtl() != null
                 || record.getRecords() != null && !record.getRecords().isEmpty()) {
             return DnsAnswer.refused();
         }
+        // A single simple alias still answers when unhealthy, since there is no alternative record.
         DnsAnswer target = embeddedDnsServer.resolveAliasTarget(
                 alias.getDnsName(), alias.getHostedZoneId(), type, listenerAddress).orElseGet(DnsAnswer::refused);
         if (target.responseCode() != 0 || target.records().stream().anyMatch(value -> value.type() != type)) {
