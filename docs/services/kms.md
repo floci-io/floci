@@ -53,7 +53,37 @@
 | `GetParametersForImport` | Get the wrapping key and import token for an `EXTERNAL` key |
 | `ImportKeyMaterial` | Import key material into an `EXTERNAL` key |
 | `DeleteImportedKeyMaterial` | Delete imported key material, returning the key to `PendingImport` |
+| `CreateCustomKeyStore` | Create an XKS external custom key store (`PUBLIC_ENDPOINT`) |
+| `DescribeCustomKeyStores` | Describe and paginate XKS custom key stores |
+| `UpdateCustomKeyStore` | Update XKS custom key store metadata or proxy configuration |
+| `DeleteCustomKeyStore` | Delete a disconnected XKS custom key store |
+| `ConnectCustomKeyStore` | Connect after checking the XKS proxy health endpoint |
+| `DisconnectCustomKeyStore` | Disconnect an XKS custom key store |
 <!-- floci:actions:end -->
+
+## External Key Stores (XKS)
+
+Floci supports the first management-plane milestone for `CustomKeyStoreType=EXTERNAL_KEY_STORE`
+with `XksProxyConnectivity=PUBLIC_ENDPOINT`: create, describe, update, delete, connect and
+disconnect. `ConnectCustomKeyStore` calls the standard XKS v1 `GetHealthStatus` endpoint and
+returns an empty success response; use `DescribeCustomKeyStores` to inspect `CONNECTED` or `FAILED` and its AWS-compatible connection code, such as `XKS_PROXY_ACCESS_DENIED`, `XKS_PROXY_INVALID_RESPONSE`, `XKS_PROXY_INVALID_CONFIGURATION`, `XKS_PROXY_NOT_REACHABLE` or `XKS_PROXY_TIMED_OUT`. `DescribeCustomKeyStores`
+never returns the proxy secret. While connected, updates may change the name, proxy URI path, or
+authentication credentials; changing the proxy URI endpoint requires a disconnected store. The `Origin=EXTERNAL` imported-key-material workflow is unchanged.
+
+Proxy credentials are encrypted at rest with AES-256-GCM. Configure a stable, deployment-managed,
+Base64-encoded 32-byte key as `FLOCI_SERVICES_KMS_XKS_CREDENTIAL_ENCRYPTION_KEY` before creating
+or connecting an XKS custom key store. Generate and store this key outside Floci (for example in
+your deployment secret manager), keep it stable across restarts, and back it up securely. Floci
+does not generate a fallback key: without the setting, credential persistence and connection fail
+closed. Changing or losing the key makes existing encrypted proxy credentials unreadable.
+
+The proxy endpoint must be a public HTTPS origin; DNS answers resolving to loopback, private,
+link-local or metadata addresses are rejected. Redirects and automatic retries are disabled, the
+health response is size-limited, and proxy-controlled error text is not persisted or logged.
+
+The cryptographic data plane (`Origin=EXTERNAL_KEY_STORE`, `XksKeyId`, and routing Encrypt/Decrypt
+through the proxy) is a separate follow-up milestone. `AWS_CLOUDHSM` and `VPC_ENDPOINT_SERVICE`
+connectivity are not included in this initial implementation.
 
 ## Asymmetric Encryption
 
