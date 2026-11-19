@@ -3,6 +3,7 @@ package io.floci.aws.services.redshift.spectrum;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.SqlParameterParser;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.model.Database;
@@ -37,7 +38,6 @@ public class SpectrumQueryPreparation {
             "\\b(?:GROUP\\s+BY|HAVING|DISTINCT)\\b|\\b(?:COUNT|SUM|AVG|MIN|MAX|MEDIAN|LISTAGG|STDDEV\\w*|VAR_\\w+|VARIANCE"
                     + "|BOOL_AND|BOOL_OR|ARRAY_AGG|APPROXIMATE|PERCENTILE_\\w+)\\s*\\(",
             Pattern.CASE_INSENSITIVE);
-    private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"");
     private final ExternalCatalogRegistry registry;
     private final KinesisSchemaRegistry kinesisSchemas;
     private final KinesisStreamingViews views;
@@ -540,7 +540,7 @@ public class SpectrumQueryPreparation {
             throw new SpectrumSqlException("0A000",
                     "AUTO REFRESH YES is not supported; refresh the view with REFRESH MATERIALIZED VIEW");
         }
-        String unquoted = STRING_LITERAL.matcher(view.select()).replaceAll("''");
+        String unquoted = SqlParameterParser.blankQuoted(view.select(), SqlParameterParser.Options.REDSHIFT);
         if (JOIN.matcher(unquoted).find()) {
             throw new SpectrumSqlException("0A000", "A streaming materialized view cannot contain a JOIN");
         }

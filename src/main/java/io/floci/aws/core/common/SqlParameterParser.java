@@ -246,6 +246,19 @@ public final class SqlParameterParser {
      * inside any of those is kept. A line comment's terminating newline is kept.
      */
     public static String stripComments(String sql, Options options) {
+        return rewrite(sql, options, false);
+    }
+
+    /**
+     * {@code sql} with each comment replaced by a single space and each quoted string, quoted
+     * identifier, or dollar-quoted body replaced by an empty {@code ''}, tokenized as {@link #parse}
+     * does, so a keyword inside any of them is not seen by a caller that scans the rest.
+     */
+    public static String blankQuoted(String sql, Options options) {
+        return rewrite(sql, options, true);
+    }
+
+    private static String rewrite(String sql, Options options, boolean blankQuoted) {
         StringBuilder out = new StringBuilder(sql.length());
         int len = sql.length();
         int i = 0;
@@ -272,7 +285,11 @@ public final class SqlParameterParser {
                 end = skipDollarQuoted(sql, i);
             }
             if (end > i) {
-                out.append(sql, i, end);
+                if (blankQuoted) {
+                    out.append("''");
+                } else {
+                    out.append(sql, i, end);
+                }
                 i = end;
                 continue;
             }
