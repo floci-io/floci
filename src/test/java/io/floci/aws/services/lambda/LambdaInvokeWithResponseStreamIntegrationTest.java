@@ -42,12 +42,11 @@ class LambdaInvokeWithResponseStreamIntegrationTest {
                   if (event.contentType) responseStream.setContentType(event.contentType);
                   if (event.mode === 'log') console.log('streamed log line');
                   if (event.mode === 'throwBefore') throw new Error('boom before');
+                  if (event.mode === 'exit') {
+                    await new Promise(() => responseStream.write('hello ', () => process.exit(3)));
+                  }
                   responseStream.write('hello ');
                   if (event.mode === 'throwAfter') throw new Error('boom after');
-                  if (event.mode === 'exit') {
-                    await new Promise((resolve) => setTimeout(resolve, 500));
-                    process.exit(3);
-                  }
                   responseStream.write('world');
                   responseStream.end();
                 });
@@ -204,6 +203,29 @@ class LambdaInvokeWithResponseStreamIntegrationTest {
     @Test
     void emptyQualifierBreaksThePatternAndTheLength() {
         given().body("{}").when().post(path(STREAMING, "?Qualifier="))
+                .then().statusCode(400)
+                .body("message", equalTo("2 validation errors detected: "
+                        + "Value '' at 'qualifier' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: \\$(LATEST(\\.PUBLISHED)?)|[a-zA-Z0-9-_$]+; "
+                        + "Value '' at 'qualifier' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 1"));
+    }
+
+    @Test
+    void longQualifierWithABadCharacterBreaksThePatternAndTheLength() {
+        String qualifier = "a " + "a".repeat(127);
+        given().body("{}").when().post(path(STREAMING, "?Qualifier=" + qualifier))
+                .then().statusCode(400)
+                .body("message", equalTo("2 validation errors detected: "
+                        + "Value '" + qualifier + "' at 'qualifier' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: \\$(LATEST(\\.PUBLISHED)?)|[a-zA-Z0-9-_$]+; "
+                        + "Value '" + qualifier + "' at 'qualifier' failed to satisfy constraint: "
+                        + "Member must have length less than or equal to 128"));
+    }
+
+    @Test
+    void plainInvokeReportsTheSameQualifierViolations() {
+        given().body("{}").when().post("/2015-03-31/functions/" + STREAMING + "/invocations?Qualifier=")
                 .then().statusCode(400)
                 .body("message", equalTo("2 validation errors detected: "
                         + "Value '' at 'qualifier' failed to satisfy constraint: "
