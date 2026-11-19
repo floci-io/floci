@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -150,10 +151,12 @@ class CodeBuildRunnerSourceFailureTest {
         when(specBuilder.build()).thenReturn(new ContainerSpec("alpine:latest"));
 
         ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        // Its confirmed removal goes through the strict removal each test stubs.
+        when(lifecycle.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("container", Map.of()));
         CountDownLatch finished = new CountDownLatch(1);
         doAnswer(invocation -> { finished.countDown(); return null; })
-                .when(lifecycle).stopAndRemove(eq("container"), nullable(Closeable.class));
+                .when(lifecycle).stopAndRemoveStrict(eq("container"), nullable(Closeable.class), eq(5), eq(false));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         when(logStreamer.attach(eq("container"), anyString(), anyString(), anyString(), anyString()))
@@ -171,8 +174,12 @@ class CodeBuildRunnerSourceFailureTest {
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.port()).thenReturn(4566);
 
+        CodeBuildRoleCredentials roleCredentials = mock(CodeBuildRoleCredentials.class);
+        when(roleCredentials.provision(anyString(), anyString(), nullable(String.class), anyString(), any()))
+                .thenReturn(new CodeBuildRoleCredentials.BuildCredentials(Map.of(), null));
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
-                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint, ec2));
+                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint, ec2,
+                roleCredentials));
         doReturn(CodeBuildRunner.PhaseResult.ofSuccess()).when(runner)
                 .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
 
