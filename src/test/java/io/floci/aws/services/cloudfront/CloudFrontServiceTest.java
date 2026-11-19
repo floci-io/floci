@@ -1843,6 +1843,38 @@ class CloudFrontServiceTest {
                         LinkedHashMap::new));
     }
 
+    @Test
+    void createDistributionKeepsTheConnectionModeTheConfigNames() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        Distribution tenantOnly = distribution(true, List.of());
+        tenantOnly.getConfig().setConnectionMode("tenant-only");
+
+        Distribution created = service.createDistribution(tenantOnly, Map.of());
+
+        assertEquals("tenant-only", service.getDistribution(created.getId()).getConfig().getConnectionMode());
+    }
+
+    @Test
+    void createAndUpdateDistributionRefuseAConnectionModeOutsideItsEnumeration() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        Distribution created = service.createDistribution(distribution(true, List.of()), Map.of());
+        Distribution shared = distribution(true, List.of());
+        shared.getConfig().setConnectionMode("shared");
+
+        AwsException onCreate = assertAws("InvalidArgument",
+                () -> service.createDistribution(shared, Map.of()));
+        AwsException onUpdate = assertAws("InvalidArgument",
+                () -> service.updateDistribution(created.getId(), created.getEtag(), shared));
+
+        assertEquals("The ConnectionMode specified is not valid.", onCreate.getMessage());
+        assertEquals("The ConnectionMode specified is not valid.", onUpdate.getMessage());
+        // Neither refusal stored anything: no second distribution, and the first is as it was.
+        assertEquals(1, service.listDistributions(null, 100).size());
+        Distribution unchanged = service.getDistribution(created.getId());
+        assertNull(unchanged.getConfig().getConnectionMode());
+        assertEquals(created.getEtag(), unchanged.getEtag());
+    }
+
     private static AwsException assertAws(
             String code, Executable action) {
         AwsException error = assertThrows(AwsException.class, action);

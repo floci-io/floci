@@ -66,6 +66,7 @@ import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.NetworkInterfaceAssociation;
 import io.floci.aws.services.ec2.model.NetworkInterfaceAttachment;
 import io.floci.aws.services.ec2.model.NetworkInterfaceListResult;
+import io.floci.aws.services.ec2.model.NetworkInterfacePermission;
 import io.floci.aws.services.ec2.model.NetworkInterfacePrivateIpAddress;
 import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.ec2.model.PrefixList;
@@ -17349,6 +17350,172 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
         detachFromInstance(region, detached.getInstanceId(), ni.getNetworkInterfaceId());
         return detached;
+    }
+
+    // ─── Network interface permissions ───────────────────────────────────────────────
+
+    /** The permission that lets another account attach an interface to an instance of its own. */
+    public static final String INSTANCE_ATTACH = "INSTANCE-ATTACH";
+    private static final String EIP_ASSOCIATE = "EIP-ASSOCIATE";
+    /** {@code NetworkInterfacePermissionState.State} once a permission applies. */
+    private static final String PERMISSION_GRANTED = "granted";
+    private static final String NETWORK_INTERFACE_PERMISSION_ID_PREFIX = "eni-perm-";
+    private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
+    private static final Set<String> NETWORK_INTERFACE_PERMISSION_FILTERS = Set.of(
+            "network-interface-permission.network-interface-permission-id",
+            "network-interface-permission.network-interface-id",
+            "network-interface-permission.aws-account-id",
+            "network-interface-permission.aws-service",
+            "network-interface-permission.permission");
+
+    /** One page of DescribeNetworkInterfacePermissions. */
+    public record NetworkInterfacePermissionPage(List<NetworkInterfacePermission> permissions, String nextToken) {}
+
+    /**
+     * CreateNetworkInterfacePermission: the interface's owner records an {@code INSTANCE-ATTACH}
+     * grant for another account. Attachment execution does not yet consume these grants.
+     * Only the owner can grant: the interface is looked up in the caller's account, and
+     * one another account owns is {@code InvalidNetworkInterfaceID.NotFound}, as it is to every
+     * other action of that account.
+     *
+     * <p>A second grant of the same permission to the same account answers the grant already in
+     * place rather than minting another: AWS documents no duplicate error for this action, and the
+     * permission either holds or it does not. {@code EIP-ASSOCIATE} is refused as unsupported, since
+     * nothing here would honour it, and so is {@code AwsService}, which AWS documents as "Currently
+     * not supported".
+     */
+    public NetworkInterfacePermission createNetworkInterfacePermission(String region, String networkInterfaceId,
+                                                                      String awsAccountId, String awsService,
+                                                                      String permission) {
+        if (!isSet(networkInterfaceId)) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter NetworkInterfaceId", 400);
+        }
+        if (!isSet(permission)) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter Permission", 400);
+        }
+        requireParameterValue("Permission", permission, INSTANCE_ATTACH, EIP_ASSOCIATE);
+        if (EIP_ASSOCIATE.equals(permission)) {
+            throw new AwsException("UnsupportedOperation",
+                    "The EIP-ASSOCIATE network interface permission is not supported.", 400);
+        }
+        if (isSet(awsService)) {
+            throw new AwsException("UnsupportedOperation",
+                    "Network interface permissions for an AwsService are not supported.", 400);
+        }
+        if (!isSet(awsAccountId)) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter AwsAccountId", 400);
+        }
+        requireAccountId("AwsAccountId", awsAccountId);
+        ensureDefaultResources(region);
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (privateIpAllocationLock) {
+                NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+                return grantInstanceAttach(callerAccountId(), region, ni, awsAccountId);
+            }
+        }
+    }
+
+    /**
+     * DescribeNetworkInterfacePermissions: the permissions the caller has granted over the
+     * interfaces it owns in {@code region}, by id and by the five documented filters. MaxResults
+     * runs 5 to 255 and defaults to 50, as AWS documents.
+     */
+    public NetworkInterfacePermissionPage describeNetworkInterfacePermissions(
+            String region, List<String> permissionIds, List<Map.Entry<String, List<String>>> filters,
+            Integer maxResults, String nextToken) {
+        requireSupportedFilters(filterNames(filters), NETWORK_INTERFACE_PERMISSION_FILTERS);
+        if (maxResults != null && (maxResults < 5 || maxResults > 255)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 255.", 400);
+        }
+        for (String id : permissionIds) {
+            if (!id.startsWith(NETWORK_INTERFACE_PERMISSION_ID_PREFIX)) {
+                throw new AwsException("InvalidNetworkInterfacePermissionID.Malformed",
+                        "Invalid id: \"" + id + "\" (expecting \"" + NETWORK_INTERFACE_PERMISSION_ID_PREFIX + "...\")",
+                        400);
+            }
+        }
+        ensureDefaultResources(region);
+        List<NetworkInterfacePermission> held = new ArrayList<>();
+        synchronized (attachmentTopologyLock(region)) {
+            for (NetworkInterface ni : networkInterfaces.scan(k -> k.startsWith(region + "::"))) {
+                held.addAll(ni.getPermissions());
+            }
+        }
+        for (String id : permissionIds) {
+            if (held.stream().noneMatch(perm -> id.equals(perm.getNetworkInterfacePermissionId()))) {
+                throw new AwsException("InvalidNetworkInterfacePermissionID.NotFound",
+                        "The NetworkInterfacePermission ID '" + id + "' does not exist", 400);
+            }
+        }
+        List<NetworkInterfacePermission> matching = held.stream()
+                .filter(perm -> permissionIds.isEmpty() || permissionIds.contains(perm.getNetworkInterfacePermissionId()))
+                .filter(perm -> matchesPermissionFilters(perm, filters))
+                .toList();
+        int offset = decodeToken(nextToken);
+        int pageSize = maxResults != null ? maxResults : 50;
+        int end = Math.min(offset + pageSize, matching.size());
+        List<NetworkInterfacePermission> page = offset < matching.size()
+                ? new ArrayList<>(matching.subList(offset, end)) : new ArrayList<>();
+        return new NetworkInterfacePermissionPage(page, end < matching.size() ? encodeToken(end) : null);
+    }
+
+    private boolean matchesPermissionFilters(NetworkInterfacePermission perm,
+                                             List<Map.Entry<String, List<String>>> filters) {
+        for (Map.Entry<String, List<String>> filter : filters == null ? List.<Map.Entry<String, List<String>>>of() : filters) {
+            List<String> values = filter.getValue();
+            boolean matches = switch (filter.getKey()) {
+                case "network-interface-permission.network-interface-permission-id" ->
+                        matchesValue(values, perm.getNetworkInterfacePermissionId());
+                case "network-interface-permission.network-interface-id" ->
+                        matchesValue(values, perm.getNetworkInterfaceId());
+                case "network-interface-permission.aws-account-id" -> matchesValue(values, perm.getAwsAccountId());
+                // No permission here is granted to a service, so none carries one to match.
+                case "network-interface-permission.aws-service" -> false;
+                case "network-interface-permission.permission" -> matchesValue(values, perm.getPermission());
+                default -> true;
+            };
+            if (!matches) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** The grant of {@code INSTANCE-ATTACH} to {@code grantee}, minted unless one is already in place. */
+    private NetworkInterfacePermission grantInstanceAttach(String ownerAccountId, String region, NetworkInterface ni,
+                                                           String grantee) {
+        Optional<NetworkInterfacePermission> existing = ni.getPermissions().stream()
+                .filter(perm -> grantee.equals(perm.getAwsAccountId()) && INSTANCE_ATTACH.equals(perm.getPermission()))
+                .findFirst();
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        NetworkInterfacePermission granted = new NetworkInterfacePermission(
+                NETWORK_INTERFACE_PERMISSION_ID_PREFIX + randomHex(17), ni.getNetworkInterfaceId(), grantee,
+                INSTANCE_ATTACH, PERMISSION_GRANTED);
+        ni.getPermissions().add(granted);
+        putNetworkInterface(ownerAccountId, region, ni);
+        return granted;
+    }
+
+    private static void requireAccountId(String parameter, String value) {
+        if (!ACCOUNT_ID.matcher(value).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + value + ") for parameter " + parameter + " is invalid. "
+                            + "Expecting a 12-digit AWS account ID.", 400);
+        }
+    }
+
+    /** Stores an interface in its owner's partition, whichever account is calling. */
+    private void putNetworkInterface(String accountId, String region, NetworkInterface ni) {
+        if (networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware) {
+            aware.putForAccount(accountId, key(region, ni.getNetworkInterfaceId()), ni);
+        } else {
+            networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
     }
 
     /** Removes an interface from an instance's own list, the mirror of attaching it. */

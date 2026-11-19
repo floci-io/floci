@@ -457,6 +457,16 @@ These operations store what they are given and return it, so code that manages t
   created with no `ViewerCertificate` at all reads the same way, the default certificate on `TLSv1`.
   The `us-east-1` restriction AWS states for ACM certificates is not enforced: a certificate is
   resolved from whatever region its ARN names, as long as it exists.
+- `ConnectionMode` is stored and returned by `GetDistribution`, `GetDistributionConfig`,
+  `ListDistributions` and the create and update responses, and `AWS::CloudFront::Distribution`
+  passes it through. It is held to `direct` and `tenant-only`; anything else is `InvalidArgument`
+  400, the code this service answers a member outside its shape with. An omitted mode is reported
+  as omitted: no published sentence says which mode such a distribution reads back as. A
+  `tenant-only` distribution is otherwise treated like a standard one. The restrictions the
+  Developer Guide lists for multi-tenant distributions (only `sni-only`, no `SSLv3`, no IAM
+  certificate, no `Aliases` or `PriceClass`) are not enforced, because no error code is published
+  for them, and an omitted `ViewerCertificate` on a `tenant-only` distribution reads as the default
+  certificate, the same as on a standard one. AWS documents no default for that case.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with
@@ -688,6 +698,9 @@ signatures must still return 403. Verify those cases through the proxy after con
 - `TestFunction` execution (function is stored, not executed)
 - Serving RTMP for a streaming distribution (deprecated by AWS)
 - VPC origins, Anycast IP lists
+- Connection groups and distribution tenants (`CreateConnectionGroup`, `CreateDistributionTenant`,
+  etc.), their CloudFormation types, `ListDistributionsByConnectionMode`, and serving a
+  `tenant-only` distribution by a tenant's domain
 - Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
   `InvalidArgument`
 - Running CloudFront Functions, so the key value store can only be read and written through its API, not
