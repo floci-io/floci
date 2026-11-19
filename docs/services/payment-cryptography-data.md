@@ -42,6 +42,13 @@ client that talks to the control plane does not reach it by accident.
   CFB8, the CFB64, the CFB128 or the OFB mode is refused with `ValidationException` rather than
   answered with a cipher of another kind. The padding of the symmetric attributes belongs to the
   RSA cipher, so a request that names one is refused as well.
+- **The symmetric cipher is the only shape of the attributes that is made.** The reference's
+  model names four shapes of the encryption attributes: the symmetric one, the asymmetric one,
+  the DUKPT one and the EMV one. This service makes the symmetric one, so a request that names
+  the asymmetric attributes, the DUKPT attributes or the EMV attributes is refused with
+  `ValidationException`. The RSA padding types the asymmetric attributes carry, PKCS1, OAEP
+  SHA-1, OAEP SHA-256 and OAEP SHA-512, are therefore never reached, and neither are the DUKPT
+  encryption mode or the EMV encryption mode, which the model names as ECB and CBC.
 - **The MAC is the one the request asks for.** The ISO 9797-1 algorithms 1 and 3 are the ones
   defined over Triple DES, and the CMAC is the AES-CMAC of RFC 4493, which is a whole block
   wide, so it is cut to a length the caller asks for. The service fails the request when the
@@ -53,6 +60,11 @@ client that talks to the control plane does not reach it by accident.
   are not, so a request that names one of them is refused with `ValidationException`. The
   reference makes them, and the reference's page for the operation says a HMAC can be asked
   for, so this is a deviation and not a rule of the model.
+- **The MAC attributes are the algorithm or a DUKPT derivation.** The reference's model names
+  five shapes for them: the algorithm, the EMV MAC, and the DUKPT derivations of the ISO 9797-1
+  algorithm 1, of the algorithm 3 and of the CMAC. This service makes the algorithm and the two
+  DUKPT derivations of the ISO 9797-1 algorithms, so a request that names the EMV MAC or the
+  DUKPT CMAC is refused with `ValidationException`.
 - **The length of a MAC is the one the algorithm gives.** The model states the range of four to
   thirty-two bytes, and the length a request asks for is refused when the algorithm gives a
   shorter one. The reference names the lengths that hold for each algorithm, and this service
@@ -75,6 +87,11 @@ client that talks to the control plane does not reach it by accident.
   over is a four-digit one and a longer PIN has no verification value. A PIN that does not
   verify fails the request with `VerificationFailedException`, because the answer of a
   verification has no verdict in it.
+- **The PIN block formats this service makes are the three the model names beside the format 1.**
+  The reference's model names four formats for the PIN data: the format 0, the format 1, the
+  format 3 and the format 4. This service makes the format 0, the format 3 and the format 4, so
+  a request that names the format 1, whether it generates a block, verifies one or translates
+  one, is refused with `ValidationException`.
 - **A verification reads the two Triple DES formats.** The reference's page for `VerifyPinData`
   says "AWS Payment Cryptography supports `ISO_Format_0` and `ISO_Format_3`", while the
   generation reads the format 4 as well, so a verification that names the format 4 or the
@@ -147,6 +164,15 @@ client that talks to the control plane does not reach it by accident.
   `TR31_E6_EMV_MKEY_OTHER` usage. The dynamic card verification code, which is the
   Mastercard counterpart over the track data, is refused rather than approximated: it is a
   proprietary construction and there is nothing published to check a derivation against.
+- **The card validation values this service makes are the two card verification values and the
+  dynamic value.** The reference's model names seven shapes for the generation and eight for the
+  verification: the American Express card security codes of the two versions, the card
+  verification values of the two versions, the cardholder verification value, the dynamic card
+  verification code, the dynamic card verification value, and the Discover dynamic card
+  verification code on the verification side. This service makes the card verification value of
+  the two versions and the dynamic card verification value, so a request that names an American
+  Express card security code, the cardholder verification value or the Discover dynamic card
+  verification code is refused with `ValidationException`.
 - **The authorization cryptogram is the ARQC of the transaction.** It is the ISO 9797-1
   algorithm 3 retail MAC over the transaction data, cut to eight bytes, under a session key
   the request's derivation produces. Three derivations are served: the EMV common session key,

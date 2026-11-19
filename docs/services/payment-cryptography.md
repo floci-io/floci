@@ -90,6 +90,11 @@
   refused. The usage says what the key is for and the algorithm has to serve it, so a key
   of a MAC usage may not be made of an AES key, and the asymmetric usages take the key
   pairs the reference's table gives them.
+- **The usage is not checked against the reference's list.** The reference's page for the key
+  attributes lists the usages a key may have and says that it prevents the creation of a key
+  that is not valid. This service requires a usage and checks that the algorithm serves it, but
+  it does not check the usage itself, so a key of a usage the reference does not list is made
+  here and refused by the reference.
 - **Which key a request may name:** `KeyIdentifier` takes the ARN of a key, the ARN of
   an alias or the name of an alias, while `KeyArn` and `ResourceArn` take the ARN of
   a key alone, as the reference states them. A request naming a key another way is
