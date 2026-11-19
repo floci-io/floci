@@ -349,8 +349,7 @@ public class BedrockController {
         if (model.servedInRegion(region)) {
             inferenceTypes.add("ON_DEMAND");
         }
-        if (BedrockModelCatalog.profilesFrom(region).stream()
-                .anyMatch(profile -> profile.modelId().equals(model.modelId()))) {
+        if (model.servedThroughProfileFrom(region)) {
             inferenceTypes.add("INFERENCE_PROFILE");
         }
         node.putObject("modelLifecycle").put("status", model.lifecycleStatus());
