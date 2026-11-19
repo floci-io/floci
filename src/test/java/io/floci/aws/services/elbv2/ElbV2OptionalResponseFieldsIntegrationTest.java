@@ -6,6 +6,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
@@ -13,6 +14,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.Certificate;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Listener;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetGroup;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,6 +38,7 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
     private String loadBalancer;
     private String targetGroup;
     private String certificate;
+    private final List<String> createdTargetGroups = new ArrayList<>();
 
     @BeforeEach
     void createResources() {
@@ -66,6 +69,8 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
                             ownedElb.deleteTargetGroup(request -> request.targetGroupArn(targetGroup));
                         }
                     },
+                    () -> assertAll(createdTargetGroups.stream().map(arn -> (Executable) () ->
+                            ownedElb.deleteTargetGroup(request -> request.targetGroupArn(arn)))),
                     () -> {
                         if (certificate != null) {
                             ownedAcm.deleteCertificate(request -> request.certificateArn(certificate));
@@ -200,40 +205,36 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
         String tcp = createTargetGroup("optional-tcp", "TCP", "TCP");
         String tcpWithHttpCheck = createTargetGroup("optional-tcp-http", "TCP", "HTTP");
         String http = createTargetGroup("optional-http", "HTTP", null);
-        try {
-            TargetGroup tcpGroup = describeTargetGroup(tcp);
-            TargetGroup tcpWithHttpCheckGroup = describeTargetGroup(tcpWithHttpCheck);
-            TargetGroup httpGroup = describeTargetGroup(http);
-            assertAll(
-                    () -> assertNull(tcpGroup.protocolVersion()),
-                    () -> assertNull(tcpGroup.healthCheckPath()),
-                    () -> assertNull(tcpGroup.matcher()),
-                    () -> assertNull(tcpWithHttpCheckGroup.protocolVersion()),
-                    () -> assertNotNull(tcpWithHttpCheckGroup.healthCheckPath()),
-                    () -> assertNotNull(tcpWithHttpCheckGroup.matcher()),
-                    () -> assertEquals("HTTP", httpGroup.healthCheckProtocolAsString()),
-                    () -> assertEquals("HTTP1", httpGroup.protocolVersion()),
-                    () -> assertEquals("/", httpGroup.healthCheckPath()),
-                    () -> assertEquals("200", httpGroup.matcher().httpCode()));
+        TargetGroup tcpGroup = describeTargetGroup(tcp);
+        TargetGroup tcpWithHttpCheckGroup = describeTargetGroup(tcpWithHttpCheck);
+        TargetGroup httpGroup = describeTargetGroup(http);
+        assertAll(
+                () -> assertNull(tcpGroup.protocolVersion()),
+                () -> assertNull(tcpGroup.healthCheckPath()),
+                () -> assertNull(tcpGroup.matcher()),
+                () -> assertNull(tcpWithHttpCheckGroup.protocolVersion()),
+                () -> assertNotNull(tcpWithHttpCheckGroup.healthCheckPath()),
+                () -> assertNotNull(tcpWithHttpCheckGroup.matcher()),
+                () -> assertEquals("HTTP", httpGroup.healthCheckProtocolAsString()),
+                () -> assertEquals("HTTP1", httpGroup.protocolVersion()),
+                () -> assertEquals("/", httpGroup.healthCheckPath()),
+                () -> assertEquals("200", httpGroup.matcher().httpCode()));
 
-            TargetGroup switchedToHttpCheck = elb.modifyTargetGroup(request -> request.targetGroupArn(tcp)
-                    .healthCheckProtocol("HTTP")).targetGroups().getFirst();
-            assertAll("Switching to an HTTP check returns the stored path and matcher",
-                    () -> assertNotNull(switchedToHttpCheck.healthCheckPath()),
-                    () -> assertNotNull(switchedToHttpCheck.matcher()));
-        } finally {
-            for (String arn : List.of(tcp, tcpWithHttpCheck, http)) {
-                elb.deleteTargetGroup(request -> request.targetGroupArn(arn));
-            }
-        }
+        TargetGroup switchedToHttpCheck = elb.modifyTargetGroup(request -> request.targetGroupArn(tcp)
+                .healthCheckProtocol("HTTP")).targetGroups().getFirst();
+        assertAll("Switching to an HTTP check returns the stored path and matcher",
+                () -> assertNotNull(switchedToHttpCheck.healthCheckPath()),
+                () -> assertNotNull(switchedToHttpCheck.matcher()));
     }
 
     private String createTargetGroup(String prefix, String protocol, String healthCheckProtocol) {
-        return elb.createTargetGroup(request -> request.name(uniqueName(prefix))
+        String arn = elb.createTargetGroup(request -> request.name(uniqueName(prefix))
                         .protocol(protocol).port(2022).targetType("ip")
                         .vpcId(Ec2Service.defaultVpcId(REGION.id()))
                         .healthCheckProtocol(healthCheckProtocol))
                 .targetGroups().getFirst().targetGroupArn();
+        createdTargetGroups.add(arn);
+        return arn;
     }
 
     private TargetGroup describeTargetGroup(String arn) {
