@@ -71,7 +71,7 @@ starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerInt
        EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
        EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
        EcsExecChannelDockerIntegrationTest EcsImagePullDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest \
-       BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest \
+       BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest DockerPoolSaturationNightlyIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
 # Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test.
 OPENSEARCH_VERSIONS="$(find src/main/java -name OpenSearchVersions.java -print -quit)"
