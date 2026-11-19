@@ -4497,6 +4497,18 @@ public interface EmulatorConfig {
         int poolGaugeIntervalSeconds();
 
         /**
+         * Consecutive Docker calls that must fail at the transport (an I/O error or an unusable
+         * socket, never an HTTP response) before Floci pings the daemon and, when the ping fails too,
+         * fails every Docker call at once until the daemon answers again. 0 turns this off.
+         */
+        @WithDefault("3")
+        int breakerFailureThreshold();
+
+        /** Seconds between the pings that check whether an unreachable Docker daemon is back. */
+        @WithDefault("5")
+        int breakerProbeIntervalSeconds();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */

@@ -57,12 +57,18 @@ public class DockerClientProducer {
 
     private final EmulatorConfig config;
     private final DockerPoolGaugeLogger gaugeLogger;
+    private final DockerCircuitBreaker breaker;
 
     @Inject
     public DockerClientProducer(EmulatorConfig config) {
         this.config = config;
         this.gaugeLogger = new DockerPoolGaugeLogger(
                 validatePoolGaugeIntervalSeconds(config.docker().poolGaugeIntervalSeconds()));
+        int breakerThreshold = validateBreakerFailureThreshold(config.docker().breakerFailureThreshold());
+        // The probe interval only matters, and is only checked, while the breaker is on.
+        Duration probeInterval = breakerThreshold == 0 ? Duration.ZERO
+                : Duration.ofSeconds(validateBreakerProbeIntervalSeconds(config.docker().breakerProbeIntervalSeconds()));
+        this.breaker = new DockerCircuitBreaker(breakerThreshold, probeInterval);
     }
 
     /**
@@ -426,6 +432,20 @@ public class DockerClientProducer {
         return seconds;
     }
 
+    /** 0 turns the Docker circuit breaker off; a negative threshold is a misconfiguration. */
+    static int validateBreakerFailureThreshold(int threshold) {
+        if (threshold < 0) {
+            throw new IllegalArgumentException("floci.docker.breaker-failure-threshold "
+                    + "(FLOCI_DOCKER_BREAKER_FAILURE_THRESHOLD) must be 0 or more, got: " + threshold);
+        }
+        return threshold;
+    }
+
+    static int validateBreakerProbeIntervalSeconds(int seconds) {
+        return requireAtLeastOne(seconds, "floci.docker.breaker-probe-interval-seconds",
+                "FLOCI_DOCKER_BREAKER_PROBE_INTERVAL_SECONDS");
+    }
+
     private static int requireAtLeastOne(int value, String setting, String envVar) {
         if (value < 1) {
             throw new IllegalArgumentException(setting + " (" + envVar + ") must be at least 1, got: " + value);
@@ -465,6 +485,7 @@ public class DockerClientProducer {
 
     void disposeDockerClient(@Disposes DockerClient client) throws IOException {
         gaugeLogger.unregister("control-plane");
+        breaker.close();
         client.close();
     }
 
@@ -518,7 +539,9 @@ public class DockerClientProducer {
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
         gaugeLogger.register(role, transport::gauges);
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout));
+        // The control-plane transport pings for the breaker; the streaming one only until it exists.
+        breaker.useProbe(DockerCircuitBreaker.pingOver(transport), "control-plane".equals(role));
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout, breaker));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
@@ -543,6 +566,20 @@ public class DockerClientProducer {
      * silent daemon, not the length of each of its attempts.
      */
     static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout) {
+        return wrapForRole(transport, role, callTimeout, null);
+    }
+
+    /**
+     * As {@link #wrapForRole(DockerHttpClient, String, Duration)}, with {@code breaker} (shared by both
+     * roles) between the retry layer and the transport, so an open breaker fails a call before the
+     * retry layer could replay it, and every attempt's outcome reaches the breaker. A null or disabled
+     * breaker leaves the transport as it is.
+     */
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout,
+                                        DockerCircuitBreaker breaker) {
+        if (breaker != null && breaker.isEnabled()) {
+            transport = new CircuitBreakingDockerHttpClient(transport, breaker);
+        }
         if (!"control-plane".equals(role)) {
             // The streaming transport replays only container waits, long-lived streams the call timeout never bounds.
             return RetryingDockerHttpClient.forContainerWaits(transport);
