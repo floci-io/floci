@@ -1047,6 +1047,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      * exists, so an update creates it.
      */
     private void provisionConnection(StackResource r, JsonNode template, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale, and
+        // a check below that refuses this update would otherwise leave it for the rollback to restore
+        r.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         boolean updating = ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore);
         Set<String> cleared = new HashSet<>();
@@ -1075,8 +1078,6 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         String connectivityParameters = resolvedObjectAsJson(props, "InvocationConnectivityParameters", ctx);
         String kmsKeyIdentifier = ctx.resolveOptional(props, "KmsKeyIdentifier");
 
-        // A snapshot describes the update in flight; one an earlier update left behind is stale
-        r.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
         Connection connection;
         if (updating && ctx.reusesPriorEntity(name)) {
             snapshotConnectionBeforeUpdate(r, eventBridgeService.describeConnection(name, ctx.region()),

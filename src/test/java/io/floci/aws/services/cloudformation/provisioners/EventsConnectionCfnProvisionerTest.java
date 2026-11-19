@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -299,6 +300,46 @@ class EventsConnectionCfnProvisionerTest {
         ArgumentCaptor<Connection> restored = ArgumentCaptor.forClass(Connection.class);
         verify(events).restoreConnection(restored.capture(), eq(REGION));
         assertEquals("description after the first update", restored.getValue().getDescription());
+    }
+
+    /**
+     * An update committed and left its snapshot; the next update is refused before it changes anything,
+     * so its rollback has nothing to restore and must not undo the committed update.
+     */
+    private void assertARefusedUpdateLeavesNothingToRestore(ObjectNode refused) {
+        StackResource r = updatedConnection();
+        assertNotNull(r.getAttributes().get(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR));
+
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(r, refused, ctx(NAME, props("new description", "rotated"))));
+
+        assertNull(r.getAttributes().get(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR));
+        assertFalse(provisioner.rollbackUpdate(r));
+        verify(events, never()).restoreConnection(any(), any());
+    }
+
+    @Test
+    void aDroppedPropertyRefusedAfterACommittedUpdateLeavesNothingToRestore() {
+        ObjectNode refused = props("new description", "rotated");
+        refused.remove("AuthParameters");
+
+        assertARefusedUpdateLeavesNothingToRestore(refused);
+    }
+
+    @Test
+    void aMissingApiKeyValueRefusedAfterACommittedUpdateLeavesNothingToRestore() {
+        ObjectNode refused = props("new description", "rotated");
+        ((ObjectNode) refused.get("AuthParameters").get("ApiKeyAuthParameters")).remove("ApiKeyValue");
+
+        assertARefusedUpdateLeavesNothingToRestore(refused);
+    }
+
+    @Test
+    void aRenameRefusedAfterACommittedUpdateLeavesNothingToRestore() {
+        ObjectNode refused = props("new description", "rotated");
+        refused.put("Name", "another-connection");
+
+        assertARefusedUpdateLeavesNothingToRestore(refused);
     }
 
     @Test
