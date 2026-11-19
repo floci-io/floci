@@ -590,7 +590,7 @@ final class PaymentCryptographyKeyExchange {
         String usage = PaymentCryptographyTr31.usageOf(block);
         String mode = PaymentCryptographyTr31.modeOf(block);
         String exportability = PaymentCryptographyTr31.exportabilityOf(block);
-        PaymentCryptographyService.usageName(usage);
+        String usageName = PaymentCryptographyService.usageName(usage);
         PaymentCryptographyService.modesFor(mode);
         if (!"E".equals(exportability) && !"N".equals(exportability) && !"S".equals(exportability)) {
             throw validation("the key block carries the exportability '" + exportability
@@ -605,6 +605,14 @@ final class PaymentCryptographyKeyExchange {
 
         PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.from(
                 PaymentCryptographyService.algorithmOf(block, clear.length));
+        // The usage binds the key to its purpose, so a key whose algorithm does not serve
+        // that purpose is not one the service makes. The rule is the one the import and the
+        // creation enforce, and a block that breaks it is refused here rather than answered
+        // with a block the import would refuse.
+        String badAlgorithm = PaymentCryptographyKeyAlgorithm.refusal(usageName, algorithm);
+        if (badAlgorithm != null) {
+            throw validation(badAlgorithm);
+        }
         // The agreed key opens the block that comes in, and the wrapping key closes the one
         // that goes out, so both have to be at least as strong as the key they protect. The
         // rule is the one the import and the export enforce.

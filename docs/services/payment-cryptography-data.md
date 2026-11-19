@@ -108,7 +108,9 @@ client that talks to the control plane does not reach it by accident.
   have to be at least as strong as the key they protect, the rule the export and the import
   enforce. A key that may not leave the service is refused as well: a block that carries the
   exportability `N` holds a key that may not be exported, and the block that goes out is
-  handed to the caller. The check value algorithm the request names has to be the one the
+  handed to the caller. The usage the block carries has to be one the algorithm serves, the
+  rule the import and the creation enforce, so a block that names a signature key and an AES
+  key at once is refused. The check value algorithm the request names has to be the one the
   key has, the CMAC for an AES key and the ANSI X9.24 one for a Triple DES key, and a request
   that names another one is refused rather than answered with a value of another kind.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A

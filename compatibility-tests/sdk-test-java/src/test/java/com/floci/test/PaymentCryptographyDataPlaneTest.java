@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
 import software.amazon.awssdk.services.paymentcryptography.model.ExportDiffieHellmanTr31KeyBlock;
+import software.amazon.awssdk.services.paymentcryptography.model.Key;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
@@ -306,13 +307,16 @@ class PaymentCryptographyDataPlaneTest {
 
             // The block that goes out opens under the key the request named, and it holds the
             // key that came in.
-            String keyCheckValue = control.importKey(r -> r
+            Key imported = control.importKey(r -> r
                     .keyMaterial(m -> m.tr31KeyBlock(t -> t
                             .wrappingKeyIdentifier(kekArn)
                             .wrappedKeyBlock(translated.wrappedKey().wrappedKeyMaterial()))))
-                    .key().keyCheckValue();
+                    .key();
+            // The key that came in is a key of the service now, so it is deleted with the
+            // others when the class is done.
+            keyArns.add(imported.keyArn());
 
-            assertThat(keyCheckValue).isNotBlank();
+            assertThat(imported.keyCheckValue()).isNotBlank();
             assertThat(translated.wrappedKey().wrappedKeyMaterialFormat())
                     .isEqualTo(WrappedKeyMaterialFormat.TR31_KEY_BLOCK);
         }

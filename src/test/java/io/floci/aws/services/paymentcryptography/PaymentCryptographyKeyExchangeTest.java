@@ -367,6 +367,28 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
+    void aKeyWithAUsageItsAlgorithmDoesNotServeIsNotTranslated() throws Exception {
+        // The usage binds the key to its purpose: a signature key is an asymmetric one, so an
+        // AES key may not carry that usage. The block that came in says it does, and the
+        // translation refuses it rather than answering with a block the import would refuse.
+        Exchange exchange = agreedExchange("ECC_NIST_P521");
+        Map<String, Object> material = sampleAgreement(exchange);
+        byte[] derived = sampleDerivedKey(exchange);
+        String incoming = PaymentCryptographyTr31.wrap(
+                HexFormat.of().parseHex(
+                        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
+                derived, true, "A", "S0", "B", "E");
+        PaymentCryptographyKey outgoing = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.translateKeyMaterial("us-east-1",
+                        translateRequest(material, incoming, outgoing)));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("may not be made of"), refused.getMessage());
+    }
+
+    @Test
     void aKeyIsTranslatedWithTheCheckValueAlgorithmTheRequestNames() {
         // The request may name the check value algorithm, and the one it names for an AES
         // key is the CMAC.
