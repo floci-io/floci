@@ -50,7 +50,7 @@ public class ClassicLoadBalancer {
 
     private ClassicHealthCheck healthCheck = ClassicHealthCheck.defaults();
     private ClassicLoadBalancerAttributes attributes = new ClassicLoadBalancerAttributes();
-    private Map<String, String> tags = new LinkedHashMap<>();
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public ClassicLoadBalancer() {}
 
