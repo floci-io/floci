@@ -136,6 +136,26 @@ class RetryingDockerHttpClientTest {
         assertTrue(tookMillis < 500, "took " + tookMillis + " ms");
     }
 
+    // Catches: the call timeout cutting the retries of an image pull, which has no response timeout and
+    // may take longer than it to answer before a dropped connection.
+    @Test
+    void aLongLivedStreamKeepsItsRetriesPastTheCallTimeout() {
+        Response ok = mock(Response.class);
+        Duration callTimeout = Duration.ofMillis(100);
+        FakeTransport delegate = new FakeTransport(attempt -> {
+            if (attempt < 3) {
+                sleepQuietly(2 * callTimeout.toMillis());
+                throw brokenPipe();
+            }
+            return ok;
+        });
+        RetryingDockerHttpClient client = new RetryingDockerHttpClient(delegate, 6, 10L, callTimeout);
+        Request pull = Request.builder().method(Request.Method.POST).path("/images/create?fromImage=alpine").build();
+
+        assertSame(ok, client.execute(pull));
+        assertEquals(3, delegate.calls.get(), "a pull is retried whatever the call timeout");
+    }
+
     private static void sleepQuietly(long millis) {
         try {
             Thread.sleep(millis);

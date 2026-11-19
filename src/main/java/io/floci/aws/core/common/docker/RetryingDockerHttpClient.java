@@ -128,7 +128,9 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         if (!replayable.test(request)) {
             return delegate.execute(request);
         }
-        return DockerRetry.call(maxAttempts, backoffMillis, callDeadline, () -> delegate.execute(request));
+        // A long-lived stream has no response timeout, so the call timeout does not bound its retries either.
+        Duration deadline = FlociDockerHttpClient.isLongLivedStream(request) ? null : callDeadline;
+        return DockerRetry.call(maxAttempts, backoffMillis, deadline, () -> delegate.execute(request));
     }
 
     /**

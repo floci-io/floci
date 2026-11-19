@@ -195,6 +195,10 @@ public final class DockerRetry {
                 LOG.warnv("Transient docker I/O error on attempt {0}/{1}, retrying: {2}",
                         attempt, maxAttempts, e.getMessage());
                 sleep(delay);
+                if (deadline != null && System.nanoTime() - start >= deadline.toNanos()) {
+                    // The backoff overslept the deadline: no attempt starts past it.
+                    throw asUnchecked(e);
+                }
             }
         }
     }
