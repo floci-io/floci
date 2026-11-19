@@ -8,11 +8,15 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.StackEvent;
+
+import java.util.List;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** An AWS::ApiGateway::Stage updated through a stack: in place, rolled back, moved by a new name or API, deleted. */
 @QuarkusTest
@@ -66,14 +70,52 @@ class ApiGatewayStageCfnUpdateIntegrationTest {
             CfnStackWaits.updateStack(cf, stack, outside(a, "beta"), "UPDATE_COMPLETE");
             given().when().get("/restapis/" + a[0] + "/stages/beta").then().statusCode(200);
             given().when().get("/restapis/" + a[0] + "/stages/prod").then().statusCode(404);
+            String oldId = physicalId(cf, stack, "Stage");
             CfnStackWaits.updateStack(cf, stack, outside(b, "beta"), "UPDATE_COMPLETE");
             given().when().get("/restapis/" + b[0] + "/stages/beta").then().statusCode(200);
             given().when().get("/restapis/" + a[0] + "/stages/beta").then().statusCode(404);
+            List<StackEvent> stageEvents = cf.describeStackEvents(r -> r.stackName(stack)).stackEvents().reversed()
+                    .stream().filter(e -> "Stage".equals(e.logicalResourceId())).toList();
+            List<StackEvent> tail = stageEvents.subList(stageEvents.size() - 3, stageEvents.size());
+            assertEquals(List.of("UPDATE_COMPLETE", "DELETE_IN_PROGRESS", "DELETE_COMPLETE"),
+                    tail.stream().map(StackEvent::resourceStatusAsString).toList());
+            assertEquals(oldId, tail.get(2).physicalResourceId());
 
             CfnStackWaits.deleteStack(cf, stackId);
             given().when().get("/restapis/" + b[0] + "/stages/beta").then().statusCode(404);
         } finally {
             CfnStackWaits.deleteStack(cf, stackId);
+            cf.close();
+        }
+    }
+
+    @Test
+    void aMovedStageIsRetainedByUpdateReplacePolicyAndRolledBackWhenTheUpdateFails() {
+        String stack = "apigw-cfn-stage-retain-it";
+        CloudFormationClient cf = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
+        String retain = "\"UpdateReplacePolicy\":\"Retain\",";
+        try {
+            String[] a = outsideApi("stage-ra");
+            String[] b = outsideApi("stage-rb");
+            CfnStackWaits.createStack(cf, stack, outside(a, "prod", retain, "\"Description\":\"old\",", ""),
+                    "CREATE_COMPLETE");
+            CfnStackWaits.updateStack(cf, stack, outside(b, "prod", retain, "\"Description\":\"old\",", ""),
+                    "UPDATE_COMPLETE");
+            given().when().get("/restapis/" + a[0] + "/stages/prod").then().statusCode(200);
+            given().when().get("/restapis/" + b[0] + "/stages/prod").then().statusCode(200);
+
+            CfnStackWaits.updateStack(cf, stack, outside(a, "prod", retain, "", ""),
+                    "UPDATE_ROLLBACK_COMPLETE");
+            assertEquals("Stage already exists", CfnStackWaits.failedResourceReason(stack));
+
+            given().when().delete("/restapis/" + a[0] + "/stages/prod").then().statusCode(202);
+            CfnStackWaits.updateStack(cf, stack, outside(a, "prod", "", "", CfnStackWaits.failingResourceAfter("Stage")),
+                    "UPDATE_ROLLBACK_COMPLETE");
+            given().when().get("/restapis/" + b[0] + "/stages/prod").then().statusCode(200)
+                    .body("description", equalTo("old"));
+            given().when().get("/restapis/" + a[0] + "/stages/prod").then().statusCode(404);
+        } finally {
+            CfnStackWaits.deleteStack(cf, stack);
             cf.close();
         }
     }
@@ -94,10 +136,16 @@ class ApiGatewayStageCfnUpdateIntegrationTest {
     }
 
     private static String outside(String[] api, String stageName) {
+        return outside(api, stageName, "", "", "");
+    }
+
+    /** {@code attributes} sit on the stage resource itself, {@code properties} (each ending in a comma) lead its properties. */
+    private static String outside(String[] api, String stageName, String attributes, String properties,
+            String later) {
         return """
-                {"Resources":{"Stage":{"Type":"AWS::ApiGateway::Stage","Properties":{
-                  "RestApiId":"%s","StageName":"%s","DeploymentId":"%s"}}}}
-                """.formatted(api[0], stageName, api[1]);
+                {"Resources":{"Stage":{"Type":"AWS::ApiGateway::Stage",%s"Properties":{%s
+                  "RestApiId":"%s","StageName":"%s","DeploymentId":"%s"}}%s}}
+                """.formatted(attributes, properties, api[0], stageName, api[1], later);
     }
 
     /** One API with a method, deployments D1 and D2 and a stage prod on {@code deployment}; {@code extra} are its properties. */
