@@ -23,6 +23,16 @@ public final class AwsEndpoints {
         return apiId + "." + host("execute-api", region);
     }
 
+    /** An AppSync Events API's {@code dns.HTTP}: {@code <apiId>.appsync-api.<region>.<dnsSuffix>}. */
+    public static String appsyncEventsHttpHost(String apiId, String region) {
+        return apiId + "." + host("appsync-api", region);
+    }
+
+    /** An AppSync Events API's {@code dns.REALTIME}: {@code <apiId>.appsync-realtime-api.<region>.<dnsSuffix>}. */
+    public static String appsyncEventsRealtimeHost(String apiId, String region) {
+        return apiId + "." + host("appsync-realtime-api", region);
+    }
+
     /** The region-less bucket host, {@code <bucket>.s3.<dnsSuffix>} (CloudFormation's {@code DomainName}). */
     public static String s3Host(String bucket, String region) {
         return bucket + ".s3." + AwsRegions.dnsSuffixFor(region);

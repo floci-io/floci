@@ -43,6 +43,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -70,6 +71,7 @@ public class ResourceArnBuilder {
 
     /** The segment that starts an API Gateway v2 management path, and is not part of the resource it names. */
     private static final String API_GATEWAY_V2_SEGMENT = "v2";
+    private static final Pattern APPSYNC_EVENT_API_PATH = Pattern.compile("(?:/_appsync)?/v2/apis/([^/]+)");
 
     /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
     private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
@@ -193,6 +195,7 @@ public class ResourceArnBuilder {
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
+            case "appsync"        -> List.of(buildAppSyncEventApiArn(ctx, region, accountId, partition));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -981,6 +984,21 @@ public class ResourceArnBuilder {
      * names that resource {@code /tags/<UrlEncodedResourceARN>}; elsewhere a decoded {@code %} or {@code /}
      * stays escaped, so a segment cannot pass for more than one.
      */
+    /**
+     * The Events API an AppSync {@code /v2/apis/{apiId}} route names, which IAM checks {@code GetApi},
+     * {@code UpdateApi} and {@code DeleteApi} on; {@code *} for {@code CreateApi}, {@code ListApis} and any other
+     * route, which name no API.
+     */
+    private static String buildAppSyncEventApiArn(ContainerRequestContext ctx, String region, String accountId,
+                                                  String partition) {
+        Matcher matcher = APPSYNC_EVENT_API_PATH.matcher(IamActionRegistry.routedPath(ctx));
+        if (!matcher.matches()) {
+            return "*";
+        }
+        return new AwsArnUtils.Arn(partition, "appsync", region, accountId,
+                "apis/" + pathSegment(matcher.group(1))).toString();
+    }
+
     private static String buildApiGatewayArn(ContainerRequestContext ctx, String region, String partition) {
         String[] raw = IamActionRegistry.routedPath(ctx).split("/", -1);
         List<String> segments = new ArrayList<>();

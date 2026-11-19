@@ -273,6 +273,19 @@ class IamActionRegistryTest {
         assertEquals("lambda:" + operation, registry.resolveRoute("lambda", ctx));
     }
 
+    /** AppSyncEventsRouteFilter moves an appsync-signed /v2/apis request under /_appsync, away from API Gateway's. */
+    @ParameterizedTest
+    @CsvSource({"POST,/_appsync/v2/apis,CreateApi", "GET,/_appsync/v2/apis,ListApis",
+            "GET,/_appsync/v2/apis/abc123,GetApi", "POST,/_appsync/v2/apis/abc123,UpdateApi",
+            "DELETE,/_appsync/v2/apis/abc123,DeleteApi"})
+    void appSyncEventsApiRoutesResolveTheirOwnActions(String method, String path, String operation) {
+        ContainerRequestContext ctx = mockCtx(method, path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("appsync:" + operation, registry.resolveRoute("appsync", ctx));
+        assertNull(registry.resolveRoute("appsync", mockCtx(method, path + "/channelNamespaces/ns/extra",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+    }
+
     @ParameterizedTest
     @CsvSource({"groups,CreateGroup", "get-group,GetGroup", "delete-group,DeleteGroup",
             "group-resources,GroupResources", "list-group-resources,ListGroupResources"})

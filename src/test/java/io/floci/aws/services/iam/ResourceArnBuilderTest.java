@@ -2412,6 +2412,16 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void appSyncEventsApiRoutesResolveTheApiTheyName() {
+        request("/_appsync/v2/apis/abc123");
+        assertEquals(List.of("arn:aws:appsync:us-east-1:" + ACCOUNT + ":apis/abc123"),
+                builder.buildResources("appsync", ctx, "us-east-1", ACCOUNT));
+        // CreateApi and ListApis name no API.
+        request("/_appsync/v2/apis");
+        assertEquals(List.of("*"), builder.buildResources("appsync", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
     void apiGatewayRoutesResolveThePathTheyNameWithNoAccount() {
         request("/restapis/abc123/stages");
         assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),

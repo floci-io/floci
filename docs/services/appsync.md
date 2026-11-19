@@ -1,9 +1,9 @@
 # AppSync
 
 **Protocol:** REST JSON
-**Endpoint:** `http://localhost:4566/v1/apis/...`
+**Endpoint:** `http://localhost:4566/v1/apis/...` (GraphQL APIs), `http://localhost:4566/v2/apis/...` (Events APIs)
 
-Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, and channel namespaces.
+Floci implements the AWS AppSync Management API, providing local emulation of GraphQL API configuration, schema management, data source binding, resolver mapping, API key provisioning, custom domains, Events APIs, and channel namespaces.
 
 ## Regions
 
@@ -32,6 +32,32 @@ targets and HTTP URLs that use a literal private or loopback address.
 | `UpdateGraphqlApi` | Update a GraphQL API |
 | `DeleteGraphqlApi` | Delete a GraphQL API and all child resources |
 | `ListGraphqlApis` | List all GraphQL APIs |
+
+### Events API
+
+| Operation | Description |
+|---|---|
+| `CreateApi` | Create an Events API with its auth providers and default auth modes |
+| `GetApi` | Get an Events API by ID |
+| `UpdateApi` | Update an Events API name, owner contact or event configuration |
+| `DeleteApi` | Delete an Events API, its channel namespaces, API keys and domain association |
+| `ListApis` | List all Events APIs |
+
+API Gateway v2 serves the same `/v2/apis` and `/v2/apis/{apiId}` paths. Floci routes a request
+by the service it is signed for: one signed for `appsync` reaches AppSync, and one signed for
+`apigateway` reaches API Gateway.
+
+`CreateApi` and `UpdateApi` require at least one auth provider. Every mode in
+`connectionAuthModes`, `defaultPublishAuthModes` and `defaultSubscribeAuthModes` must name one of
+those providers, or the request fails with `BadRequestException`. An `AWS_LAMBDA` provider needs
+`lambdaAuthorizerConfig.authorizerUri`, a Cognito provider needs `cognitoConfig.userPoolId` and
+`awsRegion`, and an OIDC provider needs `openIDConnectConfig.issuer`.
+
+`dns.HTTP` and `dns.REALTIME` carry the AWS host names,
+`<apiId>.appsync-api.<region>.<dnsSuffix>` and `<apiId>.appsync-realtime-api.<region>.<dnsSuffix>`,
+with the DNS suffix of the region's partition. Floci does not serve the Events data plane on
+those hosts yet; see [Not Implemented](#not-implemented). `logConfig` is stored and returned, but
+no logs are delivered.
 
 ### Schema
 
@@ -125,11 +151,18 @@ As on AWS, `ApiKey.id` is the key value itself (`da2-` followed by 26 lowercase 
 
 | Operation | Description |
 |---|---|
-| `CreateChannelNamespace` | Create a channel namespace |
+| `CreateChannelNamespace` | Create a channel namespace, with its publish and subscribe auth modes, handler configuration and tags |
 | `GetChannelNamespace` | Get a channel namespace by name |
-| `UpdateChannelNamespace` | Update a channel namespace description |
+| `UpdateChannelNamespace` | Update a channel namespace's auth modes, code handlers and handler configuration |
 | `ListChannelNamespaces` | List all channel namespaces for an API |
 | `DeleteChannelNamespace` | Delete a channel namespace |
+
+A channel namespace belongs to an Events API. Floci also accepts a GraphQL API's id here, as
+earlier releases did. Each of its `publishAuthModes` and `subscribeAuthModes` must name one of
+the parent API's auth types. Its ARN is
+`arn:<partition>:appsync:<region>:<account>:apis/<apiId>/channelNamespace/<name>`, in the
+region of its API. `handlerConfigs` and `codeHandlers` are stored and returned, but no handler
+runs.
 
 ### Merged API Associations
 
@@ -562,7 +595,9 @@ Deleting a GraphQL API (`DeleteGraphqlApi`) automatically deletes all child reso
 - All channel namespaces
 - All domain name associations
 
-This matches AWS behavior where deleting an API removes its entire configuration.
+This matches AWS behavior where deleting an API removes its entire configuration. Deleting an
+Events API (`DeleteApi`) likewise removes its channel namespaces, API keys and domain name
+association.
 
 ## CloudFormation
 
@@ -626,6 +661,7 @@ These AWS AppSync capabilities are not yet implemented and are tracked in future
 - **Data source adapters**: EventBridge, OpenSearch, and Bedrock connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
 - **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions
+- **Events data plane**: `POST /event` publishing and the `/event/realtime` WebSocket of an Events API, and the `onPublish` and `onSubscribe` handlers of a channel namespace
 - **Caching**: API-level and per-resolver caching
 - **Merged API source management**: `AssociateMergedGraphqlApi`, `AssociateSourceGraphqlApi`, `StartSchemaMerge`, `ListTypesByAssociation`
 - **Data source introspection**: `StartDataSourceIntrospection`, `GetDataSourceIntrospection`
@@ -707,6 +743,12 @@ curl -s -X POST "$AWS_ENDPOINT_URL/v1/apis/API_ID/graphql" \
   -H "Content-Type: application/json" \
   -H "x-api-key: da2-YOUR_API_KEY" \
   -d '{"query":"{ hello }"}'
+
+# Create an Events API with IAM publishing and API key connections and subscriptions
+aws appsync create-api \
+  --name my-events \
+  --event-config '{"authProviders":[{"authType":"AWS_IAM"},{"authType":"API_KEY"}],"connectionAuthModes":[{"authType":"API_KEY"}],"defaultPublishAuthModes":[{"authType":"AWS_IAM"}],"defaultSubscribeAuthModes":[{"authType":"API_KEY"}]}' \
+  --endpoint-url $AWS_ENDPOINT_URL
 
 # Create a channel namespace
 aws appsync create-channel-namespace \

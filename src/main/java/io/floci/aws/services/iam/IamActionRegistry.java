@@ -547,6 +547,13 @@ public class IamActionRegistry {
         rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
         rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
 
+        // ── AppSync Events APIs (under the prefix AppSyncEventsRouteFilter moves them to) ──
+        rule("appsync", "POST",   "^/_appsync/v2/apis$",       "appsync:CreateApi"),
+        rule("appsync", "GET",    "^/_appsync/v2/apis$",       "appsync:ListApis"),
+        rule("appsync", "GET",    "^/_appsync/v2/apis/[^/]+$", "appsync:GetApi"),
+        rule("appsync", "POST",   "^/_appsync/v2/apis/[^/]+$", "appsync:UpdateApi"),
+        rule("appsync", "DELETE", "^/_appsync/v2/apis/[^/]+$", "appsync:DeleteApi"),
+
         // ── Resource Groups ─────────────────────────────────────────────────────
         rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
         rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),

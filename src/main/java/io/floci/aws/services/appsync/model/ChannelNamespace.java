@@ -2,6 +2,7 @@ package io.floci.aws.services.appsync.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
+import io.floci.aws.core.common.EpochSeconds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
@@ -11,14 +12,16 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class ChannelNamespace {
+    private static final double LEGACY_MILLIS_THRESHOLD = 1e11;
+
     private String name;
     private String apiId;
     private String description;
     private String channelNamespaceArn;
     private String codeHandlers;
-    private Long created;
+    private Double created;
     private HandlerConfigs handlerConfigs;
-    private Long lastModified;
+    private Double lastModified;
     private List<AuthMode> publishAuthModes;
     private List<AuthMode> subscribeAuthModes;
     private Map<String, String> tags;
@@ -38,14 +41,14 @@ public class ChannelNamespace {
     public String getCodeHandlers() { return codeHandlers; }
     public void setCodeHandlers(String codeHandlers) { this.codeHandlers = codeHandlers; }
 
-    public Long getCreated() { return created; }
-    public void setCreated(Long created) { this.created = created; }
+    public Double getCreated() { return created; }
+    public void setCreated(Double created) { this.created = epochSeconds(created); }
 
     public HandlerConfigs getHandlerConfigs() { return handlerConfigs; }
     public void setHandlerConfigs(HandlerConfigs handlerConfigs) { this.handlerConfigs = handlerConfigs; }
 
-    public Long getLastModified() { return lastModified; }
-    public void setLastModified(Long lastModified) { this.lastModified = lastModified; }
+    public Double getLastModified() { return lastModified; }
+    public void setLastModified(Double lastModified) { this.lastModified = epochSeconds(lastModified); }
 
     public List<AuthMode> getPublishAuthModes() { return publishAuthModes; }
     public void setPublishAuthModes(List<AuthMode> publishAuthModes) { this.publishAuthModes = publishAuthModes; }
@@ -55,4 +58,15 @@ public class ChannelNamespace {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    /**
+     * Earlier builds stored these timestamps as epoch milliseconds. No epoch-seconds value reaches
+     * {@link #LEGACY_MILLIS_THRESHOLD} before the year 5138, so a larger one is read as milliseconds.
+     */
+    private static Double epochSeconds(Double value) {
+        if (value == null || value < LEGACY_MILLIS_THRESHOLD) {
+            return value;
+        }
+        return EpochSeconds.fromMillis(value.longValue());
+    }
 }

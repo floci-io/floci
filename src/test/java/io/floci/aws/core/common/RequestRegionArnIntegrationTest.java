@@ -149,7 +149,9 @@ class RequestRegionArnIntegrationTest {
                 .post("/v2/apis/" + apiId + "/channelNamespaces")
             .then()
                 .statusCode(200)
-                .body("channelNamespace.channelNamespaceArn", startsWith("arn:aws:appsync:" + REGION + ":"));
+                .body("channelNamespace.channelNamespaceArn", startsWith("arn:aws:appsync:" + REGION + ":"))
+                .body("channelNamespace.channelNamespaceArn",
+                        endsWith(":apis/" + apiId + "/channelNamespace/region-arn-ns"));
         given().header("Authorization", auth("appsync"))
                 .delete("/v2/apis/" + apiId + "/channelNamespaces/region-arn-ns").then().statusCode(204);
         given().header("Authorization", auth("appsync")).delete("/v1/apis/" + apiId).then().statusCode(204);

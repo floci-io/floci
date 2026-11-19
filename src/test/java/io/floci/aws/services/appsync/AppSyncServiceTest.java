@@ -1,12 +1,15 @@
 package io.floci.aws.services.appsync;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.appsync.graphql.SchemaRegistry;
 import io.floci.aws.services.appsync.graphql.auth.LambdaAuthorizerCache;
 import io.floci.aws.services.appsync.graphql.auth.LambdaAuthorizerResult;
+import io.floci.aws.services.appsync.model.Api;
 import io.floci.aws.services.appsync.model.ApiKey;
 import io.floci.aws.services.appsync.model.AuthenticationType;
+import io.floci.aws.services.appsync.model.ChannelNamespace;
 import io.floci.aws.services.appsync.model.DomainName;
 import io.floci.aws.services.appsync.model.FunctionConfiguration;
 import io.floci.aws.services.appsync.model.GraphqlApi;
@@ -22,6 +25,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +35,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -762,5 +768,284 @@ class AppSyncServiceTest {
         request.put("format", "SDL");
         service.createType(api.getApiId(), request);
         assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
+    }
+
+    // ──────────────────────────── Events API ────────────────────────────
+
+    private static Map<String, Object> eventConfig(List<String> providers, String connect, String publish,
+                                                   String subscribe) {
+        List<Map<String, Object>> authProviders = providers.stream()
+                .map(type -> "AWS_LAMBDA".equals(type)
+                        ? Map.<String, Object>of("authType", type, "lambdaAuthorizerConfig",
+                                Map.of("authorizerUri", "arn:aws:lambda:us-east-1:000000000000:function:auth"))
+                        : Map.<String, Object>of("authType", type))
+                .toList();
+        return Map.of(
+                "authProviders", authProviders,
+                "connectionAuthModes", List.of(Map.of("authType", connect)),
+                "defaultPublishAuthModes", List.of(Map.of("authType", publish)),
+                "defaultSubscribeAuthModes", List.of(Map.of("authType", subscribe)));
+    }
+
+    private Api createEventsApi(String name) {
+        return service.createApi(Map.of("name", name,
+                "eventConfig", eventConfig(List.of("AWS_IAM", "AWS_LAMBDA"), "AWS_LAMBDA", "AWS_IAM", "AWS_LAMBDA")),
+                "us-east-1");
+    }
+
+    @Test
+    void createApiMintsAnApiArnDnsHostsAndAnEpochSecondsCreated() {
+        Api api = createEventsApi("live-events");
+
+        assertEquals(26, api.getApiId().length());
+        assertEquals("arn:aws:appsync:us-east-1:000000000000:apis/" + api.getApiId(), api.getApiArn());
+        assertEquals(api.getApiId() + ".appsync-api.us-east-1.amazonaws.com", api.getDns().get("HTTP"));
+        assertEquals(api.getApiId() + ".appsync-realtime-api.us-east-1.amazonaws.com", api.getDns().get("REALTIME"));
+        assertEquals(NOW.getEpochSecond(), api.getCreated().longValue());
+        assertFalse(api.getXrayEnabled());
+        assertEquals(api.getApiId(), service.getApi(api.getApiId()).getApiId());
+    }
+
+    /** The DNS hosts carry the region's own partition suffix, as the ARN carries its partition. */
+    @Test
+    void createApiInChinaUsesTheChinaDnsSuffixAndPartition() {
+        region = "cn-north-1";
+        AppSyncService china = newService(Clock.fixed(NOW, ZoneOffset.UTC));
+        Api api = china.createApi(Map.of("name", "cn",
+                "eventConfig", eventConfig(List.of("AWS_IAM"), "AWS_IAM", "AWS_IAM", "AWS_IAM")), "cn-north-1");
+
+        assertEquals(api.getApiId() + ".appsync-api.cn-north-1.amazonaws.com.cn", api.getDns().get("HTTP"));
+        assertTrue(api.getApiArn().startsWith("arn:aws-cn:appsync:cn-north-1:"), api.getApiArn());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "API_KEY, AWS_IAM, AWS_IAM, connectionAuthModes",
+            "AWS_IAM, AWS_LAMBDA, AWS_IAM, defaultPublishAuthModes",
+            "AWS_IAM, AWS_IAM, API_KEY, defaultSubscribeAuthModes",
+            "AWS_IAM, AWS_IAM, AWS_IAM, ''"})
+    void createApiRefusesAModeThatNamesNoProvider(String connect, String publish, String subscribe,
+                                                  String member) {
+        Map<String, Object> config = member.isEmpty()
+                ? Map.of("authProviders", List.of(), "connectionAuthModes", List.of(Map.of("authType", connect)),
+                        "defaultPublishAuthModes", List.of(Map.of("authType", publish)),
+                        "defaultSubscribeAuthModes", List.of(Map.of("authType", subscribe)))
+                : eventConfig(List.of("AWS_IAM"), connect, publish, subscribe);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createApi(Map.of("name", "refused", "eventConfig", config), "us-east-1"));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains(member.isEmpty() ? "auth provider" : member), refused.getMessage());
+        assertTrue(service.listApis(null, null).items().isEmpty());
+    }
+
+    @Test
+    void createApiRefusesALambdaProviderWithoutAnAuthorizerUri() {
+        Map<String, Object> config = Map.of(
+                "authProviders", List.of(Map.of("authType", "AWS_LAMBDA")),
+                "connectionAuthModes", List.of(Map.of("authType", "AWS_LAMBDA")),
+                "defaultPublishAuthModes", List.of(Map.of("authType", "AWS_LAMBDA")),
+                "defaultSubscribeAuthModes", List.of(Map.of("authType", "AWS_LAMBDA")));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createApi(Map.of("name", "no-uri", "eventConfig", config), "us-east-1"));
+
+        assertTrue(refused.getMessage().contains("authorizerUri"), refused.getMessage());
+    }
+
+    @Test
+    void createApiRefusesAMissingEventConfigAndABadName() {
+        assertEquals("BadRequestException", assertThrows(AwsException.class,
+                () -> service.createApi(Map.of("name", "no-config"), "us-east-1")).getErrorCode());
+        assertEquals("BadRequestException", assertThrows(AwsException.class,
+                () -> service.createApi(Map.of("name", "bad/name",
+                        "eventConfig", eventConfig(List.of("AWS_IAM"), "AWS_IAM", "AWS_IAM", "AWS_IAM")),
+                        "us-east-1")).getErrorCode());
+    }
+
+    @Test
+    void updateApiLeavesTheStoredApiAloneWhenItRefusesTheConfig() {
+        Api api = createEventsApi("before");
+
+        assertThrows(AwsException.class, () -> service.updateApi(api.getApiId(), Map.of("name", "after",
+                "eventConfig", eventConfig(List.of("AWS_IAM"), "AWS_IAM", "API_KEY", "AWS_IAM"))));
+
+        Api stored = service.getApi(api.getApiId());
+        assertEquals("before", stored.getName());
+        assertEquals(2, stored.getEventConfig().getAuthProviders().size());
+    }
+
+    @Test
+    void deleteApiRemovesItsChannelNamespacesAndApiKeys() {
+        Api api = createEventsApi("cascade");
+        service.createChannelNamespace(api.getApiId(), Map.of("name", "v7-6-0"));
+        service.createApiKey(api.getApiId(), Map.of());
+
+        service.deleteApi(api.getApiId());
+
+        assertThrows(AwsException.class, () -> service.getApi(api.getApiId()));
+        assertTrue(service.listApiKeys(api.getApiId(), null, null).items().isEmpty());
+    }
+
+    @Test
+    void channelNamespaceStoresItsModesAndUsesTheChannelNamespaceArnSegment() {
+        Api api = createEventsApi("ns-owner");
+
+        ChannelNamespace ns = service.createChannelNamespace(api.getApiId(), Map.of("name", "v7-6-0",
+                "publishAuthModes", List.of(Map.of("authType", "AWS_IAM")),
+                "subscribeAuthModes", List.of(Map.of("authType", "AWS_LAMBDA")),
+                "tags", Map.of("k", "v")));
+
+        assertEquals(api.getApiArn() + "/channelNamespace/v7-6-0", ns.getChannelNamespaceArn());
+        assertEquals("AWS_IAM", ns.getPublishAuthModes().get(0).getAuthType());
+        assertEquals("AWS_LAMBDA", ns.getSubscribeAuthModes().get(0).getAuthType());
+        assertEquals("v", ns.getTags().get("k"));
+        assertEquals(NOW.getEpochSecond(), ns.getCreated().longValue());
+    }
+
+    @Test
+    void channelNamespaceRefusesAModeTheApiDoesNotConfigureAndKeepsItsModesOnARefusedUpdate() {
+        Api api = createEventsApi("ns-modes");
+        service.createChannelNamespace(api.getApiId(), Map.of("name", "ns",
+                "publishAuthModes", List.of(Map.of("authType", "AWS_IAM"))));
+
+        AwsException created = assertThrows(AwsException.class, () -> service.createChannelNamespace(
+                api.getApiId(), Map.of("name", "keyed", "publishAuthModes", List.of(Map.of("authType", "API_KEY")))));
+        AwsException updated = assertThrows(AwsException.class, () -> service.updateChannelNamespace(
+                api.getApiId(), "ns", Map.of("publishAuthModes", List.of(Map.of("authType", "API_KEY")))));
+
+        assertEquals("BadRequestException", created.getErrorCode());
+        assertEquals("BadRequestException", updated.getErrorCode());
+        assertEquals("AWS_IAM",
+                service.getChannelNamespace(api.getApiId(), "ns").getPublishAuthModes().get(0).getAuthType());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-leading", "trailing-", "under_score", "has space"})
+    void channelNamespaceRefusesANameOutsideTheModelPattern(String name) {
+        Api api = createEventsApi("ns-names");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createChannelNamespace(api.getApiId(), Map.of("name", name)));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+    }
+
+    @Test
+    void channelNamespaceOperationsOnAMissingApiAreNotFound() {
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.createChannelNamespace("missing", Map.of("name", "ns"))).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.getChannelNamespace("missing", "ns")).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.listChannelNamespaces("missing", null, null)).getHttpStatus());
+    }
+
+    /** A GraphQL API still owns channel namespaces, checked against its own auth types. */
+    @Test
+    void channelNamespaceOnAGraphqlApiChecksTheGraphqlApisAuthTypes() {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "gql", "authenticationType", "API_KEY"), "us-east-1");
+
+        ChannelNamespace ns = service.createChannelNamespace(api.getApiId(), Map.of("name", "ns",
+                "publishAuthModes", List.of(Map.of("authType", "API_KEY"))));
+
+        assertEquals("API_KEY", ns.getPublishAuthModes().get(0).getAuthType());
+        assertThrows(AwsException.class, () -> service.createChannelNamespace(api.getApiId(),
+                Map.of("name", "iam", "publishAuthModes", List.of(Map.of("authType", "AWS_IAM")))));
+    }
+
+    @Test
+    void tagsOnAnEventsApiArnTagTheEventsApi() {
+        Api api = createEventsApi("tagged");
+
+        service.tagResource(api.getApiArn(), Map.of("env", "local", "team", "platform"));
+        service.untagResource(api.getApiArn(), List.of("team"));
+
+        assertEquals(Map.of("env", "local"), service.getTags(api.getApiArn()));
+    }
+
+    @Test
+    void createRefusesTagsThatAreNotAMap() {
+        Api api = createEventsApi("tag-shape");
+
+        AwsException onApi = assertThrows(AwsException.class, () -> service.createApi(Map.of("name", "bad-tags",
+                "eventConfig", eventConfig(List.of("AWS_IAM"), "AWS_IAM", "AWS_IAM", "AWS_IAM"),
+                "tags", List.of("env")), "us-east-1"));
+        AwsException onNamespace = assertThrows(AwsException.class, () -> service.createChannelNamespace(
+                api.getApiId(), Map.of("name", "ns", "tags", "env=local")));
+
+        assertEquals("BadRequestException", onApi.getErrorCode());
+        assertEquals("BadRequestException", onNamespace.getErrorCode());
+        assertEquals(1, service.listApis(null, null).items().size());
+    }
+
+    @Test
+    void listApisPagesInApiIdOrder() {
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ids.add(createEventsApi("paged-" + i).getApiId());
+        }
+        Collections.sort(ids);
+
+        AppSyncService.Page<Api> first = service.listApis(2, null);
+        AppSyncService.Page<Api> second = service.listApis(2, first.nextToken());
+        AppSyncService.Page<Api> third = service.listApis(2, second.nextToken());
+
+        List<String> paged = new ArrayList<>();
+        for (AppSyncService.Page<Api> page : List.of(first, second, third)) {
+            page.items().forEach(api -> paged.add(api.getApiId()));
+        }
+        assertEquals(ids, paged);
+        assertNull(third.nextToken());
+    }
+
+    @Test
+    void anEventsApiOfAnotherRegionIsNotFoundOrListed() {
+        Api api = service.createApi(Map.of("name", "elsewhere",
+                "eventConfig", eventConfig(List.of("AWS_IAM"), "AWS_IAM", "AWS_IAM", "AWS_IAM")), "eu-west-1");
+
+        assertEquals(404, assertThrows(AwsException.class, () -> service.getApi(api.getApiId())).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.updateApi(api.getApiId(), Map.of("name", "moved"))).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteApi(api.getApiId())).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.createChannelNamespace(api.getApiId(), Map.of("name", "ns"))).getHttpStatus());
+        assertTrue(service.listApis(null, null).items().isEmpty());
+    }
+
+    @Test
+    void anEventsApiTakesACustomDomainThatDeleteApiReleases() {
+        Api api = createEventsApi("custom-domain");
+        service.createDomainName(Map.of("domainName", "events.example.com"));
+
+        service.associateApi("events.example.com", api.getApiId());
+        assertEquals(api.getApiId(), service.getApiAssociation("events.example.com").getApiId());
+
+        service.deleteApi(api.getApiId());
+        assertThrows(AwsException.class, () -> service.getApiAssociation("events.example.com"));
+    }
+
+    /** Namespaces persisted before timestamps moved to epoch seconds hold epoch milliseconds. */
+    @Test
+    void channelNamespaceReadsLegacyMillisecondTimestampsAsSeconds() throws Exception {
+        ChannelNamespace legacy = new ObjectMapper().readValue(
+                "{\"name\":\"ns\",\"created\":1767225600000,\"lastModified\":1767225601500}",
+                ChannelNamespace.class);
+        ChannelNamespace current = new ObjectMapper().readValue(
+                "{\"name\":\"ns\",\"created\":1767225600.25}", ChannelNamespace.class);
+
+        assertEquals(1767225600.0, legacy.getCreated());
+        assertEquals(1767225601.5, legacy.getLastModified());
+        assertEquals(1767225600.25, current.getCreated());
+    }
+
+    @Test
+    void getGraphqlApiDoesNotAnswerForAnEventsApi() {
+        Api api = createEventsApi("not-graphql");
+
+        assertThrows(AwsException.class, () -> service.getGraphqlApi(api.getApiId()));
     }
 }
