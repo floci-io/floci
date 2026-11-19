@@ -203,6 +203,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
+    /** An AccessKeyId as IAM documents it: 16 to 128 characters matching {@code [\w]+}. */
+    private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile("\\w{16,128}");
     private static final String ACCOUNT_ALIAS_KEY = "account-alias";
     /** As AWS documents it: no leading or trailing dash, and no two dashes in a row. */
     private static final Pattern ACCOUNT_ALIAS_PATTERN =
@@ -485,6 +487,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private final Map<String, String> partnerPermissionBoundaries;
     private final Clock clock;
     private final boolean seedDeployerPrincipal;
+    private final String seededDeployerAccessKeyId;
     private final String seededAccountAlias;
     /** Guards case-insensitive IAM name uniqueness checks and their corresponding writes. */
     private final Object resourceNameLock = new Object();
@@ -581,6 +584,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             storageFactory.create("iam", "iam-outbound-federation.json", new TypeReference<>() {}),
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
+            config.services().iam().seedDeployerAccessKeyId(),
             config.services().iam().accountAlias().orElse(null),
             PartnerPermissionBoundaries.load(config.services().iam().partnerPermissionBoundariesPath())
                     .documentsByArn(),
@@ -712,7 +716,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
                 credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
                 serviceCredentials, accountProperties, stsPreferences, outboundFederation,
-                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), Clock.systemUTC());
+                regionResolver, seedDeployerPrincipal, DEFAULT_DEPLOYER_ACCESS_KEY_ID, seededAccountAlias, Map.of(),
+                Clock.systemUTC());
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -745,7 +750,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
                 credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
                 serviceCredentials, accountProperties, stsPreferences, outboundFederation,
-                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), clock);
+                regionResolver, seedDeployerPrincipal, DEFAULT_DEPLOYER_ACCESS_KEY_ID, seededAccountAlias, Map.of(),
+                clock);
     }
 
     /**
@@ -776,6 +782,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                StorageBackend<String, OutboundWebIdentityFederation> outboundFederation,
                RegionResolver regionResolver,
                boolean seedDeployerPrincipal,
+               String seededDeployerAccessKeyId,
                String seededAccountAlias,
                Map<String, String> partnerPermissionBoundaries,
                Clock clock) {
@@ -803,6 +810,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.outboundFederation = outboundFederation;
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
+        this.seededDeployerAccessKeyId = seededDeployerAccessKeyId;
         this.seededAccountAlias = seededAccountAlias;
         this.partnerPermissionBoundaries = Map.copyOf(partnerPermissionBoundaries);
         this.clock = clock;
@@ -885,6 +893,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void seedDefaultDeployerPrincipal() {
+        // The legacy default stays accepted so setups signing with floci / floci keep working.
+        // Any other ID IAM would not issue is refused at startup rather than seeded as a key that
+        // DeleteAccessKey and UpdateAccessKey could never take.
+        if (!DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(seededDeployerAccessKeyId)
+                && (seededDeployerAccessKeyId == null
+                        || !ACCESS_KEY_ID_PATTERN.matcher(seededDeployerAccessKeyId).matches())) {
+            throw new IllegalArgumentException("floci.services.iam.seed-deployer-access-key-id must be "
+                    + DEFAULT_DEPLOYER_ACCESS_KEY_ID + " or 16 to 128 characters matching [\\w]+, as IAM "
+                    + "requires of an access key ID: " + seededDeployerAccessKeyId);
+        }
         String adminPolicyArn = AwsManagedPolicies.arnPrefix(regionResolver.getDefaultPartition())
                 + "/AdministratorAccess";
         IamUser user = users.get(DEFAULT_DEPLOYER_USER)
@@ -900,12 +918,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             user.getAttachedPolicyArns().add(adminPolicyArn);
             users.put(DEFAULT_DEPLOYER_USER, user);
         }
-        if (accessKeys.get(DEFAULT_DEPLOYER_ACCESS_KEY_ID).isEmpty()) {
-            accessKeys.put(DEFAULT_DEPLOYER_ACCESS_KEY_ID, new AccessKey(
-                    DEFAULT_DEPLOYER_ACCESS_KEY_ID,
-                    DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
-                    DEFAULT_DEPLOYER_USER));
-            LOG.infov("Seeded default IAM deployer access key: {0}", DEFAULT_DEPLOYER_ACCESS_KEY_ID);
+        synchronized (accessKeyLock) {
+            // Under persistent storage a key seeded under an earlier ID outlives a change of ID. It
+            // signs with the same public secret, and while it exists DeleteUser refuses the user, so
+            // it goes. A key created for the deployer has a secret of its own and stays.
+            for (AccessKey earlier : userAccessKeys(DEFAULT_DEPLOYER_USER)) {
+                if (!earlier.getAccessKeyId().equals(seededDeployerAccessKeyId)
+                        && DEFAULT_DEPLOYER_SECRET_ACCESS_KEY.equals(earlier.getSecretAccessKey())) {
+                    accessKeys.delete(earlier.getAccessKeyId());
+                    LOG.infov("Deleted IAM deployer access key seeded under an earlier ID: {0}",
+                            earlier.getAccessKeyId());
+                }
+            }
+            if (accessKeys.get(seededDeployerAccessKeyId).isEmpty()) {
+                accessKeys.put(seededDeployerAccessKeyId, new AccessKey(
+                        seededDeployerAccessKeyId,
+                        DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
+                        DEFAULT_DEPLOYER_USER));
+                LOG.infov("Seeded default IAM deployer access key: {0}", seededDeployerAccessKeyId);
+            }
         }
     }
 
@@ -5084,9 +5115,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return currentSession(accessKeyId).map(SessionCredential::getExpiration);
     }
 
-    /** Whether an access key ID identifies Floci's documented public deployer credential. */
-    public boolean isSeededDeployerAccessKey(String accessKeyId) {
-        return DEFAULT_DEPLOYER_ACCESS_KEY_ID.equals(accessKeyId);
+    /**
+     * Whether a secret access key is the seeded deployer's, which Floci's documentation publishes.
+     * The secret is what makes that credential public, whatever ID the key was seeded under, and
+     * only seeding creates a key with it: CreateAccessKey generates a secret of its own.
+     */
+    public boolean isSeededDeployerSecret(String secretAccessKey) {
+        return DEFAULT_DEPLOYER_SECRET_ACCESS_KEY.equals(secretAccessKey);
     }
 
     /**

@@ -537,6 +537,7 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      seed-deployer-access-key-id: floci   # floci, or 16 to 128 word characters to be able to deactivate or delete the key
       # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
                            # without creating it first. Unset means the account has no alias,
                            # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account

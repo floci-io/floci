@@ -208,6 +208,7 @@ floci:
       enabled: true
       enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
       seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
+      seed-deployer-access-key-id: floci  # Access key ID of the seeded deployer's key
 
     networkfirewall:
       enabled: true

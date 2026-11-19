@@ -474,7 +474,7 @@ kubectl get nodes
 
 `aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 15-minute token lifetime matching `aws-iam-authenticator` rather than the presigned expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before resolving the caller identity. Instance-profile sessions require an EC2_LINUX access entry as described above; non-worker callers retain the `system:masters` mapping (bound to `cluster-admin`). A long-term access key gets it only on clusters of its own account, so a default-account key is refused on another account's cluster; on the older unscoped webhook path only the default account's keys get it. No `aws-iam-authenticator` is required.
 
-Create an IAM access key before using EKS authentication. The public local-development pairs `test`/`test` and `floci`/`floci` are deliberately rejected because the webhook grants cluster-admin access.
+Create an IAM access key before using EKS authentication. The public local-development pair `test`/`test` and the seeded deployer's key, whose secret `floci` is public whatever access key ID it was seeded under, are deliberately rejected because the webhook grants cluster-admin access.
 
 Temporary IAM credentials must include their `AWS_SESSION_TOKEN` when signing the token.
 
