@@ -3720,6 +3720,25 @@ public interface EmulatorConfig {
             Optional<List<String>> labels();
 
             /**
+             * Node selector of Lambda pods, as {@code key=value} entries with label syntax.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_NODE_SELECTOR (comma-separated)
+             */
+            Optional<List<String>> nodeSelector();
+
+            /**
+             * Tolerations of Lambda pods, each written as the taint it tolerates in
+             * {@code kubectl taint} syntax: {@code key=value:Effect} tolerates that taint
+             * (operator {@code Equal}), {@code key:Effect} tolerates every value of the key
+             * (operator {@code Exists}), and an entry without {@code :Effect} tolerates every
+             * effect. Effects are {@code NoSchedule}, {@code PreferNoSchedule} and
+             * {@code NoExecute}.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS (comma-separated)
+             */
+            Optional<List<String>> tolerations();
+
+            /**
              * Host or IP that Lambda pods use to reach Floci (the Runtime API port range
              * and the main port). When unset, Floci auto-detects its own pod address if
              * running in-cluster; when running outside the cluster this must be set to an
