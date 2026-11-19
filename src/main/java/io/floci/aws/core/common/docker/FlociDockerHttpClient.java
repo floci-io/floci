@@ -95,6 +95,8 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
     private final PoolingHttpClientConnectionManager connectionManager;
     /** Responses still open per {@link #streamKind} of the request that opened them. */
     private final Map<String, AtomicInteger> openStreams = new ConcurrentHashMap<>();
+    /** The same responses per service of the container they follow, see {@link DockerContainerServices}. */
+    private final Map<String, AtomicInteger> openStreamsByService = new ConcurrentHashMap<>();
     private final HttpHost host;
     private final String pathPrefix;
     /** The same settings with no response timeout, for requests that hold a stream open (see isLongLivedStream). */
@@ -221,11 +223,18 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
             boolean ttyExec = isTtyExec(request);
             ClassicHttpResponse response = httpClient.executeOpen(host, httpRequest, context);
             AtomicInteger openOfKind = null;
+            AtomicInteger openOfService = null;
             if (streamKind != null) {
                 openOfKind = openStreams.computeIfAbsent(streamKind, kind -> new AtomicInteger());
                 openOfKind.incrementAndGet();
+                openOfService = openStreamsByService.computeIfAbsent(
+                        DockerContainerServices.serviceOf(streamContainer(request)), service -> new AtomicInteger());
+                openOfService.incrementAndGet();
+            } else {
+                forgetIfRemoved(request, response.getCode());
             }
-            return new FlociResponse(httpRequest, response, ttyExec && response.getCode() == 200, openOfKind);
+            return new FlociResponse(httpRequest, response, ttyExec && response.getCode() == 200,
+                    openOfKind, openOfService);
         } catch (IOException e) {
             throw new RuntimeException(e);
         } catch (LinkageError e) {
@@ -246,22 +255,32 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
 
     /**
      * The pool's leased, available and pending connections and its limit, and the long-lived stream
-     * responses still open by kind (only kinds with an open stream are listed), read at this moment.
+     * responses still open by kind and by service (only those with an open stream are listed), read
+     * at this moment.
      */
     public PoolGauges gauges() {
         PoolStats stats = connectionManager.getTotalStats();
-        Map<String, Integer> streams = new TreeMap<>();
-        openStreams.forEach((kind, open) -> {
-            int count = open.get();
-            if (count > 0) {
-                streams.put(kind, count);
-            }
-        });
-        return new PoolGauges(stats.getLeased(), stats.getAvailable(), stats.getPending(), stats.getMax(), streams);
+        return new PoolGauges(stats.getLeased(), stats.getAvailable(), stats.getPending(), stats.getMax(),
+                nonZero(openStreams), nonZero(openStreamsByService));
     }
 
-    /** A point-in-time reading of one pool, see {@link #gauges()}. */
-    public record PoolGauges(int leased, int available, int pending, int max, Map<String, Integer> openStreams) {
+    private static Map<String, Integer> nonZero(Map<String, AtomicInteger> counts) {
+        Map<String, Integer> open = new TreeMap<>();
+        counts.forEach((key, count) -> {
+            int value = count.get();
+            if (value > 0) {
+                open.put(key, value);
+            }
+        });
+        return open;
+    }
+
+    /**
+     * A point-in-time reading of one pool, see {@link #gauges()}. {@code openStreamsByService} counts
+     * the same streams as {@code openStreams}, by the service of the container each follows.
+     */
+    public record PoolGauges(int leased, int available, int pending, int max, Map<String, Integer> openStreams,
+                             Map<String, Integer> openStreamsByService) {
 
         /** Whether nothing is in use: no lease, no caller waiting for one and no stream open. */
         public boolean idle() {
@@ -328,6 +347,48 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
             default -> null;
         };
         return kind == null && request.hijackedInput() != null ? "hijacked" : kind;
+    }
+
+    /**
+     * The container a stream follows, as the request names it (an id or a name), or null for a stream
+     * that follows none: an exec start names its exec, and pulls, builds and events no container.
+     */
+    static String streamContainer(Request request) {
+        String[] segments = containerRoute(request.path());
+        return segments != null && segments.length == 2 ? segments[0] : null;
+    }
+
+    /**
+     * After an ordinary call: a container removed (or already gone) is forgotten by
+     * {@link DockerContainerServices}, so its entry does not outlive it.
+     */
+    private static void forgetIfRemoved(Request request, int statusCode) {
+        if (!"DELETE".equals(request.method()) || (statusCode >= 300 && statusCode != 404)) {
+            return;
+        }
+        String[] segments = containerRoute(request.path());
+        if (segments != null && segments.length == 1) {
+            DockerContainerServices.forget(segments[0]);
+        }
+    }
+
+    /**
+     * The route segments after {@code /containers/}, at most two (the container and its action), or
+     * null when the route is not about one container.
+     */
+    private static String[] containerRoute(String path) {
+        int queryStart = path.indexOf('?');
+        String route = queryStart < 0 ? path : path.substring(0, queryStart);
+        int start = route.indexOf("/containers/");
+        if (start < 0) {
+            return null;
+        }
+        String[] segments = route.substring(start + "/containers/".length()).split("/");
+        if (segments.length == 0 || segments.length > 2 || segments[0].isEmpty() || "create".equals(segments[0])
+                || ("json".equals(segments[0]) && segments.length == 1) || "prune".equals(segments[0])) {
+            return null;
+        }
+        return segments;
     }
 
     /** A boolean query parameter as Docker reads it ({@code 1} or {@code true}), or its default when absent. */
@@ -399,17 +460,19 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         private final HttpUriRequestBase request;
         private final ClassicHttpResponse response;
         private final boolean ttyExec;
-        /** The open-stream count this response is in, or null for an ordinary call. */
+        /** The open-stream counts this response is in, by kind and by service, or null for an ordinary call. */
         private final AtomicInteger openOfKind;
+        private final AtomicInteger openOfService;
         private final AtomicBoolean closed = new AtomicBoolean();
         private InputStream body;
 
         FlociResponse(HttpUriRequestBase request, ClassicHttpResponse response, boolean ttyExec,
-                      AtomicInteger openOfKind) {
+                      AtomicInteger openOfKind, AtomicInteger openOfService) {
             this.request = request;
             this.response = response;
             this.ttyExec = ttyExec;
             this.openOfKind = openOfKind;
+            this.openOfService = openOfService;
         }
 
         @Override
@@ -448,6 +511,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         public void close() {
             if (openOfKind != null && closed.compareAndSet(false, true)) {
                 openOfKind.decrementAndGet();
+                openOfService.decrementAndGet();
             }
             try {
                 request.abort();

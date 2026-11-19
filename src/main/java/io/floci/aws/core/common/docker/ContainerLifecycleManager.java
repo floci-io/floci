@@ -385,6 +385,7 @@ public class ContainerLifecycleManager {
             }
             throw e;
         }
+        DockerContainerServices.record(containerId, spec.name(), labels);
         LOG.infov("Created container {0} (name={1}, not yet started)", containerId, spec.name());
         return containerId;
     }
