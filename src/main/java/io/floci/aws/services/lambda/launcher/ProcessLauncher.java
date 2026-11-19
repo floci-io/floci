@@ -20,10 +20,14 @@ import org.jboss.logging.Logger;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +40,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
 
 /**
  * Runs each Lambda execution environment as a process on the host Floci runs on, following the
@@ -58,6 +63,9 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
     /** How long a stopped environment's process gets to exit before it is killed, and then to die. */
     private static final long STOP_GRACE_SECONDS = 2;
 
+    /** Output longer than a CloudWatch Logs event is split into several events. */
+    private static final int MAX_LOG_EVENT_CHARS = 256 * 1024;
+
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final RuntimeApiServerFactory runtimeApiServerFactory;
@@ -66,6 +74,7 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
     private final String flociEndpoint;
     private final Map<String, Process> processes = new ConcurrentHashMap<>();
+    private final Map<String, Path> codeCopies = new ConcurrentHashMap<>();
 
     @Inject
     public ProcessLauncher(EmulatorConfig config,
@@ -96,9 +105,16 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
 
     @Override
     public ContainerHandle launch(LambdaFunction fn) {
-        Path taskRoot = taskRoot(fn);
+        Path code = codeDirectory(fn);
+        Path taskRoot = fn.isHotReload() ? code : copyOf(fn, code);
+        Path codeCopy = fn.isHotReload() ? null : taskRoot;
         Path bootstrap = taskRoot.resolve("bootstrap");
-        requireExecutableBootstrap(fn, bootstrap);
+        try {
+            requireExecutableBootstrap(fn, bootstrap);
+        } catch (RuntimeException e) {
+            deleteCopy(codeCopy);
+            throw e;
+        }
         LOG.infov("Launching process for function: {0}", fn.getFunctionName());
 
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
@@ -139,6 +155,9 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
 
             String processId = "process-" + fn.getFunctionName() + "-" + shortId;
             processes.put(processId, process);
+            if (codeCopy != null) {
+                codeCopies.put(processId, codeCopy);
+            }
             return new ContainerHandle(processId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM,
                     fn.isHotReload(), roleCredentials.map(SessionCreds::accessKeyId).orElse(null), sessionAccountId);
         } catch (IOException | RuntimeException e) {
@@ -153,7 +172,7 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
             } catch (ExecutionException | TimeoutException | CancellationException stopFailure) {
                 LOG.debugv("Runtime API server stop failed during launch cleanup: {0}", stopFailure.getMessage());
             }
-            releaseWhenGone(runtimeApiServer, process, processGone);
+            releaseWhenGone(runtimeApiServer, codeCopy, process, processGone);
             if (e instanceof RuntimeException runtimeException) {
                 throw runtimeException;
             }
@@ -184,18 +203,22 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
             LOG.warnv("Process {0} did not exit yet; its Runtime API port is released once it does",
                     handle.getContainerId());
         }
-        releaseWhenGone(server, process, processGone);
+        releaseWhenGone(server, codeCopies.remove(handle.getContainerId()), process, processGone);
     }
 
     /**
-     * Returns the Runtime API port to the pool once the process is gone. A process that is still alive
-     * may still poll the port, so it is released only when that process exits.
+     * Returns the Runtime API port to the pool and deletes the code copy once the process is gone. A
+     * process that is still alive may still use both, so they are released only when it exits.
      */
-    private void releaseWhenGone(RuntimeApiServer server, Process process, boolean processGone) {
-        if (processGone) {
+    private void releaseWhenGone(RuntimeApiServer server, Path codeCopy, Process process, boolean processGone) {
+        Runnable release = () -> {
             runtimeApiServerFactory.release(server);
+            deleteCopy(codeCopy);
+        };
+        if (processGone) {
+            release.run();
         } else {
-            process.onExit().thenRun(() -> runtimeApiServerFactory.release(server));
+            process.onExit().thenRun(release);
         }
     }
 
@@ -205,7 +228,7 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
         return process != null && process.isAlive();
     }
 
-    private static Path taskRoot(LambdaFunction fn) {
+    private static Path codeDirectory(LambdaFunction fn) {
         if ("Image".equals(fn.getPackageType())) {
             throw new RuntimeException("Function '" + fn.getFunctionName() + "' is a container image; the process "
                     + "Lambda executor runs .zip packages only. Use the docker or kubernetes executor.");
@@ -218,22 +241,65 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
             throw new RuntimeException("Function '" + fn.getFunctionName() + "' has layers, which the process "
                     + "Lambda executor does not support.");
         }
+        if (fn.getFileSystemConfigs() != null && !fn.getFileSystemConfigs().isEmpty()) {
+            throw new RuntimeException("Function '" + fn.getFunctionName() + "' mounts a file system, which the "
+                    + "process Lambda executor does not support.");
+        }
         String location = fn.isHotReload() ? fn.getHotReloadHostPath() : fn.getCodeLocalPath();
         if (location == null) {
             throw new RuntimeException("No code location for function '" + fn.getFunctionName()
                     + "' (function has no deployed code)");
         }
-        Path taskRoot = Path.of(location).toAbsolutePath().normalize();
-        if (!Files.isDirectory(taskRoot)) {
+        Path code = Path.of(location).toAbsolutePath().normalize();
+        if (!Files.isDirectory(code)) {
             throw new RuntimeException("Code directory not found for function '" + fn.getFunctionName() + "': "
-                    + taskRoot);
+                    + code);
         }
-        return taskRoot;
+        return code;
     }
 
     /**
-     * Floci extracts a .zip package without its file modes, so its own copy of {@code bootstrap} is made
-     * executable here, as the docker executor's copy into the container does. A hot-reload directory
+     * Copies a deployed package for one execution environment, as the docker executor copies it into
+     * the container, so a code update or a write by another environment does not change it while it runs.
+     */
+    private static Path copyOf(LambdaFunction fn, Path code) {
+        Path copy = null;
+        try {
+            copy = Files.createTempDirectory("floci-lambda-" + fn.getFunctionName() + "-");
+            try (Stream<Path> paths = Files.walk(code)) {
+                for (Path source : (Iterable<Path>) paths::iterator) {
+                    Path target = copy.resolve(code.relativize(source).toString());
+                    if (Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS)) {
+                        Files.createDirectories(target);
+                    } else {
+                        Files.copy(source, target, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);
+                    }
+                }
+            }
+            return copy;
+        } catch (IOException | RuntimeException e) {
+            deleteCopy(copy);
+            throw new RuntimeException("Could not copy the code of function '" + fn.getFunctionName() + "': "
+                    + e.getMessage(), e);
+        }
+    }
+
+    private static void deleteCopy(Path copy) {
+        if (copy == null) {
+            return;
+        }
+        try (Stream<Path> paths = Files.walk(copy)) {
+            for (Path path : (Iterable<Path>) paths.sorted(Comparator.reverseOrder())::iterator) {
+                Files.deleteIfExists(path);
+            }
+        } catch (IOException | RuntimeException e) {
+            LOG.warnv("Could not delete the code copy {0}: {1}", copy, e.getMessage());
+        }
+    }
+
+    /**
+     * Floci extracts a .zip package without its file modes, so the environment's copy of {@code bootstrap}
+     * is made executable here, as the docker executor's copy into the container does. A hot-reload directory
      * belongs to the user and is used as it is.
      */
     private static void requireExecutableBootstrap(LambdaFunction fn, Path bootstrap) {
@@ -286,22 +352,42 @@ public class ProcessLauncher implements LambdaRuntimeLauncher {
         // A platform thread: a virtual thread blocked on a pipe read keeps its carrier, and enough of
         // them would stall every other virtual thread in Floci.
         Thread.ofPlatform().daemon().name("lambda-process-logs-" + functionName).start(() -> {
-            logStreamer.ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
-            try (BufferedReader lines = new BufferedReader(
+            try {
+                logStreamer.ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not create the log stream of function {0}: {1}", functionName, e.getMessage());
+            }
+            try (Reader output = new BufferedReader(
                     new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = lines.readLine()) != null) {
-                    String trimmed = line.stripTrailing();
-                    if (trimmed.isEmpty()) {
-                        continue;
+                char[] buffer = new char[8192];
+                StringBuilder line = new StringBuilder();
+                int read;
+                while ((read = output.read(buffer)) != -1) {
+                    for (int i = 0; i < read; i++) {
+                        if (buffer[i] != '\n') {
+                            line.append(buffer[i]);
+                        }
+                        if (buffer[i] == '\n' || line.length() >= MAX_LOG_EVENT_CHARS) {
+                            forwardLine(line, functionName, accountId, logGroup, logStream, region);
+                        }
                     }
-                    LOG.infov("[lambda:{0}] {1}", functionName, trimmed);
-                    logStreamer.streamToCloudWatchLogsForAccount(accountId, logGroup, logStream, region, trimmed);
                 }
-            } catch (IOException e) {
+                forwardLine(line, functionName, accountId, logGroup, logStream, region);
+            } catch (IOException | RuntimeException e) {
                 LOG.debugv("Output of the {0} process ended: {1}", functionName, e.getMessage());
             }
         });
+    }
+
+    private void forwardLine(StringBuilder line, String functionName, String accountId, String logGroup,
+                             String logStream, String region) {
+        String trimmed = line.toString().stripTrailing();
+        line.setLength(0);
+        if (trimmed.isEmpty()) {
+            return;
+        }
+        LOG.infov("[lambda:{0}] {1}", functionName, trimmed);
+        logStreamer.streamToCloudWatchLogsForAccount(accountId, logGroup, logStream, region, trimmed);
     }
 
     /** Stops the process and its children, returning whether the process is confirmed gone. */

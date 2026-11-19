@@ -1033,7 +1033,10 @@ Set `FLOCI_SERVICES_LAMBDA_EXECUTOR=process` to run each Lambda execution
 environment as a process on the machine Floci runs on, without Docker. It
 follows the [custom runtime](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-custom.html)
 contract: Floci starts the package's `bootstrap` in the package directory, and
-the bootstrap polls the Lambda Runtime API at `AWS_LAMBDA_RUNTIME_API`.
+the bootstrap polls the Lambda Runtime API at `AWS_LAMBDA_RUNTIME_API`. Each
+execution environment runs from its own copy of a .zip package, in the system
+temporary directory, so a code update does not change an environment that is
+already running. The copy is deleted when the environment stops.
 
 The process gets:
 
@@ -1046,7 +1049,8 @@ The process gets:
   own environment variables, credentials included, do not reach the function.
   The process can still read anything your user can, such as `~/.aws`.
 
-Its output goes to Floci's log and the function's CloudWatch Logs stream.
+Its output goes to Floci's log and the function's CloudWatch Logs stream, one
+event per line, with lines longer than 256 KB split into several events.
 Hot-reload functions run from their host directory directly.
 
 The process runs with the permissions of the user Floci runs as, with no
@@ -1056,11 +1060,11 @@ development only.
 Limitations:
 
 - Only `provided.*` runtimes from a .zip package or a hot-reload directory are
-  supported. Other runtimes, container images and functions with layers fail
-  to launch with a clear error.
-- A bootstrap from a .zip package is made executable when it starts, since
-  Floci does not keep file modes when it extracts a package. Other files in
-  the package keep the modes extraction gave them. A hot-reload bootstrap must
+  supported. Other runtimes, container images, functions with layers and
+  functions that mount a file system fail to launch with a clear error.
+- The bootstrap in a .zip package's copy is made executable when it starts,
+  since Floci does not keep file modes when it extracts a package. Other files
+  in the package keep the modes extraction gave them. A hot-reload bootstrap must
   already be executable.
 - Floci refuses to start with this executor when it runs inside a container,
   where the processes would run in that container instead of on your machine.
@@ -1072,8 +1076,9 @@ Limitations:
 - Stopping an environment stops its bootstrap and the processes it started.
   Processes a bootstrap left behind after it exited on its own are not
   tracked and keep running until you stop them, and so are bootstraps still
-  running when Floci itself is killed. Nothing removes them when Floci starts
-  again, as the Docker and Kubernetes executors do for their leftovers.
+  running when Floci itself is killed, along with their code copies. Nothing
+  removes them when Floci starts again, as the Docker and Kubernetes executors
+  do for their leftovers.
 
 ### S3 virtual-hosted-style addressing inside Lambda containers
 

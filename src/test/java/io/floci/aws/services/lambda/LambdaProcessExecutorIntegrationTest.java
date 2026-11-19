@@ -1,6 +1,7 @@
 package io.floci.aws.services.lambda;
 
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -8,18 +9,12 @@ import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -66,7 +61,7 @@ class LambdaProcessExecutorIntegrationTest {
     }
 
     @Test
-    void aProvidedRuntimeFunctionAnswersAnInvocation() throws IOException {
+    void aProvidedRuntimeFunctionAnswersAnInvocation() {
         String functionName = "process-executor-" + UUID.randomUUID().toString().substring(0, 8);
         given()
                 .contentType("application/json")
@@ -79,7 +74,7 @@ class LambdaProcessExecutorIntegrationTest {
                       "Timeout": 10,
                       "Code": {"ZipFile": "%s"}
                     }
-                    """.formatted(functionName, ROLE, bootstrapZipBase64()))
+                    """.formatted(functionName, ROLE, LambdaCodeFixtures.singleFileZipBase64("bootstrap", BOOTSTRAP)))
         .when()
                 .post(BASE_PATH + "/functions")
         .then()
@@ -98,15 +93,5 @@ class LambdaProcessExecutorIntegrationTest {
         } finally {
             given().when().delete(BASE_PATH + "/functions/" + functionName);
         }
-    }
-
-    private static String bootstrapZipBase64() throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("bootstrap"));
-            zip.write(BOOTSTRAP.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
     }
 }

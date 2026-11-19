@@ -5,6 +5,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.iam.model.SessionCreds;
+import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServerFactory;
@@ -31,6 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -47,6 +49,9 @@ class ProcessLauncherTest {
 
     @TempDir
     Path tempDir;
+
+    @TempDir
+    Path output;
 
     private RuntimeApiServerFactory runtimeApiServerFactory;
     private RuntimeApiServer runtimeApiServer;
@@ -83,19 +88,16 @@ class ProcessLauncherTest {
 
     @Test
     void launchRunsTheBootstrapWithOnlyTheLambdaEnvironment() throws IOException {
-        Path code = codeDirectory("env > env.tmp && mv env.tmp env.out\nexec sleep 30\n", false);
+        Path code = codeDirectory(writeOutput("env", "env") + "exec sleep 30\n", false);
         LambdaFunction fn = function(code);
         fn.setEnvironment(Map.of("GREETING", "hello", "AWS_ACCESS_KEY_ID", "partial"));
 
         ContainerHandle handle = launch(fn);
 
-        Path envFile = code.resolve("env.out");
-        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(envFile));
-        List<String> env = Files.readAllLines(envFile);
+        List<String> env = awaitOutput("env");
         assertThat(env).contains(
                 "AWS_LAMBDA_RUNTIME_API=127.0.0.1:12000",
                 "_HANDLER=function.handler",
-                "LAMBDA_TASK_ROOT=" + code.toAbsolutePath().normalize(),
                 "AWS_LAMBDA_FUNCTION_NAME=fn",
                 "AWS_LAMBDA_FUNCTION_VERSION=$LATEST",
                 "AWS_ENDPOINT_URL=http://127.0.0.1:4566",
@@ -110,21 +112,44 @@ class ProcessLauncherTest {
     }
 
     @Test
+    void aZipPackageRunsFromACopyThatStopDeletes() throws IOException {
+        Path code = codeDirectory(writeOutput("pwd", "pwd") + "exec sleep 30\n", false);
+        Files.writeString(code.resolve("handler.txt"), "v1");
+        ContainerHandle handle = launcher.launch(function(code));
+
+        Path copy = Path.of(awaitOutput("pwd").getFirst());
+        Files.writeString(code.resolve("handler.txt"), "v2");
+
+        assertThat(copy.toRealPath()).isNotEqualTo(code.toRealPath());
+        assertThat(Files.readString(copy.resolve("handler.txt"))).isEqualTo("v1");
+        assertThat(Files.isExecutable(code.resolve("bootstrap"))).isFalse();
+        launcher.stop(handle);
+        assertThat(copy).doesNotExist();
+    }
+
+    @Test
+    void longOutputWithoutNewlinesIsSplitIntoLogEvents() throws IOException {
+        launch(function(codeDirectory("head -c 300000 /dev/zero | tr '\\0' a\necho\nexec sleep 30\n", true)));
+
+        verify(logStreamer, timeout(10_000)).streamToCloudWatchLogsForAccount(eq(ACCOUNT), eq("/aws/lambda/fn"),
+                eq("2026/01/01/[$LATEST]stream"), eq(REGION), argThat(event -> event.length() == 256 * 1024));
+        verify(logStreamer, timeout(10_000)).streamToCloudWatchLogsForAccount(eq(ACCOUNT), eq("/aws/lambda/fn"),
+                eq("2026/01/01/[$LATEST]stream"), eq(REGION),
+                argThat(event -> event.length() == 300_000 - 256 * 1024));
+    }
+
+    @Test
     void anExecutionRoleSessionReplacesTheFunctionsCredentials() throws IOException {
         SessionCreds session = new SessionCreds("ASIAEXAMPLE", "secret", "token");
-        LambdaFunction fn = function(codeDirectory("exec sleep 30\n", true));
+        LambdaFunction fn = function(codeDirectory(writeOutput("env", "env") + "exec sleep 30\n", true));
         when(roleCredentials.forFunction(fn)).thenReturn(Optional.of(session));
         when(awsEnv.sdkBaselineEnv(anyString(), any(), anyString(), eq(Optional.of(session)), anyString()))
                 .thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIAEXAMPLE"));
-        Path code = Path.of(fn.getCodeLocalPath());
-        Files.writeString(code.resolve("bootstrap"), "#!/bin/sh\nenv > env.tmp && mv env.tmp env.out\nexec sleep 30\n");
         fn.setEnvironment(Map.of("AWS_ACCESS_KEY_ID", "user", "AWS_SECRET_ACCESS_KEY", "user",
                 "AWS_SESSION_TOKEN", "user"));
 
         ContainerHandle handle = launcher.launch(fn);
-        Path envFile = code.resolve("env.out");
-        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(envFile));
-        List<String> env = Files.readAllLines(envFile);
+        List<String> env = awaitOutput("env");
         launcher.stop(handle);
 
         assertThat(env).contains("AWS_ACCESS_KEY_ID=ASIAEXAMPLE");
@@ -145,11 +170,9 @@ class ProcessLauncherTest {
     @Test
     void stopKillsChildrenThatIgnoreTermination() throws IOException {
         Path code = codeDirectory("(trap '' TERM; exec sleep 30) &\n"
-                + "echo $! > child.tmp && mv child.tmp child.pid\nexec sleep 30\n", true);
+                + writeOutput("echo $!", "child") + "exec sleep 30\n", true);
         ContainerHandle handle = launcher.launch(function(code));
-        Path pidFile = code.resolve("child.pid");
-        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(pidFile));
-        long childPid = Long.parseLong(Files.readString(pidFile).strip());
+        long childPid = Long.parseLong(awaitOutput("child").getFirst().strip());
 
         launcher.stop(handle);
 
@@ -247,6 +270,15 @@ class ProcessLauncherTest {
     }
 
     @Test
+    void functionsWithFileSystemsAreRejected() throws IOException {
+        LambdaFunction fn = function(codeDirectory("exec sleep 30\n", true));
+        fn.setFileSystemConfigs(List.of(new LambdaFileSystemConfig(
+                "arn:aws:elasticfilesystem:us-east-1:" + ACCOUNT + ":access-point/fsap-1", "/mnt/data")));
+
+        assertRejected(fn, "mounts a file system");
+    }
+
+    @Test
     void aPackageWithoutABootstrapIsRejected() throws IOException {
         Path code = Files.createDirectories(tempDir.resolve("empty"));
 
@@ -271,6 +303,18 @@ class ProcessLauncherTest {
     private void assertRejected(LambdaFunction fn, String message) {
         assertThatThrownBy(() -> launcher.launch(fn)).hasMessageContaining(message);
         verify(runtimeApiServerFactory, never()).create();
+    }
+
+    /** A shell line that writes {@code command}'s output to the output file {@code name}, all at once. */
+    private String writeOutput(String command, String name) {
+        Path file = output.resolve(name);
+        return command + " > '" + file + ".tmp' && mv '" + file + ".tmp' '" + file + "'\n";
+    }
+
+    private List<String> awaitOutput(String name) throws IOException {
+        Path file = output.resolve(name);
+        Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> Files.exists(file));
+        return Files.readAllLines(file);
     }
 
     private Path codeDirectory(String script, boolean executable) throws IOException {
