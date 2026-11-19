@@ -19,6 +19,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -308,6 +309,52 @@ class EksEncryptionLoggingIntegrationTest {
             given().contentType(JSON)
                     .when().get("/clusters/" + name + "/updates/" + first)
                     .then().statusCode(200).body("update.id", equalTo(first));
+        } finally {
+            deleteCluster(name);
+        }
+    }
+
+    @Test
+    void updateConfigRecordsCidrsAsJsonRefusesNoOpsAndScopesDescribeUpdateToTheCluster() {
+        String name = createClusterFrom("it-update-noop-" + UUID.randomUUID(), "");
+        try {
+            String cidrs = "\"publicAccessCidrs\":[\"203.0.113.5/32\"]";
+            given().contentType(JSON)
+                    .body("{\"resourcesVpcConfig\":{\"endpointPublicAccess\":true," + cidrs + "}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(200)
+                    .body("update.type", equalTo("EndpointAccessUpdate"))
+                    .body("update.params.find { it.type == 'PublicAccessCidrs' }.value",
+                            equalTo("[\"203.0.113.5/32\"]"));
+            String loggingId = given().contentType(JSON).body("{" + LOGGING_AUDIT_ON + "}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(200).extract().path("update.id");
+            Object before = given().when().get("/clusters/" + name).then().statusCode(200).extract().path("cluster");
+
+            // both endpoints off
+            given().contentType(JSON)
+                    .body("{\"resourcesVpcConfig\":{\"endpointPublicAccess\":false,\"endpointPrivateAccess\":false}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
+            // the stored flags and CIDRs again
+            given().contentType(JSON)
+                    .body("{\"resourcesVpcConfig\":{\"endpointPublicAccess\":true,"
+                            + "\"endpointPrivateAccess\":false," + cidrs + "}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"))
+                    .body("message", startsWith("Cluster is already at the desired configuration"));
+            // api logs are already off
+            given().contentType(JSON)
+                    .body("{\"logging\":{\"clusterLogging\":[{\"types\":[\"api\"],\"enabled\":false}]}}")
+                    .when().post("/clusters/" + name + "/update-config")
+                    .then().statusCode(400).body("__type", equalTo("InvalidParameterException"))
+                    .body("message", equalTo("No changes needed for the logging config provided"));
+            given().when().get("/clusters/" + name).then().statusCode(200).body("cluster", equalTo(before));
+
+            given().contentType(JSON)
+                    .when().get("/clusters/" + name + "/updates/" + loggingId + "?addonName=vpc-cni")
+                    .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"))
+                    .body("message", equalTo("No update: " + loggingId + " found for addon: vpc-cni"));
         } finally {
             deleteCluster(name);
         }
