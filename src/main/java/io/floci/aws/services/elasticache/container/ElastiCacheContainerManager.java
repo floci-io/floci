@@ -128,13 +128,7 @@ public class ElastiCacheContainerManager {
      * container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     public ElastiCacheContainerHandle start(String groupId, String image, String region) {

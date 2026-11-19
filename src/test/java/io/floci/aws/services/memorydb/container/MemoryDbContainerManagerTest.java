@@ -1,6 +1,5 @@
 package io.floci.aws.services.memorydb.container;
 
-import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -134,8 +133,7 @@ class MemoryDbContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenThrow(new RuntimeException("java.net.SocketException: No such file or directory"));
-        when(lifecycleManager.getDockerClient()).thenThrow(
-                new RuntimeException("java.net.SocketException: No such file or directory"));
+        when(lifecycleManager.isDockerReachable()).thenReturn(false);
 
         MemoryDbContainerManager manager = newManager(lifecycleManager);
 
@@ -153,8 +151,7 @@ class MemoryDbContainerManagerTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenThrow(new RuntimeException("no such image: valkey/valkey:8"));
-        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(lifecycleManager.isDockerReachable()).thenReturn(true);
 
         MemoryDbContainerManager manager = newManager(lifecycleManager);
 
