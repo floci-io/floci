@@ -32,17 +32,49 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ElbV2HealthCheckerTest {
 
     private final Vertx vertx = Vertx.vertx();
+
+    @Test
+    void replacingMonitoringCancelsPreviousTimerAndIgnoresItsCallback() {
+        Vertx timers = mock(Vertx.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        WorkerExecutor workers = mock(WorkerExecutor.class);
+        when(timers.createSharedWorkerExecutor(any(), anyInt())).thenReturn(workers);
+        List<Handler<Long>> callbacks = new ArrayList<>();
+        when(timers.setPeriodic(anyLong(), any())).thenAnswer(call -> {
+            callbacks.add(call.getArgument(1));
+            return (long) callbacks.size();
+        });
+        ElbV2HealthChecker checker = spy(
+                new ElbV2HealthChecker(timers, config, mock(Ec2Service.class)));
+        TargetGroup group = targetGroup(8080, "200", 1, 1);
+        group.setHealthCheckIntervalSeconds(30);
+        checker.startMonitoring(group);
+        group.setHealthCheckIntervalSeconds(7);
+        checker.startMonitoring(group);
+        verify(timers).setPeriodic(eq(30_000L), any());
+        verify(timers).setPeriodic(eq(7_000L), any());
+        verify(timers).cancelTimer(1L);
+        callbacks.getFirst().handle(1L);
+        verify(checker, never()).probeAll(group.getTargetGroupArn(), group);
+        callbacks.get(1).handle(2L);
+        verify(checker).probeAll(group.getTargetGroupArn(), group);
+        checker.stopMonitoring(group.getTargetGroupArn());
+        verify(timers).cancelTimer(2L);
+    }
 
     @AfterEach
     void closeVertx() {

@@ -72,7 +72,7 @@ class ElbV2CfnProvisionerTest {
     private static final String DECLARED_TARGETS = "__FlociTargetGroupTargets";
     private static final String DECLARED_TARGETS_PRIOR = "__FlociTargetGroupTargetsPrior";
     private static final String TARGETS_SNAPSHOT = CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR;
-    private static final String HEALTH_SNAPSHOT = "__FlociTargetGroupHealthUpdateSnapshot";
+    private static final String HEALTH_SNAPSHOT = ElbV2CfnProvisioner.HEALTH_UPDATE_SNAPSHOT_ATTR;
 
     private final ElbV2Service elb = mock(ElbV2Service.class);
     private final ElbV2CfnProvisioner provisioner = new ElbV2CfnProvisioner(elb);

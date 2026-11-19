@@ -54,7 +54,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
      * update commits or when the replacement is rolled back.
      */
     private static final String LISTENER_CERTIFICATES_ATTR = "__FlociListenerCertificates";
-    private static final String HEALTH_UPDATE_SNAPSHOT_ATTR = "__FlociTargetGroupHealthUpdateSnapshot";
+    static final String HEALTH_UPDATE_SNAPSHOT_ATTR = "__FlociTargetGroupHealthUpdateSnapshot";
     /** Prefixes one uses attribute per subnet a load balancer is on, numbered from 1. */
     private static final String USED_SUBNET_ATTR_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Subnet.";
     /**
