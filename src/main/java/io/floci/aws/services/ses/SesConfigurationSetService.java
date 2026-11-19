@@ -776,21 +776,21 @@ public class SesConfigurationSetService implements SesTaggable {
                 || !arn.accountId().matches("[0-9]{12}")
                 || !"events".equals(arn.service())
                 || !arn.resource().startsWith(EVENT_BUS_RESOURCE_PREFIX)) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid Event Bridge destination, event-bus ARN is wrongly formatted", 400);
+            throw invalidEventBridgeDestination("event-bus ARN is wrongly formatted");
         }
         if (!arn.accountId().equals(accountId)) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid Event Bridge destination, cross account is not supported.", 400);
+            throw invalidEventBridgeDestination("cross account is not supported.");
         }
         if (!arn.region().equals(region)) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid Event Bridge destination, must be in region <" + region + ">.", 400);
+            throw invalidEventBridgeDestination("must be in region <" + region + ">.");
         }
         if (!DEFAULT_EVENT_BUS_RESOURCE.equals(arn.resource())) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid Event Bridge destination, must be default bus.", 400);
+            throw invalidEventBridgeDestination("must be default bus.");
         }
+    }
+
+    private static AwsException invalidEventBridgeDestination(String reason) {
+        return new AwsException("InvalidParameterValue", "Invalid Event Bridge destination, " + reason, 400);
     }
 
     private static int countDestinations(EventDestination dest) {
