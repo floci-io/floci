@@ -1128,6 +1128,22 @@ class PaymentCryptographyTest {
         return generator.generateKeyPair();
     }
 
+
+    /**
+     * The PEM of a certificate over a key pair, signed by an issuer.
+     *
+     * <p>The service reads a certificate as the base64 of its PEM, so the PEM is what the
+     * tests hand it.
+     */
+    static String pem(KeyPair subject, String subjectName, KeyPair issuer, String issuerName)
+            throws Exception {
+        X509Certificate certificate = certificate(subject, subjectName, issuer, issuerName);
+        return "-----BEGIN CERTIFICATE-----\n"
+                + Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII))
+                        .encodeToString(certificate.getEncoded())
+                + "\n-----END CERTIFICATE-----\n";
+    }
+
     /** A certificate over a key pair, signed by an issuer. */
     private static X509Certificate certificate(KeyPair subject, String subjectName,
                                                KeyPair issuer, String issuerName) throws Exception {
