@@ -28,6 +28,7 @@ import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
@@ -532,6 +533,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));
             config.setCacheBehaviors(cfnCacheBehaviors(dc, engine));
             config.setCustomErrorResponses(cfnCustomErrorResponses(dc, engine));
+            config.setViewerCertificate(cfnViewerCertificate(dc.path("ViewerCertificate"), engine));
         }
 
         Distribution dist = new Distribution();
@@ -549,6 +551,33 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("DomainName", dist.getDomainName());
         r.getAttributes().put("Arn", dist.getArn());
     }
+
+    /**
+     * The template's {@code ViewerCertificate} under the API member names the REST controller stores,
+     * so the service's certificate rules read it the same way. Only members the template sets are
+     * carried; a template with none leaves the config unset, which the service reads as the default
+     * certificate.
+     */
+    private Map<String, String> cfnViewerCertificate(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        Map<String, String> certificate = new LinkedHashMap<>();
+        putIfPresentText(certificate, "ACMCertificateArn", cfnText(node, "AcmCertificateArn", engine));
+        putIfPresentText(certificate, "IAMCertificateId", cfnText(node, "IamCertificateId", engine));
+        putIfPresentText(certificate, "CloudFrontDefaultCertificate",
+                cfnText(node, "CloudFrontDefaultCertificate", engine).toLowerCase(Locale.ROOT));
+        putIfPresentText(certificate, "MinimumProtocolVersion", cfnText(node, "MinimumProtocolVersion", engine));
+        putIfPresentText(certificate, "SSLSupportMethod", cfnText(node, "SslSupportMethod", engine));
+        return certificate.isEmpty() ? null : certificate;
+    }
+
+    private static void putIfPresentText(Map<String, String> map, String key, String value) {
+        if (!value.isEmpty()) {
+            map.put(key, value);
+        }
+    }
+
     private List<Origin> cfnOrigins(JsonNode dc, CloudFormationTemplateEngine engine) {
         List<Origin> origins = new ArrayList<>();
         JsonNode items = dc.path("Origins");

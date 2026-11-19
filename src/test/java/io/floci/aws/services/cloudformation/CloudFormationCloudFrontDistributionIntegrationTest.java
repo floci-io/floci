@@ -1,5 +1,8 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.services.acm.AcmService;
+import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.cloudfront.CloudFrontService;
 import io.floci.aws.services.cloudfront.model.Distribution;
 import io.floci.aws.services.cloudfront.model.KeyGroup;
@@ -17,8 +20,10 @@ import java.security.KeyPairGenerator;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -43,6 +48,9 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
 
     @Inject
     CloudFrontService cloudFrontService;
+
+    @Inject
+    AcmService acmService;
 
     @Test
     void createStackProvisionsBrowsableDistributionWithResolvedDomainName() {
@@ -421,5 +429,96 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
             .statusCode(200)
             .body(hasXPath("//*[local-name()='DistributionConfig']/*[local-name()='ConnectionMode']",
                     equalTo("tenant-only")));
+    }
+
+    @Test
+    void createStackRefusesSslv3WithSniOnlyOnTheViewerCertificate() {
+        String stackName = "cfn-cloudfront-sslv3-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Resources": {
+                    "Dist": {
+                      "Type": "AWS::CloudFront::Distribution",
+                      "Properties": {
+                        "DistributionConfig": {
+                          "Enabled": true,
+                          "Origins": [{
+                            "Id": "origin",
+                            "DomainName": "origin.example.com",
+                            "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}
+                          }],
+                          "DefaultCacheBehavior": {
+                            "TargetOriginId": "origin",
+                            "ViewerProtocolPolicy": "redirect-to-https"
+                          },
+                          "ViewerCertificate": {
+                            "AcmCertificateArn": "%s",
+                            "SslSupportMethod": "sni-only",
+                            "MinimumProtocolVersion": "SSLv3"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted("arn:aws:acm:us-east-1:000000000000:certificate/" + UUID.randomUUID());
+
+        CfnRequests.deploy("CreateStack", stackName, template, CFN_AUTH, "ROLLBACK_COMPLETE");
+
+        assertThat(CfnStackWaits.failedResourceReason(stackName, CFN_AUTH), containsString(
+                "You cannot specify SSLv3 as the minimum protocol version if you only want to "
+                        + "support only clients that support Server Name Indication (SNI)."));
+    }
+
+    @Test
+    void createStackCarriesTheViewerCertificateOntoTheDistribution() {
+        String stackName = "cfn-cloudfront-viewer-cert-" + Long.toString(System.nanoTime(), 36);
+        CertificateGenerator.GeneratedCertificate pair = new CertificateGenerator()
+                .generateSelfSignedCertificate("cfn.certs.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
+        String certificateArn = acmService.importCertificate(
+                pair.certificatePem(), pair.privateKeyPem(), null, null, Map.of(), "us-east-1").getArn();
+        String template = """
+                {
+                  "Resources": {
+                    "Dist": {
+                      "Type": "AWS::CloudFront::Distribution",
+                      "Properties": {
+                        "DistributionConfig": {
+                          "Enabled": true,
+                          "Origins": [{
+                            "Id": "origin",
+                            "DomainName": "origin.example.com",
+                            "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}
+                          }],
+                          "DefaultCacheBehavior": {
+                            "TargetOriginId": "origin",
+                            "ViewerProtocolPolicy": "redirect-to-https"
+                          },
+                          "ViewerCertificate": {
+                            "AcmCertificateArn": "%s",
+                            "SslSupportMethod": "sni-only",
+                            "MinimumProtocolVersion": "TLSv1.2_2021"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted(certificateArn);
+
+        CfnRequests.deploy("CreateStack", stackName, template, CFN_AUTH, "CREATE_COMPLETE");
+        String distributionId = CfnRequests.physicalId(stackName, "Dist", CFN_AUTH);
+
+        given()
+        .when()
+            .get("/2020-05-31/distribution/" + distributionId)
+        .then()
+            .statusCode(200)
+            .body(hasXPath("//*[local-name()='ViewerCertificate']/*[local-name()='ACMCertificateArn']",
+                    equalTo(certificateArn)))
+            .body(hasXPath("//*[local-name()='ViewerCertificate']/*[local-name()='SSLSupportMethod']",
+                    equalTo("sni-only")))
+            .body(hasXPath("//*[local-name()='ViewerCertificate']/*[local-name()='MinimumProtocolVersion']",
+                    equalTo("TLSv1.2_2021")));
     }
 }
