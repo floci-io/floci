@@ -523,6 +523,10 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
             config.setDefaultRootObject(cfnText(dc, "DefaultRootObject", engine));
             config.setHttpVersion(cfnTextOrDefault(dc, "HttpVersion", engine, "http2"));
             config.setPriceClass(cfnTextOrDefault(dc, "PriceClass", engine, "PriceClass_All"));
+            String connectionMode = cfnText(dc, "ConnectionMode", engine);
+            if (!connectionMode.isEmpty()) {
+                config.setConnectionMode(connectionMode);
+            }
             config.setAliases(cfnStringList(dc.path("Aliases"), engine));
             config.setOrigins(cfnOrigins(dc, engine));
             config.setDefaultCacheBehavior(cfnDefaultCacheBehavior(dc.path("DefaultCacheBehavior"), engine));

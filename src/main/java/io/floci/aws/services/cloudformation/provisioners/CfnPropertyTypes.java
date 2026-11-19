@@ -161,6 +161,9 @@ final class CfnPropertyTypes {
 
         abstract JsonNode readBoolean(String path, String property, JsonNode value);
 
+        void checkString(String path, Shape shape, String value) {
+        }
+
         /** Checks the members {@code shape} requires of the object {@code value} at {@code path}; none by default. */
         void checkRequired(String path, JsonNode value, Shape shape) {
         }
@@ -191,7 +194,7 @@ final class CfnPropertyTypes {
                 case "structure" -> readObject(path, property, value, shape);
                 case "map" -> readMap(path, property, value, shape.element());
                 case "list" -> readList(path, property, value, shape.element());
-                case "string" -> readString(path, property, value);
+                case "string" -> readString(path, property, value, shape);
                 case "integer" -> readInteger(path, property, value);
                 case "boolean" -> readBoolean(path, property, value);
                 default -> value == raw ? engine.resolveNode(raw) : value;
@@ -283,12 +286,14 @@ final class CfnPropertyTypes {
             return out;
         }
 
-        private JsonNode readString(String path, String property, JsonNode value) {
+        private JsonNode readString(String path, String property, JsonNode value, Shape shape) {
             if (value.isContainerNode()) {
                 mismatch(path, property, "String", containerName(value));
                 return null;
             }
-            return value.isTextual() ? value : TextNode.valueOf(value.asText());
+            JsonNode text = value.isTextual() ? value : TextNode.valueOf(value.asText());
+            checkString(path, shape, text.textValue());
+            return text;
         }
 
         static String child(String path, String name) {
@@ -472,16 +477,38 @@ final class CfnPropertyTypes {
         }
 
         @Override
+        void checkString(String path, Shape shape, String value) {
+            if (shape.minLength() == null && shape.maxLength() == null && shape.pattern() == null) {
+                return;
+            }
+            int length = value.codePointCount(0, value.length());
+            if (shape.minLength() != null && length < shape.minLength()) {
+                record(new Violation(path, "expected minLength: " + shape.minLength() + ", actual: " + length,
+                        false), false);
+            } else if (shape.maxLength() != null && length > shape.maxLength()) {
+                record(new Violation(path, "expected maxLength: " + shape.maxLength() + ", actual: " + length,
+                        false), false);
+            } else if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).matches()) {
+                record(new Violation(path, "failed validation constraint for keyword [pattern]", false),
+                        false);
+            }
+        }
+
+        @Override
         void checkRequired(String path, JsonNode value, Shape shape) {
             for (String member : shape.required()) {
                 JsonNode raw = value.get(member);
                 boolean absent = raw == null;
                 if (!absent && !preserveEcsHandlerSemantics) {
                     absent = raw.isNull() || raw.isMissingNode();
-                    if (!absent && "string".equals(model.shapes().get(shape.members().get(member)).type())) {
+                    Shape memberShape = model.shapes().get(shape.members().get(member));
+                    if (!absent && "string".equals(memberShape.type())) {
                         JsonNode resolved = engine.resolveNode(raw);
-                        absent = resolved == null || resolved.isNull() || resolved.isMissingNode()
-                                || resolved.isTextual() && resolved.textValue().isBlank();
+                        absent = resolved == null || resolved.isNull() || resolved.isMissingNode();
+                        if (!absent && memberShape.minLength() == null && memberShape.maxLength() == null
+                                && memberShape.pattern() == null) {
+                            absent = resolved.isTextual() && resolved.textValue().isBlank();
+                        }
                     }
                 }
                 if (absent) {

@@ -17,8 +17,8 @@ import io.floci.aws.services.redshift.spectrum.ExternalStatement;
 import io.floci.aws.services.redshift.spectrum.ExternalStatementParser;
 import io.floci.aws.services.redshift.spectrum.GlueTableBuilder;
 import io.floci.aws.services.s3.S3Service;
-import io.floci.aws.testing.SidecarAccessEnforcementProfile;
 import io.floci.aws.testing.SidecarContainersProfile;
+import io.floci.aws.testing.SidecarServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -44,11 +44,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * grant on the table, and a revoke stops the next query even though the table is already cached.
  *
  * <p>It takes new tables away from IAM in the account's Data Lake settings, and puts AWS's defaults
- * back when it is done, since the other classes on {@link SidecarAccessEnforcementProfile} read
+ * back when it is done, since the other classes on {@link SidecarServiceSettingsProfile} read
  * their external tables with no Lake Formation grant.
  */
 @QuarkusTest
-@TestProfile(SidecarAccessEnforcementProfile.class)
+@TestProfile(SidecarServiceSettingsProfile.class)
 class RedshiftSpectrumLakeFormationIntegrationTest {
 
     private static final String REGION = "us-east-1";

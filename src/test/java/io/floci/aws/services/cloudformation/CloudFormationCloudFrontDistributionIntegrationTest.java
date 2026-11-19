@@ -6,6 +6,7 @@ import io.floci.aws.services.cloudfront.model.KeyGroup;
 import io.floci.aws.services.cloudfront.model.OriginAccessControl;
 import io.floci.aws.services.cloudfront.model.PublicKey;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -21,6 +22,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.xml.HasXPath.hasXPath;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -379,5 +381,45 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
                   }
                 }
                 """.formatted(comment, alias, bucket);
+    }
+
+    @Test
+    void createStackCarriesTheConnectionModeOntoTheDistribution() {
+        String stackName = "cfn-cloudfront-tenant-only-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Resources": {
+                    "Dist": {
+                      "Type": "AWS::CloudFront::Distribution",
+                      "Properties": {
+                        "DistributionConfig": {
+                          "Enabled": true,
+                          "ConnectionMode": "tenant-only",
+                          "Origins": [{
+                            "Id": "origin",
+                            "DomainName": "origin.example.com",
+                            "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}
+                          }],
+                          "DefaultCacheBehavior": {
+                            "TargetOriginId": "origin",
+                            "ViewerProtocolPolicy": "redirect-to-https"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        CfnRequests.deploy("CreateStack", stackName, template, CFN_AUTH, "CREATE_COMPLETE");
+        String distributionId = CfnRequests.physicalId(stackName, "Dist", CFN_AUTH);
+
+        given()
+        .when()
+            .get("/2020-05-31/distribution/" + distributionId)
+        .then()
+            .statusCode(200)
+            .body(hasXPath("//*[local-name()='DistributionConfig']/*[local-name()='ConnectionMode']",
+                    equalTo("tenant-only")));
     }
 }

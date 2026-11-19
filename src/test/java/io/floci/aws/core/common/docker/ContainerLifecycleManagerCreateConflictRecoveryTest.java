@@ -10,6 +10,8 @@ import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -18,12 +20,21 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -94,6 +105,36 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
         String containerId = manager().create(spec);
 
         assertEquals("winning-container-id", containerId);
+    }
+
+    @Test
+    void createAdoptsOwnContainerWhenReservedNameBecomesVisibleAfterConflict() {
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> labelsCaptor = ArgumentCaptor.forClass(Map.class);
+        when(createCmd.withLabels(labelsCaptor.capture())).thenReturn(createCmd);
+        when(createCmd.exec()).thenThrow(new ConflictException("named container already exists"));
+        lenient().when(dockerConfig.apiTimeoutSeconds()).thenReturn(300);
+
+        Container existing = mock(Container.class);
+        lenient().when(existing.getId()).thenReturn("slowly-created-container");
+        lenient().when(existing.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
+        lenient().when(existing.getLabels()).thenAnswer(inv -> labelsCaptor.getValue());
+
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        // Docker reserves the name before publishing the container to list/inspect. The
+        // replay can conflict while the original create is still finishing its filesystem.
+        when(listCmd.exec()).thenReturn(List.of(), List.of(existing));
+
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), Map.of(), null, false, null,
+                List.of(), null, null, List.of());
+
+        AtomicLong now = new AtomicLong();
+        assertEquals("slowly-created-container", manager(now, now::addAndGet).create(spec));
     }
 
     /**
@@ -214,6 +255,215 @@ class ContainerLifecycleManagerCreateConflictRecoveryTest {
                 List.of(), null, null, List.of());
 
         assertThrows(ConflictException.class, () -> manager().create(spec));
+    }
+
+    @Test
+    void createAdoptsOriginalAttemptAfterMinutesOfDelayedVisibility() {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong(TimeUnit.HOURS.toNanos(2));
+        long started = now.get();
+        when(scenario.listCmd().exec()).thenAnswer(inv ->
+                now.get() - started < TimeUnit.SECONDS.toNanos(140) ? List.of() : List.of(scenario.owned()));
+
+        String id = manager(now, now::addAndGet).create(scenario.spec());
+
+        assertEquals("original-container-id", id);
+        assertTrue(now.get() - started >= TimeUnit.SECONDS.toNanos(140));
+        assertTrue(now.get() - started < TimeUnit.SECONDS.toNanos(300));
+        verify(scenario.listCmd(), atLeast(2)).exec();
+        verifyOnlyOriginalCreate(scenario);
+    }
+
+    @Test
+    void createPreservesOriginalConflictWhenVisibilityBudgetExpires() {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+        when(scenario.listCmd().exec()).thenReturn(List.of());
+
+        ConflictException failure = assertThrows(ConflictException.class,
+                () -> manager(now, now::addAndGet).create(scenario.spec()));
+
+        assertSame(scenario.conflict(), failure);
+        assertEquals(TimeUnit.SECONDS.toNanos(300), now.get());
+        verifyOnlyOriginalCreate(scenario);
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {300, 301})
+    void createDoesNotPollAgainWhenWaitReachesOrExceedsDeadline(long elapsedSeconds) {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+        when(scenario.listCmd().exec()).thenReturn(List.of(), List.of(scenario.owned()));
+
+        assertSame(scenario.conflict(), assertThrows(ConflictException.class,
+                () -> manager(now, nanos -> now.set(TimeUnit.SECONDS.toNanos(elapsedSeconds)))
+                        .create(scenario.spec())));
+
+        verify(scenario.listCmd()).exec();
+        verifyOnlyOriginalCreate(scenario);
+    }
+
+    @Test
+    void createChargesLookupTimeToVisibilityBudget() {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+        when(scenario.listCmd().exec()).thenAnswer(inv -> {
+            now.addAndGet(TimeUnit.SECONDS.toNanos(301));
+            return List.of();
+        });
+        AtomicLong sleeps = new AtomicLong();
+
+        assertSame(scenario.conflict(), assertThrows(ConflictException.class,
+                () -> manager(now, nanos -> sleeps.incrementAndGet()).create(scenario.spec())));
+
+        assertEquals(0, sleeps.get());
+        verify(scenario.listCmd()).exec();
+        verifyOnlyOriginalCreate(scenario);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createRejectsForeignContainerThatAppearsWhileWaiting(boolean missingAttemptLabel) {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+        Container foreign = mock(Container.class);
+        when(foreign.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
+        when(foreign.getLabels()).thenAnswer(inv -> {
+            Map<String, String> labels = new HashMap<>(scenario.owned().getLabels());
+            if (missingAttemptLabel) {
+                labels.remove(ContainerLifecycleManager.CREATE_ATTEMPT_LABEL);
+            } else {
+                labels.put(ContainerLifecycleManager.CREATE_ATTEMPT_LABEL, "different-create-attempt");
+            }
+            return labels;
+        });
+        when(scenario.listCmd().exec()).thenReturn(List.of(), List.of(foreign), List.of(scenario.owned()));
+
+        assertSame(scenario.conflict(), assertThrows(ConflictException.class,
+                () -> manager(now, now::addAndGet).create(scenario.spec())));
+
+        verify(scenario.listCmd(), times(2)).exec();
+        verifyOnlyOriginalCreate(scenario);
+    }
+
+    @Test
+    void createPreservesLookupFailureInsteadOfTreatingItAsPendingCreation() {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+        IllegalStateException lookupFailure = new IllegalStateException("Docker inventory unavailable");
+        when(scenario.listCmd().exec()).thenThrow(lookupFailure);
+
+        ConflictException failure = assertThrows(ConflictException.class,
+                () -> manager(now, now::addAndGet).create(scenario.spec()));
+
+        assertSame(scenario.conflict(), failure);
+        assertEquals(1, failure.getSuppressed().length);
+        assertSame(lookupFailure, failure.getSuppressed()[0]);
+        assertEquals(0, now.get());
+        verify(scenario.listCmd()).exec();
+        verifyOnlyOriginalCreate(scenario);
+    }
+
+    @Test
+    void createPreservesInterruptedSleepAndOriginalConflict() {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+        InterruptedException interruption = new InterruptedException("caller cancelled");
+        when(scenario.listCmd().exec()).thenReturn(List.of());
+
+        try {
+            ConflictException failure = assertThrows(ConflictException.class,
+                    () -> manager(now, nanos -> {
+                        throw interruption;
+                    }).create(scenario.spec()));
+
+            assertSame(scenario.conflict(), failure);
+            assertTrue(Thread.currentThread().isInterrupted());
+            assertEquals(1, failure.getSuppressed().length);
+            assertSame(interruption, failure.getSuppressed()[0]);
+            verify(scenario.listCmd()).exec();
+            verifyOnlyOriginalCreate(scenario);
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void createDoesNotPollWhenConflictRecoveryIsAlreadyInterrupted() {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+
+        try {
+            Thread.currentThread().interrupt();
+            assertSame(scenario.conflict(), assertThrows(ConflictException.class,
+                    () -> manager(now, now::addAndGet).create(scenario.spec())));
+
+            assertTrue(Thread.currentThread().isInterrupted());
+            verify(scenario.listCmd(), never()).exec();
+            verifyOnlyOriginalCreate(scenario);
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void createDoesNotAdoptWhenInterruptedDuringLookup() {
+        ConflictScenario scenario = conflictScenario();
+        AtomicLong now = new AtomicLong();
+        when(scenario.listCmd().exec()).thenAnswer(inv -> {
+            Thread.currentThread().interrupt();
+            return List.of(scenario.owned());
+        });
+
+        try {
+            assertSame(scenario.conflict(), assertThrows(ConflictException.class,
+                    () -> manager(now, now::addAndGet).create(scenario.spec())));
+
+            assertTrue(Thread.currentThread().isInterrupted());
+            verify(scenario.listCmd()).exec();
+            verifyOnlyOriginalCreate(scenario);
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    private ConflictScenario conflictScenario() {
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, String>> labelsCaptor = ArgumentCaptor.forClass(Map.class);
+        when(createCmd.withLabels(labelsCaptor.capture())).thenReturn(createCmd);
+        ConflictException conflict = new ConflictException("named container already exists");
+        when(createCmd.exec()).thenThrow(conflict);
+        when(dockerConfig.apiTimeoutSeconds()).thenReturn(300);
+
+        Container owned = mock(Container.class);
+        lenient().when(owned.getId()).thenReturn("original-container-id");
+        lenient().when(owned.getNames()).thenReturn(new String[] {"/emulator-fixed-name"});
+        lenient().when(owned.getLabels()).thenAnswer(inv -> labelsCaptor.getValue());
+        ListContainersCmd listCmd = mock(ListContainersCmd.class, RETURNS_SELF);
+        lenient().when(dockerClient.listContainersCmd()).thenReturn(listCmd);
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", "emulator-fixed-name", List.of(), null, null, null, Map.of(),
+                List.of(), null, List.of(), List.of(), List.of(), Map.of("resource_owner", "caller-a"),
+                null, false, null, List.of(), null, null, List.of());
+        return new ConflictScenario(createCmd, listCmd, owned, spec, conflict);
+    }
+
+    private void verifyOnlyOriginalCreate(ConflictScenario scenario) {
+        verify(dockerClient).createContainerCmd("busybox:stable");
+        verify(scenario.createCmd()).exec();
+        verify(dockerClient, never()).startContainerCmd(anyString());
+        verify(dockerClient, never()).removeContainerCmd(anyString());
+    }
+
+    private ContainerLifecycleManager manager(AtomicLong now, ContainerLifecycleManager.CreateWait wait) {
+        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config,
+                0, now::get, wait);
+    }
+
+    private record ConflictScenario(CreateContainerCmd createCmd, ListContainersCmd listCmd, Container owned,
+                                    ContainerSpec spec, ConflictException conflict) {
     }
 
     private ContainerLifecycleManager manager() {

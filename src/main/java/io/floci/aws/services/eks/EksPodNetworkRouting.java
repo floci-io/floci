@@ -7,13 +7,11 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 /**
- * Generates iptables routing rules for link-local endpoints inside an EKS cluster container.
- * <p>
- * Programs DNAT rules in the node network namespace nat table so traffic originating
- * from the cluster pod CIDR directed at a link-local address (such as IMDS 169.254.169.254:80)
- * reaches Floci's node listener rather than being dropped by the Linux kernel or hijacked by CNI
- * hostPort ingress rules. The EKS Pod Identity address, 169.254.170.23:80, is sent straight to
- * Floci's credentials endpoint instead, by {@link #buildPodIdentityForwardCommand}.
+ * Generates the iptables rules that answer a link-local address inside an EKS cluster container: IMDS,
+ * {@code 169.254.169.254:80} ({@link #buildImdsForwardCommand}), and the EKS Pod Identity address,
+ * {@code 169.254.170.23:80} ({@link #buildPodIdentityForwardCommand}). NAT rules in the node send the address
+ * straight to Floci, so no relay process runs there and nothing has to be installed, which a stock
+ * {@code rancher/k3s} image, with {@code iptables} but no package manager, could not do.
  */
 public final class EksPodNetworkRouting {
 
@@ -21,7 +19,9 @@ public final class EksPodNetworkRouting {
     public static final String CHAIN_NAME = "FLOCI-LINK-LOCAL";
     public static final LinkLocalEndpoint IMDS_ENDPOINT = new LinkLocalEndpoint("169.254.169.254", 80);
     public static final LinkLocalEndpoint POD_IDENTITY_ENDPOINT = new LinkLocalEndpoint("169.254.170.23", 80);
-    public static final List<LinkLocalEndpoint> DEFAULT_ENDPOINTS = List.of(IMDS_ENDPOINT);
+    /** The names the relays an older Floci ran for the addresses went by ({@link Ec2MetadataProxy#stopRelayLines}). */
+    private static final String IMDS_RELAY = "imds";
+    private static final String POD_IDENTITY_RELAY = "pod-identity";
     private static final String HOSTS_FILE = "/etc/hosts";
     private static final Pattern IPV4_CIDR = Pattern.compile("\\d{1,3}(\\.\\d{1,3}){3}/\\d{1,2}");
     /** A hostname or IPv4 address: nothing a shell or an iptables argument could read as more. */
@@ -32,34 +32,30 @@ public final class EksPodNetworkRouting {
     private EksPodNetworkRouting() {}
 
     /**
-     * Builds a POSIX sh command array that idempotently programs iptables DNAT rules
-     * in the node container nat table for the specified link-local endpoints.
+     * Builds a POSIX sh command array that sends IMDS ({@code 169.254.169.254:80}) straight to Floci's metadata
+     * service with NAT rules in the node, as {@link #buildPodIdentityForwardCommand} sends the Pod Identity address.
+     * An {@code OUTPUT} rule takes the node's own requests, which is where a {@code hostNetwork} pod's come from. With
+     * {@code podNetwork} a {@code PREROUTING} rule takes the pod network's too; without it, a {@code FORWARD} rule
+     * refuses them, so that they don't leave the node for the network the Docker host is on, where a host on EC2 can
+     * answer with its own metadata. The rules and the relay an older Floci set up for the address go first. The command
+     * ends once the node's instance id answers, or {@code 401} for an instance that requires tokens, which also proves
+     * that Floci knows the node by the address its requests come from.
      *
-     * @param podCidr pod network CIDR (defaults to {@link #DEFAULT_POD_CIDR} if null or blank)
-     * @param endpoints link-local endpoints to route from the pod network
+     * @param podCidr    pod network CIDR (defaults to {@link #DEFAULT_POD_CIDR} if null or blank)
+     * @param podNetwork whether pods outside the node's network namespace reach IMDS
+     * @param flociHost  the address or hostname the node reaches Floci on
+     * @param imdsPort   the port of Floci's metadata service
      * @return command array suitable for container exec (["sh", "-c", "..."])
      */
-    public static String[] buildRoutingCommand(String podCidr, List<LinkLocalEndpoint> endpoints) {
-        String cidr = (podCidr != null && !podCidr.isBlank()) ? podCidr : DEFAULT_POD_CIDR;
-        if (endpoints == null || endpoints.isEmpty()) {
-            throw new IllegalArgumentException("endpoints cannot be null or empty");
-        }
+    public static String[] buildImdsForwardCommand(String podCidr, boolean podNetwork, String flociHost, int imdsPort) {
+        return buildImdsForwardCommand(podCidr, podNetwork, flociHost, imdsPort, HOSTS_FILE);
+    }
 
-        List<String> lines = iptablesLines(true);
-        lines.add("$IPTABLES -t nat -N " + CHAIN_NAME + " 2>/dev/null || true");
-        lines.add("$IPTABLES -t nat -C PREROUTING -j " + CHAIN_NAME + " 2>/dev/null || $IPTABLES -t nat -I PREROUTING 1 -j " + CHAIN_NAME);
-
-        for (LinkLocalEndpoint ep : endpoints) {
-            String check = String.format(
-                    "$IPTABLES -t nat -C %s -s %s -d %s -p tcp --dport %d -j DNAT --to-destination %s:%d 2>/dev/null",
-                    CHAIN_NAME, cidr, ep.ip(), ep.port(), ep.ip(), ep.port());
-            String add = String.format(
-                    "$IPTABLES -t nat -A %s -s %s -d %s -p tcp --dport %d -j DNAT --to-destination %s:%d",
-                    CHAIN_NAME, cidr, ep.ip(), ep.port(), ep.ip(), ep.port());
-            lines.add(check + " || " + add);
-        }
-
-        return new String[]{"sh", "-c", String.join("\n", lines)};
+    /** As above, reading host names from {@code hostsFile} rather than {@code /etc/hosts}. */
+    static String[] buildImdsForwardCommand(String podCidr, boolean podNetwork, String flociHost, int imdsPort,
+                                            String hostsFile) {
+        return buildForwardCommand(IMDS_ENDPOINT, IMDS_RELAY, podCidrOf(podCidr), podNetwork, flociHost, imdsPort,
+                hostsFile, imdsProbeCommand("http://" + IMDS_ENDPOINT.ip()));
     }
 
     /**
@@ -91,10 +87,28 @@ public final class EksPodNetworkRouting {
 
     /** As above, reading host names from {@code hostsFile} rather than {@code /etc/hosts}. */
     static String[] buildPodIdentityForwardCommand(String podCidr, String flociHost, int flociPort, String hostsFile) {
+        return buildForwardCommand(POD_IDENTITY_ENDPOINT, POD_IDENTITY_RELAY, podCidrOf(podCidr), true, flociHost,
+                flociPort, hostsFile, podIdentityProbeCommand("http://" + POD_IDENTITY_ENDPOINT.ip()));
+    }
+
+    /** {@code podCidr}, or {@link #DEFAULT_POD_CIDR} if null or blank, which must be an IPv4 CIDR. */
+    private static String podCidrOf(String podCidr) {
         String cidr = (podCidr != null && !podCidr.isBlank()) ? podCidr.trim() : DEFAULT_POD_CIDR;
         if (!IPV4_CIDR.matcher(cidr).matches()) {
             throw new IllegalArgumentException("podCidr must be an IPv4 CIDR: " + podCidr);
         }
+        return cidr;
+    }
+
+    /**
+     * The forward of {@code endpoint} to {@code flociHost:flociPort}: the {@code flociHost} name resolved inside the
+     * node, the rules and the relay named {@code relay} an earlier Floci set up for the address removed, a
+     * {@code PREROUTING} rule for {@code podCidr} if {@code podNetwork}, else a {@code FORWARD} rule refusing it, and
+     * an {@code OUTPUT} rule added, then {@code probe} until it ends the command, failing if Floci doesn't answer.
+     */
+    private static String[] buildForwardCommand(LinkLocalEndpoint endpoint, String relay, String podCidr,
+                                                boolean podNetwork, String flociHost, int flociPort, String hostsFile,
+                                                String probe) {
         if (flociHost == null || !HOST.matcher(flociHost).matches()) {
             throw new IllegalArgumentException("flociHost must be an IPv4 address or a hostname: " + flociHost);
         }
@@ -104,8 +118,8 @@ public final class EksPodNetworkRouting {
         if (hostsFile == null || !ABSOLUTE_PATH.matcher(hostsFile).matches()) {
             throw new IllegalArgumentException("hostsFile must be an absolute path: " + hostsFile);
         }
-        String address = POD_IDENTITY_ENDPOINT.ip();
-        String match = "-d " + address + "/32 -p tcp --dport " + POD_IDENTITY_ENDPOINT.port();
+        String address = endpoint.ip();
+        String match = "-d " + address + "/32 -p tcp --dport " + endpoint.port();
 
         List<String> lines = iptablesLines(true);
         lines.add("HOST='" + flociHost + "'");
@@ -125,14 +139,20 @@ public final class EksPodNetworkRouting {
         lines.add("  exit 1");
         lines.add("fi");
         lines.add("TARGET=\"$ADDR:" + flociPort + "\"");
-        addPodIdentityRuleRemoval(lines);
-        lines.add("$IPTABLES -t nat -I PREROUTING 1 -s " + cidr + " " + match + " -j DNAT --to-destination \"$TARGET\"");
+        addRuleRemoval(lines, endpoint, relay);
+        if (podNetwork) {
+            lines.add("$IPTABLES -t nat -I PREROUTING 1 -s " + podCidr + " " + match
+                    + " -j DNAT --to-destination \"$TARGET\"");
+        } else {
+            lines.add("$IPTABLES -t filter -I FORWARD 1 -s " + podCidr + " " + match
+                    + " -j REJECT --reject-with tcp-reset");
+        }
         lines.add("$IPTABLES -t nat -I OUTPUT 1 " + match + " -j DNAT --to-destination \"$TARGET\"");
         lines.add("for i in 1 2 3 4 5 6; do");
-        lines.add("  " + podIdentityProbeCommand("http://" + address));
+        lines.add("  " + probe);
         lines.add("  sleep 1");
         lines.add("done");
-        lines.add("echo \"nothing answers on " + address + " through $TARGET\" >&2");
+        lines.add("echo \"Floci does not answer on " + address + " through $TARGET\" >&2");
         lines.add("exit 1");
         return new String[]{"sh", "-c", String.join("\n", lines)};
     }
@@ -147,25 +167,37 @@ public final class EksPodNetworkRouting {
      */
     public static String[] buildPodIdentityRemoveCommand() {
         List<String> lines = iptablesLines(false);
-        addPodIdentityRuleRemoval(lines);
+        addRuleRemoval(lines, POD_IDENTITY_ENDPOINT, POD_IDENTITY_RELAY);
         return new String[]{"sh", "-c", String.join("\n", lines)};
     }
 
-    /**
-     * Ready once the pod identity endpoint answers at all: without a pod's token Floci answers 400,
-     * which still proves the path reaches it. Any HTTP proxy the image configures is bypassed, since
-     * a proxy's own answer would pass the same check. Uses {@code curl} where there is one, else
-     * {@code wget}, as in a stock {@code rancher/k3s} node, which has BusyBox's and no {@code curl}:
-     * both print the status of an error answer, which is what is looked for.
-     */
+    /** Ready once the pod identity endpoint answers at all: without a pod's token Floci answers 400. */
     static String podIdentityProbeCommand(String endpoint) {
-        String url = endpoint + "/v1/credentials";
+        return statusProbeCommand(endpoint + "/v1/credentials", "[1-5][0-9][0-9]");
+    }
+
+    /**
+     * Ready once the node's instance id answers, or 401 for an instance that requires tokens: an instance Floci
+     * doesn't know by the caller's address gets 404, as does any path that isn't a metadata path.
+     */
+    static String imdsProbeCommand(String endpoint) {
+        return statusProbeCommand(endpoint + "/latest/meta-data/instance-id", "200|401");
+    }
+
+    /**
+     * Ready once {@code url} answers with a status that {@code statuses}, a shell {@code case} pattern, matches. Any
+     * HTTP proxy the image configures is bypassed, since a proxy's own answer could pass the same check. Uses
+     * {@code curl} where there is one, else {@code wget}, as in a stock {@code rancher/k3s} node, which has BusyBox's
+     * and no {@code curl}: with {@code -S}, BusyBox's and GNU's both print the status line, indented, whatever the
+     * status, which is where it is read from.
+     */
+    static String statusProbeCommand(String url, String statuses) {
         return "if command -v curl >/dev/null 2>&1; then"
-                + " [ \"$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 1 " + url + ")\" != \"000\" ]"
-                + " && exit 0;"
-                + " else env -u http_proxy -u HTTP_PROXY wget -T 1 -O /dev/null " + url + " 2>&1"
-                + " | grep -qE 'HTTP/1[.][01] [0-9]{3}|ERROR [0-9]{3}' && exit 0;"
-                + " fi";
+                + " STATUS=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 1 " + url + " || true);"
+                + " else STATUS=$(env -u http_proxy -u HTTP_PROXY wget -S -T 1 -O /dev/null " + url + " 2>&1"
+                + " | grep -oE '^ +HTTP/1[.][01] [0-9]{3}' | grep -oE '[0-9]{3}$' || true);"
+                + " fi;"
+                + " case \"$STATUS\" in " + statuses + ") exit 0 ;; esac";
     }
 
     /**
@@ -189,16 +221,18 @@ public final class EksPodNetworkRouting {
     }
 
     /**
-     * Deletes each rule for the Pod Identity address in {@code PREROUTING} and {@code OUTPUT}, and in
-     * {@link #CHAIN_NAME}, where an older Floci sent it to the relay it ran in the node, then retires that relay.
-     * The relay would otherwise answer again once the rules in front of it go.
+     * Deletes each rule for {@code endpoint}'s address in {@code PREROUTING} and {@code OUTPUT}, in
+     * {@link #CHAIN_NAME}, where an older Floci sent it to the relay it ran in the node, and in {@code FORWARD}, where
+     * it refused the pod network's requests, then retires that relay, named {@code relay}. The relay would otherwise
+     * answer again once the rules in front of it go.
      */
-    private static void addPodIdentityRuleRemoval(List<String> lines) {
-        lines.add("for CHAIN in PREROUTING OUTPUT " + CHAIN_NAME + "; do");
-        lines.add("  $IPTABLES -t nat -S \"$CHAIN\" 2>/dev/null | grep -F -- '-d " + POD_IDENTITY_ENDPOINT.ip() + "/32 '"
-                + " | grep -F -- '--dport " + POD_IDENTITY_ENDPOINT.port() + " '"
-                + " | sed 's/^-A /-D /' | while read -r rule; do $IPTABLES -t nat $rule; done");
+    private static void addRuleRemoval(List<String> lines, LinkLocalEndpoint endpoint, String relay) {
+        lines.add("for CHAIN in 'nat PREROUTING' 'nat OUTPUT' 'nat " + CHAIN_NAME + "' 'filter FORWARD'; do");
+        lines.add("  TABLE=${CHAIN% *}");
+        lines.add("  $IPTABLES -t \"$TABLE\" -S \"${CHAIN#* }\" 2>/dev/null | grep -F -- '-d " + endpoint.ip() + "/32 '"
+                + " | grep -F -- '--dport " + endpoint.port() + " '"
+                + " | sed 's/^-A /-D /' | while read -r rule; do $IPTABLES -t \"$TABLE\" $rule; done");
         lines.add("done");
-        lines.addAll(Ec2MetadataProxy.stopRelayLines("pod-identity", POD_IDENTITY_ENDPOINT.ip()));
+        lines.addAll(Ec2MetadataProxy.stopRelayLines(relay, endpoint.ip()));
     }
 }

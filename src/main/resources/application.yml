@@ -418,8 +418,8 @@ floci:
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
     connection-request-timeout-seconds: 30
     # FLOCI_DOCKER_API_TIMEOUT_SECONDS: how long a Docker call waits for the daemon's response before
-    # failing; long-lived streams (waits, followed logs, exec output, pulls) are exempt. It applies per
-    # attempt: a control-plane request that is safe to repeat is tried up to six times. Keep in step with
+    # failing; long-lived streams (waits, followed logs, exec output, pulls) are exempt. It bounds the
+    # whole call: a request that is safe to repeat is not retried past it. Keep in step with
     # the @WithDefault on EmulatorConfig.DockerConfig.apiTimeoutSeconds: a value set here WINS over the annotation.
     api-timeout-seconds: 300
     # FLOCI_DOCKER_IMAGE_PULL_TIMEOUT_SECONDS: how long each attempt at an image pull may take; a pull
@@ -537,6 +537,7 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      seed-deployer-access-key-id: floci   # floci, or 16 to 128 word characters to be able to deactivate or delete the key
       # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
                            # without creating it first. Unset means the account has no alias,
                            # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account

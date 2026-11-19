@@ -513,12 +513,12 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections,
-                Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds())),
+        Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
+        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections, apiTimeout,
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
         gaugeLogger.register(role, transport::gauges);
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role));
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
@@ -538,14 +538,17 @@ public class DockerClientProducer {
      * docker call survives a transient socket drop. The streaming transport replays only container
      * waits, as the control-plane one does: its other requests (log follow, attach, exec output)
      * hold hijacked or long-lived streams that must never be replayed, and its exec-start calls are
-     * the one request retrying could turn into a re-run command.
+     * the one request retrying could turn into a re-run command. {@code callTimeout} bounds a retried
+     * control-plane call across its attempts and backoffs, so it is the longest one call waits on a
+     * silent daemon, not the length of each of its attempts.
      */
-    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role) {
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout) {
         if (!"control-plane".equals(role)) {
+            // The streaming transport replays only container waits, long-lived streams the call timeout never bounds.
             return RetryingDockerHttpClient.forContainerWaits(transport);
         }
         LOG.info("Wrapping control-plane docker transport in transient-I/O retry");
-        return new RetryingDockerHttpClient(transport);
+        return new RetryingDockerHttpClient(transport, callTimeout);
     }
 
     /**

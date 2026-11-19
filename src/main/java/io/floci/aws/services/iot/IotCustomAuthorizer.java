@@ -62,6 +62,11 @@ public class IotCustomAuthorizer {
      */
     record WebSocketUpgrade(Map<String, String> headers, String queryString, String serverName, String sourceIp,
                             int sourcePort) {
+
+        boolean isSigV4Signed() {
+            String signature = params(null, Map.of(), queryString).get("X-Amz-Signature");
+            return signature != null && !signature.isEmpty();
+        }
     }
 
     @Inject
@@ -134,14 +139,19 @@ public class IotCustomAuthorizer {
     }
 
     /**
-     * The policies an MQTT CONNECT through the named authorizer is admitted with. None when the
-     * authorizer is not ACTIVE, which never invokes the function, or when the function denies or
-     * returns no policy; an {@link AwsException} when the authorizer does not exist, a signature
-     * does not verify (the function is not invoked) or the answer is one TestInvokeAuthorizer rejects.
+     * The policies an MQTT CONNECT through the named authorizer, or the default authorizer when
+     * {@code name} is null, is admitted with. None when the authorizer is not ACTIVE, which never
+     * invokes the function, or when the function denies or returns no policy; an
+     * {@link AwsException} when the authorizer does not exist or no default authorizer is set, a
+     * signature does not verify (the function is not invoked) or the answer is one
+     * TestInvokeAuthorizer rejects.
      */
     List<String> connectPolicies(String name, String clientId, String username, String password, WebSocketUpgrade upgrade) {
         // ponytail: the broker has no request context, so a connection finds authorizers in the default account and region.
-        IotAuthorizer authorizer = authorizers.describeAuthorizer(name, regionResolver.getDefaultRegion());
+        String region = regionResolver.getDefaultRegion();
+        IotAuthorizer authorizer = name == null
+                ? authorizers.describeDefaultAuthorizer(region)
+                : authorizers.describeAuthorizer(name, region);
         if (!"ACTIVE".equals(authorizer.getStatus())) {
             return List.of();
         }

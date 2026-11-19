@@ -81,7 +81,8 @@ class PipesKinesisTerminalTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         PipesPoller poller = new PipesPoller(mock(Vertx.class), sqs, kinesis, mock(DynamoDbStreamReader.class),
-                mock(PipesKafkaConsumerManager.class), target, new PipesFilterMatcher(mapper), mapper, config);
+                mock(PipesKafkaConsumerManager.class), target, new PipesFilterMatcher(mapper), mapper, config,
+                new RegionResolver("eu-west-1", "111111111111"));
         try {
             for (int i = 0; i < recordCount + 3; i++) {
                 poller.pollKinesis(pipe, "eu-west-1");

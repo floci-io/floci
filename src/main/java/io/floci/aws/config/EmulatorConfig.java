@@ -1776,6 +1776,15 @@ public interface EmulatorConfig {
         boolean seedDeployerPrincipal();
 
         /**
+         * Access key ID of the seeded deployer's key. The default {@code floci} is shorter than
+         * the 16 characters IAM requires of an AccessKeyId, so DeleteAccessKey and UpdateAccessKey
+         * refuse it; an ID of 16 to 128 word characters lets the key be retired like any other.
+         * Seeding refuses to start with any other value outside that format.
+         */
+        @WithDefault("floci")
+        String seedDeployerAccessKeyId();
+
+        /**
          * Alias to seed for the default account at startup, so callers that read the account
          * alias find one without creating it first. Unset means the account has no alias, which
          * is the AWS default.
@@ -4422,8 +4431,9 @@ public interface EmulatorConfig {
 
         /**
          * How long a Docker call waits for the daemon's response before it fails, in seconds, for
-         * both pools. The limit is per attempt: a control-plane request that is safe to repeat is
-         * tried up to six times. Requests that hold a stream open for as long as a container runs (container
+         * both pools. It bounds the whole call: a request that is safe to repeat is retried after a
+         * transient connection error only while no retry would start past the limit, counted from
+         * the first attempt. Requests that hold a stream open for as long as a container runs (container
          * waits, exec and attach output, followed logs, streamed stats, events, image pulls and
          * builds) are exempt, since they can stay silent while healthy.
          */

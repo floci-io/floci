@@ -733,6 +733,10 @@ public class SqsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "The name of a FIFO queue can only end with '.fifo'.", 400);
         }
+        if (!hasFifoSuffix && attributes != null && attributes.containsKey("FifoQueue")) {
+            // A standard queue has no FifoQueue attribute, so SQS refuses even an explicit false.
+            throw new AwsException("InvalidAttributeName", "Unknown Attribute FifoQueue.", 400);
+        }
         if (hasFifoSuffix && !fifoRequested) {
             // Auto-set FifoQueue attribute when name ends with .fifo
             attributes = attributes == null ? new HashMap<>() : new HashMap<>(attributes);

@@ -452,6 +452,21 @@ class IotCustomAuthorizerTest {
     }
 
     @Test
+    void aConnectNamingNoAuthorizerGoesThroughTheDefaultAuthorizer() {
+        authorizers.setDefaultAuthorizer("a", REGION);
+
+        assertEquals(List.of(POLICY), customAuthorizer.connectPolicies(null, "c", "c", "secret", null));
+        assertEquals("c", events.getLast().path("protocolData").path("mqtt").path("username").asText());
+    }
+
+    @Test
+    void aConnectNamingNoAuthorizerFailsWithoutADefaultAndInvokesNothing() {
+        assertAwsError("ResourceNotFoundException", 404, "Default authorizer not found",
+                () -> customAuthorizer.connectPolicies(null, "c", "c", "secret", null));
+        verifyNotInvoked();
+    }
+
+    @Test
     void aSignedConnectSendsTheTokenAfterTheProtocols() throws GeneralSecurityException {
         String username = signedUsername(sign(key2, "allow-me"), "allow-me");
 
@@ -484,6 +499,17 @@ class IotCustomAuthorizerTest {
             assertThrows(AwsException.class, () -> customAuthorizer.connectPolicies("s", "c", username, null, null), username);
         }
         verifyNotInvoked();
+    }
+
+    @Test
+    void onlyAnUpgradeWhoseQueryCarriesASigV4SignatureIsSigV4Signed() {
+        assertTrue(new WebSocketUpgrade(Map.of(), "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=00", null, null, -1)
+                .isSigV4Signed());
+        assertFalse(new WebSocketUpgrade(Map.of(), "", null, null, -1).isSigV4Signed());
+        assertFalse(new WebSocketUpgrade(Map.of(), "X-Amz-Algorithm=AWS4-HMAC-SHA256", null, null, -1).isSigV4Signed());
+        assertFalse(new WebSocketUpgrade(Map.of(), "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=", null, null, -1)
+                .isSigV4Signed());
+        assertFalse(new WebSocketUpgrade(Map.of("x-amz-signature", "00"), "", null, null, -1).isSigV4Signed());
     }
 
     @Test

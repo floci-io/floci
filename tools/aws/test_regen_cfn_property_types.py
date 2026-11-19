@@ -23,7 +23,7 @@ SCHEMA = {
             "Attempts": {"type": "integer"}, "Enabled": {"type": "boolean"}, "Ratio": {"type": "number"}}},
     },
     "properties": {
-        "Name": {"type": "string"},
+        "Name": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z]+$"},
         "Targets": {"type": "array", "items": {"$ref": "#/definitions/Target"}},
         "Pattern": {"type": "object"},
         "Tags": {"type": "array", "items": {"type": "object", "properties": {"Key": {"type": "string"}}}},
@@ -46,8 +46,10 @@ def test_each_schema_type_becomes_a_shape(monkeypatch):
     assert doc["operations"] == {"AWS::Test::Thing": "AWS::Test::Thing"}
     shapes = doc["shapes"]
     assert shapes["AWS::Test::Thing"] == {"type": "structure", "members": {
-        "Name": "String", "Targets": "AWS::Test::Thing.Targets", "Pattern": "Json", "Tags": "AWS::Test::Thing.Tags"},
+        "Name": "AWS::Test::Thing.Name", "Targets": "AWS::Test::Thing.Targets", "Pattern": "Json", "Tags": "AWS::Test::Thing.Tags"},
         "required": ["Name"]}
+    assert shapes["AWS::Test::Thing.Name"] == {
+        "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z]+$"}
     assert shapes["AWS::Test::Thing.Targets"] == {"type": "list", "member": "AWS::Test::Thing/Target"}
     assert shapes["AWS::Test::Thing/Target"] == {"type": "structure", "members": {
         "Id": "String", "Retry": "AWS::Test::Thing/Retry", "Labels": "AWS::Test::Thing/Target.Labels",
@@ -77,7 +79,11 @@ def test_ses_event_destination_shape_preserves_nested_schema_constraints():
     assert shapes[type_name]["required"] == ["ConfigurationSetName", "EventDestination"]
     destination = shapes[f"{type_name}/EventDestination"]
     assert destination["required"] == ["MatchingEventTypes"]
-    assert destination["members"]["Name"] == "String"
+    assert destination["members"]["Name"] == f"{type_name}/EventDestination.Name"
+    assert shapes[f"{type_name}/EventDestination.Name"]["pattern"] == "^[a-zA-Z0-9_-]{0,64}$"
+    dimension = shapes[f"{type_name}/DimensionConfiguration"]
+    assert shapes[dimension["members"]["DimensionName"]]["minLength"] == 1
+    assert shapes[dimension["members"]["DefaultDimensionValue"]]["maxLength"] == 256
     assert destination["members"]["MatchingEventTypes"] == f"{type_name}/EventDestination.MatchingEventTypes"
     assert shapes[f"{type_name}/SnsDestination"]["required"] == ["TopicARN"]
     assert shapes[f"{type_name}/KinesisFirehoseDestination"]["required"] == ["IAMRoleARN", "DeliveryStreamARN"]

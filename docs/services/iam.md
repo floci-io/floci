@@ -2279,6 +2279,15 @@ When enabled, Floci creates the `floci-deployer` user if it does not already exi
 
 Requests signed with the seeded access key return the deployer user ARN from `sts:GetCallerIdentity`.
 
+The default access key ID, `floci`, is shorter than IAM allows: `DeleteAccessKey` and `UpdateAccessKey` take an `AccessKeyId` of 16 to 128 characters matching `[\w]+`, so the AWS SDKs and Floci refuse the default with a validation error, and `DeleteUser` then refuses the user with `DeleteConflict` while the key exists. To provision with the deployer and then retire it, set an ID in IAM's format, for example (any value other than `floci` must be in that format, or Floci refuses to start):
+
+```bash
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID=AKIAFLOCIDEPLOYER001
+```
+
+The secret access key stays `floci`. Seeding runs at every start, so under persistent storage a retired deployer comes back on the next start unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` is turned off. When the ID changes, seeding deletes the deployer's key seeded under the earlier ID, so an install that already seeded `floci` can then retire the deployer; keys created for the deployer with `CreateAccessKey` are kept.
+
 ## IAM Enforcement Mode
 
 By default Floci accepts any credentials without enforcing IAM policies — all requests are allowed through regardless of what policies are attached to the calling identity. This preserves backward compatibility and keeps the default setup frictionless.
@@ -3516,8 +3525,10 @@ floci populates:
   custom action types, DataSync for its agents, locations and tasks, Global Accelerator for its accelerators, listeners
   and endpoint groups, EMR Serverless for its applications, job runs and sessions, EMR on EKS for its virtual clusters,
   job runs, managed endpoints, job templates and security configurations, Cost Explorer for its anomaly monitors and
-  subscriptions, Security Hub for its hubs and configuration policies, and Control Tower for its landing zones and
-  enabled controls. Tag keys differing only in case are one condition key holding every value.
+  subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
+  controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, and
+  Elastic Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers. Tag
+  keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
@@ -3930,6 +3941,26 @@ Four deviations to be aware of:
   service-linked mark comes from the action that minted the role rather than from its path. Such
   a role stays fully modifiable, and `DeleteServiceLinkedRole` answers `NoSuchEntity` for it.
 
+## Service-linked role refusals
+
+A service-linked role is immutable, and this package refuses eleven actions on one. Only one of
+those refusals is recorded, and it is worded differently from the rest: `UpdateRole` changing
+`MaxSessionDuration` answers `UnmodifiableEntity` 400 with `<roleName> is an AWS service linked
+role, max session duration cannot be changed.`, recorded 2026-10-29, where the clause names the
+change refused rather than the service the role is linked to.
+
+The other ten keep this package's own sentence, `Role <name> is a service-linked role for
+<principal>; request the change through that service.` Nothing records them, the clause AWS would
+write for each cannot be inferred from the one that is recorded, and AWS may not refuse all of them
+this way at all, so inventing ten clauses would put words in AWS's mouth. A recording for any of
+them moves that action alone. The same guard stands on one path no IAM action reaches, the policy
+replacement an IAM Identity Center permission set provisions a role through, which is why ten
+actions carry the sentence where eleven call sites test the mark.
+
+The description is not one of the eleven: AWS documents it as editable on any role, and both
+`UpdateRole` carrying only a description and `UpdateRoleDescription` are taken here, with the guard
+standing on the duration.
+
 ## Partitions
 
 IAM is global, so its ARNs take the partition of the region a request is signed for:
@@ -3945,6 +3976,7 @@ of the role it was issued for, whatever region later calls are signed for. See [
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
 | `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
+| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` | `floci` | Access key ID of the seeded deployer's key: `floci`, or 16 to 128 word characters, which make it deletable |
 | `FLOCI_SERVICES_IAM_ACCOUNT_ALIAS` | _(unset)_ | Seed an account alias at startup; unset means the account has no alias |
 | `FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH` | _(unset)_ | A JSON file of partner account id to boundary ARN to policy document, standing in for the permissions boundaries AWS registers for a delegation partner by email; unset means none is registered |
 

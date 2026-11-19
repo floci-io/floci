@@ -15,16 +15,13 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LocallyBuiltHelperImage;
+import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -424,19 +421,8 @@ public class SecurityGroupFirewallManager {
     private void apply(String helperId, String script) {
         for (int attempt = 0; attempt < 120; attempt++) {
             try {
-                byte[] content = script.getBytes(StandardCharsets.UTF_8);
-                ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
-                try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
-                    TarArchiveEntry entry = new TarArchiveEntry("floci-sg.nft");
-                    entry.setSize(content.length);
-                    tar.putArchiveEntry(entry);
-                    tar.write(content);
-                    tar.closeArchiveEntry();
-                }
-                dockerClient.copyArchiveToContainerCmd(helperId)
-                        .withRemotePath("/tmp")
-                        .withTarInputStream(new ByteArrayInputStream(archive.toByteArray()))
-                        .exec();
+                RetryingTarCopier.copyBytes(dockerClient, helperId, "/tmp", "floci-sg.nft",
+                        script.getBytes(StandardCharsets.UTF_8), 0644);
                 String execId = dockerClient.execCreateCmd(helperId)
                         .withAttachStdout(true).withAttachStderr(true)
                         .withCmd("nft", "-f", "/tmp/floci-sg.nft").exec().getId();

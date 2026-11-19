@@ -5,6 +5,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ListNetworksCmd;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
@@ -33,6 +34,7 @@ import io.floci.aws.services.ec2.model.NatGatewayAddress;
 import io.floci.aws.services.ec2.model.NetworkAcl;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.NetworkInterfaceAssociation;
+import io.floci.aws.services.ec2.model.NetworkInterfaceAttachment;
 import io.floci.aws.services.ec2.model.NetworkInterfaceListResult;
 import io.floci.aws.services.ec2.model.NetworkInterfacePrivateIpAddress;
 import io.floci.aws.services.ec2.model.Placement;
@@ -124,6 +126,7 @@ import static io.floci.aws.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
 import static io.floci.aws.services.ec2.Ec2KeyPairFixtures.RSA_FINGERPRINT;
 import static io.floci.aws.services.ec2.Ec2KeyPairFixtures.RSA_KEY;
 import static io.floci.aws.services.ec2.Ec2KeyPairFixtures.TRUNCATED_RSA_KEY;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -660,6 +663,48 @@ class Ec2ServiceTest {
         return service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1, null, List.of(), null, null,
                 List.of(), null, null, null, null, 0, null, null, null, null, false, null, null,
                 List.of(data), false, null, null);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"grant-before-detach", "detach-before-grant", "grant-before-describe"})
+    void interfacePermissionOperationsShareAttachmentSynchronization(String order) throws Exception {
+        String region = "us-east-1";
+        ParkingStore<NetworkInterface> interfaces = new ParkingStore<>();
+        AccountAwareStorageBackend<NetworkInterface> interfaceStore =
+                new AccountAwareStorageBackend<>(interfaces, null, "000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-network-interfaces.json", interfaceStore)));
+        String subnet = publicSubnet(service, region, "10.243.0.0/24");
+        NetworkInterface eni = service.createNetworkInterface(region, subnet, null, "10.243.0.10",
+                List.of(), List.of(), List.of());
+        Instance instance = service.runInstances(region, "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), subnet, null, List.of(), null, null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        NetworkInterfaceAttachment attachment = service.attachNetworkInterface(region,
+                eni.getNetworkInterfaceId(), instance.getInstanceId(), 1);
+        Runnable grant = () -> service.createNetworkInterfacePermission(region, eni.getNetworkInterfaceId(),
+                "111111111111", null, Ec2Service.INSTANCE_ATTACH);
+        Runnable detach = () -> service.detachNetworkInterface(region, attachment.getAttachmentId(), false);
+        Runnable describe = () -> assertEquals(1, service.describeNetworkInterfacePermissions(
+                region, List.of(), List.of(), null, null).permissions().size());
+        interfaces.parkNextWrite();
+
+        switch (order) {
+            case "grant-before-detach" -> assertOperationWaitsForParkedStore(interfaces, grant, detach);
+            case "detach-before-grant" -> assertOperationWaitsForParkedStore(interfaces, detach, grant);
+            case "grant-before-describe" -> assertOperationWaitsForParkedStore(interfaces, grant, describe);
+            default -> throw new IllegalArgumentException(order);
+        }
+
+        assertEquals(1, service.describeNetworkInterfacePermissions(
+                region, List.of(), List.of(), null, null).permissions().size());
+        if (!"grant-before-describe".equals(order)) {
+            assertNull(eni.getAttachment());
+            assertTrue(instance.getNetworkInterfaces().stream()
+                    .noneMatch(value -> eni.getNetworkInterfaceId().equals(value.getNetworkInterfaceId())));
+        }
     }
 
     @Test
@@ -7717,7 +7762,7 @@ class Ec2ServiceTest {
         assertEquals(List.of("192.0.2.0/24"), service.describePrefixLists("eu-west-1", List.of(id), Map.of())
                 .getFirst().getCidrs());
         assertEquals("192.0.2.0/24", service.getManagedPrefixListEntries("eu-west-1", id, null).getFirst().getCidr());
-        assertEquals(3, service.describeManagedPrefixLists("eu-west-1", List.of(), Map.of()).size());
+        assertEquals(4, service.describeManagedPrefixLists("eu-west-1", List.of(), Map.of()).size());
         assertEquals("InvalidPrefixListID.NotFound", assertThrows(AwsException.class,
                 () -> service.describeManagedPrefixLists("us-east-1", List.of(id), Map.of())).getErrorCode());
         assertEquals("UnsupportedOperation", assertThrows(AwsException.class,
@@ -7745,6 +7790,11 @@ class Ec2ServiceTest {
             "{\"eu-west-1\": [{\"prefixListId\":\"pl-12345678\",\"prefixListName\":\"example\",\"cidrs\":[\"invalid\"]}]}",
             "{\"eu-west-1\": [{\"prefixListId\":\"pl-63a5400a\",\"prefixListName\":\"example\",\"cidrs\":[\"192.0.2.0/24\"]}]}",
             "{\"eu-west-1\": [{\"prefixListId\":\"pl-12345678\",\"prefixListName\":\"com.amazonaws.eu-west-1.s3\","
+                    + "\"cidrs\":[\"192.0.2.0/24\"]}]}",
+            "{\"eu-west-1\": [{\"prefixListId\":\"pl-3b927c52\",\"prefixListName\":\"example\","
+                    + "\"cidrs\":[\"192.0.2.0/24\"]}]}",
+            "{\"eu-west-1\": [{\"prefixListId\":\"pl-12345678\","
+                    + "\"prefixListName\":\"com.amazonaws.global.cloudfront.origin-facing\","
                     + "\"cidrs\":[\"192.0.2.0/24\"]}]}"
     })
     void invalidManagedPrefixListCatalogFailsStartup(String json, @TempDir Path temp) throws IOException {
@@ -7756,6 +7806,36 @@ class Ec2ServiceTest {
 
         IllegalStateException error = assertThrows(IllegalStateException.class, () -> prefixListService(config));
         assertTrue(error.getMessage().contains(catalog.toString()));
+    }
+
+    @Test
+    void legacyCloudFrontCatalogEntryGivesWayToTheBuiltIn(@TempDir Path temp) throws IOException {
+        Path catalog = temp.resolve("prefix-lists.json");
+        Files.writeString(catalog, """
+                {"eu-west-1": [
+                  {"prefixListId": "pl-3b927c52", "prefixListName": "com.amazonaws.global.cloudfront.origin-facing",
+                   "cidrs": ["192.0.2.0/24"]},
+                  {"prefixListId": "pl-0123456789abcdef0", "prefixListName": "example-managed-service",
+                   "cidrs": ["198.51.100.0/24"]}]}
+                """);
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().enabled()).thenReturn(true);
+        when(config.services().ec2().managedPrefixListCatalogPath()).thenReturn(Optional.of(catalog.toString()));
+
+        Ec2Service service = assertDoesNotThrow(() -> prefixListService(config));
+
+        List<ManagedPrefixList> cloudFront = service.describeManagedPrefixLists("eu-west-1",
+                List.of("pl-3b927c52"), Map.of());
+        assertEquals(1, cloudFront.size());
+        assertEquals(49, cloudFront.getFirst().getMaxEntries());
+        List<String> cidrs = service.getManagedPrefixListEntries("eu-west-1", "pl-3b927c52", null).stream()
+                .map(PrefixListEntry::getCidr)
+                .toList();
+        assertFalse(cidrs.contains("192.0.2.0/24"), cidrs.toString());
+        assertTrue(cidrs.contains("130.176.0.0/18"), cidrs.toString());
+        assertEquals(List.of("198.51.100.0/24"), service.describePrefixLists("eu-west-1",
+                List.of("pl-0123456789abcdef0"), Map.of()).getFirst().getCidrs());
+        assertEquals(4, service.describeManagedPrefixLists("eu-west-1", List.of(), Map.of()).size());
     }
 
     @Test
@@ -7951,13 +8031,13 @@ class Ec2ServiceTest {
         service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5, List.of(), List.of());
 
         List<ManagedPrefixList> east = service.describeManagedPrefixLists("us-east-1", List.of(), Map.of());
-        assertEquals(3, east.size());
+        assertEquals(4, east.size());
         assertTrue(east.stream().anyMatch(l -> "com.amazonaws.us-east-1.s3".equals(l.getPrefixListName())));
         assertTrue(east.stream().anyMatch(l -> "corp".equals(l.getPrefixListName())));
 
-        // The customer list belongs to us-east-1; only the AWS-managed pair shows up elsewhere.
+        // The customer list belongs to us-east-1; only the AWS-managed lists show up elsewhere.
         List<ManagedPrefixList> west = service.describeManagedPrefixLists("us-west-2", List.of(), Map.of());
-        assertEquals(2, west.size());
+        assertEquals(3, west.size());
         assertTrue(west.stream().allMatch(ManagedPrefixList::isAwsManaged));
         assertTrue(west.stream().anyMatch(l -> "com.amazonaws.us-west-2.s3".equals(l.getPrefixListName())));
     }
@@ -8120,18 +8200,78 @@ class Ec2ServiceTest {
         assertEquals("PrefixListVersionMismatch", error.getErrorCode());
     }
 
-    @Test
-    void awsManagedListsCannotBeModifiedOrDeleted() {
+    @ParameterizedTest
+    @ValueSource(strings = {"pl-63a5400a", "pl-3b927c52"})
+    void awsManagedListsCannotBeModifiedOrDeleted(String prefixListId) {
         Ec2Service service = prefixListService();
 
         AwsException modifyError = assertThrows(AwsException.class, () ->
-                service.modifyManagedPrefixList("us-east-1", "pl-63a5400a", null, "hijacked", null,
+                service.modifyManagedPrefixList("us-east-1", prefixListId, null, "hijacked", null,
                         List.of(), List.of()));
         assertEquals("UnsupportedOperation", modifyError.getErrorCode());
 
         AwsException deleteError = assertThrows(AwsException.class, () ->
-                service.deleteManagedPrefixList("us-east-1", "pl-63a5400a"));
+                service.deleteManagedPrefixList("us-east-1", prefixListId));
         assertEquals("UnsupportedOperation", deleteError.getErrorCode());
+    }
+
+    @Test
+    void cloudFrontOriginFacingListExistsInEveryCommercialRegion() {
+        Ec2Service service = prefixListService();
+        Map<String, List<String>> byName = Map.of("prefix-list-name",
+                List.of("com.amazonaws.global.cloudfront.origin-facing"));
+
+        for (String region : List.of("us-east-1", "eu-west-1", "ap-southeast-2")) {
+            List<ManagedPrefixList> found = service.describeManagedPrefixLists(region, List.of(), byName);
+            assertEquals(1, found.size(), region);
+            ManagedPrefixList list = found.getFirst();
+            assertEquals("pl-3b927c52", list.getPrefixListId());
+            assertEquals("AWS", list.getOwnerId());
+            assertTrue(list.isAwsManaged());
+            assertEquals("IPv4", list.getAddressFamily());
+            assertEquals(49, list.getMaxEntries());
+            assertEquals("arn:aws:ec2:" + region + ":aws:prefix-list/pl-3b927c52", list.getPrefixListArn());
+        }
+
+        List<String> cidrs = service.getManagedPrefixListEntries("us-east-1", "pl-3b927c52", null).stream()
+                .map(PrefixListEntry::getCidr)
+                .toList();
+        assertTrue(cidrs.containsAll(List.of("130.176.0.0/18", "15.158.0.0/16", "64.252.64.0/18")), cidrs.toString());
+        assertEquals(49, cidrs.size(), cidrs.toString());
+    }
+
+    @Test
+    void cloudFrontOriginFacingListIsAbsentOutsideTheCommercialPartition() {
+        Ec2Service service = prefixListService();
+
+        for (String region : List.of("cn-north-1", "us-gov-west-1")) {
+            assertTrue(service.describeManagedPrefixLists(region, List.of(), Map.of()).stream()
+                    .noneMatch(l -> "pl-3b927c52".equals(l.getPrefixListId())), region);
+            assertEquals("InvalidPrefixListID.NotFound", assertThrows(AwsException.class,
+                    () -> service.getManagedPrefixListEntries(region, "pl-3b927c52", null)).getErrorCode());
+        }
+    }
+
+    @Test
+    void anUnknownRegionTakesTheDeploymentPartitionForTheCloudFrontList() {
+        String unknown = "polygondwanaland-west-1";
+        assertTrue(AwsPartitions.forRegion(unknown).isEmpty());
+        Map<String, String> expectedPartitions = Map.of(
+                "us-gov-west-1", "aws-us-gov",
+                "cn-north-1", "aws-cn",
+                "us-east-1", "aws");
+
+        for (Map.Entry<String, String> deployment : expectedPartitions.entrySet()) {
+            Ec2Service service = prefixListService();
+            service.regionResolver = new RegionResolver(deployment.getKey(), "000000000000");
+            List<ManagedPrefixList> lists = service.describeManagedPrefixLists(unknown, List.of(), Map.of());
+
+            boolean commercial = "aws".equals(deployment.getValue());
+            assertEquals(commercial, lists.stream().anyMatch(l -> "pl-3b927c52".equals(l.getPrefixListId())),
+                    deployment.getKey());
+            assertTrue(lists.stream().allMatch(l -> l.getPrefixListArn().startsWith(
+                    "arn:" + deployment.getValue() + ":ec2:" + unknown + ":aws:prefix-list/")), lists.toString());
+        }
     }
 
     @Test

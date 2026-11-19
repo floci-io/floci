@@ -6,6 +6,8 @@ import com.github.dockerjava.transport.DockerHttpClient;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 
 /**
@@ -67,21 +69,47 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
     private final int maxAttempts;
     private final long backoffMillis;
     private final Predicate<Request> replayable;
+    /**
+     * One limit across a call's attempts and backoffs (see {@link DockerRetry#call(int, long, Duration,
+     * DockerRetry.DockerCall)}), the Docker call timeout, so retries cannot stretch a call to several
+     * times it; null for none.
+     */
+    private final Duration callDeadline;
+    private final LongSupplier nanoTime;
+    private final DockerRetry.BackoffWait backoffWait;
 
     public RetryingDockerHttpClient(DockerHttpClient delegate) {
-        this(delegate, MAX_ATTEMPTS, BACKOFF_MS);
+        this(delegate, (Duration) null);
+    }
+
+    /** @param callDeadline the longest a call may take across its attempts, or null for no limit */
+    public RetryingDockerHttpClient(DockerHttpClient delegate, Duration callDeadline) {
+        this(delegate, MAX_ATTEMPTS, BACKOFF_MS, RetryingDockerHttpClient::isReplayable, callDeadline,
+                System::nanoTime, Thread::sleep);
     }
 
     RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis) {
-        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable);
+        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable, null,
+                System::nanoTime, Thread::sleep);
+    }
+
+    /** With a clock and a backoff wait of the test's own, so a deadline is checked without sleeping. */
+    RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis, Duration callDeadline,
+                             LongSupplier nanoTime, DockerRetry.BackoffWait backoffWait) {
+        this(delegate, maxAttempts, backoffMillis, RetryingDockerHttpClient::isReplayable, callDeadline,
+                nanoTime, backoffWait);
     }
 
     private RetryingDockerHttpClient(DockerHttpClient delegate, int maxAttempts, long backoffMillis,
-                                     Predicate<Request> replayable) {
+                                     Predicate<Request> replayable, Duration callDeadline,
+                                     LongSupplier nanoTime, DockerRetry.BackoffWait backoffWait) {
         this.delegate = delegate;
         this.maxAttempts = maxAttempts;
         this.backoffMillis = backoffMillis;
         this.replayable = replayable;
+        this.callDeadline = callDeadline;
+        this.nanoTime = nanoTime;
+        this.backoffWait = backoffWait;
     }
 
     /**
@@ -96,8 +124,9 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
 
     static RetryingDockerHttpClient forContainerWaits(DockerHttpClient delegate, int maxAttempts,
                                                       long backoffMillis) {
+        // No call timeout: a container wait is a long-lived stream, which the deadline never bounds.
         return new RetryingDockerHttpClient(delegate, maxAttempts, backoffMillis,
-                request -> isReplayable(request) && isContainerWait(request));
+                request -> isReplayable(request) && isContainerWait(request), null, System::nanoTime, Thread::sleep);
     }
 
     @Override
@@ -105,7 +134,10 @@ public final class RetryingDockerHttpClient implements DockerHttpClient {
         if (!replayable.test(request)) {
             return delegate.execute(request);
         }
-        return DockerRetry.call(maxAttempts, backoffMillis, () -> delegate.execute(request));
+        // A long-lived stream has no response timeout, so the call timeout does not bound its retries either.
+        Duration deadline = FlociDockerHttpClient.isLongLivedStream(request) ? null : callDeadline;
+        return DockerRetry.call(maxAttempts, backoffMillis, deadline, nanoTime, backoffWait,
+                () -> delegate.execute(request));
     }
 
     /**

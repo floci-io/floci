@@ -28,6 +28,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -178,7 +179,8 @@ public class SchedulerService implements StoredResourceArns {
                         "ScheduleGroup not found: " + effectiveName, 404));
     }
 
-    public void deleteScheduleGroup(String name, String region) {
+    /** Synchronized with {@link #recordFire}, so a fire recorded during the cascade cannot restore a schedule. */
+    public synchronized void deleteScheduleGroup(String name, String region) {
         validateName(name);
         if (DEFAULT_GROUP.equals(name)) {
             throw new AwsException("ValidationException",
@@ -304,7 +306,7 @@ public class SchedulerService implements StoredResourceArns {
                         "Schedule not found: " + name, 404));
     }
 
-    public Schedule updateSchedule(ScheduleRequest req, String region) {
+    public synchronized Schedule updateSchedule(ScheduleRequest req, String region) {
         validateName(req.getName());
         validateScheduleRequest(req);
         String effectiveGroup = resolveAndValidateGroup(req.getGroupName());
@@ -331,13 +333,14 @@ public class SchedulerService implements StoredResourceArns {
         updated.setKmsKeyArn(req.getKmsKeyArn());
         updated.setCreationDate(existing.getCreationDate());
         updated.setLastModificationDate(now);
+        updated.setLastFiredAt(existing.getLastFiredAt());
 
         scheduleStore.put(key, updated);
         LOG.infov("Updated schedule: {0} in group {1}", req.getName(), effectiveGroup);
         return updated;
     }
 
-    public void deleteSchedule(String name, String groupName, String region) {
+    public synchronized void deleteSchedule(String name, String groupName, String region) {
         validateName(name);
         String effectiveGroup = resolveAndValidateGroup(groupName);
         String key = scheduleKey(region, effectiveGroup, name);
@@ -360,7 +363,24 @@ public class SchedulerService implements StoredResourceArns {
         return scheduleStore.scan(k -> k.startsWith("schedule:"));
     }
 
-    public void deleteScheduleForAccount(String accountId, String name, String groupName, String region) {
+    /**
+     * Records in the stored schedule that the dispatcher fired it at {@code firedAt}. Synchronized
+     * with update and delete, so it never writes back a stale copy over an update, and a schedule
+     * deleted meanwhile, or deleted and created again under the same name, is left as it is.
+     */
+    public synchronized void recordFire(Schedule schedule, String region, Instant firedAt) {
+        String key = scheduleKey(region, schedule.getGroupName(), schedule.getName());
+        AccountAwareStorageBackend.getInAccount(scheduleStore, schedule.getAccountId(), key)
+                .filter(stored -> Objects.equals(stored.getArn(), schedule.getArn())
+                        && Objects.equals(stored.getCreationDate(), schedule.getCreationDate()))
+                .ifPresent(stored -> {
+                    stored.setLastFiredAt(firedAt);
+                    AccountAwareStorageBackend.putInAccount(scheduleStore, schedule.getAccountId(), key, stored);
+                });
+    }
+
+    public synchronized void deleteScheduleForAccount(String accountId, String name, String groupName,
+                                                      String region) {
         String effectiveGroup = resolveAndValidateGroup(groupName);
         String key = scheduleKey(region, effectiveGroup, name);
         if (scheduleStore instanceof AccountAwareStorageBackend<Schedule> aware) {
