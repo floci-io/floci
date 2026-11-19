@@ -55,12 +55,8 @@ public class SesConfigurationSetService implements SesTaggable {
 
     private static final Logger LOG = Logger.getLogger(SesConfigurationSetService.class);
 
-    private static final Pattern CONFIG_SET_NAME = Pattern.compile("^[A-Za-z0-9_-]+$");
-    private static final int MAX_CONFIG_SET_NAME_LENGTH = 64;
     private static final Set<String> VDM_FEATURE_STATES = Set.of("ENABLED", "DISABLED");
 
-    private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
-    private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
     private static final String INVALID_SNS_DESTINATION = "InvalidSNSDestination";
     private static final String EVENT_BUS_RESOURCE_PREFIX = "event-bus/";
     private static final String DEFAULT_EVENT_BUS_RESOURCE = EVENT_BUS_RESOURCE_PREFIX + "default";
@@ -404,7 +400,7 @@ public class SesConfigurationSetService implements SesTaggable {
 
     /** For guards that must not trip the key derivation's name validation (the tenant gate). */
     static boolean isValidName(String name) {
-        return name != null && name.length() <= MAX_CONFIG_SET_NAME_LENGTH && CONFIG_SET_NAME.matcher(name).matches();
+        return name != null && name.length() <= SesNames.MAX_LENGTH && SesNames.hasOnlyAllowedCharacters(name);
     }
 
     // ──────────────────────── Domain-pure option setters ────────────────────────
@@ -619,15 +615,8 @@ public class SesConfigurationSetService implements SesTaggable {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "EventDestinationName is required.", 400);
         }
-        if (!EVENT_DESTINATION_NAME_CHARS.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid event destination name <" + name + ">: only alphanumeric ASCII characters, "
-                            + "'_', and '-' are allowed.", 400);
-        }
-        if (name.length() > MAX_EVENT_DESTINATION_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Event destination name cannot exceed 64 characters.", 400);
-        }
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Invalid event destination name");
+        SesNames.requireMaxLength(name, "InvalidParameterValue", "Event destination name");
     }
 
     static void validateEventDestination(EventDestination dest, String accountId, String region) {
@@ -818,15 +807,8 @@ public class SesConfigurationSetService implements SesTaggable {
             throw new AwsException("InvalidParameterValue",
                     "The configuration set name must be specified.", 400);
         }
-        if (name.length() > MAX_CONFIG_SET_NAME_LENGTH) {
-            throw new AwsException("InvalidParameterValue",
-                    "Configuration set name cannot exceed " + MAX_CONFIG_SET_NAME_LENGTH + " characters.", 400);
-        }
-        if (!CONFIG_SET_NAME.matcher(name).matches()) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid configuration set name <" + name + ">: only alphanumeric ASCII characters, "
-                            + "'_', and '-' are allowed.", 400);
-        }
+        SesNames.requireMaxLength(name, "InvalidParameterValue", "Configuration set name");
+        SesNames.requireAllowedCharacters(name, "InvalidParameterValue", "Invalid configuration set name");
     }
 
     private static String configSetKey(String region, String name) {
