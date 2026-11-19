@@ -78,6 +78,62 @@ class RdsDataServiceTest {
         assertEquals(Types.INTEGER, response.path("columnMetadata").get(0).path("arrayBaseColumnType").asInt());
     }
 
+    // Catches the connection-property injection at the service: the name reaches the connection as the
+    // caller wrote it (the factory encodes it), neither refused nor swapped for the resource's database.
+    @Test
+    void aDatabaseNameIsPassedToTheConnectionAsWritten() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
+        String injected = "app?allowLoadLocalInfile=true&autoDeserialize=true";
+        ObjectNode request = harness.request("select 1");
+        request.put("database", injected);
+
+        harness.service.executeStatement(request, REGION);
+
+        assertEquals(List.of(injected), harness.databasesOpened);
+    }
+
+    @Test
+    void aDatabaseNameLongerThanTheModelAllowsIsRefused() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        ObjectNode request = harness.request("select 1");
+        request.put("database", "d".repeat(65));
+
+        AwsException error = assertThrows(AwsException.class, () -> harness.service.executeStatement(request, REGION));
+
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals("database must be at most 64 characters.", error.getMessage());
+        assertEquals(0, harness.connectionsOpened.get());
+    }
+
+    // Catches: a name of only spaces read as "no database", so it ran against the resource's database
+    // even at a length the model refuses.
+    @Test
+    void aDatabaseNameOfSpacesIsANameRatherThanTheResourcesDatabase() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
+        ObjectNode spaces = harness.request("select 1");
+        spaces.put("database", "   ");
+        ObjectNode tooLong = harness.request("select 1");
+        tooLong.put("database", " ".repeat(65));
+
+        harness.service.executeStatement(spaces, REGION);
+        AwsException lengthError = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(tooLong, REGION));
+
+        assertEquals(List.of("   "), harness.databasesOpened);
+        assertEquals("database must be at most 64 characters.", lengthError.getMessage());
+    }
+
+    @Test
+    void anOrdinaryDatabaseNameWithAHyphenStillConnects() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        ObjectNode request = harness.request("select 1");
+        request.put("database", "orders-db_2");
+
+        harness.service.executeStatement(request, REGION);
+
+        assertEquals(1, harness.connectionsOpened.get());
+    }
+
     @Test
     void rejectsMultidimensionalArrayResultsThroughTheJdbcExecutionPath() throws Exception {
         TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
@@ -1302,6 +1358,7 @@ class RdsDataServiceTest {
         private final AtomicInteger endpointsResolved = new AtomicInteger();
         private final AtomicReference<EndpointInfo> currentEndpoint = new AtomicReference<>();
         private final List<EndpointInfo> endpointsOpened = new CopyOnWriteArrayList<>();
+        private final List<String> databasesOpened = new CopyOnWriteArrayList<>();
         private volatile RuntimeException endpointFailure;
         private final RdsDataService service;
 
@@ -1360,6 +1417,7 @@ class RdsDataServiceTest {
                                 String password,
                                 String database) throws SQLException {
                     endpointsOpened.add(endpoint);
+                    databasesOpened.add(database);
                     connectionsOpened.incrementAndGet();
                     return getConnection();
                 }
