@@ -119,8 +119,7 @@ public class LambdaResponseStreamController {
 
     private static void addEnumViolation(List<String> violations, String value, String field, List<String> allowed) {
         if (value != null && !allowed.contains(value)) {
-            violations.add("Value '" + value + "' at '" + field + "' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [" + String.join(", ", allowed) + "]");
+            violations.add(SmithyValidationErrors.notInEnum(value, field, allowed));
         }
     }
 

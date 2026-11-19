@@ -3539,31 +3539,24 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
 
     /** Invoke's Qualifier, when supplied: 1-128 characters matching {@link #QUALIFIER}. */
     private static void validateInvokeQualifier(String qualifier) {
-        validateNonEmpty(qualifier, "qualifier", false);
-        validateMaxLength(qualifier, "qualifier", 128);
-        validatePattern(qualifier, "qualifier", QUALIFIER);
+        List<String> violations = invokeQualifierViolations(qualifier);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
     }
 
-    /**
-     * The violations of Invoke's Qualifier as AWS lists them, pattern first. An empty qualifier breaks the
-     * pattern and the minimum length, so it yields two.
-     */
+    /** The violations of Invoke's Qualifier as AWS lists them, the pattern before the length. */
     static List<String> invokeQualifierViolations(String qualifier) {
         List<String> violations = new ArrayList<>();
         if (qualifier == null) {
             return violations;
         }
         if (!QUALIFIER.matcher(qualifier).matches()) {
-            violations.add("Value '" + qualifier + "' at 'qualifier' failed to satisfy constraint: "
-                    + "Member must satisfy regular expression pattern: " + QUALIFIER.pattern());
+            violations.add(SmithyValidationErrors.pattern("qualifier", qualifier, QUALIFIER.pattern()));
         }
-        if (qualifier.isEmpty()) {
-            violations.add("Value '' at 'qualifier' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1");
-        }
-        if (qualifier.length() > 128) {
-            violations.add("Value at 'qualifier' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 128");
+        String length = SmithyValidationErrors.lengthOutOfRange("qualifier", qualifier, 1, 128);
+        if (length != null) {
+            violations.add(length);
         }
         return violations;
     }
