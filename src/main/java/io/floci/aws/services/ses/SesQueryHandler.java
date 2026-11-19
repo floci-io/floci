@@ -48,6 +48,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.IntStream;
 
 /**
  * Query-protocol handler for SES actions.
@@ -182,7 +183,8 @@ public class SesQueryHandler {
                 case "ListReceiptFilters" -> handleListReceiptFilters(region);
                 case "DeleteReceiptFilter" -> handleDeleteReceiptFilter(params, region);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
-                        "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
+                        spellOutControlCharacters("Operation " + action + " is not supported by SES."),
+                        AwsNamespaces.SES, 400);
             };
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), spellOutControlCharacters(e.getMessage()),
@@ -191,23 +193,35 @@ public class SesQueryHandler {
     }
 
     /**
-     * SES writes a control character a message quotes as {@code 0x0009}, which also keeps the
-     * characters XML 1.0 forbids out of the error document.
+     * SES writes a control character a message quotes as {@code 0x0009}. The same form is used for
+     * the other characters XML 1.0 forbids (U+FFFE, U+FFFF, a surrogate without its pair), where
+     * what SES writes is not known, so that the error document always parses.
      */
     static String spellOutControlCharacters(String message) {
-        if (message == null || message.chars().noneMatch(c -> c < ' ')) {
+        if (message == null || IntStream.range(0, message.length()).noneMatch(i -> isSpelledOut(message, i))) {
             return message;
         }
         StringBuilder out = new StringBuilder(message.length() + 8);
         for (int i = 0; i < message.length(); i++) {
             char c = message.charAt(i);
-            if (c < ' ') {
+            if (isSpelledOut(message, i)) {
                 out.append(String.format(Locale.ROOT, "0x%04x", (int) c));
             } else {
                 out.append(c);
             }
         }
         return out.toString();
+    }
+
+    private static boolean isSpelledOut(String message, int index) {
+        char c = message.charAt(index);
+        if (Character.isHighSurrogate(c)) {
+            return index + 1 == message.length() || !Character.isLowSurrogate(message.charAt(index + 1));
+        }
+        if (Character.isLowSurrogate(c)) {
+            return index == 0 || !Character.isHighSurrogate(message.charAt(index - 1));
+        }
+        return c < ' ' || c == '\uFFFE' || c == '\uFFFF';
     }
 
     private Response handleVerifyEmailIdentity(MultivaluedMap<String, String> params, String region) {
