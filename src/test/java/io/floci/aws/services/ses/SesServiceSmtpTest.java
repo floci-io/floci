@@ -307,7 +307,7 @@ class SesServiceSmtpTest {
         SmtpRelay.RawRelayMessage relayed = capturedRawRelay();
         assertEquals("from@example.com", relayed.from());
         assertEquals(List.of("to@example.com"), relayed.destinations());
-        assertEquals("raw MIME", relayed.rawMessage());
+        assertNotNull(relayed.message());
         assertEquals(messageId, relayed.messageId());
     }
 

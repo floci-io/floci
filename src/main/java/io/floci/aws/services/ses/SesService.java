@@ -641,7 +641,7 @@ public class SesService {
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!rejected && !relayedDestinations.isEmpty()) {
             smtpRelay.relayRaw(new SmtpRelay.RawRelayMessage(effectiveSource, effectiveReturnPath,
-                    relayedDestinations, raw.data(), messageId));
+                    relayedDestinations, parsed.message(), messageId));
         } else {
             LOG.infov("SES raw email accepted but not relayed ({0}): messageId={1}",
                     rejected ? "content rejected" : "all recipients suppressed", messageId);
