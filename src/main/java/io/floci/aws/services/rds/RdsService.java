@@ -9321,16 +9321,18 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private DbEndpoint proxyEndpoint(int proxyPort) {
-        Optional<String> endpointHost = config.services().rds().endpointHost()
-                .filter(host -> !host.isBlank());
-        if (endpointHost.isEmpty()) {
+        if (configuredEndpointHost().isEmpty()) {
             return new DbEndpoint(proxyEndpointHost(), proxyPort);
         }
 
         int endpointPort = currentContainerNetworkResolver == null
                 ? proxyPort
                 : currentContainerNetworkResolver.resolvePublishedPort(proxyPort).orElse(proxyPort);
-        return new DbEndpoint(endpointHost.get(), endpointPort);
+        return new DbEndpoint(configuredEndpointHost().get(), endpointPort);
+    }
+
+    private Optional<String> configuredEndpointHost() {
+        return config.services().rds().endpointHost().filter(host -> !host.isBlank());
     }
 
     private String proxyEndpointHost() {
@@ -9344,9 +9346,7 @@ public class RdsService implements Resettable, ResourceProvider {
      * built without it, so a fixed host changed with the container's start order only for proxies.
      */
     private String advertisedProxyHost() {
-        return config.services().rds().endpointHost()
-                .filter(host -> !host.isBlank())
-                .orElse(proxyEndpointHost());
+        return configuredEndpointHost().orElseGet(this::proxyEndpointHost);
     }
 
     private void validateDbProxyCreate(String name, String engineFamily, String roleArn,
