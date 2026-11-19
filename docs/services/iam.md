@@ -3540,9 +3540,9 @@ floci populates:
   Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers, SQS for its
   queues, SNS for its topics, Kinesis Data Streams for its streams and consumers, EventBridge Pipes for its pipes,
   Aurora DSQL for its clusters, EKS for its clusters, node groups, Fargate profiles, add-ons, Pod Identity
-  associations and access entries, Resource Groups for its groups and CloudWatch Logs for its log groups,
-  destinations, delivery sources, delivery destinations and deliveries. Tag keys differing only in case are one
-  condition key holding every value.
+  associations and access entries, Resource Groups for its groups, CloudWatch Logs for its log groups,
+  destinations, delivery sources, delivery destinations and deliveries, and Pricing Calculator for its workload
+  estimates. Tag keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
