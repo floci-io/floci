@@ -7,6 +7,7 @@ import io.floci.aws.services.lakeformation.LakeFormationService;
 import io.floci.aws.services.lakeformation.model.DataLakePrincipal;
 import io.floci.aws.services.lakeformation.model.DataLakeSettings;
 import io.floci.aws.services.lakeformation.model.GrantPermissionsRequest;
+import io.floci.aws.services.lakeformation.model.PrincipalPermissions;
 import io.floci.aws.services.lakeformation.model.PutDataLakeSettingsRequest;
 import io.floci.aws.services.lakeformation.model.Resource;
 import io.floci.aws.services.lakeformation.model.RevokePermissionsRequest;
@@ -17,7 +18,7 @@ import io.floci.aws.services.redshift.spectrum.ExternalStatementParser;
 import io.floci.aws.services.redshift.spectrum.GlueTableBuilder;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.SidecarContainersProfile;
-import io.floci.aws.testing.SidecarSpectrumLakeFormationProfile;
+import io.floci.aws.testing.SidecarServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -41,9 +42,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * A Spectrum query is refused until the external schema's role holds a Lake Formation {@code SELECT}
  * grant on the table, and a revoke stops the next query even though the table is already cached.
+ *
+ * <p>It takes new tables away from IAM in the account's Data Lake settings, and puts AWS's defaults
+ * back when it is done, since the other classes on {@link SidecarServiceSettingsProfile} read
+ * their external tables with no Lake Formation grant.
  */
 @QuarkusTest
-@TestProfile(SidecarSpectrumLakeFormationProfile.class)
+@TestProfile(SidecarServiceSettingsProfile.class)
 class RedshiftSpectrumLakeFormationIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -80,6 +85,7 @@ class RedshiftSpectrumLakeFormationIntegrationTest {
 
     @AfterEach
     void cleanUp() {
+        lakeFormationService.putDataLakeSettings(REGION, iamOnlyDefaults());
         if (clusterId != null) {
             redshiftService.deleteCluster(clusterId);
         }
@@ -156,6 +162,25 @@ class RedshiftSpectrumLakeFormationIntegrationTest {
         request.setResource(tableResource());
         request.setPermissions(List.of("SELECT"));
         return request;
+    }
+
+    /** AWS's defaults for a new account, which leave new databases and tables to IAM. */
+    private static PutDataLakeSettingsRequest iamOnlyDefaults() {
+        DataLakeSettings settings = new DataLakeSettings();
+        settings.setCreateDatabaseDefaultPermissions(List.of(allToIamAllowedPrincipals()));
+        settings.setCreateTableDefaultPermissions(List.of(allToIamAllowedPrincipals()));
+        PutDataLakeSettingsRequest request = new PutDataLakeSettingsRequest();
+        request.setDataLakeSettings(settings);
+        return request;
+    }
+
+    private static PrincipalPermissions allToIamAllowedPrincipals() {
+        DataLakePrincipal principal = new DataLakePrincipal();
+        principal.setDataLakePrincipalIdentifier("IAM_ALLOWED_PRINCIPALS");
+        PrincipalPermissions permissions = new PrincipalPermissions();
+        permissions.setPrincipal(principal);
+        permissions.setPermissions(List.of("ALL"));
+        return permissions;
     }
 
     private static DataLakePrincipal principal() {

@@ -183,9 +183,9 @@ public class RabbitMqManager {
         }
     }
 
-    /** The broker's Region, {@link Broker#region} with the configured default Region. */
+    /** The Region the broker's ARN names, and the default Region for a broker recorded without one. */
     private String brokerRegion(Broker broker) {
-        return broker.region(regionResolver.getDefaultRegion());
+        return regionResolver.regionOf(broker.getBrokerArn());
     }
 
     /**

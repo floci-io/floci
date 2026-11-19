@@ -332,6 +332,18 @@ public class EmrServerlessSessionService implements SparkConnectTargets, Resetta
     }
 
     /**
+     * The sessions, of every account, whose kept history stays ({@link EmrServerlessHistories}): those that have not
+     * ended, and those that ended after {@code cutoff}.
+     */
+    synchronized Set<String> historiesKept(Instant cutoff) {
+        List<Session> all = store.scanAllAccountEntries(key -> true).stream()
+                .map(entry -> entry.value().getSession()).toList();
+        return EmrServerlessHistories.stillKept(all, Session::getSessionId,
+                session -> STATE_TERMINATED.equals(session.getState()) || STATE_FAILED.equals(session.getState()),
+                Session::getEndedAt, cutoff);
+    }
+
+    /**
      * The session GetResourceDashboard links to, in any state: "Currently, only Session is supported" as its
      * {@code resourceType}.
      */

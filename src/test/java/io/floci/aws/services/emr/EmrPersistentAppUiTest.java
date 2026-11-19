@@ -1,5 +1,6 @@
 package io.floci.aws.services.emr;
 
+import io.floci.aws.core.common.AppUiRoute;
 import io.floci.aws.core.common.LinkSigner;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -73,7 +74,7 @@ class EmrPersistentAppUiTest {
         URI url = URI.create(starting.url());
         assertEquals(EmrAppUiService.HISTORY_NOT_READY, appUis.route(url.getAuthority(), "http").refusal());
         fixture.clusterStorage.historyInterfaces.put(SPARK_HISTORY, ON_HOST);
-        EmrAppUiService.UiRoute route = appUis.route(url.getAuthority(), "http");
+        AppUiRoute route = appUis.route(url.getAuthority(), "http");
         assertNull(route.refusal());
         assertEquals(32803, route.port());
         assertTrue(appUis.persistentUrl(appUi, "SHS", null).ready());

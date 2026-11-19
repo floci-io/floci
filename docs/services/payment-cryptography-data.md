@@ -15,6 +15,7 @@ client that talks to the control plane does not reach it by accident.
 | `EncryptData` | Encrypt plaintext under a key, on `POST /keys/{KeyIdentifier}/encrypt` |
 | `DecryptData` | Decrypt a ciphertext under a key, on `POST /keys/{KeyIdentifier}/decrypt` |
 | `ReEncryptData` | Decrypt under one key and encrypt under another, on `POST /keys/{IncomingKeyIdentifier}/reencrypt` |
+| `TranslateKeyMaterial` | Move a key from a key the two parties agreed to another key, on `POST /keymaterial/translate` |
 | `GenerateMac` | A MAC of a message under a key, on `POST /mac/generate` |
 | `VerifyMac` | Verify a MAC over a message, on `POST /mac/verify` |
 | `GeneratePinData` | Generate a PIN block and the verification value that goes with it, on `POST /pindata/generate` |
@@ -35,11 +36,27 @@ client that talks to the control plane does not reach it by accident.
   the plaintext it holds: the initialization vector travels in the request's attributes, and a
   request that names none gets a zero vector. The blobs of the data plane are hexadecimal, which is
   what the reference says they are.
+- **Only the CBC mode is made.** The reference's model names eight block cipher modes for the
+  symmetric encryption, and the reference's page for the attributes names them as the valid
+  values. This service makes the CBC one, so a request that names the ECB, the CFB, the CFB1, the
+  CFB8, the CFB64, the CFB128 or the OFB mode is refused with `ValidationException` rather than
+  answered with a cipher of another kind. The padding of the symmetric attributes belongs to the
+  RSA cipher, so a request that names one is refused as well.
 - **The MAC is the one the request asks for.** The ISO 9797-1 algorithms 1 and 3 are the ones
   defined over Triple DES, and the CMAC is the AES-CMAC of RFC 4493, which is a whole block
   wide, so it is cut to a length the caller asks for. The service fails the request when the
   MAC is not the one over the message, because the answer of a verification has no verdict in
   it.
+- **The MAC algorithms this service makes are the three the model names beside the DUKPT ones.**
+  The ISO 9797-1 algorithms 1 and 3, the CMAC, and the DUKPT derivations of the two ISO 9797
+  algorithms are made. The HMAC family, the EMV MAC, the DUKPT CMAC and the AS 2805 4.1 MAC
+  are not, so a request that names one of them is refused with `ValidationException`. The
+  reference makes them, and the reference's page for the operation says a HMAC can be asked
+  for, so this is a deviation and not a rule of the model.
+- **The length of a MAC is the one the algorithm gives.** The model states the range of four to
+  thirty-two bytes, and the length a request asks for is refused when the algorithm gives a
+  shorter one. The reference names the lengths that hold for each algorithm, and this service
+  takes any length the algorithm can give.
 - **The modes of use of a key decide what it may be used for.** A key without the `Encrypt`
   mode is refused for an encryption, and a key with `NoRestrictions` is refused for nothing.
 - **The usage of a key decides what it may be used for.** The modes say whether a key may be
@@ -58,6 +75,11 @@ client that talks to the control plane does not reach it by accident.
   over is a four-digit one and a longer PIN has no verification value. A PIN that does not
   verify fails the request with `VerificationFailedException`, because the answer of a
   verification has no verdict in it.
+- **A verification reads the two Triple DES formats.** The reference's page for `VerifyPinData`
+  says "AWS Payment Cryptography supports `ISO_Format_0` and `ISO_Format_3`", while the
+  generation reads the format 4 as well, so a verification that names the format 4 or the
+  format 1 is refused with `ValidationException`. The format 1 is a format ISO 9564-1 defines
+  that this service does not make anywhere, so a request that asks for one is refused.
 - **A PIN block that is not one the service can read is a different failure.** A block that
   does not decipher into a PIN field, because the key is another one, the account number is
   another one, or the block is corrupted, is refused with `ValidationException` and the
@@ -73,12 +95,39 @@ client that talks to the control plane does not reach it by accident.
   Triple DES one, so a request that asks for another of the five the model allows is refused,
   and the PIN key it derives both encrypts and decrypts, so a key variant other than the
   bidirectional one is refused.
+- **The key material of a key may be translated:** `TranslateKeyMaterial` takes a key block
+  that came under a key two parties agreed with ECDH, and answers with the same key wrapped
+  under the key the request names. The key material never leaves the service: the block is
+  opened under the agreed key and wrapped again under the other one, and the block that goes
+  out carries the attributes of the key it holds, its version and its optional blocks with
+  them. The reference has it for the keys that
+  are rotated for every transaction, such as a PEK wrapped under a key that was agreed
+  with ECDH, so the key is moved to another wrapping key without being imported.
+- **A translation is refused when the key that protects it is too weak.** The agreed key
+  opens the block that comes in and the wrapping key closes the one that goes out, so both
+  have to be at least as strong as the key they protect, the rule the export and the import
+  enforce. A key that may not leave the service is refused as well: a block that carries the
+  exportability `N` holds a key that may not be exported, and the block that goes out is
+  handed to the caller. The usage the block carries has to be one the algorithm serves, the
+  rule the import and the creation enforce, so a block that names a signature key and an AES
+  key at once is refused. The check value algorithm the request names has to be the one the
+  key has, the CMAC for an AES key and the ANSI X9.24 one for a Triple DES key, and a request
+  that names another one is refused rather than answered with a value of another kind.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
   request that asks for one of them is refused with the error that says so, rather than
   answered with something of another kind. The EMV PIN change MAC is refused as well: it needs
   the session key the EMV secure messaging rules define, which this service does not make. It
   is not one of the actions the service lists as supported. The wrapped-key form of a PIN
   encryption key is refused too, because the unwrapping is part of the key exchange.
+- **The AS2805 key validation is not served.** The reference publishes the operation
+  `GenerateAs2805KekValidation`, which answers with the two random numbers the AS2805
+  ceremony makes of one, and this service has no route for it: a request for it does not
+  reach a payment cryptography operation at all.
+- **The UnionPay session key derivation is not made.** The reference's model names six ways
+  of deriving the session key of an authorization request, and this service makes three of
+  them: the EMV common session key, the Mastercard one and the Visa one, which derives none.
+  The EMV 2000 one and the American Express one are refused, and so is the UnionPay one, each
+  with the error that says so.
 - **The wrapped key is refused on every operation that carries one.** The encrypt, decrypt
   and re-encrypt requests hold a wrapped key for the key exchange, and the unwrapping is
   part of that exchange rather than part of the cipher, so a request that carries one is
@@ -148,6 +197,10 @@ client that talks to the control plane does not reach it by accident.
   hexadecimal characters is a request the model allows and the cipher cannot read. The
   track data, the transaction data and the proprietary authentication data are the members
   it applies to, and the refusal names the member.
+- **The quotas of the reference are not enforced.** The reference holds five hundred
+  symmetric data plane requests a second and twenty asymmetric ones, and it throttles the
+  request that passes the limit. The emulator holds no such limit, and answers every request
+  it is given.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.

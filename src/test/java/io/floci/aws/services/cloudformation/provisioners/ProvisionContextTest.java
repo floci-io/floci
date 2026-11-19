@@ -10,10 +10,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.lang.reflect.RecordComponent;
+import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -283,9 +285,32 @@ class ProvisionContextTest {
         assertNull(ctx.resolveOptionalInt(null, "Port"), "no properties at all");
         assertNull(ctx.resolveOptionalInt(props("{\"Port\": {\"Ref\": \"AWS::NoValue\"}}"), "Port"),
                 "an intrinsic that resolves to blank, as AWS::NoValue does");
-        for (String literal : List.of("\"\"", "\"ten\"", "\"4.5\"", "4.5", "true")) {
+        for (String literal : List.of("\"\"", "\"ten\"", "\"4.5\"", "4.5", "true", "99999999999")) {
             AwsException e = assertThrows(AwsException.class,
                     () -> ctx.resolveOptionalInt(props("{\"Port\": " + literal + "}"), "Port"), literal);
+            assertEquals("ValidationError", e.getErrorCode(), literal);
+            assertEquals("Value of property Port must be an integer.", e.getMessage(), literal);
+        }
+    }
+
+    @Test
+    void resolveOptionalBigIntegerReadsAnyWidthAndTakesTheAbsentRuleOfResolveOptionalInt() {
+        ProvisionContext ctx = context(null);
+        JsonNode size = props("{\"Ref\": \"Size\"}");
+        when(engine.resolve(size)).thenReturn("3");
+        Function<String, BigInteger> read = json -> ctx.resolveOptionalBigInteger(props(json), "Port");
+
+        assertEquals(BigInteger.valueOf(42), read.apply("{\"Port\": 42}"), "a number");
+        assertEquals(new BigInteger("99999999999999999999"), read.apply("{\"Port\": \" 99999999999999999999 \"}"),
+                "any width, trimmed");
+        assertEquals(BigInteger.valueOf(3), read.apply("{\"Port\": {\"Ref\": \"Size\"}}"), "an intrinsic's result");
+        assertNull(read.apply("{}"), "absent");
+        assertNull(read.apply("{\"Port\": null}"), "explicitly null");
+        assertNull(ctx.resolveOptionalBigInteger(null, "Port"), "no properties at all");
+        assertNull(read.apply("{\"Port\": {\"Ref\": \"AWS::NoValue\"}}"),
+                "an intrinsic that resolves to blank, as AWS::NoValue does");
+        for (String literal : List.of("\"\"", "\"ten\"", "\"4.5\"", "4.5", "true")) {
+            AwsException e = assertThrows(AwsException.class, () -> read.apply("{\"Port\": " + literal + "}"), literal);
             assertEquals("ValidationError", e.getErrorCode(), literal);
             assertEquals("Value of property Port must be an integer.", e.getMessage(), literal);
         }

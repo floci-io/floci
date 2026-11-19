@@ -203,6 +203,29 @@ class PaymentCryptographyPinOperationsTest {
     }
 
     @Test
+    void aBlockInAFormatTheReferenceDoesNotVerifyIsRefused() {
+        // The reference names the formats it verifies: "AWS Payment Cryptography supports
+        // ISO_Format_0 and ISO_Format_3". The format 4 block is an AES block, and the
+        // verification reads the Triple DES blocks, so a request that names another format
+        // is refused rather than answered as if the reference read it.
+        PaymentCryptographyKey pek = pinEncryptionKey();
+        PaymentCryptographyKey pvk = visaVerificationKey();
+        for (String format : new String[] {"ISO_FORMAT_4", "ISO_FORMAT_1"}) {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> pin.verifyPinData(request(Map.of(
+                            "EncryptionKeyIdentifier", pek.getArn(),
+                            "VerificationKeyIdentifier", pvk.getArn(),
+                            "PinBlockFormat", format,
+                            "PrimaryAccountNumber", PAN,
+                            "EncryptedPinBlock", "00000000000000000000000000000000",
+                            "VerificationAttributes", visaPin(1, "1234"))),
+                            "us-east-1"));
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertTrue(refused.getMessage().contains("ISO_FORMAT_0"), refused.getMessage());
+        }
+    }
+
+    @Test
     void aBlockWithTheWrongVerificationValueIsRefused() {
         PaymentCryptographyKey pek = pinEncryptionKey();
         PaymentCryptographyKey pvk = visaVerificationKey();

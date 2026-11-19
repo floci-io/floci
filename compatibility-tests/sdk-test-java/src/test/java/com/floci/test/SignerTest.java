@@ -75,7 +75,7 @@ class SignerTest {
                         .build())
                 .tags(Map.of("env", "sdk")));
 
-        assertThat(created.arn()).startsWith("arn:aws:signer:")
+        assertThat(created.arn()).startsWith("arn:" + TestFixtures.partition() + ":signer:")
                 .endsWith(":/signing-profiles/" + PROFILE);
         assertThat(created.profileVersion()).hasSize(10);
         assertThat(created.profileVersionArn()).isEqualTo(

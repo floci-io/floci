@@ -150,11 +150,11 @@ public class EksPodIdentityWebhook {
 
     /**
      * A pod resolves names through CoreDNS, which never sees the cluster container's
-     * {@code /etc/hosts}, where {@code host.docker.internal} lives on Linux. Floci's DNS server does
-     * not reach it either: on a custom Docker network the container's resolver is {@code 127.0.0.11},
-     * which k3s rejects as loopback and replaces with a public resolver, so Floci's hostname resolves
-     * to {@code 127.0.0.1} inside the pod. Only an IP address is reachable, and that is what
-     * {@code baseUrl(false)} returns whenever Floci runs in a container. No endpoint is injected
+     * {@code /etc/hosts}, where {@code host.docker.internal} lives on Linux. Floci's hostname resolves
+     * in a pod only when the cluster hands its pods Floci's embedded DNS server: without it, a custom
+     * Docker network's resolver is {@code 127.0.0.11}, which k3s rejects as loopback and replaces with
+     * a public resolver, so the name resolves to {@code 127.0.0.1}. An IP address is reachable either
+     * way, and that is what {@code baseUrl(false)} returns whenever Floci runs in a container. No endpoint is injected
      * otherwise, which leaves the SDK default.
      */
     static String podReachableEndpoint(String baseUrl) {

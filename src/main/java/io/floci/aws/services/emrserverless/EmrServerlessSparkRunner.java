@@ -480,6 +480,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private final ContainerLaunches launches = new ContainerLaunches();
     // What the workers of each application's runs with executors of their own hold, by application, while any runs.
     private final Map<String, SparkExecutors.Capacity> capacities = new ConcurrentHashMap<>();
+    // Where Floci reaches the Spark UI of each EMR Serverless Spark run's driver, by run, while its container runs.
+    private final Map<String, ContainerLifecycleManager.EndpointInfo> driverUis = new ConcurrentHashMap<>();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -521,7 +523,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     @Override
     public Outcome run(Job given, Progress progress) {
         String network = containerBuilder.resolveDockerNetwork(Optional.ofNullable(given.dockerNetwork())).orElse(null);
-        Job job = executorsApart(given, network) ? given : given.withExecutors(null);
+        // On the network it resolves to, which tells whether its executors run apart and its driver serves its UI.
+        Job job = (executorsApart(given, network) ? given : given.withExecutors(null)).onNetwork(network);
         ContainerLaunches.Launch launch = launches.begin(job.runId());
         Optional<SessionCreds> credentials = Optional.empty();
         Closeable logHandle = null;
@@ -630,6 +633,18 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 // Reached through Floci alone, so published on the host's loopback interface only.
                 container.withLoopbackPortBinding(job.listenPort(), 0);
             }
+            if (servesDriverUi(job)) {
+                container.withLoopbackPortBinding(SparkExecutors.DRIVER_UI_PORT, 0);
+                if (job.keepsEventLogs()) {
+                    // Its event logs, where the release's image writes them, in a volume of its own that its Spark
+                    // History Server reads once it has ended; Docker fills a new volume with the image's folder, its
+                    // owner the image's user.
+                    String volume = EmrServerlessHistories.volume(config, job.runId());
+                    lifecycleManager.ensureVolume(volume, EmrServerlessHistories.labels(config, job.runId(),
+                            job.accountId(), job.region(), EmrServerlessHistories.VOLUME_COMPONENT));
+                    container.withNamedVolume(volume, EmrServerlessHistories.EVENT_LOGS);
+                }
+            }
             ContainerSpec spec = container
                     .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))
                     .withHostDockerInternalOnLinux()
@@ -662,6 +677,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
             ContainerLifecycleManager.ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
             logHandle = attachLog(containerId, job);
+            // Found before the run is told it runs, so that a link to its UI then finds it.
+            ContainerLifecycleManager.EndpointInfo driverUi = servesDriverUi(job)
+                    ? info.getEndpoint(SparkExecutors.DRIVER_UI_PORT) : null;
+            if (driverUi != null) {
+                driverUis.put(job.runId(), driverUi);
+            }
             progress.started();
             if (job.listenPort() > 0) {
                 ContainerLifecycleManager.EndpointInfo listening = info.getEndpoint(job.listenPort());
@@ -690,6 +711,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             LOG.warnv(e, "Spark run {0} of {1} could not run", job.runId(), job.service());
             return Outcome.couldNotStart(e.getMessage());
         } finally {
+            driverUis.remove(job.runId());
             // The executors go with their driver, however the run ended, and their workers' share of the
             // application's capacity with them.
             if (executors != null) {
@@ -707,6 +729,28 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
             credentials.ifPresent(session -> roleCredentials.unregister(job.accountId(), session.accessKeyId()));
         }
+    }
+
+    @Override
+    public Optional<ContainerLifecycleManager.EndpointInfo> driverUi(String runId) {
+        return Optional.ofNullable(driverUis.get(runId));
+    }
+
+    @Override
+    public boolean servesDriverUis(String dockerNetwork) {
+        return ownNetwork(containerBuilder.resolveDockerNetwork(Optional.ofNullable(dockerNetwork)).orElse(null));
+    }
+
+    /**
+     * Whether a job's driver serves its Spark UI for Floci to open: an EMR Serverless Spark run's or session's, which
+     * GetDashboardForJobRun and GetResourceDashboard link to while it runs, on a network where its container has an
+     * address of its own, as on the host's network every driver's UI would be on the host's port. The release's image
+     * turns the UI off ({@code spark.ui.enabled false} in its {@code spark-defaults}); a run's own settings may still
+     * do so.
+     */
+    static boolean servesDriverUi(Job job) {
+        return EmrServerlessJobRunService.SERVICE.equals(job.service()) && job.engine() == Engine.SPARK
+                && ownNetwork(job.dockerNetwork());
     }
 
     @Override
@@ -918,8 +962,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      */
     static boolean executorsApart(Job job, String network) {
         return job.executors() != null && job.engine() == Engine.SPARK && job.command() == null
-                && job.storage() == null && !"host".equals(network)
-                && (network == null || !network.startsWith("container:"));
+                && job.storage() == null && ownNetwork(network);
+    }
+
+    // Whether a container on the network has an address of its own, rather than the host's or another container's.
+    private static boolean ownNetwork(String network) {
+        return !"host".equals(network) && (network == null || !network.startsWith("container:"));
     }
 
     private static String newSecret() {
@@ -1616,10 +1664,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         if (onYarn(job)) {
             settings.addAll(yarnSettings(job, executorEnvironment));
         }
-        // The driver's UI, which Floci follows the driver through; its kill links, which any container on the network
-        // reaches, are turned off after the run's own settings (SparkExecutors.DRIVER_WRAPPER).
-        if (job.executors() != null) {
+        // The driver's UI, which a dashboard link opens, and which Floci follows a driver with executors of its own
+        // through. Its kill links, which any container on the network reaches, are off: for a driver with executors of
+        // its own, after the run's own settings (SparkExecutors.DRIVER_WRAPPER); for any other, unless the run turns
+        // them on.
+        if (servesDriverUi(job)) {
             settings.add(new SparkSetting("spark.ui.enabled", "true"));
+            if (job.executors() == null) {
+                settings.add(new SparkSetting("spark.ui.killEnabled", "false"));
+            }
         }
         job.sparkDefaults().forEach((key, value) -> settings.add(new SparkSetting(key, value)));
         return settings;

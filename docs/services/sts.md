@@ -466,7 +466,7 @@ The response resolves both header and query-string credentials, including the qu
 so a presigned request reports the same caller identity. A nonblank Authorization header retains
 precedence over query credentials.
 
-When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded `floci` access key return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
+When `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true`, requests signed with the seeded access key (`floci` unless `FLOCI_SERVICES_IAM_SEED_DEPLOYER_ACCESS_KEY_ID` sets another) return `arn:aws:iam::000000000000:user/floci-deployer`. Other unknown local credentials continue to return the account root ARN for backward compatibility.
 
 When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks presigned query
 credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`

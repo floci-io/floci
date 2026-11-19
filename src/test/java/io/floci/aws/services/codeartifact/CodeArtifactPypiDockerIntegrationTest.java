@@ -5,6 +5,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
+import io.floci.aws.testing.StartGate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.json.JsonPath;
@@ -19,21 +20,20 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -258,32 +258,24 @@ class CodeArtifactPypiDockerIntegrationTest {
                 .then().statusCode(200);
 
         int attempts = 8;
-        ExecutorService pool = Executors.newFixedThreadPool(attempts);
         CountDownLatch ready = new CountDownLatch(attempts);
-        CountDownLatch go = new CountDownLatch(1);
-        AtomicInteger notFoundResponses = new AtomicInteger();
-        try {
-            for (int i = 0; i < attempts; i++) {
-                pool.submit(() -> {
-                    ready.countDown();
-                    try {
-                        go.await();
-                        given().header("Authorization", "Bearer " + bearerToken)
-                                .get("/codeartifact/pypi/" + DOMAIN + "/concurrent-repo/simple/does-not-exist/")
-                                .then().statusCode(404);
-                        notFoundResponses.incrementAndGet();
-                    } catch (InterruptedException ignored) {
-                        Thread.currentThread().interrupt();
-                    }
-                });
+        StartGate.Results<Integer> results = StartGate.runConcurrently(attempts, index -> {
+            ready.countDown();
+            try {
+                assertTrue(ready.await(5, TimeUnit.SECONDS), "all request workers must be ready");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("request worker interrupted before admission", e);
             }
-            ready.await(5, TimeUnit.SECONDS);
-            go.countDown();
-        } finally {
-            pool.shutdown();
-            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
-        }
-        assertEquals(attempts, notFoundResponses.get());
+            given().header("Authorization", "Bearer " + bearerToken)
+                    .get("/codeartifact/pypi/" + DOMAIN + "/concurrent-repo/simple/does-not-exist/")
+                    .then().statusCode(404);
+            return 404;
+        });
+        assertAll("concurrent PyPI requests", results.errors().stream().map(error -> () -> {
+            throw error;
+        }));
+        assertEquals(Collections.nCopies(attempts, 404), results.values());
     }
 
     @Test

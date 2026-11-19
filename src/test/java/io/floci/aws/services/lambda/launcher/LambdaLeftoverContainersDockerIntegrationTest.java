@@ -9,9 +9,9 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ScopedServiceSettingsProfile;
 import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(LambdaLeftoverContainersDockerIntegrationTest.LeftoversProfile.class)
+@TestProfile(ScopedServiceSettingsProfile.class)
 class LambdaLeftoverContainersDockerIntegrationTest {
 
     @Inject
@@ -124,14 +124,6 @@ class LambdaLeftoverContainersDockerIntegrationTest {
             return true;
         } catch (NotFoundException expected) {
             return false; // The sweep removed this exact test container.
-        }
-    }
-
-    public static final class LeftoversProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.docker.resource-namespace", "lambda-leftovers-7731",
-                    "floci.services.lambda.executor", "docker");
         }
     }
 }

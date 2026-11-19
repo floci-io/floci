@@ -86,6 +86,57 @@ class S3VectorsServiceTest {
         assertEquals(Set.of(REGION + "::legacy"), raw.keys());
     }
 
+    /**
+     * A bucket and an index an older Floci stored under names S3 Vectors' rules refuse, which the create calls now
+     * refuse too, stay reachable by those names and by their ARNs in the calls that read a name as given.
+     */
+    @Test
+    void aBucketAndAnIndexStoredUnderNamesTheRulesRefuseStayReachable() {
+        String bucketArn = "arn:aws:s3vectors:us-east-1:000000000000:bucket/Legacy_Bucket";
+        VectorBucket legacy = new VectorBucket("Legacy_Bucket", bucketArn, Map.of("sseType", "AES256"));
+        legacy.setCreationTime(CREATION_TIME);
+        legacy.getIndexes().put("My_Index",
+                new VectorIndex("My_Index", bucketArn + "/index/My_Index", "Legacy_Bucket", 2, "float32", "cosine"));
+        S3VectorsService upgraded = storing(legacy);
+
+        assertEquals(new S3VectorsService.ResolvedBucket("Legacy_Bucket", REGION, null),
+                upgraded.bucketTarget("Legacy_Bucket", null, REGION));
+        assertEquals(new S3VectorsService.ResolvedBucket("Legacy_Bucket", REGION, "000000000000"),
+                upgraded.bucketTarget(null, bucketArn, REGION));
+        assertEquals(new S3VectorsService.ResolvedIndex("Legacy_Bucket", "My_Index", REGION),
+                upgraded.resolveIndexTarget(null, null, bucketArn + "/index/My_Index", REGION));
+        assertEquals("My_Index", upgraded.getIndex("Legacy_Bucket", "My_Index", REGION).getIndexName());
+        assertEquals(List.of("My_Index"), upgraded.listIndexes("Legacy_Bucket", REGION).stream()
+                .map(VectorIndex::getIndexName).toList());
+    }
+
+    /**
+     * A bucket an older Floci took under a name the create rules now reserve keeps its policy calls, by name and by
+     * ARN: they check only that the bucket's name is one of dot-joined labels, as before.
+     */
+    @Test
+    void aBucketStoredUnderAReservedNameKeepsItsPolicyCalls() {
+        String bucketArn = "arn:aws:s3vectors:us-east-1:000000000000:bucket/sthree-logs";
+        VectorBucket legacy = new VectorBucket("sthree-logs", bucketArn, Map.of("sseType", "AES256"));
+        legacy.setCreationTime(CREATION_TIME);
+        S3VectorsService upgraded = storing(legacy);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Read\",\"Effect\":\"Allow\"}]}";
+
+        upgraded.putVectorBucketPolicy("sthree-logs", null, policy, REGION);
+        assertEquals(policy, upgraded.getVectorBucketPolicy(null, bucketArn, REGION));
+        upgraded.deleteVectorBucketPolicy(null, bucketArn, REGION);
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> upgraded.getVectorBucketPolicy("sthree-logs", null, REGION)).getErrorCode());
+    }
+
+    /** A service over a store holding {@code bucket}, as an older Floci stored it. */
+    private static S3VectorsService storing(VectorBucket bucket) {
+        AccountAwareStorageBackend<VectorBucket> stored = AccountAwareStorageBackend.inMemory("000000000000");
+        stored.put(REGION + "::" + bucket.getVectorBucketName(), bucket);
+        return new S3VectorsService(new InMemoryStorageFactory("000000000000").withStore("s3vectors.json", stored),
+                new RegionResolver(REGION, "000000000000"), Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+    }
+
     @Test
     void persistsCreationTimesConfigurationAndCreationTags() throws Exception {
         Map<String, String> encryption = Map.of("sseType", "aws:kms", "kmsKeyArn", "key");

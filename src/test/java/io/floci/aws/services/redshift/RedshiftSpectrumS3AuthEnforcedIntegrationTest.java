@@ -10,7 +10,7 @@ import io.floci.aws.services.redshift.spectrum.GlueTableBuilder;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
-import io.floci.aws.testing.SidecarS3AuthEnforcedProfile;
+import io.floci.aws.testing.SidecarServiceSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * role stops the next query with SQLSTATE 42501 even though the table is already cached.
  */
 @QuarkusTest
-@TestProfile(SidecarS3AuthEnforcedProfile.class)
+@TestProfile(SidecarServiceSettingsProfile.class)
 class RedshiftSpectrumS3AuthEnforcedIntegrationTest {
 
     private static final String ROLE_NAME = "SpectrumAuthItRole";

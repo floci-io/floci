@@ -1776,6 +1776,15 @@ public interface EmulatorConfig {
         boolean seedDeployerPrincipal();
 
         /**
+         * Access key ID of the seeded deployer's key. The default {@code floci} is shorter than
+         * the 16 characters IAM requires of an AccessKeyId, so DeleteAccessKey and UpdateAccessKey
+         * refuse it; an ID of 16 to 128 word characters lets the key be retired like any other.
+         * Seeding refuses to start with any other value outside that format.
+         */
+        @WithDefault("floci")
+        String seedDeployerAccessKeyId();
+
+        /**
          * Alias to seed for the default account at startup, so callers that read the account
          * alias find one without creating it first. Unset means the account has no alias, which
          * is the AWS default.
@@ -2138,6 +2147,45 @@ public interface EmulatorConfig {
 
         /** Docker network for the database containers. Defaults to Floci's own network. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Where cluster databases live: {@code docker} runs a PostgreSQL container per cluster,
+         * {@code external} uses one PostgreSQL server that already runs, see {@link External}. Any
+         * other value fails Floci's start.
+         */
+        @WithDefault("docker")
+        Backend backend();
+
+        /** The PostgreSQL server of the {@code external} backend. */
+        External external();
+
+        /** Kinds of backend {@link #backend()} accepts. */
+        enum Backend { DOCKER, EXTERNAL }
+
+        interface External {
+            /** Host of the PostgreSQL server. Required with the {@code external} backend. */
+            Optional<String> host();
+
+            @WithDefault("5432")
+            int port();
+
+            /**
+             * Maintenance database Floci connects to in order to create, and later drop, each
+             * cluster's own database and roles.
+             */
+            @WithDefault("postgres")
+            String database();
+
+            /**
+             * Role Floci connects as. It must be a superuser: Floci installs event triggers and
+             * creates each cluster's database and roles.
+             */
+            @WithDefault("postgres")
+            String username();
+
+            /** Password of {@link #username()}; none when the server trusts the connection. */
+            Optional<String> password();
+        }
     }
 
     interface RdsDataServiceConfig {
@@ -4344,11 +4392,10 @@ public interface EmulatorConfig {
 
         /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call
-         * leases a connection from it, and a few streams hold one for as long as they run:
-         * CodeBuild phase execs, EKS audit followers and ECS Exec sessions. The streams a Lambda
-         * container holds for its whole lifetime live in the separate streaming pool. Once
-         * long-lived connections fill this pool, create, start, stop and remove wait for a free
-         * connection, including the calls that would release one, so the emulator stalls.
+         * leases a connection from it; streams that stay open while a container or a command runs
+         * live in the separate streaming pool. Once this pool is full, create, start, stop and
+         * remove wait for a free connection, including the calls that would release one, so the
+         * emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100. Connections are opened on demand, so a
          * small stack never approaches the limit.
@@ -4358,8 +4405,11 @@ public interface EmulatorConfig {
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived streams that occupy a slot for a container's entire lifetime: container log
-         * follow, and for each Lambda container its exit watcher and one exec per extension.
+         * long-lived streams that occupy a slot for a container's entire lifetime or a long
+         * command's run: container log follow, for each Lambda container its exit watcher and one
+         * exec per extension, and the output of each CodeBuild phase, SSM command, ECS Exec
+         * session, EKS audit follower, ECR garbage collection, user data script and EMR bootstrap
+         * action.
          * Total live containers is unbounded across distinct functions (each {@code WarmPool}
          * caps only per-function), so this pool is sized generously rather than tied to any
          * single function's warm-pool cap.
@@ -4383,8 +4433,9 @@ public interface EmulatorConfig {
 
         /**
          * How long a Docker call waits for the daemon's response before it fails, in seconds, for
-         * both pools. The limit is per attempt: a control-plane request that is safe to repeat is
-         * tried up to six times. Requests that hold a stream open for as long as a container runs (container
+         * both pools. It bounds the whole call: a request that is safe to repeat is retried after a
+         * transient connection error only while no retry would start past the limit, counted from
+         * the first attempt. Requests that hold a stream open for as long as a container runs (container
          * waits, exec and attach output, followed logs, streamed stats, events, image pulls and
          * builds) are exempt, since they can stay silent while healthy.
          */

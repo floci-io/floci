@@ -78,8 +78,15 @@ jobs:
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: maven-${{ runner.os }}-
 
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+
       - name: Set nightly version
-        run: mvn versions:set -DnewVersion="nightly-${{ needs.prepare.outputs.version }}" -DgenerateBackupPoms=false -q
+        run: ./mvnw versions:set -DnewVersion="nightly-${{ needs.prepare.outputs.version }}" -DgenerateBackupPoms=false -q
 
       - name: Build native executable
         # Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
@@ -87,7 +94,7 @@ jobs:
         # single call site of a very large method; inlined, the method outgrows the aarch64
         # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2,-H:-AOTSingleCallsiteInline"
+        run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2,-H:-AOTSingleCallsiteInline"
 
       - name: Check the x86-64 ISA level of the binary
         # The image must run on x86-64-v2 CPUs. The runner's CPU has v3, so starting the binary
@@ -140,8 +147,15 @@ jobs:
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: maven-${{ runner.os }}-
 
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+
       - name: Set nightly version
-        run: mvn versions:set -DnewVersion="nightly-${{ needs.prepare.outputs.version }}" -DgenerateBackupPoms=false -q
+        run: ./mvnw versions:set -DnewVersion="nightly-${{ needs.prepare.outputs.version }}" -DgenerateBackupPoms=false -q
 
       - name: Build native executable
         # Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
@@ -149,7 +163,7 @@ jobs:
         # single call site of a very large method; inlined, the method outgrows the aarch64
         # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
-        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-H:-AOTSingleCallsiteInline"
+        run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-H:-AOTSingleCallsiteInline"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -235,8 +249,6 @@ jobs:
             version=nightly-${{ needs.prepare.outputs.version }}
             build-date=${{ steps.created.outputs.created }}
             vcs-ref=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Build and push compat nightly image
         uses: ./.github/actions/push-zstd-image
@@ -258,5 +270,3 @@ jobs:
             version=nightly-${{ needs.prepare.outputs.version }}
             build-date=${{ steps.created.outputs.created }}
             vcs-ref=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

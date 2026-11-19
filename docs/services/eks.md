@@ -146,7 +146,7 @@ A matching pod is patched exactly the way real EKS patches it. Every init contai
 
 The volume is a projected service account token with audience `pods.eks.amazonaws.com`, `expirationSeconds: 86400` and path `eks-pod-identity-token`. A name the pod already carries (a volume, a mount, or any of the environment variables) is left as the workload set it.
 
-Real EKS sets neither endpoint variable. Floci adds them so the credentials it hands out are used against Floci, as every container Floci launches already is, instead of being sent to AWS, which rejects them. `AWS_ENDPOINT_URL_STS` is set beside the global variable because the AWS SDK for Go v2 builds the STS client of its web identity provider before it reads `AWS_ENDPOINT_URL`. A pod cannot resolve the Docker host name (`host.docker.internal` lives only in the cluster container's `/etc/hosts`) or Floci's hostname (on a custom Docker network k3s replaces the loopback resolver `127.0.0.11` with a public one, so `localhost.floci.io` answers `127.0.0.1`), so the endpoint is the Docker host address and is injected only when that is an IP address, as it is when Floci runs in a container. A container that sets `AWS_ENDPOINT_URL` itself gets no `AWS_ENDPOINT_URL_STS`, which would override its choice for STS. A container with any `envFrom` source gets no endpoint variable, because its values are unknown at admission and an injected `env` entry would take precedence over them; it still gets the credentials variables.
+Real EKS sets neither endpoint variable. Floci adds them so the credentials it hands out are used against Floci, as every container Floci launches already is, instead of being sent to AWS, which rejects them. `AWS_ENDPOINT_URL_STS` is set beside the global variable because the AWS SDK for Go v2 builds the STS client of its web identity provider before it reads `AWS_ENDPOINT_URL`. A pod cannot resolve the Docker host name (`host.docker.internal` lives only in the cluster container's `/etc/hosts`) or, unless the cluster's pods resolve through Floci's embedded DNS (see [DNS resolution](#dns-resolution-and-route-53-private-hosted-zones)), Floci's hostname (k3s replaces a custom Docker network's loopback resolver `127.0.0.11` with a public one, so `localhost.floci.io` answers `127.0.0.1`), so the endpoint is the Docker host address and is injected only when that is an IP address, as it is when Floci runs in a container. A container that sets `AWS_ENDPOINT_URL` itself gets no `AWS_ENDPOINT_URL_STS`, which would override its choice for STS. A container with any `envFrom` source gets no endpoint variable, because its values are unknown at admission and an injected `env` entry would take precedence over them; it still gets the credentials variables.
 
 ### Credential endpoint
 
@@ -350,6 +350,46 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
 - **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
 
+## EKS Auto Mode configuration
+
+`CreateCluster` accepts EKS Auto Mode's configuration, and `CreateCluster` and `DescribeCluster` return it as it
+was given: `computeConfig` (`enabled`, `nodePools` and `nodeRoleArn`), `storageConfig.blockStorage.enabled` and
+`kubernetesNetworkConfig.elasticLoadBalancing.enabled`.
+
+```json
+{
+  "computeConfig": {
+    "enabled": true,
+    "nodePools": ["general-purpose", "system"],
+    "nodeRoleArn": "arn:aws:iam::000000000000:role/AmazonEKSAutoNodeRole"
+  },
+  "storageConfig": {"blockStorage": {"enabled": true}},
+  "kubernetesNetworkConfig": {"elasticLoadBalancing": {"enabled": true}}
+}
+```
+
+As on AWS, the compute, block storage and load balancing capabilities are enabled together or not at all. A
+request that enables some of them and not the others is refused with `InvalidParameterException` ("For EKS Auto
+Mode, please ensure that all required configs, including computeConfig, kubernetesNetworkConfig, and
+blockStorage are all either fully enabled or fully disabled."), and a capability the request leaves out counts
+as not enabled. A `computeConfig` that names node pools without a `nodeRoleArn` is refused with
+`InvalidParameterException` ("When Compute Config nodeRoleArn is null or empty, nodePool list cannot be
+populated"), and one that names a `nodeRoleArn` without node pools with `InvalidParameterException` ("When
+Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided."). A `computeConfig` with
+neither is accepted, as AWS accepts it for Auto Mode without its built-in node pools.
+
+In CloudFormation, `AWS::EKS::Cluster` leaves EKS Auto Mode out for now: it accepts `ComputeConfig`,
+`StorageConfig` and `KubernetesNetworkConfig.ElasticLoadBalancing` and ignores them, so a template that enables
+Auto Mode creates its cluster without it.
+
+With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster role, passed to
+`eks.amazonaws.com`, and not yet on the node role. AWS's Service Reference lists both `ec2.amazonaws.com` and
+`eks.amazonaws.com` for the roles `CreateCluster` passes, and does not say which one the node role goes to.
+
+Floci records the configuration and does nothing more with it yet. It does not create the node role's access
+entry, install the built-in node pools, serve the EBS provisioner or create load balancers, and
+`UpdateClusterConfig` is not implemented. [#8914](https://github.com/floci-io/floci/issues/8914) plans each.
+
 ## Node group inputs
 
 `CreateNodegroup` accepts the full documented input set and stores every member, so `CreateNodegroup` and `DescribeNodegroup` both return exactly what was supplied.
@@ -474,7 +514,7 @@ kubectl get nodes
 
 `aws eks update-kubeconfig` wires `aws eks get-token` into the kubeconfig as an exec credential. The bearer token contains a SigV4-presigned STS `GetCallerIdentity` request. Floci validates its signature and 15-minute token lifetime matching `aws-iam-authenticator` rather than the presigned expiry, then verifies the signed `x-k8s-aws-id` header against the cluster-specific `/_floci/eks/clusters/<cluster-name>/token-webhook` endpoint before resolving the caller identity. Instance-profile sessions require an EC2_LINUX access entry as described above; non-worker callers retain the `system:masters` mapping (bound to `cluster-admin`). A long-term access key gets it only on clusters of its own account, so a default-account key is refused on another account's cluster; on the older unscoped webhook path only the default account's keys get it. No `aws-iam-authenticator` is required.
 
-Create an IAM access key before using EKS authentication. The public local-development pairs `test`/`test` and `floci`/`floci` are deliberately rejected because the webhook grants cluster-admin access.
+Create an IAM access key before using EKS authentication. The public local-development pair `test`/`test` and the seeded deployer's key, whose secret `floci` is public whatever access key ID it was seeded under, are deliberately rejected because the webhook grants cluster-admin access.
 
 Temporary IAM credentials must include their `AWS_SESSION_TOKEN` when signing the token.
 
@@ -803,6 +843,8 @@ Requirements and limits:
 
 By default, Floci injects its embedded DNS server into each cluster container (`FLOCI_SERVICES_EKS_EMBEDDED_DNS=true`). Cluster containers and CoreDNS forward to Floci's embedded resolver on port 53, enabling resolution of Route 53 private hosted zone records, internal hostnames, and records managed by `external-dns`. Set `FLOCI_SERVICES_EKS_EMBEDDED_DNS=false` to use standard Docker network DNS instead.
 
+Pods resolve through CoreDNS, which forwards to the resolver file k3s hands its pods. Floci writes that file to `/etc/rancher/k3s/floci-resolv.conf` in the cluster container, naming only its embedded DNS server, and starts k3s with `--resolv-conf` pointing at it. With Floci in a container, it does so only when the cluster joins Floci's own Docker network, the default when neither `FLOCI_SERVICES_EKS_DOCKER_NETWORK` nor `FLOCI_SERVICES_DOCKER_NETWORK` names another: Docker isolates user-defined networks from each other, so on another network the pods keep k3s's resolver rather than one they cannot reach. Otherwise k3s reads the container's `/etc/resolv.conf`, which on a user-defined Docker network names only Docker's `127.0.0.11`; k3s refuses that loopback address and writes a file naming a public resolver, which never sees Floci's names. The public fallback resolvers (`FLOCI_DNS_CONTAINER_FALLBACK_SERVERS`) stay out of the file, because CoreDNS picks among its upstreams at random and a public one would answer some lookups of Floci's names; Floci forwards every name it does not hold itself. A cluster that sets the kubelet's resolver file itself, with the `floci:kubelet-arg:resolv-conf` tag, keeps its own file.
+
 ### Registry host configuration (pull-through caches and custom mirrors)
 
 On standard EKS (such as AL2023), node registry host configuration is provided through the node
@@ -856,7 +898,7 @@ services:
 ## Instance Metadata Service (IMDS)
 The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the node group's type, which also sizes the container unless `floci.services.eks.node-instance-type` is set.
 
-When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
+When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, NAT rules send metadata requests to Floci's IMDS server (see below).
 
 Both IMDSv1 and IMDSv2 (`PUT /latest/api/token`) are supported. The cluster container is registered as a synthesized EC2 instance node associated with the cluster's IAM role:
 
@@ -872,23 +914,24 @@ curl -s -H "x-aws-ec2-metadata-token: $TOKEN" \
 
 ### Reachability and network namespaces
 
-The link-local proxy attaches to the loopback interface of the k3s container network namespace (the node network namespace).
+NAT rules in the k3s container's network namespace (the node network namespace) send `169.254.169.254:80` straight to Floci's metadata service, as they send the EKS Pod Identity address to its credentials endpoint. No relay process runs in the node, so nothing is installed there: a stock `rancher/k3s` image, which has `iptables` but no package manager, answers IMDS too.
 
-- **Reachable from node network namespace:** Workloads configured with `hostNetwork: true` share the node network namespace and can reach `169.254.169.254:80`. This allows local testing of host-network security policies, intrusion-detection rules, and credential exfiltration defenses.
-- **Default isolation for ordinary pods:** By default, pods running in separate pod network namespaces cannot reach `169.254.169.254`. CNI portmap rules on the node intercept local traffic, preserving node credential isolation for multi-tenant or untrusted workloads.
-- **Opt-in pod network routing:** When `floci.services.eks.imds-pod-network=true` is set alongside `floci.services.eks.imds=true`, iptables DNAT rules are programmed in a custom `FLOCI-LINK-LOCAL` chain at the head of `PREROUTING`. Traffic originating from the pod CIDR (`10.42.0.0/16`) targeting `169.254.169.254:80` matches first and is routed directly to the local node listener, preempting CNI portmap rules. This enables standard AWS SDK credential resolution inside ordinary pods without requiring `hostNetwork: true`.
+- **Reachable from node network namespace:** An `OUTPUT` rule takes the node's own requests. Workloads configured with `hostNetwork: true` share the node network namespace and can reach `169.254.169.254:80`. This allows local testing of host-network security policies, intrusion-detection rules, and credential exfiltration defenses.
+- **Default isolation for ordinary pods:** By default, pods running in separate pod network namespaces cannot reach `169.254.169.254`: a `FORWARD` rule refuses their requests, so that they don't leave the node for the network the Docker host is on, where a Docker host on EC2 can answer them with its own metadata. This preserves node credential isolation for multi-tenant or untrusted workloads.
+- **Opt-in pod network routing:** When `floci.services.eks.imds-pod-network=true` is set alongside `floci.services.eks.imds=true`, a `PREROUTING` rule at the head of the chain takes requests from the pod CIDR (`10.42.0.0/16`) for `169.254.169.254:80` too, and the node's masquerade rule (flannel's) carries the answers back. This enables standard AWS SDK credential resolution inside ordinary pods without requiring `hostNetwork: true`.
+- **Nodes an older Floci set up:** the rules and the `socat` relay an older Floci left for the address, on the node's loopback, are removed when the node starts or is adopted.
 
 ### Configuration
 
-IMDS proxy initialization is disabled by default (`floci.services.eks.imds=false`). Set `FLOCI_SERVICES_EKS_IMDS=true` to enable the proxy setup inside the k3s container.
+IMDS is disabled by default (`floci.services.eks.imds=false`). Set `FLOCI_SERVICES_EKS_IMDS=true` to add the forward inside the k3s container.
 
-Pod network reachability is also disabled by default (`floci.services.eks.imds-pod-network=false`) to maintain pod isolation. Set `FLOCI_SERVICES_EKS_IMDS_POD_NETWORK=true` together with `FLOCI_SERVICES_EKS_IMDS=true` to route pod traffic to the link-local proxy.
+Pod network reachability is also disabled by default (`floci.services.eks.imds-pod-network=false`) to maintain pod isolation. Set `FLOCI_SERVICES_EKS_IMDS_POD_NETWORK=true` together with `FLOCI_SERVICES_EKS_IMDS=true` to forward pod traffic too.
 
-A failure to configure the proxy (for example on custom minimal images lacking network utilities) logs a warning and allows cluster startup to continue.
+A failure to configure the forward (for example on a custom image without `iptables`) logs a warning and allows cluster startup to continue.
 
 ### Hop limits
 
-EC2 metadata options store `HttpPutResponseHopLimit`, but the userspace TCP proxy relay terminates the incoming connection and opens a new connection to Floci, regenerating the IP packet TTL. Hop limits are recorded on the instance metadata options model but are not enforced by the userspace proxy.
+EC2 metadata options store `HttpPutResponseHopLimit`, but Floci's metadata service sets no TTL on the packets of its answers, so a hop limit is recorded on the instance metadata options model but not enforced.
 
 ## IRSA (IAM Roles for Service Accounts)
 

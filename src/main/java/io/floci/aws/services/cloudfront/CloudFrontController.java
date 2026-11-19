@@ -1964,6 +1964,9 @@ public class CloudFrontController {
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
         xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
         xml.raw(xmlLogging(cfg.getLogging()));
+        if (cfg.getConnectionMode() != null) {
+            xml.elem("ConnectionMode", cfg.getConnectionMode());
+        }
 
         return xml.build();
     }
@@ -2409,6 +2412,9 @@ public class CloudFrontController {
 
         xml.raw(xmlViewerCertificate(cfg != null ? cfg.getViewerCertificate() : null));
         xml.raw(xmlRestrictions(cfg != null ? cfg.getGeoRestriction() : null));
+        if (cfg != null && cfg.getConnectionMode() != null) {
+            xml.elem("ConnectionMode", cfg.getConnectionMode());
+        }
 
         xml.end("DistributionSummary");
         return xml.build();
@@ -2673,6 +2679,7 @@ public class CloudFrontController {
                 values.get("ContinuousDeploymentPolicyId"));
         cfg.setStaging("true".equalsIgnoreCase(
                 values.getOrDefault("Staging", "false")));
+        cfg.setConnectionMode(values.get("ConnectionMode"));
 
         cfg.setOrigins(parseOrigins(body));
         cfg.setDefaultCacheBehavior(parseDefaultCacheBehavior(body));
@@ -2750,7 +2757,8 @@ public class CloudFrontController {
                     "WebACLId",
                     "WebAclId",
                     "ContinuousDeploymentPolicyId",
-                    "Staging" -> true;
+                    "Staging",
+                    "ConnectionMode" -> true;
             default -> false;
         };
     }

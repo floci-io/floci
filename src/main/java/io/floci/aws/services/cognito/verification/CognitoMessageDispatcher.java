@@ -2,6 +2,7 @@ package io.floci.aws.services.cognito.verification;
 
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.DomainNames;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.cognito.CognitoHtml;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.UserPool;
@@ -75,13 +76,13 @@ public final class CognitoMessageDispatcher {
 
     private final SesService ses;
     private final SnsService sns;
-    private final String defaultRegion;
+    private final RegionResolver regionResolver;
 
-    /** {@code defaultRegion} serves a pool whose ARN names no region; a pool otherwise sends from its own. */
-    public CognitoMessageDispatcher(SesService ses, SnsService sns, String defaultRegion) {
+    /** A pool sends from the Region its ARN names, and from {@code regionResolver}'s default when it names none. */
+    public CognitoMessageDispatcher(SesService ses, SnsService sns, RegionResolver regionResolver) {
         this.ses = ses;
         this.sns = sns;
-        this.defaultRegion = defaultRegion;
+        this.regionResolver = regionResolver;
     }
 
     public void dispatch(UserPool pool, CognitoUser user, VerificationCode.Purpose purpose,
@@ -130,7 +131,7 @@ public final class CognitoMessageDispatcher {
         String phone = user.getAttributes().get("phone_number");
 
         List<String> mediums = resolveDeliveryMediums(deliveryMediums, email, phone);
-        String region = AwsArnUtils.regionOrDefault(pool.getArn(), defaultRegion);
+        String region = regionResolver.regionOf(pool.getArn());
 
         for (String medium : mediums) {
             if ("EMAIL".equalsIgnoreCase(medium) && email != null) {
@@ -181,7 +182,7 @@ public final class CognitoMessageDispatcher {
         String defaultBody = temporaryPassword == null ? DEFAULT_PASSWORDLESS_INVITE_BODY : DEFAULT_INVITE_BODY;
         String email = invitationRecipient(user, deliveryMediums, "EMAIL");
         String phone = invitationRecipient(user, deliveryMediums, "SMS");
-        String region = AwsArnUtils.regionOrDefault(pool.getArn(), defaultRegion);
+        String region = regionResolver.regionOf(pool.getArn());
 
         List<Runnable> sends = new ArrayList<>();
         if (email != null) {

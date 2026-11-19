@@ -43,6 +43,14 @@ public final class DsqlClusterFixture {
 
     /** Creates the cluster and waits until it is ACTIVE; skips the test class when Docker is not there. */
     public void create(DockerClient dockerClient) {
+        createAndAwait(dockerClient, "ACTIVE");
+    }
+
+    /**
+     * Creates the cluster and waits until its status is {@code status}; skips the test class when
+     * Docker is not there.
+     */
+    public void createAndAwait(DockerClient dockerClient, String status) {
         try {
             dockerClient.pingCmd().exec();
         } catch (Exception e) {
@@ -52,7 +60,24 @@ public final class DsqlClusterFixture {
                 .post("/cluster").then().statusCode(200).extract().path("identifier");
         host = identifier + ".dsql." + REGION + ".localhost.floci.io";
         await().atMost(Duration.ofMinutes(3)).pollInterval(Duration.ofMillis(500)).until(() ->
-                "ACTIVE".equals(dsql().get("/cluster/" + identifier).then().extract().path("status")));
+                status.equals(status()));
+    }
+
+    /** The cluster's status, as GetCluster reports it. */
+    public String status() {
+        return dsql().get("/cluster/" + identifier).then().extract().path("status");
+    }
+
+    /** Asks for the cluster's deletion without waiting for it to finish. */
+    public void requestDelete() {
+        if (identifier != null) {
+            dsql().delete("/cluster/" + identifier).then().statusCode(200);
+        }
+    }
+
+    /** Lists the account's clusters in the fixture's Region; ListClusters answers 200. */
+    public void listClusters() {
+        dsql().get("/cluster").then().statusCode(200);
     }
 
     public void delete() {

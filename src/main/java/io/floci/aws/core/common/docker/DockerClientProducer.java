@@ -438,7 +438,6 @@ public class DockerClientProducer {
      * short-lived call in Floci. Kept on its own connection pool, separate from the
      * {@link StreamingDocker} bean, so long-lived streams can never occupy every lease in this
      * pool and starve these short calls until httpclient5's connection-request timeout fires.
-     * CodeBuild phase execs, EKS audit followers and ECS Exec sessions still use this pool.
      */
     @Produces
     @ApplicationScoped
@@ -449,7 +448,8 @@ public class DockerClientProducer {
 
     /**
      * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}), Lambda
-     * extension execs and Lambda exit watchers, and Lambda Web attach streams. Each
+     * extension execs and Lambda exit watchers, Lambda Web attach streams, and the output of
+     * long-running execs (CodeBuild phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions). Each
      * stream occupies a connection pool slot for its entire lifetime, so sharing the
      * control-plane pool meant a fan-out of many concurrent streams exhausted it and blocked
      * control-plane calls. Sized separately because {@code WarmPool}'s cap is per-function,
@@ -513,12 +513,12 @@ public class DockerClientProducer {
         LOG.infov("Creating {0} DockerClient pool (maxConnections={1}) for host: {2}",
                 role, maxConnections, clientConfig.getDockerHost());
 
-        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections,
-                Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds())),
+        Duration apiTimeout = Duration.ofSeconds(validateApiTimeoutSeconds(config.docker().apiTimeoutSeconds()));
+        FlociDockerHttpClient transport = newHttpClient(clientConfig, maxConnections, apiTimeout,
                 Duration.ofSeconds(validateConnectionRequestTimeoutSeconds(
                         config.docker().connectionRequestTimeoutSeconds())));
         gaugeLogger.register(role, transport::gauges);
-        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role));
+        return DockerClientImpl.getInstance(clientConfig, wrapForRole(transport, role, apiTimeout));
     }
 
     static FlociDockerHttpClient newHttpClient(DefaultDockerClientConfig clientConfig, int maxConnections,
@@ -538,14 +538,17 @@ public class DockerClientProducer {
      * docker call survives a transient socket drop. The streaming transport replays only container
      * waits, as the control-plane one does: its other requests (log follow, attach, exec output)
      * hold hijacked or long-lived streams that must never be replayed, and its exec-start calls are
-     * the one request retrying could turn into a re-run command.
+     * the one request retrying could turn into a re-run command. {@code callTimeout} bounds a retried
+     * control-plane call across its attempts and backoffs, so it is the longest one call waits on a
+     * silent daemon, not the length of each of its attempts.
      */
-    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role) {
+    static DockerHttpClient wrapForRole(DockerHttpClient transport, String role, Duration callTimeout) {
         if (!"control-plane".equals(role)) {
+            // The streaming transport replays only container waits, long-lived streams the call timeout never bounds.
             return RetryingDockerHttpClient.forContainerWaits(transport);
         }
         LOG.info("Wrapping control-plane docker transport in transient-I/O retry");
-        return new RetryingDockerHttpClient(transport);
+        return new RetryingDockerHttpClient(transport, callTimeout);
     }
 
     /**

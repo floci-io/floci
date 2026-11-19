@@ -33,8 +33,10 @@ class DsqlRoleNamesTest {
                 + "|ALTER DEFAULT PRIVILEGES FOR ROLE dx_app GRANT SELECT ON TABLES TO dx_reader",
         "REASSIGN OWNED BY app TO reader|REASSIGN OWNED BY dx_app TO dx_reader",
         "DROP OWNED BY app|DROP OWNED BY dx_app",
-        "DROP ROLE app, reader|CALL sys.drop_roles(ARRAY['dx_app', 'dx_reader']::text[], false)",
-        "AWS IAM GRANT app TO " + ARN + "|CALL sys.aws_iam_grant('dx_app', " + ARN + ")",
+        "DROP ROLE app, reader|CALL sys.drop_roles(ARRAY[E'dx_app', E'dx_reader']::text[], false)",
+        // A backslash in the name cannot break the literal while standard_conforming_strings is off.
+        "DROP ROLE \"a\\b\"|CALL sys.drop_roles(ARRAY[E'dx_a\\\\b']::text[], false)",
+        "AWS IAM GRANT app TO " + ARN + "|CALL sys.aws_iam_grant(E'dx_app', E" + ARN + ")",
         "CREATE ROLE \"App\"|CALL sys.run_role_ddl($dsql$CREATE ROLE \"dx_App\"$dsql$)",
         "SELECT 'app'|SELECT 'app'",
         "GRANT pg_read_all_data TO app|CALL sys.run_role_ddl($dsql$GRANT pg_read_all_data TO dx_app$dsql$)",
@@ -111,7 +113,7 @@ class DsqlRoleNamesTest {
     void eachStatementOfAQueryIsTranslated() {
         DsqlStatements.Query query = DsqlStatements.rewriteQuery("SELECT 'app'; SET ROLE app; DROP ROLE reader", NAMES);
 
-        assertEquals("SELECT 'app';\nSET ROLE dx_app;\nCALL sys.drop_roles(ARRAY['dx_reader']::text[], false)",
+        assertEquals("SELECT 'app';\nSET ROLE dx_app;\nCALL sys.drop_roles(ARRAY[E'dx_reader']::text[], false)",
                 query.sql());
         assertEquals(Arrays.asList(null, null, "DROP ROLE"), query.commandTags());
     }
@@ -120,7 +122,7 @@ class DsqlRoleNamesTest {
     void theOneArgumentRewriteStillAnswersWhatItDid() {
         List<DsqlStatements.Statement> statements = DsqlStatements.rewrite("DROP ROLE app", NAMES);
 
-        assertEquals("CALL sys.drop_roles(ARRAY['dx_app']::text[], false)", statements.get(0).sql());
+        assertEquals("CALL sys.drop_roles(ARRAY[E'dx_app']::text[], false)", statements.get(0).sql());
         assertEquals(DsqlStatements.rewrite("DROP ROLE app"), DsqlStatements.rewrite("DROP ROLE app", RoleNames.IDENTITY));
     }
 
@@ -240,7 +242,7 @@ class DsqlRoleNamesTest {
         String unquoted = DsqlStatements.rewriteQuery("SET ROLE \u00c9mile", NAMES).sql();
 
         assertEquals("CALL sys.run_role_ddl($dsql$CREATE ROLE \"dx_\u00c9mile\"$dsql$)", created);
-        assertEquals("CALL sys.drop_roles(ARRAY['dx_\u00c9mile']::text[], false)", quoted);
+        assertEquals("CALL sys.drop_roles(ARRAY[E'dx_\u00c9mile']::text[], false)", quoted);
         assertEquals("SET ROLE \"dx_\u00c9mile\"", unquoted);
         assertEquals("SET ROLE \"dx_\u00e9mile\"", DsqlStatements.rewriteQuery("SET ROLE \u00e9MILE", NAMES).sql());
     }
@@ -340,7 +342,7 @@ class DsqlRoleNamesTest {
         "GRANT SELECT ON t TO \"public\", PUBLIC|GRANT SELECT ON t TO \"dx_public\", PUBLIC",
         "SET SESSION AUTHORIZATION \"none\"|SET SESSION AUTHORIZATION \"dx_none\"",
         "ALTER TABLE t OWNER TO \"current_user\"|ALTER TABLE t OWNER TO \"dx_current_user\"",
-        "DROP ROLE \"default\"|CALL sys.drop_roles(ARRAY['dx_default']::text[], false)",
+        "DROP ROLE \"default\"|CALL sys.drop_roles(ARRAY[E'dx_default']::text[], false)",
         "CREATE ROLE \"pg_x\"|CALL sys.run_role_ddl($dsql$CREATE ROLE \"pg_x\"$dsql$)",
         "GRANT pg_read_all_data TO \"public\"|CALL sys.run_role_ddl($dsql$GRANT pg_read_all_data TO \"dx_public\"$dsql$)",
     })

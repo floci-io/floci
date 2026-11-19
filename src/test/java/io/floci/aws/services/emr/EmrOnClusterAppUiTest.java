@@ -1,5 +1,6 @@
 package io.floci.aws.services.emr;
 
+import io.floci.aws.core.common.AppUiRoute;
 import io.floci.aws.core.common.LinkSigner;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -55,7 +56,7 @@ class EmrOnClusterAppUiTest {
         assertEquals("/cluster", url.getPath());
         assertTrue(url.getAuthority().matches("[a-z2-7]{26}-8088\\.emrappui\\.localhost:4566"), link.url());
         String secret = url.getHost().substring(0, 26);
-        EmrAppUiService.UiRoute route = appUis.route(url.getAuthority(), "http");
+        AppUiRoute route = appUis.route(url.getAuthority(), "http");
         assertNull(route.refusal());
         assertEquals("localhost", route.host());
         assertEquals(32801, route.port());
@@ -110,7 +111,7 @@ class EmrOnClusterAppUiTest {
         assertEquals("/app/application_1_0001", tez.getFragment());
         // Its page asks the timeline server and the ResourceManager, on their own hosts under the same link.
         String secret = tez.getHost().substring(0, 26);
-        EmrAppUiService.UiRoute route = appUis.route(tez.getAuthority(), "http");
+        AppUiRoute route = appUis.route(tez.getAuthority(), "http");
         String primary = EmrService.masterPrivateDnsName(fixture.service.describeCluster(clusterId));
         assertEquals("http://" + secret + "-8188.emrappui.localhost:4566",
                 route.rewrites().get("http://" + primary + ":8188"));
@@ -127,7 +128,7 @@ class EmrOnClusterAppUiTest {
         assertFalse(second.ready());
         // One start, its command run as a step's on the cluster, its HDFS and YARN started first.
         assertEquals(1, fixture.stepThreadsWaiting());
-        EmrAppUiService.UiRoute notYet = appUis.route(URI.create(first.url()).getAuthority(), "http");
+        AppUiRoute notYet = appUis.route(URI.create(first.url()).getAuthority(), "http");
         assertEquals(503, notYet.status());
         assertEquals(EmrAppUiService.NOT_READY, notYet.refusal());
         fixture.runStepThread();
@@ -149,7 +150,7 @@ class EmrOnClusterAppUiTest {
         // Not a link's host at all, which goes on to the rest of Floci.
         assertNull(appUis.route("bucket.emrappui.localhost:4566", "http"));
         fixture.clock.advance(EmrAppUiService.VALIDITY);
-        EmrAppUiService.UiRoute expired = appUis.route(authority, "http");
+        AppUiRoute expired = appUis.route(authority, "http");
         assertEquals(403, expired.status());
         assertEquals(EmrAppUiController.INVALID, expired.refusal());
     }
@@ -178,7 +179,7 @@ class EmrOnClusterAppUiTest {
         assertNull(appUis.route(authority, "http").refusal());
 
         fixture.service.terminateJobFlows(List.of(clusterId));
-        EmrAppUiService.UiRoute ended = appUis.route(authority, "http");
+        AppUiRoute ended = appUis.route(authority, "http");
 
         // Its node's port, still within the link's hour, may be another container's by then.
         assertEquals(404, ended.status());

@@ -428,7 +428,8 @@ public class EmulatorLifecycle {
             }
         });
         runCleanup("ECS task-role credentials server", () -> {
-            if (config.services().ecs().taskRoleCredentials().enabled()) {
+            // A CodeBuild build starts it on its need whether or not ECS's setting is on.
+            if (config.services().ecs().taskRoleCredentials().enabled() || ecsTaskRoleCredentialsServer.isRunning()) {
                 ecsTaskRoleCredentialsServer.stop();
             }
         });

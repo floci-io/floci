@@ -1,7 +1,5 @@
-package io.floci.aws.services.emr;
+package io.floci.aws.core.common;
 
-import io.floci.aws.core.common.Html;
-import io.floci.aws.core.common.ServiceConfigAccess;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -17,9 +15,12 @@ import io.vertx.core.net.SocketAddress;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.annotation.PreDestroy;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
@@ -31,16 +32,17 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The on-cluster application UIs Floci opens for real ({@link EmrAppUiService}): a request to an interface's own host,
- * {@code <secret>-<port>.emrappui.<Floci's host>}, goes on to that port of the cluster's primary node, and its answer
- * comes back with each link to one of the node's interfaces, which its daemons write by the node's name, made a link
- * to that interface's own host. The secret in the host is the link's authority, as no request to the interface carries
- * AWS credentials; one that is not this process's, or whose hour has passed, is answered with a page saying so.
+ * The application UIs Floci opens for real, those of an EMR cluster's primary node and of an EMR Serverless run's
+ * driver among them: a request to an interface's own host, {@link AppUiHost}, goes on to where the service whose label
+ * the host holds finds that interface ({@link AppUiRoutes}), and its answer comes back with each link to one of its
+ * sibling interfaces, which their daemons write by their own address, made a link to that interface's own host. The
+ * secret in the host is the link's authority, as no request to the interface carries AWS credentials; one that is not
+ * this process's, or whose hour has passed, is answered with a page saying so.
  */
 @ApplicationScoped
-public class EmrAppUiProxy {
+public class AppUiProxy {
 
-    private static final Logger LOG = Logger.getLogger(EmrAppUiProxy.class);
+    private static final Logger LOG = Logger.getLogger(AppUiProxy.class);
 
     // What does not go on: the connection's own headers, the host, which the interface is asked for under the
     // browser's, and the encodings the browser takes, as only an answer that is not compressed can have its links made
@@ -56,20 +58,19 @@ public class EmrAppUiProxy {
     // How long the interface may send nothing, its answer or the rest of it, before the request is given up.
     private static final Duration IDLE_TIMEOUT = Duration.ofMinutes(1);
 
-    private final EmrAppUiService appUis;
+    private final List<AppUiRoutes> services;
     private final ServiceConfigAccess serviceConfigAccess;
     private final Vertx vertx;
     private final HttpClient client;
     private final Duration idleTimeout;
 
     @Inject
-    public EmrAppUiProxy(EmrAppUiService appUis, ServiceConfigAccess serviceConfigAccess, Vertx vertx) {
-        this(appUis, serviceConfigAccess, vertx, IDLE_TIMEOUT);
+    public AppUiProxy(Instance<AppUiRoutes> services, ServiceConfigAccess serviceConfigAccess, Vertx vertx) {
+        this(services.stream().toList(), serviceConfigAccess, vertx, IDLE_TIMEOUT);
     }
 
-    EmrAppUiProxy(EmrAppUiService appUis, ServiceConfigAccess serviceConfigAccess, Vertx vertx,
-                  Duration idleTimeout) {
-        this.appUis = appUis;
+    AppUiProxy(List<AppUiRoutes> services, ServiceConfigAccess serviceConfigAccess, Vertx vertx, Duration idleTimeout) {
+        this.services = services;
         this.serviceConfigAccess = serviceConfigAccess;
         this.vertx = vertx;
         this.idleTimeout = idleTimeout;
@@ -81,26 +82,28 @@ public class EmrAppUiProxy {
         client.close();
     }
 
-    void register(@Observes Router router) {
+    // Ahead of the routes the other observers add, whose paths an interface's own may be: the ResourceManager's REST
+    // answers are under /ws/, where API Gateway's WebSocket route takes every request. A request to any other host goes
+    // on to them.
+    void register(@Observes @Priority(Interceptor.Priority.APPLICATION) Router router) {
         router.route().handler(this::handle);
     }
 
     void handle(RoutingContext context) {
         HttpServerRequest request = context.request();
         String hostHeader = request.getHeader("host");
+        AppUiRoutes service = hostHeader != null ? serviceOf(hostHeader) : null;
         // This route runs ahead of the filter that refuses a disabled service, so it checks for itself.
-        if (hostHeader == null || !hostHeader.toLowerCase(Locale.ROOT).contains("." + EmrAppUiService.UI_HOST + ".")
-                || !serviceConfigAccess.isEnabled("emr")) {
+        if (service == null || !serviceConfigAccess.isEnabled(service.service())) {
             context.next();
             return;
         }
         request.pause();
         // Finding the interface may ask Docker where it is, so off the event loop.
-        vertx.<EmrAppUiService.UiRoute>executeBlocking(() -> appUis.route(hostHeader, request.scheme()), false)
+        vertx.<AppUiRoute>executeBlocking(() -> service.route(hostHeader, request.scheme()), false)
                 .onComplete(routed -> {
                     if (routed.failed()) {
-                        LOG.warnv(routed.cause(), "EMR application UI request to {0} could not be routed",
-                                hostHeader);
+                        LOG.warnv(routed.cause(), "Application UI request to {0} could not be routed", hostHeader);
                         refuse(request, 502, "The interface could not be reached.");
                     } else if (routed.result() == null) {
                         request.resume();
@@ -113,7 +116,18 @@ public class EmrAppUiProxy {
                 });
     }
 
-    private void forward(HttpServerRequest request, String hostHeader, EmrAppUiService.UiRoute route) {
+    // The service whose label the host holds, or null where it holds none.
+    private AppUiRoutes serviceOf(String hostHeader) {
+        String host = hostHeader.toLowerCase(Locale.ROOT);
+        for (AppUiRoutes service : services) {
+            if (host.contains("." + service.hostLabel() + ".")) {
+                return service;
+            }
+        }
+        return null;
+    }
+
+    private void forward(HttpServerRequest request, String hostHeader, AppUiRoute route) {
         URI authority = URI.create("http://" + hostHeader);
         RequestOptions options = new RequestOptions().setMethod(request.method())
                 .setServer(SocketAddress.inetSocketAddress(route.port(), route.host()))
@@ -131,7 +145,8 @@ public class EmrAppUiProxy {
         client.request(options).onComplete(opened -> {
             if (opened.failed()) {
                 route.unreachable().run();
-                refuse(request, 502, "The cluster's interface did not answer: " + opened.cause().getMessage());
+                refuse(request, route.unansweredStatus(), route.unanswered() != null ? route.unanswered()
+                        : "The interface did not answer: " + opened.cause().getMessage());
                 return;
             }
             HttpClientRequest upstream = opened.result();
@@ -148,7 +163,7 @@ public class EmrAppUiProxy {
                     if (response.headWritten()) {
                         response.reset();
                     } else {
-                        refuse(request, 502, "The cluster's interface did not answer: "
+                        refuse(request, 502, "The interface did not answer: "
                                 + answered.cause().getMessage());
                     }
                     return;

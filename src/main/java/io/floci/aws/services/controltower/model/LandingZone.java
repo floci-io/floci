@@ -21,7 +21,7 @@ public class LandingZone {
     private String driftStatus;
     private JsonNode manifest;
     private List<String> remediationTypes;
-    private Map<String, String> tags;
+    private volatile Map<String, String> tags;
 
     public LandingZone() {
     }

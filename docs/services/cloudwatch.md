@@ -561,6 +561,15 @@ Tags supplied to `PutMetricAlarm` apply only when creating an alarm; use `TagRes
 `UntagResource` to change existing tags. `SetAlarmState` requires `StateReason` and rejects
 missing or unknown state values before changing the alarm.
 
+`PutMetricAlarm` refuses an `EvaluationInterval` on an alarm configured with `MetricName` or `Metrics`
+with `InvalidParameterCombination`: the API reference allows it only with `EvaluationCriteria`, which
+Floci does not model and accepts without keeping the interval. Over Query and through CloudFormation an
+integer outside 10 to 3600, of any size, is a `ValidationError`; a value that is not an integer is an
+`InvalidParameterValue` over Query, a `SerializationException` over JSON and CBOR (as is a number beyond
+32 bits) and a failed resource through CloudFormation. AWS documents none of these answers. An
+`AWS::CloudWatch::Alarm` fails the same way on create and on update, so a stack that sets the property
+cannot change that alarm until its template drops it.
+
 `StateTransitionedTimestamp` records when an alarm's `StateValue` last changed, while
 `StateUpdatedTimestamp` moves on every state update, including one that keeps the value.
 Alarms stored before Floci recorded it report their last state update.

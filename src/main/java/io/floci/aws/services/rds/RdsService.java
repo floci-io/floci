@@ -72,6 +72,7 @@ import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -243,6 +244,8 @@ public class RdsService implements Resettable, ResourceProvider {
     private static final Set<String> DB_PROXY_CLIENT_PASSWORD_AUTH_TYPES = Set.of(
             "MYSQL_NATIVE_PASSWORD", "MYSQL_CACHING_SHA2_PASSWORD",
             "POSTGRES_SCRAM_SHA_256", "POSTGRES_MD5", "SQL_SERVER_AUTHENTICATION");
+
+    private static final String RDS_RESOURCE_RELAY_PREFIX = "rds-resource:";
 
     public RdsService(RdsContainerManager containerManager,
                       RdsProxyManager proxyManager,
@@ -496,6 +499,11 @@ public class RdsService implements Resettable, ResourceProvider {
         this.proxyEndpoints = new InMemoryStorage<>();
         this.instanceAutomatedBackups = new InMemoryStorage<>();
         this.clusterAutomatedBackups = new InMemoryStorage<>();
+    }
+
+    @PostConstruct
+    void registerForceSslPolicy() {
+        proxyManager.forceSslWhen(this::relayForcesSsl);
     }
 
     public void restorePersistedRuntime() {
@@ -2717,7 +2725,9 @@ public class RdsService implements Resettable, ResourceProvider {
             copiedTags.putAll(tags);
         }
         copy.setTags(copiedTags);
-        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, sourceId)).orElse("");
+        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, sourceId))
+                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DB cluster snapshot data for " + sourceId + " not found.", 404));
         snapshotData.put(clusterSnapshotDataKey(effectiveRegion, targetSnapshotId), sqlDump);
         putClusterSnapshotForScope(accountId, effectiveRegion, targetSnapshotId, copy);
         LOG.infov("Copied DB cluster snapshot {0} to {1}", sourceId, targetSnapshotId);
@@ -11145,7 +11155,38 @@ public class RdsService implements Resettable, ResourceProvider {
         if (identity == null || identity.isBlank()) {
             identity = currentAccountId() + ":" + resourceId;
         }
-        return "rds-resource:" + identity;
+        return RDS_RESOURCE_RELAY_PREFIX + identity;
+    }
+
+    private boolean relayForcesSsl(String relayKey) {
+        if (!relayKey.startsWith(RDS_RESOURCE_RELAY_PREFIX)) {
+            return false;
+        }
+        String arn = relayKey.substring(RDS_RESOURCE_RELAY_PREFIX.length());
+        return AwsArnUtils.resourceIfArnFor(arn, "rds")
+                .map(resource -> relayEngineParameters(arn, resource))
+                .map(parameters -> "1".equals(parameters.get("rds.force_ssl")))
+                .orElse(false);
+    }
+
+    private Map<String, String> relayEngineParameters(String arn, String resource) {
+        String accountId = accountIdFromArn(arn);
+        String region = effectiveRegion(regionResolver.regionOf(arn));
+        DbCluster cluster;
+        if (resource.startsWith("cluster:")) {
+            cluster = findClusterForScope(accountId, region, resource.substring("cluster:".length()));
+        } else {
+            DbInstance instance = findInstanceByArnOrNull(accountId, region, arn);
+            if (instance == null) {
+                return Map.of();
+            }
+            if (instance.getDbClusterIdentifier() == null) {
+                return instanceEngineParameters(instance);
+            }
+            cluster = findClusterForScope(accountId, region, instance.getDbClusterIdentifier());
+        }
+        return cluster == null ? Map.of()
+                : clusterEngineParameters(accountId, region, cluster.getParameterGroupName());
     }
 
     private Collection<DbCluster> allClusters() {
