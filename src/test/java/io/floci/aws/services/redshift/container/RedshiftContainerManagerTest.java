@@ -124,7 +124,7 @@ class RedshiftContainerManagerTest {
         } else {
             when(lifecycleManager.adopt(eq("cont-survivor"), any(), any())).thenReturn(
                     new ContainerInfo("cont-survivor", Map.of(5432, new EndpointInfo("localhost", 5432))));
-            when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
+            when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
             if ("readiness".equals(failureStage)) {
                 when(dockerClient.execCreateCmd(anyString())).thenThrow(new IllegalStateException("not ready"));
                 Thread.currentThread().interrupt();
@@ -683,17 +683,17 @@ class RedshiftContainerManagerTest {
         ContainerInfo info = new ContainerInfo("cont-stream", Map.of(5432, new EndpointInfo("localhost", 5432)));
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(info);
         Closeable stream = mock(Closeable.class);
-        when(logStreamer.attach("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
+        when(logStreamer.attachPolled("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
                 .thenReturn(stream);
 
         RedshiftContainerHandle handle = manager.start(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handle);
         assertEquals(stream, handle.getLogStream());
-        verify(logStreamer).attach("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
+        verify(logStreamer).attachPolled("cont-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
 
         // When logStreamer throws, start still completes successfully
         doThrow(new RuntimeException("stream error"))
-                .when(logStreamer).attach(anyString(), anyString(), anyString(), anyString(), anyString());
+                .when(logStreamer).attachPolled(anyString(), anyString(), anyString(), anyString(), anyString());
         RedshiftContainerHandle handleTolerated = manager.start(ACCOUNT_ID, "test-cluster-2", "admin", "pass");
         assertNotNull(handleTolerated);
         assertNull(handleTolerated.getLogStream());
@@ -708,17 +708,17 @@ class RedshiftContainerManagerTest {
         ContainerInfo adopted = new ContainerInfo("cont-adopt-stream", Map.of(5432, new EndpointInfo("localhost", 6000)));
         when(lifecycleManager.adopt(eq("cont-adopt-stream"), any(), eq(Optional.empty()))).thenReturn(adopted);
         Closeable stream = mock(Closeable.class);
-        when(logStreamer.attach("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
+        when(logStreamer.attachPolled("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster"))
                 .thenReturn(stream);
 
         RedshiftContainerHandle handle = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handle);
         assertEquals(stream, handle.getLogStream());
-        verify(logStreamer).attach("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
+        verify(logStreamer).attachPolled("cont-adopt-stream", "/floci/redshift", "test-cluster", "us-east-1", "redshift:test-cluster");
 
         // When logStreamer throws, adoptOrStart still completes successfully
         doThrow(new RuntimeException("stream error"))
-                .when(logStreamer).attach(anyString(), anyString(), anyString(), anyString(), anyString());
+                .when(logStreamer).attachPolled(anyString(), anyString(), anyString(), anyString(), anyString());
         RedshiftContainerHandle handleTolerated = manager.adoptOrStart(ACCOUNT_ID, "test-cluster", "admin", "pass");
         assertNotNull(handleTolerated);
         assertNull(handleTolerated.getLogStream());
@@ -802,7 +802,7 @@ class RedshiftContainerManagerTest {
         when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(
                 new ContainerInfo("cont-unready", Map.of(5432, new EndpointInfo("localhost", 5432))));
         Closeable stream = mock(Closeable.class);
-        when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
+        when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(stream);
         when(dockerClient.execCreateCmd(anyString())).thenThrow(new IllegalStateException("not ready"));
         Thread.currentThread().interrupt();
         try {

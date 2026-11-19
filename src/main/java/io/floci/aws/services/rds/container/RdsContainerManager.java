@@ -434,10 +434,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 String logStream = logStreamer.generateLogStreamName(shortId);
 
                 Closeable logHandle = runtimeIdentity.arnAccountId() != null
-                        ? logStreamer.attachForAccount(
+                        ? logStreamer.attachPolledForAccount(
                                 runtimeIdentity.arnAccountId(), info.containerId(), logGroup,
                                 logStream, runtimeIdentity.region(), "rds:" + effectiveRuntimeId)
-                        : logStreamer.attach(
+                        : logStreamer.attachPolled(
                                 info.containerId(), logGroup, logStream, runtimeIdentity.region(),
                                 "rds:" + effectiveRuntimeId);
                 handle.setLogStream(logHandle);

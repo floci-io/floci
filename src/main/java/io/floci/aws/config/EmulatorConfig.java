@@ -4527,6 +4527,15 @@ public interface EmulatorConfig {
         int maxConcurrentLaunches();
 
         /**
+         * Milliseconds between the reads of a long-lived service container's log (a database, a broker, a
+         * registry), which Floci reads on a timer instead of holding a follow stream open for the
+         * container's life. A line reaches the console and CloudWatch Logs up to this long after the
+         * container writes it. At least 100.
+         */
+        @WithDefault("1000")
+        int logPollIntervalMillis();
+
+        /**
          * Optional namespace inserted into Floci-managed child container and volume names.
          * Useful when multiple Floci processes share one Docker daemon.
          */
