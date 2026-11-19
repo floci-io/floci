@@ -64,6 +64,10 @@ class SesV2JsonTest {
         assertEquals("SendingPausedException", SesV2Json.remapV1Exception(new AwsException(
                 "ConfigurationSetSendingPausedException", "m", 400)).getErrorCode());
 
+        AwsException restatedByCallers = new AwsException(
+                "CustomVerificationEmailTemplateDoesNotExist", "v1 sentence", 400);
+        assertSame(restatedByCallers, SesV2Json.remapV1Exception(restatedByCallers));
+
         AwsException untouched = new AwsException("NotFoundException", "already v2", 404);
         assertSame(untouched, SesV2Json.remapV1Exception(untouched));
     }

@@ -46,8 +46,7 @@ final class SesV2Json {
             case "InvalidParameterValue", "InvalidTemplate", "ValidationError",
                  "InvalidRenderingParameter", "MissingRenderingAttribute", "InvalidSNSDestination" ->
                     new AwsException("BadRequestException", e.getMessage(), 400);
-            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist",
-                 "CustomVerificationEmailTemplateDoesNotExist", "FromEmailAddressNotVerified" ->
+            case "TemplateDoesNotExist", "ConfigurationSetDoesNotExist", "FromEmailAddressNotVerified" ->
                     new AwsException("NotFoundException", e.getMessage(), 404);
             case "AlreadyExists", "ConfigurationSetAlreadyExists",
                  "CustomVerificationEmailTemplateAlreadyExists" ->
@@ -56,6 +55,15 @@ final class SesV2Json {
                     new AwsException("SendingPausedException", e.getMessage(), 400);
             default -> e;
         };
+    }
+
+    /**
+     * The v2 answer for a missing custom verification email template (probed). It names the
+     * template, unlike either v1 message, so callers restate it instead of remapping the v1 error.
+     */
+    static AwsException cvetNotFound(String templateName) {
+        return new AwsException("NotFoundException",
+                "Custom verification email template <" + templateName + "> does not exist", 404);
     }
 
     /** A request body that is not a JSON object: AWS names a list and answers anything else without a message. */

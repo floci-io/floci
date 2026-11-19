@@ -89,8 +89,41 @@ class SesIdentityAttributesV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<MailFromDomain></MailFromDomain>"))
-            .body(containsString("<MailFromDomainStatus>Pending</MailFromDomainStatus>"));
+            .body(containsString("<key>v1-attrs.floci.test</key>"))
+            .body(containsString("<BehaviorOnMXFailure>UseDefaultValue</BehaviorOnMXFailure>"))
+            .body(not(containsString("MailFromDomain>")))
+            .body(not(containsString("MailFromDomainStatus")));
+    }
+
+    @Test
+    void getIdentityMailFromDomainAttributes_unknownIdentity_hasNoEntry() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityMailFromDomainAttributes")
+            .formParam("Identities.member.1", "v1-attrs-unknown.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("MailFromDomainAttributes"))
+            .body(not(containsString("<entry>")));
+    }
+
+    @Test
+    void getIdentityMailFromDomainAttributes_skipsOnlyTheUnknownIdentity() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityMailFromDomainAttributes")
+            .formParam("Identities.member.1", "v1-attrs-unknown.floci.test")
+            .formParam("Identities.member.2", "v1-attrs.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<key>v1-attrs.floci.test</key>"))
+            .body(not(containsString("v1-attrs-unknown.floci.test")));
     }
 
     @Test
