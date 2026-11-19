@@ -26,19 +26,20 @@ concurrency:
 
 jobs:
   checks:
-    name: Nightly checks
+    name: Nightly checks (${{ matrix.group }})
     runs-on: ubuntu-latest
-    # The checks run one after another, each within its own @Timeout bounds, so the job allows their sum, and about
-    # twenty minutes for the build, the image and the prefetch: EmrPigStepsNightlyIntegrationTest's 30,
-    # EmrFlociContainerNightlyIntegrationTest's 20 and 4 for its setup,
-    # EmrServerlessCustomImageNightlyIntegrationTest's 85 and 21 for its setup,
-    # EmrServerlessSparkConnectNightlyIntegrationTest's 30, EmrSessionServerNightlyIntegrationTest's 40,
-    # EmrHiveStepsNightlyIntegrationTest's five two-minute tests, one five-minute test and six-minute setup,
-    # EmrNotebookExecutionNightlyIntegrationTest's 40, EmrAppUiNightlyIntegrationTest's 30, and
-    # EmrServerlessDashboardNightlyIntegrationTest's 15, 336 in all. A check added, or a bound raised, raises this with
-    # it, so a slow check fails with its own message rather than the job being cancelled with none; a hosted runner
-    # ends any job at 360 minutes, which this stays under.
-    timeout-minutes: 356
+    # The existing checks keep their 336-minute total plus twenty minutes for setup. The shrink check runs
+    # separately: its sixteen-minute method and two-minute setup plus twenty minutes for compilation/prefetch.
+    # Combining them would exceed the hosted runner's 360-minute job limit.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: standard
+            timeout: 356
+          - group: cluster-shrink
+            timeout: 38
+    timeout-minutes: ${{ matrix.timeout }}
     # A fork's schedule would spend its owner's minutes on checks it never asked for; a draft waits until it is
     # ready for review, as the CI shards do.
     if: >-
@@ -53,8 +54,13 @@ jobs:
         run: |
           cd src/test/java
           find . -name '*NightlyIntegrationTest.java' | sed 's|^\./||; s|\.java$||' | LC_ALL=C sort \
-            > "$GITHUB_WORKSPACE/nightly.txt"
+            > "$GITHUB_WORKSPACE/all-nightly.txt"
           cd "$GITHUB_WORKSPACE"
+          if [ "${{ matrix.group }}" = "cluster-shrink" ]; then
+            grep '/EmrClusterShrinkNightlyIntegrationTest$' all-nightly.txt > nightly.txt
+          else
+            grep -v '/EmrClusterShrinkNightlyIntegrationTest$' all-nightly.txt > nightly.txt
+          fi
           count=$(wc -l < nightly.txt | tr -d ' ')
           echo "count=$count" >> "$GITHUB_OUTPUT"
           echo "$count nightly checks"
@@ -100,7 +106,7 @@ jobs:
       # A check that runs Floci in a container, as a user's Docker setup does, runs this image: this commit's own
       # build, made from the compiled application as docker/Dockerfile.jvm-package describes.
       - name: Build the Floci image
-        if: steps.list.outputs.count != '0'
+        if: steps.list.outputs.count != '0' && matrix.group == 'standard'
         run: |
           ./mvnw package -B -q -DskipTests
           docker build -q -f docker/Dockerfile.jvm-package -t floci/floci:nightly-check .
@@ -111,7 +117,7 @@ jobs:
         run: >
           ./mvnw surefire:test -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/nightly.txt"
-          -Dsurefire.failIfNoTests=true
+          -DfailIfNoTests=true
           -Dnightly.checks.enabled=true
           -Dnightly.checks.floci-image=floci/floci:nightly-check
 
@@ -126,7 +132,7 @@ jobs:
         if: always() && steps.list.outputs.count != '0'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-checks
+          name: nightly-checks-${{ matrix.group }}
           path: |
             nightly.txt
             prefetch-images.log
