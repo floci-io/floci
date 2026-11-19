@@ -74,12 +74,13 @@ final class LambdaInvokeResponseStream implements ResponseStreamListener {
     }
 
     GenericEntity<StreamingOutput> body(CompletableFuture<InvokeResult> invocation, boolean logTail) {
-        return new GenericEntity<>(output -> write(output, invocation.join(), logTail), StreamingOutput.class);
+        return new GenericEntity<>(output -> write(output, invocation, logTail), StreamingOutput.class);
     }
 
     /** Writes the frames as they arrive until {@link #end()}, then the final {@code InvokeComplete}. */
-    void write(OutputStream output, InvokeResult result, boolean logTail) throws IOException {
+    void write(OutputStream output, CompletableFuture<InvokeResult> invocation, boolean logTail) throws IOException {
         frames.drainTo(output);
+        InvokeResult result = invocation.join();
         boolean streamed = started.isDone();
         boolean failed = result.getFunctionError() != null;
         if (!streamed && !result.isTimedOut() && result.getPayload() != null && result.getPayload().length > 0) {

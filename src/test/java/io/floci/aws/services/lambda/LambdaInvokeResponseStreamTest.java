@@ -4,17 +4,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.testing.EventStreamMessages;
 import io.floci.aws.testing.EventStreamMessages.Message;
+import jakarta.ws.rs.core.StreamingOutput;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LambdaInvokeResponseStreamTest {
@@ -222,10 +229,64 @@ class LambdaInvokeResponseStreamTest {
         assertTrue(stream.started().isDone());
     }
 
+    @Test
+    void chunksReachTheClientWhileTheFunctionIsStillRunning() throws Exception {
+        CompletableFuture<InvokeResult> invocation = new CompletableFuture<>();
+        CountDownLatch firstWrite = new CountDownLatch(1);
+        ByteArrayOutputStream out = new ByteArrayOutputStream() {
+            @Override
+            public synchronized void write(byte[] bytes) throws IOException {
+                super.write(bytes);
+                firstWrite.countDown();
+            }
+        };
+        stream.onStart(null);
+        stream.onChunk("early".getBytes(StandardCharsets.UTF_8));
+        StreamingOutput body = stream.body(invocation, false).getEntity();
+        CompletableFuture<Void> writer = CompletableFuture.runAsync(() -> {
+            try {
+                body.write(out);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+
+        assertTrue(firstWrite.await(5, TimeUnit.SECONDS));
+        assertFalse(writer.isDone());
+
+        invocation.complete(new InvokeResult(200, null, new byte[0], null, "r"));
+        stream.end();
+        writer.get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("PayloadChunk", "InvokeComplete"), types(decoded(out)));
+    }
+
+    @Test
+    void chunksAreDroppedAfterTheClientIsGone() {
+        OutputStream closed = new OutputStream() {
+            @Override
+            public void write(int b) throws IOException {
+                throw new IOException("closed");
+            }
+        };
+        stream.onStart(null);
+        stream.onChunk(new byte[] {1});
+        assertThrows(IOException.class, () -> stream.write(closed, new CompletableFuture<>(), false));
+
+        stream.onChunk(new byte[] {2});
+        stream.end();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        assertDoesNotThrow(() -> stream.write(out, done(new InvokeResult(200, null, new byte[0], null, "r")), false));
+        assertEquals(List.of("InvokeComplete"), types(decoded(out)));
+    }
+
+    private static List<Message> decoded(ByteArrayOutputStream out) {
+        return EventStreamMessages.decode(out.toByteArray());
+    }
+
     private List<Message> write(InvokeResult result, boolean logTail) throws IOException {
         stream.end();
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        stream.write(out, result, logTail);
+        stream.write(out, done(result), logTail);
         return EventStreamMessages.decode(out.toByteArray());
     }
 
