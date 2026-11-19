@@ -99,9 +99,18 @@ client that talks to the control plane does not reach it by accident.
   that came under a key two parties agreed with ECDH, and answers with the same key wrapped
   under the key the request names. The key material never leaves the service: the block is
   opened under the agreed key and wrapped again under the other one, and the block that goes
-  out carries the attributes of the key it holds. The reference has it for the keys that
+  out carries the attributes of the key it holds, its version and its optional blocks with
+  them. The reference has it for the keys that
   are rotated for every transaction, such as a PEK wrapped under a key that was agreed
   with ECDH, so the key is moved to another wrapping key without being imported.
+- **A translation is refused when the key that protects it is too weak.** The agreed key
+  opens the block that comes in and the wrapping key closes the one that goes out, so both
+  have to be at least as strong as the key they protect, the rule the export and the import
+  enforce. A key that may not leave the service is refused as well: a block that carries the
+  exportability `N` holds a key that may not be exported, and the block that goes out is
+  handed to the caller. The check value algorithm the request names has to be the one the
+  key has, the CMAC for an AES key and the ANSI X9.24 one for a Triple DES key, and a request
+  that names another one is refused rather than answered with a value of another kind.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
   request that asks for one of them is refused with the error that says so, rather than
   answered with something of another kind. The EMV PIN change MAC is refused as well: it needs
