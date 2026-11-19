@@ -1,5 +1,6 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.SesContentScan;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;

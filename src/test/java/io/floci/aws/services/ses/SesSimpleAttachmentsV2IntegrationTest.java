@@ -1,5 +1,7 @@
 package io.floci.aws.services.ses;
 
+import io.floci.aws.services.ses.mime.SesContentScan;
+import io.floci.aws.services.ses.mime.SesMimeParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
@@ -96,7 +98,7 @@ class SesSimpleAttachmentsV2IntegrationTest {
         assertTrue(wire.contains("X-Custom: custom-value"), wire);
         assertFalse(wire.contains("hidden@example.com"), "Bcc must not appear in the message");
 
-        Message message = SmtpRelay.parseMime(mime);
+        Message message = SesMimeParser.parse(mime);
         assertNotNull(message);
         assertEquals("With attachments", message.getSubject());
         List<Entity> leaves = new ArrayList<>();

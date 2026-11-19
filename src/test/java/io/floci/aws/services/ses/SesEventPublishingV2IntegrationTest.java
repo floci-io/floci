@@ -7,6 +7,7 @@ import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService.MetricI
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.services.ses.mime.SesContentScan;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;

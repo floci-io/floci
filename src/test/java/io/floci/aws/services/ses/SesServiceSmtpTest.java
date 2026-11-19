@@ -2,6 +2,7 @@ package io.floci.aws.services.ses;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.ses.mime.SesContentScan;
 import io.floci.aws.services.ses.model.ConfigurationSet;
 import io.floci.aws.services.ses.model.CustomVerificationEmailTemplate;
 import io.floci.aws.services.ses.model.EmailContent;

@@ -1,6 +1,7 @@
 package io.floci.aws.services.ses;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.ses.mime.SesMimeParser;
 import io.floci.aws.services.ses.model.MessageAttachment;
 import io.floci.aws.services.ses.model.MessageHeader;
 import io.floci.aws.services.ses.model.MessageTag;
@@ -729,20 +730,9 @@ public class SmtpRelay {
             return new ParsedRawMessage(new byte[0], null, RawMessageHeaders.empty());
         }
         byte[] mimeBytes = tryBase64Decode(rawMessage);
-        Message message = parseMime(mimeBytes);
+        Message message = SesMimeParser.parse(mimeBytes);
         return new ParsedRawMessage(mimeBytes, message,
                 message == null ? RawMessageHeaders.empty() : headersOf(message));
-    }
-
-    /** Parses MIME bytes, or returns {@code null} for anything the parser cannot read. */
-    static Message parseMime(byte[] mimeBytes) {
-        try {
-            return new DefaultMessageBuilder().parseMessage(new ByteArrayInputStream(mimeBytes));
-        } catch (Exception | StackOverflowError ignored) {
-            // The caller treats an unparseable message as such; there is nothing to diagnose here,
-            // and mime4j nests a reader per forwarded message, so a hostile depth overflows too.
-            return null;
-        }
     }
 
     private static RawMessageHeaders headersOf(Message message) {
