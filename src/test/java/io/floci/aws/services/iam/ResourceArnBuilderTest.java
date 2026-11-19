@@ -1804,7 +1804,7 @@ class ResourceArnBuilderTest {
         for (String queue : queues) {
             sqs.createQueue(queue, Map.of(), "us-east-1");
         }
-        return reading(new SqsStoredResourceArns(sqs, new RegionResolver("us-east-1", ACCOUNT)));
+        return reading(new SqsStoredResourceArns(sqs));
     }
 
     /**

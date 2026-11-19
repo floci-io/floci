@@ -1,7 +1,6 @@
 package io.floci.aws.services.sqs;
 
 import io.floci.aws.core.common.AwsArnUtils;
-import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.StoredResourceArns;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -21,12 +20,10 @@ public class SqsStoredResourceArns implements StoredResourceArns {
     private static final String QUEUE = "queue";
 
     private final SqsService sqs;
-    private final RegionResolver regionResolver;
 
     @Inject
-    public SqsStoredResourceArns(SqsService sqs, RegionResolver regionResolver) {
+    public SqsStoredResourceArns(SqsService sqs) {
         this.sqs = sqs;
-        this.regionResolver = regionResolver;
     }
 
     @Override
@@ -48,8 +45,8 @@ public class SqsStoredResourceArns implements StoredResourceArns {
     }
 
     /**
-     * The tags of the queue whose ARN is {@code arn}, in the request's account, where the tag handlers read: an ARN of
-     * another account names none, and neither does one other than the ARN {@link #find} gives the queue. The queue is
+     * The tags of the queue whose ARN is {@code arn}, in the queue's account, including when the caller belongs to
+     * another account. An ARN other than the one {@link #find} gives the queue names none. The queue is
      * read in place by the Region and the name the ARN gives. A tag without
      * a value reads as an empty one. Tag calls give the queue a new map, so the read is of one whole set.
      */
@@ -59,8 +56,8 @@ public class SqsStoredResourceArns implements StoredResourceArns {
             return Map.of();
         }
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        String account = regionResolver.getAccountId();
-        if (!parsed.accountId().equals(account) || parsed.region().isBlank()
+        String account = parsed.accountId();
+        if (account.isBlank() || parsed.region().isBlank()
                 || !arn.equals(AwsArnUtils.Arn.of(NAMESPACE, parsed.region(), account, parsed.resource()).toString())) {
             return Map.of();
         }
