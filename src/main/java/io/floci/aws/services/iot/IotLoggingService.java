@@ -3,6 +3,7 @@ package io.floci.aws.services.iot;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.iot.model.IotV2LoggingOptions;
@@ -39,9 +40,8 @@ public class IotLoggingService {
         String defaultLogLevel = text(request.path("defaultLogLevel"), "defaultLogLevel");
         Boolean disableAllLogs = bool(request.path("disableAllLogs"), "disableAllLogs");
         if (defaultLogLevel != null && !LOG_LEVELS.contains(defaultLogLevel)) {
-            throw new AwsException("InvalidRequestException", "1 validation error detected: Value '" + defaultLogLevel
-                    + "' at 'defaultLogLevel' failed to satisfy constraint: Member must satisfy enum value set: "
-                    + LOG_LEVELS, 400);
+            throw SmithyValidationErrors.exception("InvalidRequestException",
+                    SmithyValidationErrors.notInEnum(defaultLogLevel, "defaultLogLevel", LOG_LEVELS));
         }
         synchronized (lock) {
             Optional<IotV2LoggingOptions> current = store.get(region);
