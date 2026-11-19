@@ -16,7 +16,6 @@ import java.util.HashSet;
 import java.util.List;
 
 import static io.floci.aws.testing.Ec2Requests.ec2;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
@@ -38,7 +37,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class Route53ResolverIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/route53resolver/aws4_request";
 
@@ -49,14 +47,7 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void listFirewallDomainLists_returnsAwsManagedLists() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.ListFirewallDomainLists")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("ListFirewallDomainLists", "{}", AUTH_HEADER)
             .statusCode(200)
             .body("FirewallDomainLists.Name", hasItems(
                     "AWSManagedDomainsAggregateThreatList",
@@ -68,39 +59,18 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void listFirewallDomainLists_idsAreStableAcrossCalls() {
-        String firstId = given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.ListFirewallDomainLists")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
+        String firstId = Route53ResolverRequests.call("ListFirewallDomainLists", "{}", AUTH_HEADER)
             .statusCode(200)
             .extract().path("FirewallDomainLists[0].Id");
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.ListFirewallDomainLists")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("ListFirewallDomainLists", "{}", AUTH_HEADER)
             .statusCode(200)
             .body("FirewallDomainLists[0].Id", equalTo(firstId));
     }
 
     @Test
     void unknownOperation_returns400() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.DoesNotExist")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("DoesNotExist", "{}", AUTH_HEADER)
             .statusCode(400);
     }
 
@@ -188,14 +158,8 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_acceptsTheAwsIpAddressesMember() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddresses", "aws-member-1", 2))
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddresses", "aws-member-1", 2),
+                AUTH_HEADER)
             .statusCode(200)
             .body("ResolverEndpoint.Id", startsWith("rslvr-in-"))
             .body("ResolverEndpoint.Direction", equalTo("INBOUND"))
@@ -204,14 +168,8 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_stillAcceptsTheLegacyMember() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddressRequests", "legacy-member-1", 2))
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddressRequests", "legacy-member-1", 2),
+                AUTH_HEADER)
             .statusCode(200)
             .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
@@ -221,21 +179,11 @@ class Route53ResolverIntegrationTest {
         // A caller that created an endpoint with the old name and retries with the AWS
         // one is sending the same request. The idempotency check compares contents, so
         // it must not read the rename as a conflict.
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddressRequests", "replay-across-names", 2))
-        .when().post("/").then().statusCode(200);
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddressRequests", "replay-across-names", 2),
+                AUTH_HEADER).statusCode(200);
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddresses", "replay-across-names", 2))
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddresses", "replay-across-names", 2),
+                AUTH_HEADER)
             .statusCode(200)
             .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
@@ -244,15 +192,9 @@ class Route53ResolverIntegrationTest {
     void createResolverEndpoint_withoutAddressesNamesTheAwsMember() {
         // The message is the only hint a caller gets about which member to send, so it
         // must name the one AWS documents rather than the emulator's internal spelling.
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body("{\"Name\":\"ep\",\"Direction\":\"INBOUND\","
-                + "\"CreatorRequestId\":\"no-addresses\",\"SecurityGroupIds\":[\"sg-abc123\"]}")
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint",
+                "{\"Name\":\"ep\",\"Direction\":\"INBOUND\","
+                        + "\"CreatorRequestId\":\"no-addresses\",\"SecurityGroupIds\":[\"sg-abc123\"]}", AUTH_HEADER)
             .statusCode(400)
             .body("message", equalTo("IpAddresses is required"));
     }
@@ -275,9 +217,8 @@ class Route53ResolverIntegrationTest {
                 + "\"],\"IpAddresses\":[{\"SubnetId\":\"" + subA + "\"},{\"SubnetId\":\"" + subA
                 + "\",\"Ip\":\"10.77.1.40\"},{\"SubnetId\":\"" + subB + "\",\"Ip\":null}]}");
 
-        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.GetResolverEndpoint")
-                .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
-                .when().post("/").then().statusCode(200).body("ResolverEndpoint.HostVPCId", equalTo(vpc));
+        Route53ResolverRequests.call("GetResolverEndpoint", "{\"ResolverEndpointId\":\"" + id + "\"}", AUTH_HEADER)
+                .statusCode(200).body("ResolverEndpoint.HostVPCId", equalTo(vpc));
         JsonPath listed = JsonPath.from(listIpAddresses(id));
         for (String subnet : List.of(subA, subB)) {
             XmlPath enis = describeInterfaces(subnet);
@@ -316,19 +257,15 @@ class Route53ResolverIntegrationTest {
                 + "\"],\"IpAddresses\":[{\"SubnetId\":\"" + sub + "\",\"Ip\":\"10.78.1.30\"},{\"SubnetId\":\""
                 + sub + "\",\"Ip\":\"10.78.1.20\"}]}";
 
-        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-                .header("Authorization", AUTH_HEADER).body(second)
-                .when().post("/").then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        Route53ResolverRequests.call("CreateResolverEndpoint", second, AUTH_HEADER)
+                .statusCode(400).body("__type", equalTo("InvalidRequestException"));
         assertEquals(2, describeInterfaces(sub).getList(ENI_ITEMS + ".networkInterfaceId").size(),
                 "a refused endpoint must leave no interface behind");
-        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
-                .header("Authorization", AUTH_HEADER).body("{}")
-                .when().post("/").then().statusCode(200)
+        Route53ResolverRequests.call("ListResolverEndpoints", "{}", AUTH_HEADER).statusCode(200)
                 .body("ResolverEndpoints.findAll { it.Name == 'ep-taken-2' }.size()", equalTo(0));
 
-        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.DeleteResolverEndpoint")
-                .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + first + "\"}")
-                .when().post("/").then().statusCode(200);
+        Route53ResolverRequests.call("DeleteResolverEndpoint", "{\"ResolverEndpointId\":\"" + first + "\"}", AUTH_HEADER)
+                .statusCode(200);
         assertTrue(describeInterfaces(sub).getList(ENI_ITEMS + ".networkInterfaceId").isEmpty(),
                 "deleting the endpoint deletes its interfaces");
         String again = createEndpoint(second);
@@ -354,9 +291,8 @@ class Route53ResolverIntegrationTest {
             String id = createEndpoint("{\"Name\":\"ep-order\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\""
                     + sg + "\"],\"IpAddresses\":[" + auto + ",{\"SubnetId\":\"" + sub + "\",\"Ip\":\"" + next + "\"}]}");
             assertTrue(JsonPath.from(listIpAddresses(id)).getList("IpAddresses.Ip").contains(next), auto);
-            given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.DeleteResolverEndpoint")
-                    .header("Authorization", AUTH_HEADER).body("{\"ResolverEndpointId\":\"" + id + "\"}")
-                    .when().post("/").then().statusCode(200);
+            Route53ResolverRequests.call("DeleteResolverEndpoint", "{\"ResolverEndpointId\":\"" + id + "\"}", AUTH_HEADER)
+                    .statusCode(200);
         }
     }
 
@@ -368,15 +304,12 @@ class Route53ResolverIntegrationTest {
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
         String sg = securityGroup(vpc, "ep-exhausted");
         String requests = String.join(",", Collections.nCopies(12, "{\"SubnetId\":\"" + sub + "\"}"));
-        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-                .header("Authorization", AUTH_HEADER)
-                .body("{\"Name\":\"ep-exhausted\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"" + sg + "\"],"
-                        + "\"IpAddresses\":[" + requests + "]}")
-                .when().post("/").then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+        Route53ResolverRequests.call("CreateResolverEndpoint",
+                "{\"Name\":\"ep-exhausted\",\"Direction\":\"INBOUND\",\"SecurityGroupIds\":[\"" + sg + "\"],"
+                        + "\"IpAddresses\":[" + requests + "]}", AUTH_HEADER)
+                .statusCode(400).body("__type", equalTo("InvalidRequestException"));
         assertTrue(describeInterfaces(sub).getList(ENI_ITEMS + ".networkInterfaceId").isEmpty());
-        given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
-                .header("Authorization", AUTH_HEADER).body("{}")
-                .when().post("/").then().statusCode(200)
+        Route53ResolverRequests.call("ListResolverEndpoints", "{}", AUTH_HEADER).statusCode(200)
                 .body("ResolverEndpoints.findAll { it.Name == 'ep-exhausted' }.size()", equalTo(0));
     }
 
@@ -393,9 +326,8 @@ class Route53ResolverIntegrationTest {
     }
 
     private static String createEndpoint(String body) {
-        return given().contentType(CONTENT_TYPE).header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-                .header("Authorization", AUTH_HEADER).body(body)
-                .when().post("/").then().statusCode(200).extract().path("ResolverEndpoint.Id");
+        return Route53ResolverRequests.call("CreateResolverEndpoint", body, AUTH_HEADER)
+                .statusCode(200).extract().path("ResolverEndpoint.Id");
     }
 
     /** An EC2 Query call through {@link io.floci.aws.testing.Ec2Requests}, expecting 200. */
@@ -408,42 +340,24 @@ class Route53ResolverIntegrationTest {
     }
 
     private static String listIpAddresses(String endpointId) {
-        return given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpointIpAddresses")
-            .header("Authorization", AUTH_HEADER)
-            .body("{\"ResolverEndpointId\":\"" + endpointId + "\"}")
-        .when()
-            .post("/")
-        .then()
+        return Route53ResolverRequests.call("ListResolverEndpointIpAddresses",
+                "{\"ResolverEndpointId\":\"" + endpointId + "\"}", AUTH_HEADER)
             .statusCode(200)
             .extract().asString();
     }
 
     @Test
     void listResolverEndpointIpAddresses_returnsTheAddressesTheEndpointWasCreatedWith() {
-        String endpointId = given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body("{\"Name\":\"ep-ips\",\"Direction\":\"OUTBOUND\",\"CreatorRequestId\":\"list-ips-1\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],"
-                + "\"IpAddresses\":[{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.0.1.10\"},"
-                + "{\"SubnetId\":\"subnet-bbb\"}]}")
-        .when()
-            .post("/")
-        .then()
+        String endpointId = Route53ResolverRequests.call("CreateResolverEndpoint",
+                "{\"Name\":\"ep-ips\",\"Direction\":\"OUTBOUND\",\"CreatorRequestId\":\"list-ips-1\","
+                        + "\"SecurityGroupIds\":[\"sg-abc123\"],"
+                        + "\"IpAddresses\":[{\"SubnetId\":\"subnet-aaa\",\"Ip\":\"10.0.1.10\"},"
+                        + "{\"SubnetId\":\"subnet-bbb\"}]}", AUTH_HEADER)
             .statusCode(200)
             .extract().path("ResolverEndpoint.Id");
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpointIpAddresses")
-            .header("Authorization", AUTH_HEADER)
-            .body("{\"ResolverEndpointId\":\"" + endpointId + "\"}")
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("ListResolverEndpointIpAddresses",
+                "{\"ResolverEndpointId\":\"" + endpointId + "\"}", AUTH_HEADER)
             .statusCode(200)
             .body("IpAddresses.size()", equalTo(2))
             .body("IpAddresses.SubnetId", containsInAnyOrder("subnet-aaa", "subnet-bbb"))
@@ -462,16 +376,10 @@ class Route53ResolverIntegrationTest {
         // Two addresses in one subnet, both left for AWS to pick, is a valid request: the
         // model's IpAddressesRequest is a plain list with no uniqueness constraint. Each is a
         // separate address, so each needs its own IpId.
-        String endpointId = given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body("{\"Name\":\"ep-dup-ips\",\"Direction\":\"INBOUND\",\"CreatorRequestId\":\"list-ips-dup\","
-                + "\"SecurityGroupIds\":[\"sg-abc123\"],"
-                + "\"IpAddresses\":[{\"SubnetId\":\"subnet-aaa\"},{\"SubnetId\":\"subnet-aaa\"}]}")
-        .when()
-            .post("/")
-        .then()
+        String endpointId = Route53ResolverRequests.call("CreateResolverEndpoint",
+                "{\"Name\":\"ep-dup-ips\",\"Direction\":\"INBOUND\",\"CreatorRequestId\":\"list-ips-dup\","
+                        + "\"SecurityGroupIds\":[\"sg-abc123\"],"
+                        + "\"IpAddresses\":[{\"SubnetId\":\"subnet-aaa\"},{\"SubnetId\":\"subnet-aaa\"}]}", AUTH_HEADER)
             .statusCode(200)
             .extract().path("ResolverEndpoint.Id");
 
@@ -484,14 +392,8 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void listResolverEndpointIpAddresses_unknownEndpoint_returnsResourceNotFound() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpointIpAddresses")
-            .header("Authorization", AUTH_HEADER)
-            .body("{\"ResolverEndpointId\":\"rslvr-in-doesnotexist\"}")
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("ListResolverEndpointIpAddresses",
+                "{\"ResolverEndpointId\":\"rslvr-in-doesnotexist\"}", AUTH_HEADER)
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
     }
@@ -505,14 +407,8 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_singleAddress_returnsInvalidParameters() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddresses", "single-address", 1))
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddresses", "single-address", 1),
+                AUTH_HEADER)
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterException"))
             .body("message", equalTo("IpAddresses must contain at least two IP addresses."));
@@ -520,14 +416,8 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_twentyOneAddresses_returnsInvalidParameters() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddresses", "too-many-addresses", 21))
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddresses", "too-many-addresses", 21),
+                AUTH_HEADER)
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterException"))
             .body("message", equalTo("IpAddresses must contain at most twenty IP addresses."));
@@ -535,38 +425,19 @@ class Route53ResolverIntegrationTest {
 
     @Test
     void createResolverEndpoint_twoAddresses_succeeds() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddresses", "two-addresses", 2))
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddresses", "two-addresses", 2),
+                AUTH_HEADER)
             .statusCode(200)
             .body("ResolverEndpoint.IpAddressCount", equalTo(2));
     }
 
     @Test
     void createResolverEndpoint_singleAddress_createsNoEndpoint() {
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.CreateResolverEndpoint")
-            .header("Authorization", AUTH_HEADER)
-            .body(endpointBody("IpAddresses", "rejected-endpoint", 1))
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("CreateResolverEndpoint", endpointBody("IpAddresses", "rejected-endpoint", 1),
+                AUTH_HEADER)
             .statusCode(400);
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "Route53Resolver.ListResolverEndpoints")
-            .header("Authorization", AUTH_HEADER)
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
+        Route53ResolverRequests.call("ListResolverEndpoints", "{}", AUTH_HEADER)
             .statusCode(200)
             .body("ResolverEndpoints.findAll { it.Name == 'ep-rejected-endpoint' }.size()",
                     equalTo(0));
