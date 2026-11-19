@@ -87,6 +87,10 @@ final class CfnPropertyTypes {
                 + "; add the type to tools/aws/regen_cfn_property_types.py");
     }
 
+    private static boolean hasStringConstraints(Shape shape) {
+        return shape.minLength() != null || shape.maxLength() != null || shape.pattern() != null;
+    }
+
     /**
      * Refuses a value of another type than {@code expected}, an object or a list, with template
      * validation's message, where a number or a boolean reads as a String.
@@ -400,10 +404,10 @@ final class CfnPropertyTypes {
      * (#/ContainerDefinitions/0/Memory: expected type: Integer, found: String. This may occur ...
      * \n#/ContainerDefinitions/0/LinuxParameters/Capabilities/Add: expected type: JSONArray, found:
      * String)". At each object its missing required members come first, then its members in the
-     * schema's order. When every value converts, only the required members the converted model lacks
-     * fail it, grouped where their paths meet as the schema validator groups them: "Model validation
-     * failed (#/ContainerDefinitions: 2 schema violations found)\n#/ContainerDefinitions/0: required
-     * key [Name] not found (#/ContainerDefinitions/0)\n...".
+     * schema's order. When every value converts, missing required members and each failing string
+     * constraint are grouped where their paths meet as the schema validator groups them: "Model
+     * validation failed (#/ContainerDefinitions: 2 schema violations found)\n#/ContainerDefinitions/0:
+     * required key [Name] not found (#/ContainerDefinitions/0)\n...".
      */
     static final class HandlerReader extends ShapeWalk {
 
@@ -432,9 +436,9 @@ final class CfnPropertyTypes {
             if (unconverted) {
                 throw modelValidation(String.join("\n", violations.stream().map(Violation::text).toList()) + ")");
             }
-            List<Violation> missing = violations.stream().filter(Violation::required).toList();
-            if (!missing.isEmpty()) {
-                throw modelValidation(grouped(missing));
+            List<Violation> groupedViolations = violations.stream().filter(Violation::grouped).toList();
+            if (!groupedViolations.isEmpty()) {
+                throw modelValidation(grouped(groupedViolations));
             }
             return read;
         }
@@ -478,19 +482,20 @@ final class CfnPropertyTypes {
 
         @Override
         void checkString(String path, Shape shape, String value) {
-            if (shape.minLength() == null && shape.maxLength() == null && shape.pattern() == null) {
+            if (!hasStringConstraints(shape)) {
                 return;
             }
             int length = value.codePointCount(0, value.length());
             if (shape.minLength() != null && length < shape.minLength()) {
                 record(new Violation(path, "expected minLength: " + shape.minLength() + ", actual: " + length,
-                        false), false);
-            } else if (shape.maxLength() != null && length > shape.maxLength()) {
+                        true), true);
+            }
+            if (shape.maxLength() != null && length > shape.maxLength()) {
                 record(new Violation(path, "expected maxLength: " + shape.maxLength() + ", actual: " + length,
-                        false), false);
-            } else if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).matches()) {
-                record(new Violation(path, "failed validation constraint for keyword [pattern]", false),
-                        false);
+                        true), true);
+            }
+            if (shape.pattern() != null && !Pattern.compile(shape.pattern()).matcher(value).matches()) {
+                record(new Violation(path, "failed validation constraint for keyword [pattern]", true), true);
             }
         }
 
@@ -500,13 +505,12 @@ final class CfnPropertyTypes {
                 JsonNode raw = value.get(member);
                 boolean absent = raw == null;
                 if (!absent && !preserveEcsHandlerSemantics) {
-                    absent = raw.isNull() || raw.isMissingNode();
+                    absent = raw.isNull();
                     Shape memberShape = model.shapes().get(shape.members().get(member));
                     if (!absent && "string".equals(memberShape.type())) {
                         JsonNode resolved = engine.resolveNode(raw);
                         absent = resolved == null || resolved.isNull() || resolved.isMissingNode();
-                        if (!absent && memberShape.minLength() == null && memberShape.maxLength() == null
-                                && memberShape.pattern() == null) {
+                        if (!absent && !hasStringConstraints(memberShape)) {
                             absent = resolved.isTextual() && resolved.textValue().isBlank();
                         }
                     }
@@ -591,8 +595,8 @@ final class CfnPropertyTypes {
             return path.isEmpty() ? "#" : "#/" + path;
         }
 
-        /** One violation of the model at {@code path}, a missing required member or a type. */
-        private record Violation(String path, String message, boolean required) {
+        /** One violation of the model at {@code path}; schema keyword failures use grouped output. */
+        private record Violation(String path, String message, boolean grouped) {
 
             String text() {
                 return pointer(path) + ": " + message;

@@ -80,8 +80,16 @@
   `KeyModesOfUse` of the key are required, as the reference requires them. The answer
   carries every mode of use the reference gives a key, the ones the key was not made
   with as false, so a caller reading them finds a boolean for each of them. The check
-  value is a CMAC, which is the only algorithm this service computes, so a request
-  naming another one is refused.
+  value is a CMAC under an AES key and the ANSI X9.24 value under a Triple DES one, and a
+  request that names another one is refused.
+- **The key attributes this service makes.** The algorithms are the Triple DES, the AES,
+  the RSA and the ECC ones, so the HMAC algorithms the reference's model names, which fix
+  the hash of the key at its creation, are refused. The SHA-1 check value the reference's
+  model also names is refused as well. The classes are the symmetric key, the asymmetric
+  key pair and the public key, so the private key class the reference's model also names is
+  refused. The usage says what the key is for and the algorithm has to serve it, so a key
+  of a MAC usage may not be made of an AES key, and the asymmetric usages take the key
+  pairs the reference's table gives them.
 - **Which key a request may name:** `KeyIdentifier` takes the ARN of a key, the ARN of
   an alias or the name of an alias, while `KeyArn` and `ResourceArn` take the ARN of
   a key alone, as the reference states them. A request naming a key another way is
@@ -261,6 +269,9 @@
 - **The replication is in sync at once:** the service does not model the progress of a
   replication, so the status of a replica that is there is `SYNCHRONIZED` right away,
   where the reference answers `IN_PROGRESS` until the replication has finished.
+- **The quotas of the reference are not enforced.** The reference holds two thousand keys
+  and two thousand aliases in a Region and throttles the control plane to five requests a
+  second. The emulator holds no such limit, and answers every request it is given.
 - **Resource policies:** `PutResourcePolicy` attaches or replaces the policy stored on the
   key, `GetResourcePolicy` returns it and `DeleteResourcePolicy` removes it. A key without
   a policy is answered with `ResourceNotFoundException` by both reads. The policy is a JSON

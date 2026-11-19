@@ -239,6 +239,58 @@ class PaymentCryptographyCryptoHandlerTest {
     }
 
     @Test
+    void aMacAlgorithmThisServiceDoesNotMakeIsRefused() {
+        // The reference's page for the operation says a HMAC, a CMAC, a DUKPT or an EMV MAC
+        // can be asked for, and its model names the HMAC family, the EMV MAC and the DUKPT
+        // CMAC beside the ones this service makes. This service makes the ISO 9797
+        // algorithms 1 and 3 and the CMAC, and a request that asks for another is refused
+        // with the error that names the ones it makes.
+        PaymentCryptographyKey key = createTdesKey("Generate", "Verify");
+        String message = hex("a message".getBytes());
+        for (String algorithm : new String[] {"HMAC", "HMAC_SHA256", "AS2805_4_1"}) {
+            ObjectNode attributes = mapper.createObjectNode();
+            attributes.put("Algorithm", algorithm);
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> handler.generateMac(request(Map.of(
+                            "KeyIdentifier", key.getArn(), "MessageData", message,
+                            "GenerationAttributes", attributes)), "us-east-1"));
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertTrue(refused.getMessage().contains("CMAC"), refused.getMessage());
+        }
+        for (String variant : new String[] {"EmvMac", "DukptCmac"}) {
+            ObjectNode attributes = mapper.createObjectNode();
+            attributes.put(variant, mapper.createObjectNode());
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> handler.generateMac(request(Map.of(
+                            "KeyIdentifier", key.getArn(), "MessageData", message,
+                            "GenerationAttributes", attributes)), "us-east-1"));
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertTrue(refused.getMessage().contains(variant), refused.getMessage());
+        }
+    }
+
+    @Test
+    void anEncryptionModeThisServiceDoesNotMakeIsRefused() {
+        // The reference's model names eight block cipher modes for the symmetric
+        // encryption, and this service makes the CBC one, so a request that names another is
+        // refused rather than answered with a cipher of another kind.
+        PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
+        for (String mode : new String[] {"ECB", "CFB", "CFB8", "OFB"}) {
+            ObjectNode symmetric = mapper.createObjectNode();
+            symmetric.put("Mode", mode);
+            ObjectNode attributes = mapper.createObjectNode();
+            attributes.set("Symmetric", symmetric);
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> handler.encryptData(request(Map.of(
+                            "KeyIdentifier", key.getArn(),
+                            "PlainText", hex("hello, world!!!!".getBytes()),
+                            "EncryptionAttributes", attributes)), "us-east-1"));
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertTrue(refused.getMessage().contains("CBC"), refused.getMessage());
+        }
+    }
+
+    @Test
     void aMacUnderAThreeKeyTdesKeyIsComputedAndVerified() {
         // The ISO 9797 MACs are defined over Triple DES, and the cipher takes the three keys
         // a three-key key holds, so such a key computes a MAC rather than failing.
