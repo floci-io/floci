@@ -88,25 +88,16 @@ class S3VectorsServiceTest {
 
     /**
      * A bucket and an index an older Floci stored under names S3 Vectors' rules refuse, which the create calls now
-     * refuse too, stay reachable by those names and by their ARNs, since every other call reads a name as given.
+     * refuse too, stay reachable by those names and by their ARNs in the calls that read a name as given.
      */
     @Test
     void aBucketAndAnIndexStoredUnderNamesTheRulesRefuseStayReachable() {
-        AccountAwareStorageBackend<VectorBucket> stored = AccountAwareStorageBackend.inMemory("000000000000");
         String bucketArn = "arn:aws:s3vectors:us-east-1:000000000000:bucket/Legacy_Bucket";
         VectorBucket legacy = new VectorBucket("Legacy_Bucket", bucketArn, Map.of("sseType", "AES256"));
         legacy.setCreationTime(CREATION_TIME);
         legacy.getIndexes().put("My_Index",
                 new VectorIndex("My_Index", bucketArn + "/index/My_Index", "Legacy_Bucket", 2, "float32", "cosine"));
-        stored.put("us-east-1::Legacy_Bucket", legacy);
-        S3VectorsService upgraded = new S3VectorsService(new StorageFactory(null, null) {
-            @Override
-            @SuppressWarnings("unchecked")
-            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                                                            TypeReference<Map<String, V>> typeReference) {
-                return (AccountAwareStorageBackend<V>) stored;
-            }
-        }, new RegionResolver(REGION, "000000000000"), Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+        S3VectorsService upgraded = storing(legacy);
 
         assertEquals(new S3VectorsService.ResolvedBucket("Legacy_Bucket", REGION, null),
                 upgraded.bucketTarget("Legacy_Bucket", null, REGION));
@@ -117,6 +108,33 @@ class S3VectorsServiceTest {
         assertEquals("My_Index", upgraded.getIndex("Legacy_Bucket", "My_Index", REGION).getIndexName());
         assertEquals(List.of("My_Index"), upgraded.listIndexes("Legacy_Bucket", REGION).stream()
                 .map(VectorIndex::getIndexName).toList());
+    }
+
+    /**
+     * A bucket an older Floci took under a name the create rules now reserve keeps its policy calls, by name and by
+     * ARN: they check only that the bucket's name is one of dot-joined labels, as before.
+     */
+    @Test
+    void aBucketStoredUnderAReservedNameKeepsItsPolicyCalls() {
+        String bucketArn = "arn:aws:s3vectors:us-east-1:000000000000:bucket/sthree-logs";
+        VectorBucket legacy = new VectorBucket("sthree-logs", bucketArn, Map.of("sseType", "AES256"));
+        legacy.setCreationTime(CREATION_TIME);
+        S3VectorsService upgraded = storing(legacy);
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Read\",\"Effect\":\"Allow\"}]}";
+
+        upgraded.putVectorBucketPolicy("sthree-logs", null, policy, REGION);
+        assertEquals(policy, upgraded.getVectorBucketPolicy(null, bucketArn, REGION));
+        upgraded.deleteVectorBucketPolicy(null, bucketArn, REGION);
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> upgraded.getVectorBucketPolicy("sthree-logs", null, REGION)).getErrorCode());
+    }
+
+    /** A service over a store holding {@code bucket}, as an older Floci stored it. */
+    private static S3VectorsService storing(VectorBucket bucket) {
+        AccountAwareStorageBackend<VectorBucket> stored = AccountAwareStorageBackend.inMemory("000000000000");
+        stored.put(REGION + "::" + bucket.getVectorBucketName(), bucket);
+        return new S3VectorsService(new InMemoryStorageFactory("000000000000").withStore("s3vectors.json", stored),
+                new RegionResolver(REGION, "000000000000"), Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
     }
 
     @Test

@@ -316,11 +316,11 @@ public class S3VectorsService implements StoredResourceArns {
                     "Specify exactly one of VectorBucketName or VectorBucketArn.", 400);
         }
         if (bucketArn == null) {
-            return new ResolvedBucket(validateName(bucketName, "VectorBucketName", errorCode),
+            return new ResolvedBucket(checkName(bucketName, "VectorBucketName", errorCode, false),
                     defaultRegion, null);
         }
         String[] parts = arnParts(bucketArn, false, errorCode);
-        validateName(parts[1], "VectorBucketArn bucket name", errorCode);
+        checkName(parts[1], "VectorBucketArn bucket name", errorCode, false);
         return bucketOfArn(bucketArn, parts, partitionForRegion, errorCode);
     }
 
@@ -338,8 +338,19 @@ public class S3VectorsService implements StoredResourceArns {
         return new ResolvedBucket(parts[1], parsed.region(), parsed.accountId());
     }
 
+    /** A name a CloudFormation resource creates its bucket or index under, checked by the naming rules. */
     public static String validateName(String name, String property, String errorCode) {
-        if (name == null || !hasValidLength(name) || !followsNamingRules(name)) {
+        return checkName(name, property, errorCode, true);
+    }
+
+    /**
+     * A name of 3 to 63 characters made of dot-joined labels. One that names a new bucket or index must also follow the
+     * rest of the naming rules ({@code creates}); one that refers to a bucket need not, so a bucket an older Floci took
+     * under a reserved name, such as {@code sthree-logs}, stays reachable.
+     */
+    private static String checkName(String name, String property, String errorCode, boolean creates) {
+        if (name == null || !hasValidLength(name)
+                || !(creates ? followsNamingRules(name) : NAME.matcher(name).matches())) {
             throw new AwsException(errorCode,
                     property + " must be a valid lowercase name of 3 to 63 characters.", 400);
         }
