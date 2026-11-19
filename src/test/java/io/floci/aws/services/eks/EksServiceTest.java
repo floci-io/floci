@@ -26,6 +26,7 @@ import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
+import io.floci.aws.services.eks.model.AccessConfig;
 import io.floci.aws.services.eks.model.BlockStorage;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
@@ -49,6 +50,8 @@ import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
 import io.floci.aws.services.eks.model.StorageConfig;
+import io.floci.aws.services.eks.model.Update;
+import io.floci.aws.services.eks.model.UpdateClusterConfigRequest;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -916,6 +919,69 @@ class EksServiceTest {
         Cluster deleted = eksService.deleteCluster("to-delete");
         assertEquals(ClusterStatus.DELETING, deleted.getStatus());
         assertTrue(eksService.listClusters().isEmpty());
+    }
+
+    @Test
+    void updateClusterConfigRefusesBadPublicAccessCidrsOnAnIpv4ClusterAndChangesNothing() {
+        EksAddonService addons = mock(EksAddonService.class);
+        Update recorded = new Update("u", "Successful", "EndpointAccessUpdate", List.of(), 0, List.of());
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        CreateClusterRequest create = new CreateClusterRequest();
+        create.setName("cidr-cluster");
+        create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        service.createCluster(create);
+        for (String cidr : List.of("10.0.0.0/33", "::/0")) {
+            ResourcesVpcConfig vpc = new ResourcesVpcConfig();
+            vpc.setEndpointPublicAccess(false);
+            vpc.setPublicAccessCidrs(List.of(cidr));
+            AwsException e = assertThrows(AwsException.class, () -> service.updateClusterConfig(
+                    "cidr-cluster", new UpdateClusterConfigRequest(vpc, null, null, null)), cidr);
+            assertEquals("InvalidParameterException", e.getErrorCode(), cidr);
+            ResourcesVpcConfig stored = service.describeCluster("cidr-cluster").getResourcesVpcConfig();
+            assertEquals(Boolean.TRUE, stored.getEndpointPublicAccess(), cidr);
+            assertEquals(List.of("0.0.0.0/0"), stored.getPublicAccessCidrs(), cidr);
+        }
+        verify(addons, never()).recordUpdate(any(), anyString(), any(), any(), any());
+    }
+
+    @Test
+    void updateClusterConfigMovesTheAuthenticationModeOneStepForwardOnly() {
+        EksAddonService addons = mock(EksAddonService.class);
+        Update recorded = new Update("u", "Successful", "AuthenticationModeUpdate", List.of(), 0, List.of());
+        when(addons.recordUpdate(any(), anyString(), any(), any(), any())).thenReturn(recorded);
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, ec2Service,
+                new EksOidcService(storageFactory, new ObjectMapper()), mock(EksAccessEntryService.class),
+                mock(EksPodIdentityAssociationService.class), addons);
+        List<String> modes = List.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API");
+        for (int from = 0; from < modes.size(); from++) {
+            for (int to = 0; to < modes.size(); to++) {
+                String pair = modes.get(from) + " to " + modes.get(to);
+                String name = "mode-" + from + "-" + to;
+                CreateClusterRequest create = new CreateClusterRequest();
+                create.setName(name);
+                create.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+                create.setAccessConfig(new AccessConfig(modes.get(from), null));
+                service.createCluster(create);
+                UpdateClusterConfigRequest request = new UpdateClusterConfigRequest(
+                        null, null, new AccessConfig(modes.get(to), null), null);
+                if (to == from + 1) {
+                    service.updateClusterConfig(name, request);
+                    assertEquals(modes.get(to), service.describeCluster(name).getAccessConfig()
+                            .authenticationMode(), pair);
+                } else {
+                    AwsException e = assertThrows(AwsException.class,
+                            () -> service.updateClusterConfig(name, request), pair);
+                    assertEquals("InvalidParameterException", e.getErrorCode(), pair);
+                    assertEquals("Unsupported authentication mode update from " + pair,
+                            e.getMessage(), pair);
+                    assertEquals(modes.get(from), service.describeCluster(name).getAccessConfig()
+                            .authenticationMode(), pair);
+                }
+            }
+        }
     }
 
     @Test
