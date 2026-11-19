@@ -140,6 +140,30 @@ class Route53ResolverIntegrationTest {
                 .statusCode(400).body("__type", equalTo("AccessDeniedException"));
     }
 
+    @Test
+    void listResolverDnssecConfigs_listsTheUpdatedConfiguration() {
+        String vpc = ec2Ok("CreateVpc", "CidrBlock", "10.82.0.0/16")
+                .extract().path("CreateVpcResponse.vpc.vpcId");
+        try {
+            dnssec("UpdateResolverDnssecConfig", "{\"ResourceId\":\"" + vpc
+                    + "\",\"Validation\":\"ENABLE\"}").statusCode(200);
+            String id = dnssec("GetResolverDnssecConfig", "{\"ResourceId\":\"" + vpc + "\"}")
+                    .statusCode(200).extract().path("ResolverDNSSECConfig.Id");
+
+            dnssec("ListResolverDnssecConfigs", "{}")
+                .statusCode(200)
+                .body("ResolverDnssecConfigs.ResourceId", hasItems(vpc))
+                .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
+                        .formatted(vpc) + "[0].Id", equalTo(id))
+                .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
+                        .formatted(vpc) + "[0].OwnerId", notNullValue())
+                .body("ResolverDnssecConfigs.findAll { it.ResourceId == '%s' }"
+                        .formatted(vpc) + "[0].ValidationStatus", equalTo("ENABLED"));
+        } finally {
+            ec2Ok("DeleteVpc", "VpcId", vpc);
+        }
+    }
+
     private static ValidatableResponse dnssec(String action, String body) {
         return dnssec(action, body, AUTH_HEADER);
     }

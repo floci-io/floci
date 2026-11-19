@@ -696,6 +696,11 @@ public class Route53ResolverService {
                 }).deepCopy();
     }
 
+    public synchronized List<ObjectNode> listResolverDnssecConfigs(String region) {
+        return dnssecConfigStore.scan(key -> key.startsWith(region + "::")).stream()
+                .map(ObjectNode::deepCopy).toList();
+    }
+
     private Vpc requireDnssecVpc(String resourceId, String region) {
         if (ec2Service == null) {
             return null;

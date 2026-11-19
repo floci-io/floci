@@ -5,7 +5,10 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class Route53ResolverDnssecStorageTest {
@@ -41,5 +44,26 @@ class Route53ResolverDnssecStorageTest {
         assertEquals(original.path("Id").asText(), stored.path("Id").asText());
         assertEquals("ENABLED", service.getResolverDnssecConfig(vpcId, region)
                 .path("ValidationStatus").asText());
+    }
+
+    @Test
+    void listResolverDnssecConfigs_returnsOnlyTheRegionsConfigs() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        Route53ResolverService service = new Route53ResolverService(new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
+        String accountId = "000000000000";
+        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
+                .put("ResourceId", "vpc-east").put("Validation", "ENABLE"), "us-east-1", accountId);
+        service.updateResolverDnssecConfig(objectMapper.createObjectNode()
+                .put("ResourceId", "vpc-west").put("Validation", "ENABLE"), "us-west-2", accountId);
+
+        List<ObjectNode> east = service.listResolverDnssecConfigs("us-east-1");
+        assertEquals(1, east.size());
+        assertEquals("vpc-east", east.get(0).path("ResourceId").asText());
+        assertEquals(accountId, east.get(0).path("OwnerId").asText());
+        assertEquals("ENABLED", east.get(0).path("ValidationStatus").asText());
+        assertTrue(east.get(0).path("Id").asText().startsWith("rdsc-"));
+        assertTrue(service.listResolverDnssecConfigs("eu-west-1").isEmpty());
     }
 }

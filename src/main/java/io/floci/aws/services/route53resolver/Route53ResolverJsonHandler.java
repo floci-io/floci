@@ -78,6 +78,7 @@ public class Route53ResolverJsonHandler {
                         request, region, accountId));
                 case "GetResolverDnssecConfig" -> dnssecConfigResponse(service.getResolverDnssecConfig(
                         text(request, "ResourceId"), region));
+                case "ListResolverDnssecConfigs" -> handleListResolverDnssecConfigs(region);
 
                 case "TagResource" -> {
                     service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);
@@ -203,5 +204,14 @@ public class Route53ResolverJsonHandler {
 
     private Response dnssecConfigResponse(ObjectNode config) {
         return Response.ok(objectMapper.createObjectNode().set("ResolverDNSSECConfig", config)).build();
+    }
+
+    private Response handleListResolverDnssecConfigs(String region) {
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode configs = result.putArray("ResolverDnssecConfigs");
+        for (ObjectNode config : service.listResolverDnssecConfigs(region)) {
+            configs.add(config);
+        }
+        return Response.ok(result).build();
     }
 }
