@@ -121,9 +121,11 @@ AWS::BedrockAgentCore::Memory	NamespaceKeys	accepted and not stored, a warning i
 AWS::BedrockAgentCore::Memory	StreamDeliveryResources	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	CapacityProviderConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	FilesystemConfigurations	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	HooksConfiguration	accepted and not stored by the runtime provisioner
 AWS::BedrockAgentCore::Runtime	LifecycleConfiguration	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	PlatformVersion	accepted and not stored, a warning is logged
 AWS::BedrockAgentCore::Runtime	RequestHeaderConfiguration	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	ResourceConfigurations	accepted and not stored by the runtime provisioner
 AWS::BedrockAgentCore::RuntimeEndpoint	Tags	accepted and not stored, a warning is logged
 AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
 AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
