@@ -42,8 +42,6 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     private static final String ROLE = "arn:aws:iam::000000000000:role/apigw-sqs";
     private static final String ATTRIBUTES =
             "{\"Authorization\":{\"DataType\":\"String\",\"StringValue\":\"${request.header.Authorization}\"}}";
-    private static final String REQUEST_PATH_ATTRIBUTES =
-            "{\"Path\":{\"DataType\":\"String\",\"StringValue\":\"${request.path}\"}}";
 
     @Inject
     ObjectMapper mapper;
@@ -266,44 +264,6 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     }
 
     @Test
-    void createAcceptsRequestPathWithoutName() {
-        String queueUrl = "http://localhost/000000000000/request-path";
-        try (ApiGatewayV2Client client = apigw()) {
-            String api = client.createApi(b -> b.name("sqs-subtype-request-path").protocolType("HTTP")).apiId();
-            try {
-                CreateIntegrationResponse created = client.createIntegration(b -> b.apiId(api)
-                        .integrationType("AWS_PROXY").integrationSubtype(SUBTYPE)
-                        .requestParameters(Map.of("QueueUrl", queueUrl, "MessageBody", "$request.path",
-                                "MessageAttributes", REQUEST_PATH_ATTRIBUTES)));
-                assertEquals("$request.path", created.requestParameters().get("MessageBody"));
-            } finally {
-                client.deleteApi(b -> b.apiId(api));
-            }
-        }
-    }
-
-    @Test
-    void createRejectsRequestPathAsAWholeJsonParameter() {
-        String queueUrl = "http://localhost/000000000000/request-path-json";
-        try (ApiGatewayV2Client client = apigw()) {
-            String api = client.createApi(b -> b.name("sqs-subtype-request-path-json").protocolType("HTTP"))
-                    .apiId();
-            try {
-                for (String source : List.of("$request.path", "${request.path}")) {
-                    BadRequestException error = assertThrows(BadRequestException.class, () ->
-                            client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
-                                    .integrationSubtype(SUBTYPE).requestParameters(Map.of("QueueUrl", queueUrl,
-                                            "MessageBody", "$request.body", "MessageAttributes", source))));
-                    assertThat(error.getMessage(), containsString(
-                            "Parameter MessageAttributes must be a JSON object, but " + source + " resolves to a string."));
-                }
-            } finally {
-                client.deleteApi(b -> b.apiId(api));
-            }
-        }
-    }
-
-    @Test
     void restPathTreatsNullPayloadFormatVersionAsAbsent() {
         try (ApiGatewayV2Client client = apigw()) {
             String api = client.createApi(b -> b.name("sqs-subtype-null-version").protocolType("HTTP")).apiId();
@@ -516,9 +476,10 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
 
     @Test
     void invokeResolvesRequestPathWithoutTheStage() {
+        String attributes = "{\"Path\":{\"DataType\":\"String\",\"StringValue\":\"${request.path}\"}}";
         withSendMessageRoute("sqs-invoke-request-path",
                 queueUrl -> Map.of("QueueUrl", queueUrl, "MessageBody", "$request.path",
-                        "MessageAttributes", REQUEST_PATH_ATTRIBUTES),
+                        "MessageAttributes", attributes),
                 (sqs, queueUrl, api) -> {
                     given().post("/execute-api/" + api + "/test/send").then().statusCode(200);
                     Message message = onlyMessage(sqs, queueUrl);

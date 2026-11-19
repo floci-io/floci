@@ -82,14 +82,6 @@ public class AwsServiceIntegrationMapper {
     }
 
     /**
-     * Whether a value is the whole {@code $request.path} or {@code ${request.path}} source, which resolves to a path
-     * and never to a JSON object.
-     */
-    public static boolean isWholeRequestPath(String value) {
-        return REQUEST_PATH.equals(value) || "${request.path}".equals(value);
-    }
-
-    /**
      * The first source expression in a parameter value that names no source the mapper reads, or null when there is
      * none. A value starting with {@code $} is one whole expression, {@code ${...}} marks an embedded one, and a
      * {@code $} anywhere else is static text. For a JSON parameter holding a JSON object, the expressions are those in
