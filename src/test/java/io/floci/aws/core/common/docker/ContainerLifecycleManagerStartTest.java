@@ -74,7 +74,7 @@ class ContainerLifecycleManagerStartTest {
 
     private ContainerLifecycleManager manager(DockerClient docker) {
         return new ContainerLifecycleManager(
-                docker, imageCacheService, containerDetector, config);
+                docker, docker, imageCacheService, containerDetector, config);
     }
 
     @Test

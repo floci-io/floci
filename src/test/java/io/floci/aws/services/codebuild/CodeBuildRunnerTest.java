@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CodeBuildRunnerTest {
@@ -47,6 +48,32 @@ class CodeBuildRunnerTest {
         assertTrue(result.failed());
         String expectedTail = "x".repeat(512 - "error: build step failed".length()) + "error: build step failed";
         assertEquals("Exit code 2: " + expectedTail, result.errorMessage());
+    }
+
+    // Catches: a timed-out phase leaving its exec's output stream open, so it held a streaming
+    // connection for as long as the command ran on.
+    @Test
+    @SuppressWarnings("unchecked")
+    void aPhaseThatTimesOutClosesItsOutputStream() throws Exception {
+        DockerClient dockerClient = mock(DockerClient.class);
+        DockerClient streamingDockerClient = mock(DockerClient.class);
+        ExecCreateCmd createCmd = mock(ExecCreateCmd.class, RETURNS_SELF);
+        ExecCreateCmdResponse createResponse = mock(ExecCreateCmdResponse.class);
+        when(createResponse.getId()).thenReturn("exec-1");
+        when(createCmd.exec()).thenReturn(createResponse);
+        when(dockerClient.execCreateCmd("container-1")).thenReturn(createCmd);
+        ExecStartCmd startCmd = mock(ExecStartCmd.class);
+        ResultCallback.Adapter<Frame> neverCompletes = mock(ResultCallback.Adapter.class);
+        when(startCmd.exec(any())).thenReturn(neverCompletes);
+        when(streamingDockerClient.execStartCmd("exec-1")).thenReturn(startCmd);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, streamingDockerClient, null, null, null, null, null,
+                null, null, null, null, null, null, null);
+
+        CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
+                List.of("./build.sh"), 0, new AtomicBoolean(false));
+
+        assertEquals("Phase timed out after 0 minutes", result.errorMessage());
+        verify(neverCompletes).close();
     }
 
     @Test

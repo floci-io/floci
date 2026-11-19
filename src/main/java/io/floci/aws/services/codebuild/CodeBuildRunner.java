@@ -727,6 +727,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
         String script = String.join("\n", commands);
         String[] cmd = {"sh", "-e", "-c", script};
 
+        Closeable phaseOutput = null;
         try {
             String execId = dockerClient.execCreateCmd(containerId)
                     .withCmd(cmd)
@@ -740,7 +741,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
             CountDownLatch latch = new CountDownLatch(1);
             OutputTail outputCapture = new OutputTail();
 
-            streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+            phaseOutput = streamingDockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
                 @Override
                 public void onNext(Frame frame) {
                     if (frame.getPayload() != null) {
@@ -755,6 +756,8 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
 
             boolean completed = latch.await(timeoutMinutes, TimeUnit.MINUTES);
             if (!completed) {
+                // Its output would otherwise hold a streaming connection for as long as the command runs on.
+                closePhaseOutput(phaseOutput);
                 return PhaseResult.ofFailure("Phase timed out after " + timeoutMinutes + " minutes");
             }
             if (stopFlag.get()) {
@@ -774,12 +777,24 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            closePhaseOutput(phaseOutput);
             return PhaseResult.ofStopped();
         } catch (Exception e) {
             if (stopFlag.get()) {
                 return PhaseResult.ofStopped();
             }
             return PhaseResult.ofFailure(e.getMessage());
+        }
+    }
+
+    private static void closePhaseOutput(Closeable phaseOutput) {
+        if (phaseOutput == null) {
+            return;
+        }
+        try {
+            phaseOutput.close();
+        } catch (IOException e) {
+            LOG.debugv(e, "Could not close a CodeBuild phase's output stream");
         }
     }
 

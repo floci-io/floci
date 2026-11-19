@@ -121,14 +121,6 @@ public class ContainerLifecycleManager {
                 RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
     }
 
-    /** For tests: one client serves as both the control-plane and the streaming client. */
-    public ContainerLifecycleManager(DockerClient dockerClient,
-                                     ImageCacheService imageCacheService,
-                                     ContainerDetector containerDetector,
-                                     EmulatorConfig config) {
-        this(dockerClient, imageCacheService, containerDetector, config, RetryingTarCopier.DEFAULT_BACKOFF_MS);
-    }
-
     ContainerLifecycleManager(DockerClient dockerClient,
                               ImageCacheService imageCacheService,
                               ContainerDetector containerDetector,

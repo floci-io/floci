@@ -605,7 +605,7 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     private ContainerLifecycleManager manager() {
-        return new ContainerLifecycleManager(dockerClient, imageCacheService, containerDetector, config);
+        return new ContainerLifecycleManager(dockerClient, dockerClient, imageCacheService, containerDetector, config);
     }
 
     private static ContainerSpec spec(String networkMode, Map<Integer, Integer> portBindings,
