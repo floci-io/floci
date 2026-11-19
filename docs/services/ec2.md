@@ -1328,6 +1328,21 @@ A repeated grant of the same permission to the same account answers the grant al
 AWS documents no duplicate error for it; this is Floci's choice. Grants are kept on the interface,
 so they go when it is deleted. `DeleteNetworkInterfacePermission` is not served.
 
+#### Interface and VPC endpoint IAM resources
+
+With IAM enforcement enabled, the generated request-resource catalog checks interface and VPC
+endpoint operations on their resource ARNs. Creating an interface also names its subnet and security
+groups; creating an endpoint also names its VPC, subnets, security groups and route tables.
+`ModifyVpcEndpoint` includes both added and removed resources. Tag requests recognize the interface
+ID prefix supplied by the pinned botocore model. Endpoint, attachment and endpoint-service IDs
+without a model-backed prefix remain checked on `*`.
+
+`DetachNetworkInterface` resolves the attachment's instance and interface in the caller's account
+and Region, then checks both resources. An attachment that cannot be resolved uses the caller's
+`instance/*` and `network-interface/*` resources for authorization before the service reports it
+missing. `DescribeNetworkInterfaces` and `DescribeNetworkInterfacePermissions` remain checked on
+`*`. These authorization checks do not establish cross-account guest-network attachment support.
+
 ### Volumes
 
 | Action | Description |

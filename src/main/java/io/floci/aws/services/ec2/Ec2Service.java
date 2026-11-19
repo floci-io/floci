@@ -17424,6 +17424,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return attachment;
     }
 
+    /** The endpoints of an attachment held in the caller's account and Region, without changing it. */
+    List<String> networkInterfaceAttachmentArns(String region, String attachmentId) {
+        if (attachmentId == null || attachmentId.isBlank()) {
+            return List.of();
+        }
+        String account = callerAccountId();
+        synchronized (attachmentTopologyLock(region)) {
+            List<NetworkInterface> interfaces =
+                    networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware
+                    ? aware.scanForAccount(account, k -> k.startsWith(region + "::"))
+                    : networkInterfaces.scan(k -> k.startsWith(region + "::"));
+            NetworkInterface attached = interfaces.stream()
+                    .filter(ni -> ni.getAttachment() != null && attachmentId.equals(ni.getAttachment().getAttachmentId()))
+                    .findFirst().orElse(null);
+            if (attached == null) {
+                return List.of();
+            }
+            String instanceId = attached.getAttachment().getInstanceId();
+            String interfaceId = attached.getNetworkInterfaceId();
+            return List.of(AwsArnUtils.Arn.of("ec2", region, account,
+                            "instance/" + (instanceId == null ? "*" : instanceId)).toString(),
+                    AwsArnUtils.Arn.of("ec2", region, account, "network-interface/" + interfaceId).toString());
+        }
+    }
+
     /** Detaches a standalone ENI by attachment id, floci-kt9. */
     public NetworkInterfaceAttachment detachNetworkInterface(String region, String attachmentId, boolean force) {
         if (attachmentId == null || attachmentId.isBlank()) {

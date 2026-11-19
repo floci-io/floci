@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ListNetworksCmd;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.PaginatedResult;
@@ -135,6 +136,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -663,6 +665,59 @@ class Ec2ServiceTest {
         return service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1, null, List.of(), null, null,
                 List.of(), null, null, null, null, 0, null, null, null, null, false, null, null,
                 List.of(data), false, null, null);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "us-gov-west-1", "cn-north-1"})
+    void attachmentArnLookupStaysInTheCallerAccountAndRegion(String region) {
+        String owner = "000000000000";
+        String other = "111111111111";
+        AccountAwareStorageBackend<NetworkInterface> interfaces = AccountAwareStorageBackend.inMemory(owner);
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-network-interfaces.json", interfaces))));
+        NetworkInterface eni = new NetworkInterface();
+        eni.setNetworkInterfaceId("eni-11111111");
+        eni.setOwnerId(owner);
+        NetworkInterfaceAttachment attachment = new NetworkInterfaceAttachment();
+        attachment.setAttachmentId("eni-attach-11111111");
+        attachment.setInstanceId("i-11111111");
+        eni.setAttachment(attachment);
+        interfaces.putForAccount(owner, region + "::" + eni.getNetworkInterfaceId(), eni);
+        Ec2StoredResourceArns stored = new Ec2StoredResourceArns(service);
+
+        assertEquals(attachmentArns(region, owner, "i-11111111", "eni-11111111"),
+                service.networkInterfaceAttachmentArns(region, attachment.getAttachmentId()));
+        assertEquals(Optional.of(attachmentArns(region, owner, "i-11111111", "eni-11111111").getFirst()),
+                stored.findByMembers("instance", List.of(attachment.getAttachmentId()), region));
+        assertEquals(Optional.of(attachmentArns(region, owner, "i-11111111", "eni-11111111").getLast()),
+                stored.findByMembers("network-interface", List.of(attachment.getAttachmentId()), region));
+        assertTrue(stored.findByMembers("instance", List.of("eni-attach-missing"), region).isEmpty());
+        assertTrue(stored.findByMembers("instance", List.of(), region).isEmpty());
+        assertSame(attachment, eni.getAttachment(), "authorization lookup must not detach the interface");
+        assertEquals(List.of(),
+                service.networkInterfaceAttachmentArns("eu-west-1", attachment.getAttachmentId()));
+        assertEquals(List.of(),
+                service.networkInterfaceAttachmentArns(region, "eni-attach-missing"));
+        doReturn(other).when(service).callerAccountId();
+        assertEquals(List.of(),
+                service.networkInterfaceAttachmentArns(region, attachment.getAttachmentId()));
+        assertTrue(stored.findByMembers("instance", List.of(attachment.getAttachmentId()), region).isEmpty());
+        assertTrue(stored.findByMembers("network-interface", List.of(attachment.getAttachmentId()), region).isEmpty());
+        assertTrue(stored.through("UnrelatedId", attachment.getAttachmentId(), region).isEmpty());
+        assertTrue(service.networkInterfaceAttachmentArns(region, null).isEmpty());
+        assertTrue(service.networkInterfaceAttachmentArns(region, "  ").isEmpty());
+        doReturn(owner).when(service).callerAccountId();
+        eni.setAttachment(null);
+        interfaces.putForAccount(owner, region + "::" + eni.getNetworkInterfaceId(), eni);
+        assertEquals(List.of(),
+                service.networkInterfaceAttachmentArns(region, attachment.getAttachmentId()));
+    }
+
+    private static List<String> attachmentArns(String region, String account, String instance, String eni) {
+        return List.of(AwsArnUtils.Arn.of("ec2", region, account, "instance/" + instance).toString(),
+                AwsArnUtils.Arn.of("ec2", region, account, "network-interface/" + eni).toString());
     }
 
     @ParameterizedTest
