@@ -47,7 +47,7 @@ import java.util.regex.Pattern;
  * {@link SecureRandom} (no static instance, so no native-image run-time-init registration).
  *
  * <p>Tag validation is a shared cross-resource concern, so {@code createTemplate} calls
- * {@link SesTags#validate} rather than depending back on the facade.
+ * {@link SesTags} rather than depending back on the facade.
  */
 @ApplicationScoped
 public class SesTemplateService implements SesTaggable {
@@ -87,9 +87,13 @@ public class SesTemplateService implements SesTaggable {
     }
 
     public EmailTemplate createTemplate(EmailTemplate template, String region, String accountId) {
+        requirePresent(template);
+        // SES checks the tags before the template itself, except for a reserved key, which it
+        // refuses after the template, before it looks the name up, and in words of its own.
+        SesTags.validateIgnoringSystemKeys(template.getTags());
         validateTemplate(template);
         dropEmptyParts(template);
-        SesTags.validate(template.getTags());
+        SesTags.requireNoSystemKeys(template.getTags(), "Invalid tags");
         String key = templateKey(region, template.getTemplateName());
         if (templateStore.get(key).isPresent()) {
             throw new AwsException("AlreadyExists",
@@ -181,10 +185,14 @@ public class SesTemplateService implements SesTaggable {
         templateStore.put(templateKey(region, template.getTemplateName()), template);
     }
 
-    private static void validateTemplate(EmailTemplate template) {
+    private static void requirePresent(EmailTemplate template) {
         if (template == null) {
             throw new AwsException("InvalidTemplate", "Template is required.", 400);
         }
+    }
+
+    private static void validateTemplate(EmailTemplate template) {
+        requirePresent(template);
         validateTemplateName(template.getTemplateName());
         // SES asks for the subject first, then for a part, and a blank value counts as missing.
         if (template.getSubject() == null || template.getSubject().isBlank()) {

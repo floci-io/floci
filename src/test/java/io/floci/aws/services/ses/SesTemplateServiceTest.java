@@ -122,6 +122,54 @@ class SesTemplateServiceTest {
                 Arguments.of(" ", ""));
     }
 
+    private static EmailTemplate tagged(String name, String subject, String text, String tagKey) {
+        EmailTemplate template = new EmailTemplate(name, subject, text, null);
+        template.setTags(List.of(new Tag(tagKey, "v")));
+        return template;
+    }
+
+    // probed: a malformed tag is refused before the name and the content
+    @Test
+    void create_checksTagsBeforeTheNameAndTheContent() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged(" ", null, null, "bad!key"), REGION, ACCOUNT));
+        assertEquals("Tags can only contain letters, numbers, spaces, and the following special characters: "
+                + "_ . : / = + - @", e.getMessage());
+    }
+
+    // probed: a reserved key waits for the content
+    @Test
+    void create_checksTheContentBeforeAReservedTagKey() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged("reserved", "S", null, "aws:x"), REGION, ACCOUNT));
+        assertEquals("Template must specify at least one of the parts.", e.getMessage());
+    }
+
+    // probed: the template operation words a reserved key its own way and stores nothing
+    @Test
+    void create_refusesAReservedTagKeyAsInvalidTags() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged("reserved", "S", "t", "aws:x"), REGION, ACCOUNT));
+        assertEquals("BadRequestException", e.getErrorCode());
+        assertEquals("Invalid tags", e.getMessage());
+        assertTrue(service.find("reserved", REGION).isEmpty());
+    }
+
+    // probed: a reserved key is refused before the name is looked up
+    @Test
+    void create_refusesAReservedTagKeyBeforeAnExistingName() {
+        service.createTemplate(template("stored"), REGION, ACCOUNT);
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createTemplate(tagged("stored", "S", "t", "aws:x"), REGION, ACCOUNT));
+        assertEquals("Invalid tags", e.getMessage());
+    }
+
+    @Test
+    void create_refusesANullTemplate() {
+        AwsException e = assertThrows(AwsException.class, () -> service.createTemplate(null, REGION, ACCOUNT));
+        assertEquals("Template is required.", e.getMessage());
+    }
+
     // probed: the content is checked before the name is looked up, on both operations
     @Test
     void contentIsCheckedBeforeTheTemplateIsLookedUp() {
