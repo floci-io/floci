@@ -967,6 +967,46 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":" + tags + "}").post("/").then().statusCode(200);
     }
 
+    /**
+     * An SQS request is checked on the queue its QueueUrl reaches, over the Query and the JSON protocol alike, so a
+     * grant on one queue's ARN does not reach another; and an {@code aws:ResourceTag} condition reads the tags SQS
+     * holds on that queue, as TagQueue leaves them.
+     */
+    @Test
+    void anSqsRequestIsCheckedOnTheQueueItsUrlReachesWithItsTags() {
+        String tagged = sqsQueue("res-queue-" + suffix());
+        String other = sqsQueue("res-queue-" + suffix());
+        admin("sqs").formParam("Action", "TagQueue").formParam("QueueUrl", tagged).formParam("Tag.1.Key", "team")
+                .formParam("Tag.1.Value", "data").post("/").then().statusCode(200);
+        String queues = "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":";
+
+        User user = user("res-queue");
+        user.policy(allowOn("sqs:SendMessage", queues + tagged.substring(tagged.lastIndexOf('/') + 1)) + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"sqs:GetQueueAttributes\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        user.query("sqs", "SendMessage").formParam("QueueUrl", tagged).formParam("MessageBody", "x").post("/").then()
+                .statusCode(200);
+        refused(user.query("sqs", "SendMessage").formParam("QueueUrl", other).formParam("MessageBody", "x")
+                .post("/").then(), "sqs:SendMessage");
+        refusedJson(user.json("sqs", "AmazonSQS.SendMessage", "1.0").body("{\"QueueUrl\":\"" + other
+                + "\",\"MessageBody\":\"x\"}").post("/").then(), "sqs:SendMessage");
+        user.json("sqs", "AmazonSQS.GetQueueAttributes", "1.0").body("{\"QueueUrl\":\"" + tagged + "\"}").post("/")
+                .then().statusCode(200);
+        refusedJson(user.json("sqs", "AmazonSQS.GetQueueAttributes", "1.0").body("{\"QueueUrl\":\"" + other + "\"}")
+                .post("/").then(), "sqs:GetQueueAttributes");
+        refused(user.query("sqs", "GetQueueAttributes").formParam("QueueUrl", other).post("/").then(),
+                "sqs:GetQueueAttributes");
+    }
+
+    /** An SQS queue an administrator creates, deleted after the test; its URL. */
+    private String sqsQueue(String name) {
+        String url = admin("sqs").formParam("Action", "CreateQueue").formParam("QueueName", name).post("/").then()
+                .statusCode(200).extract().path("CreateQueueResponse.CreateQueueResult.QueueUrl");
+        cleanup.register(() -> admin("sqs").formParam("Action", "DeleteQueue").formParam("QueueUrl", url).post("/")
+                .then().statusCode(200));
+        return url;
+    }
+
     @Test
     void aCloudMapNamespaceAndServiceAreCheckedOnTheArnsTheirIdsGive() {
         String namespaceId = cloudMapNamespace("res-ns-" + suffix());

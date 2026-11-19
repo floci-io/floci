@@ -24,6 +24,9 @@ import io.floci.aws.services.iam.model.ServerCertificate;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.lambda.LambdaStoredResourceArns;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
+import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.services.sqs.SqsServiceFactory;
+import io.floci.aws.services.sqs.SqsStoredResourceArns;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -1080,15 +1083,6 @@ class ResourceArnBuilderTest {
         return builder.buildStsResources(action, ctx).getFirst();
     }
 
-    @Test
-    void sqsBuildsArnFromFormBodyQueueUrl() {
-        // The handler acts on the body's QueueUrl, so a decoy in the query string must not be checked.
-        queryParams.add("QueueUrl", "http://localhost:4566/000000000000/allowed");
-        setFormBody("Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Forders&MessageBody=x");
-        String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:sqs:us-east-1:000000000000:orders", arn);
-    }
-
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
 
@@ -1794,24 +1788,99 @@ class ResourceArnBuilderTest {
 
     // ── SQS ─────────────────────────────────────────────────────────────────────
 
+    /** A builder reading what an in-memory SQS holds, its queues in {@code account}. */
+    private static ResourceArnBuilder sqsHolding(String account, String... queues) {
+        SqsService sqs = SqsServiceFactory.createInMemory("http://localhost:4566",
+                new RegionResolver("us-east-1", account));
+        for (String queue : queues) {
+            sqs.createQueue(queue, Map.of(), "us-east-1");
+        }
+        return reading(new SqsStoredResourceArns(sqs, new RegionResolver("us-east-1", ACCOUNT)));
+    }
+
+    /**
+     * A Query request is checked on the queue its body's QueueUrl reaches, which SQS finds as its handlers do; the
+     * handler acts on the body's QueueUrl, so a decoy in the query string is not checked.
+     */
     @Test
-    void sqsNamesTheAccountTheQueueUrlNames() {
-        queryParams.putSingle("QueueUrl", "http://localhost:4566/111122223333/orders");
-        assertEquals("arn:aws:sqs:us-east-1:111122223333:orders", builder.build("sqs", ctx, "us-east-1", "000000000000"));
+    void sqsChecksTheQueueAFormBodysQueueUrlReaches() {
+        ResourceArnBuilder builder = sqsHolding(ACCOUNT, "orders", "allowed");
+        queryParams.add("QueueUrl", "http://localhost:4566/000000000000/allowed");
+        setFormBody("Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F000000000000%2Forders&MessageBody=x");
+        assertEquals(List.of("arn:aws:sqs:us-east-1:000000000000:orders"),
+                builder.buildResources("sqs", "sqs:SendMessage", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     @Test
-    void sqsBuildsArnFromJsonQueueName() {
+    void sqsChecksTheQueueAJsonBodysQueueUrlReaches() {
+        ResourceArnBuilder builder = sqsHolding(ACCOUNT, "my-queue");
+        setJsonBody("{\"QueueUrl\":\"http://localhost:4566/000000000000/my-queue\"}");
+        assertEquals(List.of("arn:aws:sqs:us-east-1:000000000000:my-queue"),
+                builder.buildResources("sqs", "sqs:GetQueueAttributes", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /** A queue URL naming another account reaches the queue that account holds, as the handlers find it. */
+    @Test
+    void sqsChecksTheQueueOfTheAccountItsUrlNames() {
+        ResourceArnBuilder builder = sqsHolding("111122223333", "orders");
+        setJsonBody("{\"QueueUrl\":\"http://localhost:4566/111122223333/orders\"}");
+        assertEquals(List.of("arn:aws:sqs:us-east-1:111122223333:orders"),
+                builder.buildResources("sqs", "sqs:SendMessage", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /** A URL reaching no queue leaves the queue's name open. */
+    @Test
+    void sqsChecksAnOpenQueueForAUrlReachingNone() {
+        ResourceArnBuilder builder = sqsHolding(ACCOUNT);
+        setJsonBody("{\"QueueUrl\":\"http://localhost:4566/000000000000/gone\"}");
+        assertEquals(List.of("arn:aws:sqs:us-east-1:000000000000:*"),
+                builder.buildResources("sqs", "sqs:SendMessage", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /** ListDeadLetterSourceQueues is checked on the dead-letter queue its QueueUrl reaches. */
+    @Test
+    void sqsChecksTheDeadLetterQueueItsUrlReaches() {
+        ResourceArnBuilder builder = sqsHolding(ACCOUNT, "orders-dlq");
+        setJsonBody("{\"QueueUrl\":\"http://localhost:4566/000000000000/orders-dlq\"}");
+        assertEquals(List.of("arn:aws:sqs:us-east-1:000000000000:orders-dlq"),
+                builder.buildResources("sqs", "sqs:ListDeadLetterSourceQueues", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    @Test
+    void sqsChecksANewQueueOnItsName() {
+        ResourceArnBuilder builder = sqsHolding(ACCOUNT);
         setJsonBody("{\"QueueName\":\"order-queue\"}");
-        String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:sqs:us-east-1:000000000000:order-queue", arn);
+        assertEquals(List.of("arn:aws:sqs:us-east-1:000000000000:order-queue"),
+                builder.buildResources("sqs", "sqs:CreateQueue", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    /**
+     * StartMessageMoveTask is checked for its own action on each queue ARN it carries, a named destination included,
+     * and on the dead-letter queue alone when it names none.
+     */
     @Test
-    void sqsBuildsArnFromQueryParam() {
-        queryParams.putSingle("QueueUrl", "http://localhost:4566/000000000000/my-queue");
-        String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:sqs:us-east-1:000000000000:my-queue", arn);
+    void sqsChecksAMoveTaskOnTheQueueArnsItCarries() {
+        ResourceArnBuilder builder = sqsHolding(ACCOUNT, "orders-dlq", "orders");
+        String dlq = "arn:aws:sqs:us-east-1:000000000000:orders-dlq";
+        String destination = "arn:aws:sqs:us-east-1:000000000000:orders";
+        setJsonBody("{\"SourceArn\":\"" + dlq + "\",\"DestinationArn\":\"" + destination + "\"}");
+        assertEquals(List.of(destination, dlq),
+                builder.buildResources("sqs", "sqs:StartMessageMoveTask", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"SourceArn\":\"" + dlq + "\"}");
+        assertEquals(List.of(dlq),
+                builder.buildResources("sqs", "sqs:StartMessageMoveTask", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * CancelMessageMoveTask names its task only by its TaskHandle, which names no queue, so it is checked on every
+     * resource, and a grant scoped to a queue, or to the account's queues, does not allow it.
+     */
+    @Test
+    void sqsChecksACancelledMoveTaskOnEveryResource() {
+        ResourceArnBuilder builder = sqsHolding(ACCOUNT, "orders-dlq");
+        setJsonBody("{\"TaskHandle\":\"eyJ0YXNrSWQiOiJ0In0=\"}");
+        assertEquals(List.of("*"),
+                builder.buildResources("sqs", "sqs:CancelMessageMoveTask", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── SNS ─────────────────────────────────────────────────────────────────────
