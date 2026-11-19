@@ -159,7 +159,7 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. DSQL ARNs are minted in {@code partition}, the request's, as
+     * The resources a request is checked against. API Gateway ARNs are minted in {@code partition}, the request's, as
      * that service mints its own, so a Region no partition publishes gets the deployment's partition rather than
      * {@code aws}.
      */
@@ -188,7 +188,6 @@ public class ResourceArnBuilder {
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
-            case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
@@ -935,29 +934,6 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resource of an Aurora DSQL route, as the Service Authorization Reference names it: the cluster
-     * a cluster route names, the stream a stream route names (its cluster, to create or list streams), or
-     * the ARN a tagging route names. CreateCluster and ListClusters are checked against
-     * {@code cluster/*}, as DSQL checks them (measured).
-     */
-    private String buildDsqlArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                String partition) {
-        String cluster = "/cluster".equals(path) ? "*" : segmentAfterPrefix(path, "/cluster/");
-        if (cluster == null) {
-            cluster = segmentAfterPrefix(path, "/clusters/");
-        }
-        String streamCluster = segmentAfterPrefix(path, "/stream/");
-        if (streamCluster != null) {
-            String stream = segmentAfterPrefix(path, "/stream/" + streamCluster + "/");
-            cluster = stream == null ? streamCluster : streamCluster + "/stream/" + stream;
-        }
-        if (cluster != null) {
-            return new AwsArnUtils.Arn(partition, "dsql", region, accountId, "cluster/" + cluster).toString();
-        }
-        return taggedResource(ctx);
-    }
-
-    /**
      * API Gateway authorizes a management call as its HTTP method on the path it names, in the Region serving
      * it and with no account: {@code GET /restapis/abc/stages} acts on
      * {@code arn:<partition>:apigateway:<region>::/restapis/abc/stages}. The path is read as the router reads
@@ -1117,12 +1093,6 @@ public class ResourceArnBuilder {
                 .filter(arn -> region.equals(AwsArnUtils.regionOrDefault(arn, null)));
     }
 
-    /** The ARN a shared tagging route names, or {@code *} for any other route. */
-    private String taggedResource(ContainerRequestContext ctx) {
-        String arn = taggedArn(ctx);
-        return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
-    }
-
     /**
      * The ARN a shared tagging route acts on, read where its controller reads it: after {@code /tags/} or
      * {@code /v1/tags/} in the path; on {@code POST /tags}, the body's {@code resourceArn}; and on the other
@@ -1156,17 +1126,6 @@ public class ResourceArnBuilder {
         } catch (IllegalArgumentException e) {
             return raw;
         }
-    }
-
-    /** The path segment right after {@code prefix}, or null when the path doesn't start with it or names none. */
-    private static String segmentAfterPrefix(String path, String prefix) {
-        if (!path.startsWith(prefix)) {
-            return null;
-        }
-        String rest = path.substring(prefix.length());
-        int slash = rest.indexOf('/');
-        String segment = slash < 0 ? rest : rest.substring(0, slash);
-        return segment.isEmpty() ? null : segment;
     }
 
     // ── Bedrock ──────────────────────────────────────────────────────────────────
