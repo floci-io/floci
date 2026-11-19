@@ -40,6 +40,7 @@ import static io.floci.aws.testing.AlbFixtures.deleteListener;
 import static io.floci.aws.testing.AlbFixtures.deleteLoadBalancer;
 import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
+import static io.floci.aws.testing.AlbFixtures.withHealthCheck;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
@@ -73,7 +74,7 @@ class ElbV2ForwardedHeadersIntegrationTest {
     @BeforeEach
     void startBackend() throws Exception {
         backend = vertx.createHttpServer()
-                .requestHandler(request -> {
+                .requestHandler(withHealthCheck(request -> {
                     if ("websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         handshake.complete(MultiMap.caseInsensitiveMultiMap().addAll(request.headers()));
                         request.toWebSocket();
@@ -85,7 +86,7 @@ class ElbV2ForwardedHeadersIntegrationTest {
                             .putHeader("X-Seen-Proto", String.valueOf(request.getHeader("X-Forwarded-Proto")))
                             .putHeader("X-Seen-Port", String.valueOf(request.getHeader("X-Forwarded-Port")))
                             .end("ok");
-                })
+                }))
                 .listen(0, "127.0.0.1")
                 .toCompletionStage()
                 .toCompletableFuture()

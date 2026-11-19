@@ -34,6 +34,7 @@ import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.exchange;
 import static io.floci.aws.testing.AlbFixtures.forwardDefaultActionTo;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
+import static io.floci.aws.testing.AlbFixtures.withHealthCheck;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.anyOf;
@@ -69,7 +70,7 @@ class ElbV2WebSocketIntegrationTest {
     @BeforeEach
     void startBackend() throws Exception {
         backend = vertx.createHttpServer()
-                .requestHandler(request -> {
+                .requestHandler(withHealthCheck(request -> {
                     if (!"websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         request.response().setStatusCode(400).end("not an upgrade");
                     } else if (request.path().startsWith("/broken/")) {
@@ -89,7 +90,7 @@ class ElbV2WebSocketIntegrationTest {
                         request.toWebSocket().onSuccess(socket -> socket.textMessageHandler(
                                 text -> socket.writeTextMessage(query + ":" + text)));
                     }
-                })
+                }))
                 .listen(0, "127.0.0.1")
                 .toCompletionStage()
                 .toCompletableFuture()

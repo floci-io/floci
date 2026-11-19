@@ -38,6 +38,7 @@ import static io.floci.aws.testing.AlbFixtures.deleteLoadBalancer;
 import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.loadBalancerDnsName;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
+import static io.floci.aws.testing.AlbFixtures.withHealthCheck;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
@@ -57,7 +58,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
 
     @Test
     void preservesRepeatedTargetResponseHeaders() throws Exception {
-        HttpServer backend = vertx.createHttpServer().requestHandler(request -> {
+        HttpServer backend = vertx.createHttpServer().requestHandler(withHealthCheck(request -> {
             request.response().headers()
                     .add("Set-Cookie", "a=1; Path=/")
                     .add("Set-Cookie", "b=2; Path=/")
@@ -66,7 +67,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                     .add("X-Multi", "two")
                     .add("Keep-Alive", "timeout=5");
             request.response().end("ok");
-        }).listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        })).listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
         String loadBalancerArn = null;
         String targetGroupArn = null;
         String listenerArn = null;
@@ -97,7 +98,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         HttpServer backend = vertx.createHttpServer(new HttpServerOptions()
                         .setMaxHeaderSize(ElbV2DataPlane.MAX_REQUEST_HEADER_SIZE)
                         .setMaxInitialLineLength(ElbV2DataPlane.MAX_REQUEST_LINE_LENGTH))
-                .requestHandler(request -> {
+                .requestHandler(withHealthCheck(request -> {
                     if ("/stream".equals(request.path())) {
                         request.body().onSuccess(body -> {
                             request.response()
@@ -117,7 +118,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                     } else {
                         request.response().end(request.getHeader("Host"));
                     }
-                })
+                }))
                 .listen(0, "127.0.0.1")
                 .toCompletionStage()
                 .toCompletableFuture()
@@ -150,7 +151,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
     @Test
     void drainsRequestWhenTargetConnectionFails() throws Exception {
         HttpServer backend = vertx.createHttpServer()
-                .requestHandler(request -> request.response().end("healthy"))
+                .requestHandler(withHealthCheck(request -> request.response().end("healthy")))
                 .listen(0, "127.0.0.1")
                 .toCompletionStage()
                 .toCompletableFuture()
@@ -164,7 +165,6 @@ class ElbV2PreserveHostHeaderIntegrationTest {
             loadBalancerArn = createLoadBalancer("preserve-host-header-lb");
             targetGroupArn = createTargetGroup("preserve-host-header-tg", "ip", backend.actualPort());
             registerTarget(targetGroupArn, "127.0.0.1", failedPort);
-            registerTarget(targetGroupArn, "127.0.0.1", backend.actualPort());
             listenerArn = createListener(loadBalancerArn, targetGroupArn, LISTENER_PORT);
 
             String host = loadBalancerDnsName(loadBalancerArn);
@@ -181,6 +181,14 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                 BufferedReader input = new BufferedReader(
                         new InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
                 assertEquals(502, readStatus(input));
+
+                given().formParam("Action", "DeregisterTargets")
+                        .formParam("TargetGroupArn", targetGroupArn)
+                        .formParam("Targets.member.1.Id", "127.0.0.1")
+                        .formParam("Targets.member.1.Port", failedPort)
+                        .header("Authorization", AUTH)
+                        .post("/").then().statusCode(200);
+                registerTarget(targetGroupArn, "127.0.0.1", backend.actualPort());
 
                 output.write(("GET /healthy HTTP/1.1\r\n"
                         + "Host: " + host + "\r\n"
