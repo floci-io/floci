@@ -1,6 +1,7 @@
 package io.floci.aws.services.s3;
 
-import io.floci.aws.services.s3.EventStreamMessages.Message;
+import io.floci.aws.testing.EventStreamMessages;
+import io.floci.aws.testing.EventStreamMessages.Message;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
