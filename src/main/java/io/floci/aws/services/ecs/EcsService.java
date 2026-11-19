@@ -3162,7 +3162,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     svc.getServiceConnectConfiguration(), svc.getServiceConnectNamespaceArn(), List.of(), region,
                     "ClientException"));
             if ("CODE_DEPLOY".equals(controller)) {
-                createInitialTaskSet(svc, cluster, region);
+                try {
+                    createInitialTaskSet(svc, cluster, region);
+                } catch (RuntimeException e) {
+                    // The service isn't stored, so neither are the endpoints just made for it.
+                    if (discoveryRegistrar != null) {
+                        discoveryRegistrar.deleteServiceConnectServices(svc.getServiceConnectResources());
+                    }
+                    throw e;
+                }
             }
             services.put(key, svc);
             cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);

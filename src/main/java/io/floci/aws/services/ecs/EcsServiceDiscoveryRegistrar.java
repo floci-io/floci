@@ -30,6 +30,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -62,6 +63,8 @@ public class EcsServiceDiscoveryRegistrar {
     // namespace ARN → held while a service's Service Connect discovery names are checked and taken
     private final StripedLocks serviceConnectNamespaceLocks = new StripedLocks(256);
 
+    /** The most characters a label of a Cloud Map service name holds. */
+    private static final int MAX_LABEL = 63;
     /** The tag ECS puts on the Cloud Map services it creates for Service Connect (measured on AWS). */
     static final String ECS_MANAGED_TAG = "AmazonECSManaged";
     /** A discovery name ECS takes: up to 64 lowercase letters, numbers, underscores and hyphens, no hyphen first. */
@@ -256,13 +259,15 @@ public class EcsServiceDiscoveryRegistrar {
      * The names of the Cloud Map services a Service Connect configuration gives the service {@code serviceArn},
      * in its order: each {@code services[]} entry's {@code discoveryName}, or its {@code portName} when it has
      * none, and for a client configuration, with no entries, the one Cloud Map service ECS creates for the
-     * client ({@link #clientDiscoveryName}). None for a configuration that leaves Service Connect off.
+     * client ({@link #clientDiscoveryName}). None for a configuration that leaves Service Connect off, and none for
+     * an entry without a name.
      */
     public static List<String> discoveryNames(Map<String, Object> configuration, String serviceArn) {
         if (configuration == null || !Boolean.TRUE.equals(configuration.get("enabled"))) {
             return List.of();
         }
         List<String> names = new ArrayList<>();
+        boolean client = !(configuration.get("services") instanceof List<?> listed) || listed.isEmpty();
         if (configuration.get("services") instanceof List<?> services) {
             for (Object entry : services) {
                 if (entry instanceof Map<?, ?> service) {
@@ -274,18 +279,20 @@ public class EcsServiceDiscoveryRegistrar {
                 }
             }
         }
-        return names.isEmpty() && serviceArn != null ? List.of(clientDiscoveryName(serviceArn)) : names;
+        return client && serviceArn != null ? List.of(clientDiscoveryName(serviceArn)) : names;
     }
 
     /**
      * The Cloud Map service ECS creates for a Service Connect client, which offers no endpoint:
-     * {@code aws-ecs-sc.client.<UUID>.<service name>}, as measured on AWS. How AWS derives the UUID isn't
-     * documented (it is none of the name-based UUIDs of the service's ARN or names); Floci derives one from
-     * the service's ARN, so the service keeps it across updates.
+     * {@code aws-ecs-sc.client.<UUID>.<service name>}, the service name cut to its first 63 characters, a Cloud
+     * Map label's most, as measured on AWS. How AWS derives the UUID isn't documented (it is none of the
+     * name-based UUIDs of the service's ARN or names); Floci derives one from the service's ARN, so the service
+     * keeps it across updates, as on AWS.
      */
     static String clientDiscoveryName(String serviceArn) {
+        String serviceName = serviceArn.substring(serviceArn.lastIndexOf('/') + 1);
         return "aws-ecs-sc.client." + UUID.nameUUIDFromBytes(serviceArn.getBytes(StandardCharsets.UTF_8)) + "."
-                + serviceArn.substring(serviceArn.lastIndexOf('/') + 1);
+                + serviceName.substring(0, Math.min(serviceName.length(), MAX_LABEL));
     }
 
     /**
@@ -305,10 +312,18 @@ public class EcsServiceDiscoveryRegistrar {
                 throw new AwsException(errorCode, INVALID_DISCOVERY_NAME, 400);
             }
         }
+        refuseRepeatedNames(discoveryNames(configuration, null), false, errorCode);
+    }
+
+    /**
+     * Refuses names a configuration gives more than once, with ECS's message (measured on AWS); compared without
+     * case when {@code ignoreCase}, as a DNS namespace's Cloud Map compares them.
+     */
+    private static void refuseRepeatedNames(List<String> names, boolean ignoreCase, String errorCode) {
         Set<String> seen = new HashSet<>();
         Set<String> twice = new LinkedHashSet<>();
-        for (String name : discoveryNames(configuration, null)) {
-            if (!seen.add(name)) {
+        for (String name : names) {
+            if (!seen.add(ignoreCase ? name.toLowerCase(Locale.ROOT) : name)) {
                 twice.add(name);
             }
         }
@@ -374,12 +389,21 @@ public class EcsServiceDiscoveryRegistrar {
         List<ServiceConnectServiceResource> resources = new ArrayList<>();
         if (namespace != null && !discoveryNames.isEmpty()) {
             synchronized (serviceConnectNamespaceLocks.lockFor(namespace.getArn())) {
+                // A portName, which the naming rule doesn't hold to lowercase, can repeat a name in a case of its own.
+                refuseRepeatedNames(discoveryNames, CloudMapService.isDnsNamespace(namespace), errorCode);
                 checkDiscoveryNames(current, discoveryNames, namespace, region, errorCode);
+                Set<String> own = new HashSet<>();
+                current.forEach(resource -> own.add(resource.discoveryArn()));
                 List<ServiceConnectServiceResource> created = new ArrayList<>();
                 for (String name : discoveryNames) {
-                    // The check let through only a name that is free or held by one of current's.
                     Service existing = cloudMapService.findServiceByName(name, namespace.getId(), region)
                             .orElse(null);
+                    if (existing != null && !own.contains(existing.getArn())) {
+                        // The check let through only a name that was free or this service's own: a Cloud Map
+                        // CreateService took it since, and that service isn't ECS's to take over or delete.
+                        deleteServiceConnectServices(created);
+                        throw nameTaken(existing, namespace, errorCode);
+                    }
                     if (existing == null) {
                         try {
                             existing = cloudMapService.createService(name, namespace.getId(), null,

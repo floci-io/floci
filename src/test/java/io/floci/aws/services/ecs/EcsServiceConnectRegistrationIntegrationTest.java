@@ -52,6 +52,10 @@ class EcsServiceConnectRegistrationIntegrationTest {
     private static final Region REGION = Region.US_EAST_1;
     private static final String CLUSTER = "shop-cluster";
     private static final String FAMILY = "shop";
+    /**
+     * AWS's text as measured, kept apart from the registrar's copy on purpose: the test checks Floci's answer
+     * against AWS's, which checking it against Floci's own constant would not.
+     */
     private static final String INVALID_NAME = "The discovery name that you provided is invalid. This must be "
             + "unique within the AWS Cloud Map namespace. Up to 64 characters are allowed. The characters can "
             + "include lowercase letters, numbers, underscores (_), and hyphens (-). A hyphen can\u2019t be the "
@@ -166,6 +170,13 @@ class EcsServiceConnectRegistrationIntegrationTest {
 
         update("client-svc", connect(endpoint("http", "web", 80)));
         assertEquals(List.of("web"), List.copyOf(cloudMapServices().keySet()), "an endpoint replaces the client's");
+
+        // A Cloud Map label holds 63 characters, and AWS keeps the first 63 of a longer service name.
+        String longName = "c" + "x".repeat(69);
+        Service longClient = createService(longName);
+        String longClientName = longClient.deployments().getFirst().serviceConnectResources().getFirst()
+                .discoveryName();
+        assertEquals(longName.substring(0, 63), longClientName.substring(longClientName.lastIndexOf('.') + 1));
     }
 
     @Test
@@ -283,6 +294,14 @@ class EcsServiceConnectRegistrationIntegrationTest {
                 .serviceConnectConfiguration(ServiceConnectConfiguration.builder().enabled(true)
                         .namespace("shop.example").services(endpoint("http", "web", 80)).build())))
                 .awsErrorDetails().errorMessage().matches(CLOUD_MAP_SERVICE_EXISTS));
+        assertEquals(List.of("Web"), List.copyOf(cloudMapServices(dnsNamespace).keySet()));
+
+        // A portName isn't held to lowercase, so it can repeat a discoveryName in a case of its own.
+        assertRefused("ClientException", "The following discoveryNames are defined more than once: [Admin].",
+                () -> ecs.createService(r -> r.cluster(CLUSTER).serviceName("twice-svc").taskDefinition(FAMILY)
+                        .desiredCount(0).serviceConnectConfiguration(ServiceConnectConfiguration.builder()
+                                .enabled(true).namespace("shop.example")
+                                .services(endpoint("http", "admin", 80), endpoint("Admin", null, 81)).build())));
         assertEquals(List.of("Web"), List.copyOf(cloudMapServices(dnsNamespace).keySet()));
     }
 
