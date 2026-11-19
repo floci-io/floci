@@ -96,6 +96,21 @@ class ElbClassicServiceTest {
                 List.of(), List.of("subnet-a"), List.of("sg-1"), null, Map.of());
     }
 
+    /**
+     * IAM's lookup reads the tags of the load balancer of that name only when it records the account asked for, as a
+     * service without storage holds every account's load balancers in one map.
+     */
+    @Test
+    void tagsInAccountReadOnlyTheLoadBalancerOfThatAccount() {
+        ClassicLoadBalancer lb = service.createLoadBalancer(REGION, "tagged", List.of(httpListener()),
+                List.of(), List.of("subnet-a"), List.of("sg-1"), null, Map.of("team", "data"));
+        lb.setAccountId("111111111111");
+
+        assertEquals(Map.of("team", "data"), service.tagsInAccount("111111111111", REGION, "tagged"));
+        assertTrue(service.tagsInAccount("222222222222", REGION, "tagged").isEmpty());
+        assertTrue(service.tagsInAccount("111111111111", REGION, "missing").isEmpty());
+    }
+
     @Test
     void omittedInstanceProtocolMatchesExplicitDefaultOnListenerRetry() {
         ClassicListener listener = httpListener();

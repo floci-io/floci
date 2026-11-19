@@ -3526,7 +3526,8 @@ floci populates:
   and endpoint groups, EMR Serverless for its applications, job runs and sessions, EMR on EKS for its virtual clusters,
   job runs, managed endpoints, job templates and security configurations, Cost Explorer for its anomaly monitors and
   subscriptions, Security Hub for its hubs and configuration policies, Control Tower for its landing zones and enabled
-  controls, GuardDuty for its detectors and Malware Protection plans, and Cloud Map for its namespaces and services. Tag
+  controls, GuardDuty for its detectors and Malware Protection plans, Cloud Map for its namespaces and services, and
+  Elastic Load Balancing for its load balancers, target groups, listeners and rules and its Classic Load Balancers. Tag
   keys differing only in case are one condition key holding every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the

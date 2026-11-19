@@ -135,6 +135,66 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An {@code elasticloadbalancing:ResourceTag} or {@code aws:ResourceTag} condition reads the tags Elastic Load
+     * Balancing holds on the target group or the Classic Load Balancer a request names, as a tag call or the create
+     * leaves them, so an allow on one team's tag lets the caller change that team's resources and not another's.
+     */
+    @Test
+    void anElbResourceTagConditionReadsTheTagsOfTheTargetGroupAndTheClassicLoadBalancer() {
+        String tagged = elbTargetGroup();
+        String other = elbTargetGroup();
+        admin("elasticloadbalancing").formParam("Action", "AddTags").formParam("Version", "2015-12-01")
+                .formParam("ResourceArns.member.1", tagged).formParam("Tags.member.1.Key", "team")
+                .formParam("Tags.member.1.Value", "data").post("/").then().statusCode(200);
+        String taggedLoadBalancer = classicLoadBalancer("data");
+        String otherLoadBalancer = classicLoadBalancer("web");
+
+        User user = user("res-elb-team");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"elasticloadbalancing:ModifyTargetGroupAttributes\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"elasticloadbalancing:ResourceTag/team\":"
+                + "\"data\"}}},{\"Effect\":\"Allow\",\"Action\":\"elasticloadbalancing:ConfigureHealthCheck\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        modifyAttributes(user, tagged).statusCode(200);
+        refused(modifyAttributes(user, other), "elasticloadbalancing:ModifyTargetGroupAttributes");
+        configureHealthCheck(user, taggedLoadBalancer).statusCode(200);
+        refused(configureHealthCheck(user, otherLoadBalancer), "elasticloadbalancing:ConfigureHealthCheck");
+    }
+
+    /** An IP target group an administrator creates, deleted after the test; its ARN. */
+    private String elbTargetGroup() {
+        String arn = admin("elasticloadbalancing").formParam("Action", "CreateTargetGroup")
+                .formParam("Version", "2015-12-01").formParam("Name", "res-tg-team-" + suffix())
+                .formParam("Protocol", "HTTP").formParam("Port", "80").formParam("TargetType", "ip").post("/").then()
+                .statusCode(200).extract()
+                .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
+        cleanup.register(() -> admin("elasticloadbalancing").formParam("Action", "DeleteTargetGroup")
+                .formParam("Version", "2015-12-01").formParam("TargetGroupArn", arn).post("/").then().statusCode(200));
+        return arn;
+    }
+
+    /** A Classic Load Balancer an administrator creates, tagged with {@code team}, deleted after the test; its name. */
+    private String classicLoadBalancer(String team) {
+        String name = "res-clb-" + suffix();
+        admin("elasticloadbalancing").formParam("Action", "CreateLoadBalancer").formParam("Version", "2012-06-01")
+                .formParam("LoadBalancerName", name).formParam("Listeners.member.1.Protocol", "TCP")
+                .formParam("Listeners.member.1.LoadBalancerPort", "443")
+                .formParam("Listeners.member.1.InstancePort", "443").formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", team).post("/").then()
+                .statusCode(200);
+        cleanup.register(() -> admin("elasticloadbalancing").formParam("Action", "DeleteLoadBalancer")
+                .formParam("Version", "2012-06-01").formParam("LoadBalancerName", name).post("/").then()
+                .statusCode(200));
+        return name;
+    }
+
+    private static ValidatableResponse configureHealthCheck(User user, String loadBalancerName) {
+        return user.query("elasticloadbalancing", "ConfigureHealthCheck").formParam("Version", "2012-06-01")
+                .formParam("LoadBalancerName", loadBalancerName).formParam("HealthCheck.Target", "TCP:443")
+                .formParam("HealthCheck.Interval", "10").formParam("HealthCheck.Timeout", "3")
+                .formParam("HealthCheck.HealthyThreshold", "2").formParam("HealthCheck.UnhealthyThreshold", "2")
+                .post("/").then();
+    }
+
+    /**
      * The AWS Load Balancer Controller's policy creates on {@code *} with its cluster tag, and tags at creation only
      * a target group or an application or network load balancer, as {@code elasticloadbalancing:CreateAction}
      * says; these statements are the published policy's.
