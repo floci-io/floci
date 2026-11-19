@@ -152,8 +152,20 @@ public class Cluster {
 
     private AccessConfig accessConfig;
 
+    @JsonProperty("computeConfig")
+    private ComputeConfig computeConfig;
+
+    @JsonProperty("storageConfig")
+    private StorageConfig storageConfig;
+
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
+
+    public ComputeConfig getComputeConfig() { return computeConfig; }
+    public void setComputeConfig(ComputeConfig computeConfig) { this.computeConfig = computeConfig; }
+
+    public StorageConfig getStorageConfig() { return storageConfig; }
+    public void setStorageConfig(StorageConfig storageConfig) { this.storageConfig = storageConfig; }
 
     public Map<String, String> getJoinedInstanceIds() {
         if (joinedInstanceIds != null && !(joinedInstanceIds instanceof ConcurrentHashMap)) {
@@ -291,6 +303,8 @@ public class Cluster {
         c.defaultStorageClass = this.defaultStorageClass;
         c.joinedInstanceIds = this.joinedInstanceIds != null ? new ConcurrentHashMap<>(this.joinedInstanceIds) : null;
         c.accessConfig = this.accessConfig;
+        c.computeConfig = this.computeConfig;
+        c.storageConfig = this.storageConfig;
         return c;
     }
 }

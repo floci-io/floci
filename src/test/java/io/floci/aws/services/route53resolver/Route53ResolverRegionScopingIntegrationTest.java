@@ -112,7 +112,7 @@ class Route53ResolverRegionScopingIntegrationTest {
         }
     }
 
-    private static ValidatableResponse call(String region, String action, String body) {
+    static ValidatableResponse call(String region, String action, String body) {
         return given()
                 .contentType("application/x-amz-json-1.1")
                 .header("X-Amz-Target", "Route53Resolver." + action)

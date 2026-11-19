@@ -105,7 +105,7 @@ public class PaymentCryptographyPinOperations {
         String encryptionKeyIdentifier = text(request, "EncryptionKeyIdentifier");
         String verificationKeyIdentifier = text(request, "VerificationKeyIdentifier");
         refuseWrappedKey(request, "EncryptionWrappedKey");
-        PinBlockFormat format = format(text(request, "PinBlockFormat"));
+        PinBlockFormat format = verificationFormat(text(request, "PinBlockFormat"));
         String pan = requirePan(text(request, "PrimaryAccountNumber"),
                 "PrimaryAccountNumber is required for Visa PVV verification");
         requireVisaPinLength(request);
@@ -512,6 +512,27 @@ public class PaymentCryptographyPinOperations {
         if (format == null) {
             throw validation("PinBlockFormat '" + wireName + "' not supported by this service ("
                     + PinBlockFormat.supported() + ")");
+        }
+        return format;
+    }
+
+    /**
+     * The PIN block format a verification reads.
+     *
+     * <p>The reference names the formats it supports for this operation: "AWS Payment
+     * Cryptography supports {@code ISO_Format_0} and {@code ISO_Format_3}". The format 4
+     * block is an AES block, and the reference's verification reads the Triple DES blocks, so
+     * a request that names the format 4 is refused rather than answered as if the reference
+     * read it.
+     *
+     * @param wireName the name the request carries
+     * @return the format the block is in
+     */
+    private static PinBlockFormat verificationFormat(String wireName) {
+        PinBlockFormat format = PinBlockFormat.from(wireName);
+        if (format != PinBlockFormat.ISO_FORMAT_0 && format != PinBlockFormat.ISO_FORMAT_3) {
+            throw validation("PinBlockFormat '" + wireName + "' is not a format the reference "
+                    + "verifies (ISO_FORMAT_0, ISO_FORMAT_3)");
         }
         return format;
     }

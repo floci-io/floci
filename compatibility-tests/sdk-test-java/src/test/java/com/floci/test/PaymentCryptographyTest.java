@@ -65,6 +65,7 @@ import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The Payment Cryptography control plane through the AWS SDK.
@@ -151,6 +152,7 @@ class PaymentCryptographyTest {
 
     @Test
     void aKeyIsReplicatedToTheRegionsTheAccountReplicatesToByDefault() {
+        assumeReplicationRegions();
         // The account's own default regions are read before the test changes them, so the
         // cleanup can put them back.
         List<String> before = client.getDefaultKeyReplicationRegions(r -> { })
@@ -183,6 +185,7 @@ class PaymentCryptographyTest {
 
     @Test
     void theReplicationRegionsOfAKeyCanBeChanged() {
+        assumeReplicationRegions();
         Key key = createReplicatedKey("us-west-2");
 
         assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
@@ -202,6 +205,7 @@ class PaymentCryptographyTest {
 
     @Test
     void aRegionTheKeyAlreadyReplicatesIntoIsRefused() {
+        assumeReplicationRegions();
         // Adding a region the key already replicates into changes nothing, and a request
         // that cannot be carried out is refused rather than answered with what it already was.
         Key key = createReplicatedKey("us-west-2");
@@ -213,6 +217,7 @@ class PaymentCryptographyTest {
 
     @Test
     void aRegionTheKeyDoesNotReplicateIntoIsRefused() {
+        assumeReplicationRegions();
         // There is nothing to take away from a region the key does not replicate into.
         Key key = createReplicatedKey("us-west-2");
 
@@ -223,6 +228,7 @@ class PaymentCryptographyTest {
 
     @Test
     void takingTheLastReplicaAwayEndsTheReplication() {
+        assumeReplicationRegions();
         // Taking the replica regions away is how the replication is turned off for a key, so
         // a key that replicates nowhere is not a multi-region key and says so by carrying no
         // type at all.
@@ -241,6 +247,7 @@ class PaymentCryptographyTest {
 
     @Test
     void aKeyThatIsReplicatedHasToBeExportable() {
+        assumeReplicationRegions();
         assertRefusedWithValidationException(
                 () -> client.createKey(replicatedKeyRequest(false, "us-west-2")),
                 "exportable");
@@ -282,6 +289,7 @@ class PaymentCryptographyTest {
 
     @Test
     void aKeyWhoseRegionsAreChangedHasAConfigurationOfItsOwn() {
+        assumeReplicationRegions();
         // A key that took the account's default regions says so, and a key whose regions are
         // changed afterwards has a configuration of its own, so it says the other thing.
         Key key = createReplicatedKey("us-west-2");
@@ -379,6 +387,16 @@ class PaymentCryptographyTest {
                     .accept(r);
             r.replicationRegions(regions);
         };
+    }
+
+    /**
+     * Skips a replication test outside the commercial partition: it replicates into us-west-2 and us-west-1,
+     * and a key replicates only within its own partition, where AWS GovCloud and China have one other region
+     * each and the European Sovereign Cloud none.
+     */
+    private static void assumeReplicationRegions() {
+        assumeTrue("aws".equals(TestFixtures.partition()),
+                "replication tests name commercial regions; this run is in " + TestFixtures.partition());
     }
 
     /**
@@ -593,6 +611,7 @@ class PaymentCryptographyTest {
 
     @Test
     void anImportedKeyIsReplicatedToTheRegionsTheRequestNames() {
+        assumeReplicationRegions();
         // The model gives an import the same replication regions a creation does, so a key
         // that comes in can be replicated as soon as it lands.
         Key wrapping = createWrappingKey();
@@ -1107,6 +1126,22 @@ class PaymentCryptographyTest {
         KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
         generator.initialize(new ECGenParameterSpec("secp256r1"));
         return generator.generateKeyPair();
+    }
+
+
+    /**
+     * The PEM of a certificate over a key pair, signed by an issuer.
+     *
+     * <p>The service reads a certificate as the base64 of its PEM, so the PEM is what the
+     * tests hand it.
+     */
+    static String pem(KeyPair subject, String subjectName, KeyPair issuer, String issuerName)
+            throws Exception {
+        X509Certificate certificate = certificate(subject, subjectName, issuer, issuerName);
+        return "-----BEGIN CERTIFICATE-----\n"
+                + Base64.getMimeEncoder(64, "\n".getBytes(StandardCharsets.US_ASCII))
+                        .encodeToString(certificate.getEncoded())
+                + "\n-----END CERTIFICATE-----\n";
     }
 
     /** A certificate over a key pair, signed by an issuer. */

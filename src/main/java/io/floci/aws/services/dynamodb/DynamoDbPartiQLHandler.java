@@ -584,7 +584,6 @@ class DynamoDbPartiQLHandler {
     }
 
     // An LSI read reaches the co-located base item, so non-projected columns stay legal there.
-    // AWS lists each root once, in an order of its own that is not the statement order.
     private static void requireColumnsProjected(Stmt.Select stmt, DynamoDbAccessPath accessPath,
                                                 TableDefinition table) {
         if (!accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
@@ -595,7 +594,10 @@ class DynamoDbPartiQLHandler {
                 .map(Path::root)
                 .filter(c -> !"*".equals(c))
                 .filter(c -> !projected.contains(c))
-                .distinct()
+                .map(Utf8Name::new)
+                .collect(Collectors.toCollection(HashSet::new))
+                .stream()
+                .map(Utf8Name::name)
                 .toList();
         if (!unprojected.isEmpty()) {
             throw DynamoDbAccessPathValidator.unprojectedGsiAttributes(accessPath.indexName(), unprojected);
@@ -604,6 +606,14 @@ class DynamoDbPartiQLHandler {
 
     private static boolean isKeyCondition(Cond cond, String keyName) {
         return cond.bareAttribute().filter(keyName::equals).isPresent();
+    }
+
+    // DynamoDB lists the unprojected columns in the order of a HashSet that hashes their UTF-8 bytes.
+    private record Utf8Name(String name) {
+        @Override
+        public int hashCode() {
+            return Arrays.hashCode(name.getBytes(StandardCharsets.UTF_8));
+        }
     }
 
     private record SelectedColumn(Path path, String reportedName) {}
