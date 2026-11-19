@@ -930,6 +930,10 @@ to the template.
 `CfnSchemaCoverageTest` keeps the list complete. Other services follow
 [#6606](https://github.com/floci-io/floci/issues/6606).
 
+A type whose provisioner arm does not read the engine's property changes (`ctx.changes`) needs a row
+with a reason in `src/test/resources/cloudformation/change-exempt.tsv`, and `CfnSchemaCoverageTest`
+fails without it. A type that moves onto the changes must delete its row.
+
 When a later resource fails the update, the rollback puts each AppSync API, data source, function, resolver and API key that the update changed in
 place back to the members it had, including the ones the update cleared. An API that had no
 `AdditionalAuthenticationProviders` gets an empty list back, and an API key's `Expires` is sent again
