@@ -705,25 +705,16 @@ public class RdsDataService implements Resettable {
         if (database != null && !database.isEmpty()) {
             return database;
         }
-        String stored = target.databaseName();
-        if (stored != null && !stored.isBlank()) {
-            // RDS takes a name at create that AWS would refuse; one that would change the JDBC URL is
-            // answered as a bad request rather than reaching the URL builder.
-            Character unsafe = RdsDataConnectionFactory.urlUnsafeCharacter(stored);
-            if (unsafe != null) {
-                throw new AwsException("BadRequestException", String.format(
-                        "The resource's database name has a character a database name cannot have here: U+%04X. "
-                                + "Name the database in the request.", (int) unsafe), 400);
-            }
-            return stored;
+        if (target.databaseName() != null && !target.databaseName().isBlank()) {
+            return target.databaseName();
         }
         throw new AwsException("BadRequestException", "database is required.", 400);
     }
 
     /**
-     * Refuses a request's {@code database} longer than the model allows, or one holding a character
-     * that would change the JDBC URL Floci opens rather than name a database. Runs first, as AWS checks
-     * the request's shape before it looks up the resource.
+     * Refuses a request's {@code database} longer than the model's {@code DbName} allows. Runs first, as
+     * AWS checks the request's shape before it looks up the resource. Any other name is the engine's to
+     * judge: {@link RdsDataConnectionFactory#buildUrl} encodes it so it cannot change the connection.
      */
     private static void validateRequestDatabase(JsonNode request) {
         String database = textOrNull(request, "database");
@@ -734,11 +725,6 @@ public class RdsDataService implements Resettable {
         if (database.length() > RdsDataConnectionFactory.MAX_DATABASE_NAME_LENGTH) {
             throw new AwsException("BadRequestException", "database must be at most "
                     + RdsDataConnectionFactory.MAX_DATABASE_NAME_LENGTH + " characters.", 400);
-        }
-        Character unsafe = RdsDataConnectionFactory.urlUnsafeCharacter(database);
-        if (unsafe != null) {
-            throw new AwsException("BadRequestException", String.format(
-                    "database contains a character a database name cannot have here: U+%04X.", (int) unsafe), 400);
         }
     }
 

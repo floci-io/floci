@@ -4,7 +4,6 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -93,20 +92,20 @@ class RdsDataControllerIntegrationTest {
             .body("__type", equalTo("BadRequestException"));
     }
 
-    // Catches, over the wire, connection-property injection: the database name is refused for what it is, before
-    // the resource is looked up, so it never reaches a JDBC URL.
+    // Catches: the model's 64-character limit on database checked only after the resource lookup;
+    // AWS checks the request's shape first, so a missing resource does not hide it.
     @Test
-    void executeRefusesADatabaseNameCarryingConnectionProperties() {
+    void executeRefusesADatabaseNameLongerThanTheModelAllows() {
         given()
             .contentType("application/json")
             .body("""
                 {
                   "resourceArn": "arn:aws:rds:us-east-1:000000000000:cluster:missing",
                   "secretArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:missing",
-                  "database": "app?allowLoadLocalInfile=true&autoDeserialize=true",
+                  "database": "%s",
                   "sql": "select 1"
                 }
-                """)
+                """.formatted("d".repeat(65)))
         .when()
             .post("/Execute")
         .then()
@@ -114,7 +113,7 @@ class RdsDataControllerIntegrationTest {
             .contentType("application/json")
             .header("X-Amzn-Errortype", "BadRequestException")
             .body("__type", equalTo("BadRequestException"))
-            .body("message", containsString("database contains a character"));
+            .body("message", equalTo("database must be at most 64 characters."));
     }
 
     @Test

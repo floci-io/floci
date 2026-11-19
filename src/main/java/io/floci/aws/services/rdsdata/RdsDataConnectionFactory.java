@@ -4,6 +4,8 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import jakarta.enterprise.context.ApplicationScoped;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
@@ -35,30 +37,18 @@ class RdsDataConnectionFactory {
     static final int MAX_DATABASE_NAME_LENGTH = 64;
 
     /**
-     * The first character of {@code database} that would change the JDBC URL's structure rather than
-     * name a database (one that starts or separates connection properties, a path, a fragment, a user
-     * or an escape, whitespace, or a control character), or null when there is none. The database
-     * goes into the URL as written, so such a character would let the name add or override connection
-     * properties.
+     * The JDBC URL for {@code database}, the name percent-encoded so that both drivers read back exactly
+     * the name given and nothing in it can start, add or override a connection property, as AWS passes
+     * the name to the engine as an identifier. A name the engine does not know is then the engine's
+     * error. {@link URLEncoder} writes a literal {@code +} as {@code %2B} and a space as {@code +}, which
+     * is replaced by {@code %20}: both drivers decode a bare {@code +} in the path as a space.
      */
-    static Character urlUnsafeCharacter(String database) {
-        for (int i = 0; i < database.length(); i++) {
-            char c = database.charAt(i);
-            if ("?&=#/\\@;%:".indexOf(c) >= 0 || Character.isWhitespace(c) || Character.isISOControl(c)) {
-                return c;
-            }
-        }
-        return null;
-    }
-
     static String buildUrl(DatabaseEngine engine, String host, int port, String database) {
-        if (urlUnsafeCharacter(database) != null) {
-            throw new IllegalArgumentException("Database name cannot be used in a JDBC URL: " + database);
-        }
+        String path = URLEncoder.encode(database, StandardCharsets.UTF_8).replace("+", "%20");
         return switch (engine) {
-            case MYSQL, MARIADB -> "jdbc:mysql://" + host + ":" + port + "/" + database
+            case MYSQL, MARIADB -> "jdbc:mysql://" + host + ":" + port + "/" + path
                     + "?useSSL=false&allowPublicKeyRetrieval=true";
-            case POSTGRES -> "jdbc:postgresql://" + host + ":" + port + "/" + database
+            case POSTGRES -> "jdbc:postgresql://" + host + ":" + port + "/" + path
                     + "?sslmode=disable";
             case SQLSERVER -> throw new IllegalArgumentException(
                     "RDS Data API is not supported for SQL Server");

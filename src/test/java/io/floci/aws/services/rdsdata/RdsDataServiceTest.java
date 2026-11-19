@@ -78,28 +78,18 @@ class RdsDataServiceTest {
         assertEquals(Types.INTEGER, response.path("columnMetadata").get(0).path("arrayBaseColumnType").asInt());
     }
 
-    // Catches: the database name went into the JDBC URL as written, so a caller
-    // could append connection properties (allowLoadLocalInfile, autoDeserialize) to it.
+    // Catches the connection-property injection at the service: the name reaches the connection as the
+    // caller wrote it (the factory encodes it), neither refused nor swapped for the resource's database.
     @Test
-    void aDatabaseNameCarryingConnectionPropertiesIsRefusedBeforeAnyConnectionOpens() throws Exception {
+    void aDatabaseNameIsPassedToTheConnectionAsWritten() throws Exception {
         TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
         String injected = "app?allowLoadLocalInfile=true&autoDeserialize=true";
+        ObjectNode request = harness.request("select 1");
+        request.put("database", injected);
 
-        ObjectNode execute = harness.request("select 1");
-        execute.put("database", injected);
-        ObjectNode begin = harness.beginRequest();
-        begin.put("database", injected);
-        ObjectNode batch = harness.request("select 1");
-        batch.put("database", injected);
-        batch.putArray("parameterSets");
-        for (AwsException error : List.of(
-                assertThrows(AwsException.class, () -> harness.service.executeStatement(execute, REGION)),
-                assertThrows(AwsException.class, () -> harness.service.beginTransaction(begin, REGION)),
-                assertThrows(AwsException.class, () -> harness.service.batchExecuteStatement(batch, REGION)))) {
-            assertEquals("BadRequestException", error.getErrorCode());
-            assertEquals(400, error.getHttpStatus());
-        }
-        assertEquals(0, harness.connectionsOpened.get());
+        harness.service.executeStatement(request, REGION);
+
+        assertEquals(List.of(injected), harness.databasesOpened);
     }
 
     @Test
@@ -115,41 +105,22 @@ class RdsDataServiceTest {
         assertEquals(0, harness.connectionsOpened.get());
     }
 
-    // Catches: a name of only spaces read as "no database", skipping the check and running against the
-    // resource's database, even at a length the model refuses.
+    // Catches: a name of only spaces read as "no database", so it ran against the resource's database
+    // even at a length the model refuses.
     @Test
-    void aDatabaseNameOfSpacesIsCheckedRatherThanReadAsAbsent() throws Exception {
+    void aDatabaseNameOfSpacesIsANameRatherThanTheResourcesDatabase() throws Exception {
         TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
         ObjectNode spaces = harness.request("select 1");
         spaces.put("database", "   ");
         ObjectNode tooLong = harness.request("select 1");
         tooLong.put("database", " ".repeat(65));
 
-        AwsException spacesError = assertThrows(AwsException.class,
-                () -> harness.service.executeStatement(spaces, REGION));
+        harness.service.executeStatement(spaces, REGION);
         AwsException lengthError = assertThrows(AwsException.class,
                 () -> harness.service.executeStatement(tooLong, REGION));
 
-        assertEquals("BadRequestException", spacesError.getErrorCode());
+        assertEquals(List.of("   "), harness.databasesOpened);
         assertEquals("database must be at most 64 characters.", lengthError.getMessage());
-        assertEquals(0, harness.connectionsOpened.get());
-    }
-
-    // Catches: a database name stored on the RDS resource (which RDS does not check at create) that
-    // would change the JDBC URL surfacing as a server error instead of a bad request.
-    @Test
-    void aStoredDatabaseNameThatWouldChangeTheUrlIsABadRequest() throws Exception {
-        TestHarness harness = new TestHarness(DatabaseEngine.MYSQL);
-        when(harness.resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(new RdsDataResourceResolver.DatabaseTarget(
-                RESOURCE_ARN, RESOURCE_ARN, DatabaseEngine.MYSQL, "sa", "", "app?allowLoadLocalInfile=true"));
-        ObjectNode request = harness.request("select 1");
-        request.remove("database");
-
-        AwsException error = assertThrows(AwsException.class, () -> harness.service.executeStatement(request, REGION));
-
-        assertEquals("BadRequestException", error.getErrorCode());
-        assertEquals(400, error.getHttpStatus());
-        assertEquals(0, harness.connectionsOpened.get());
     }
 
     @Test
@@ -1387,6 +1358,7 @@ class RdsDataServiceTest {
         private final AtomicInteger endpointsResolved = new AtomicInteger();
         private final AtomicReference<EndpointInfo> currentEndpoint = new AtomicReference<>();
         private final List<EndpointInfo> endpointsOpened = new CopyOnWriteArrayList<>();
+        private final List<String> databasesOpened = new CopyOnWriteArrayList<>();
         private volatile RuntimeException endpointFailure;
         private final RdsDataService service;
 
@@ -1445,6 +1417,7 @@ class RdsDataServiceTest {
                                 String password,
                                 String database) throws SQLException {
                     endpointsOpened.add(endpoint);
+                    databasesOpened.add(database);
                     connectionsOpened.incrementAndGet();
                     return getConnection();
                 }
