@@ -350,6 +350,46 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
 - **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
 
+## EKS Auto Mode configuration
+
+`CreateCluster` accepts EKS Auto Mode's configuration, and `CreateCluster` and `DescribeCluster` return it as it
+was given: `computeConfig` (`enabled`, `nodePools` and `nodeRoleArn`), `storageConfig.blockStorage.enabled` and
+`kubernetesNetworkConfig.elasticLoadBalancing.enabled`.
+
+```json
+{
+  "computeConfig": {
+    "enabled": true,
+    "nodePools": ["general-purpose", "system"],
+    "nodeRoleArn": "arn:aws:iam::000000000000:role/AmazonEKSAutoNodeRole"
+  },
+  "storageConfig": {"blockStorage": {"enabled": true}},
+  "kubernetesNetworkConfig": {"elasticLoadBalancing": {"enabled": true}}
+}
+```
+
+As on AWS, the compute, block storage and load balancing capabilities are enabled together or not at all. A
+request that enables some of them and not the others is refused with `InvalidParameterException` ("For EKS Auto
+Mode, please ensure that all required configs, including computeConfig, kubernetesNetworkConfig, and
+blockStorage are all either fully enabled or fully disabled."), and a capability the request leaves out counts
+as not enabled. A `computeConfig` that names node pools without a `nodeRoleArn` is refused with
+`InvalidParameterException` ("When Compute Config nodeRoleArn is null or empty, nodePool list cannot be
+populated"), and one that names a `nodeRoleArn` without node pools with `InvalidParameterException` ("When
+Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided."). A `computeConfig` with
+neither is accepted, as AWS accepts it for Auto Mode without its built-in node pools.
+
+In CloudFormation, `AWS::EKS::Cluster` leaves EKS Auto Mode out for now: it accepts `ComputeConfig`,
+`StorageConfig` and `KubernetesNetworkConfig.ElasticLoadBalancing` and ignores them, so a template that enables
+Auto Mode creates its cluster without it.
+
+With IAM enforcement on, `CreateCluster` checks `iam:PassRole` on the cluster role, passed to
+`eks.amazonaws.com`, and not yet on the node role. AWS's Service Reference lists both `ec2.amazonaws.com` and
+`eks.amazonaws.com` for the roles `CreateCluster` passes, and does not say which one the node role goes to.
+
+Floci records the configuration and does nothing more with it yet. It does not create the node role's access
+entry, install the built-in node pools, serve the EBS provisioner or create load balancers, and
+`UpdateClusterConfig` is not implemented. [#8914](https://github.com/floci-io/floci/issues/8914) plans each.
+
 ## Node group inputs
 
 `CreateNodegroup` accepts the full documented input set and stores every member, so `CreateNodegroup` and `DescribeNodegroup` both return exactly what was supplied.
