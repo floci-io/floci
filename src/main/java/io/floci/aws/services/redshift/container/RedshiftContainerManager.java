@@ -220,7 +220,7 @@ public class RedshiftContainerManager {
                 info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
 
         try {
-            Closeable stream = logStreamer.attach(
+            Closeable stream = logStreamer.attachPolled(
                     info.containerId(),
                     "/floci/redshift",
                     clusterIdentifier,

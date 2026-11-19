@@ -136,6 +136,7 @@ floci:
     pool-gauge-interval-seconds: 60          # Log Docker pool use every N seconds while a pool is busy; 0 = off
     breaker-failure-threshold: 3             # Consecutive Docker call attempts (each retry counts) failing at the transport before Floci pings the daemon and fails calls fast if it is gone; 0 = off
     breaker-probe-interval-seconds: 5        # Seconds between pings while the daemon is unreachable
+    log-poll-interval-millis: 1000           # How often a long-lived service container's log is read (it is not followed)
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 

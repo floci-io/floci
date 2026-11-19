@@ -5,6 +5,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.LogContainerCmd;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -16,6 +17,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -47,17 +49,43 @@ public class ContainerLogStreamer {
     private static final Logger LOG = Logger.getLogger(ContainerLogStreamer.class);
     private static final DateTimeFormatter LOG_STREAM_DATE_FMT = DateTimeFormatter.ofPattern("yyyy/MM/dd");
 
+    private static final Duration DEFAULT_POLL_INTERVAL = Duration.ofMillis(1000);
+
     private final DockerClient dockerClient;
+    private final DockerClient pollingDockerClient;
     private final CloudWatchLogsService cloudWatchLogsService;
+    private final Duration pollInterval;
 
     // Log-follow attaches hold their connection open for the whole container lifetime, so
     // this class is the primary consumer of the streaming pool: sharing the control-plane
     // pool is what starved short create/start/stop calls during an LZA Logging fan-out
-    // (see DockerClientProducer / StreamingDocker).
+    // (see DockerClientProducer / StreamingDocker). A polled attach reads with short
+    // control-plane calls instead, and holds no connection between reads.
     @Inject
-    public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
+    public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, DockerClient pollingDockerClient,
+                                CloudWatchLogsService cloudWatchLogsService, EmulatorConfig config) {
+        this(dockerClient, pollingDockerClient, cloudWatchLogsService,
+                Duration.ofMillis(validateLogPollIntervalMillis(config.docker().logPollIntervalMillis())));
+    }
+
+    public ContainerLogStreamer(DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
+        this(dockerClient, dockerClient, cloudWatchLogsService, DEFAULT_POLL_INTERVAL);
+    }
+
+    ContainerLogStreamer(DockerClient dockerClient, DockerClient pollingDockerClient,
+                         CloudWatchLogsService cloudWatchLogsService, Duration pollInterval) {
         this.dockerClient = dockerClient;
+        this.pollingDockerClient = pollingDockerClient;
         this.cloudWatchLogsService = cloudWatchLogsService;
+        this.pollInterval = pollInterval;
+    }
+
+    static int validateLogPollIntervalMillis(int millis) {
+        if (millis < 100) {
+            throw new IllegalArgumentException("floci.docker.log-poll-interval-millis "
+                    + "(FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS) must be at least 100, got: " + millis);
+        }
+        return millis;
     }
 
     /**
@@ -118,6 +146,47 @@ public class ContainerLogStreamer {
             }
         };
         return follow(containerId, since, emitter);
+    }
+
+    /**
+     * Like {@link #attach}, but for a long-lived service container (a database, a broker, a registry):
+     * the log is read every {@code floci.docker.log-poll-interval-millis} with a short call, so the container
+     * holds no streaming connection and no stream thread for its life. Lines arrive up to one interval
+     * later. Hand the handle to {@code ContainerLifecycleManager.stopAndRemove}, which reads the last
+     * lines between the container's stop and its removal.
+     */
+    public Closeable attachPolled(String containerId, String logGroup, String logStream,
+                                  String region, String logPrefix) {
+        return attachPolledForAccount(null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    /** Like {@link #attachFromNow}, read on a timer as {@link #attachPolled} is. */
+    public Closeable attachPolledFromNow(String containerId, String logGroup, String logStream,
+                                         String region, String logPrefix) {
+        return attachPolledFromNowForAccount(null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    /** Like {@link #attachForAccount}, read on a timer as {@link #attachPolled} is. */
+    public Closeable attachPolledForAccount(String accountId, String containerId, String logGroup,
+                                            String logStream, String region, String logPrefix) {
+        return attachPolledForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
+    }
+
+    /** Like {@link #attachFromNowForAccount}, read on a timer as {@link #attachPolled} is. */
+    public Closeable attachPolledFromNowForAccount(String accountId, String containerId, String logGroup,
+                                                   String logStream, String region, String logPrefix) {
+        return attachPolledForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now());
+    }
+
+    Closeable attachPolledForAccount(String accountId, String containerId, String logGroup, String logStream,
+                                     String region, String logPrefix, Instant since) {
+        ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+        return new PolledLogHandle(pollingDockerClient, containerId, since, (stream, line) -> {
+            String logged = logToConsole(logPrefix, line);
+            if (logged != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+            }
+        }).start(pollInterval);
     }
 
     /**

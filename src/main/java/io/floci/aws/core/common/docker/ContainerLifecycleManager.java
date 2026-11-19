@@ -712,6 +712,7 @@ public class ContainerLifecycleManager {
      */
     public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
         boolean stoppedOrMissing = stop(containerId, stopTimeoutSeconds);
+        readLastLogLines(logStream);
 
         // Force removal is the recovery path when Docker could not stop the container cleanly. It also
         // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
@@ -729,6 +730,17 @@ public class ContainerLifecycleManager {
 
         if (logStream != null && (stoppedOrMissing || removedOrMissing)) {
             closeLogStreamAfterContainerStop(logStream);
+        }
+    }
+
+    /**
+     * A log read on a timer ({@link ContainerLogStreamer#attachPolled}) has not seen what the container
+     * wrote since its last read, and cannot once the container is removed, so read it between the stop
+     * and the removal. A follow stream needs nothing: the removal ends it and it drains its own tail.
+     */
+    private static void readLastLogLines(Closeable logStream) {
+        if (logStream instanceof PolledLogHandle polled) {
+            polled.drainBeforeRemove();
         }
     }
 
@@ -824,6 +836,7 @@ public class ContainerLifecycleManager {
             stopFailure = e;
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
         }
+        readLastLogLines(logStream);
 
         try {
             RemoveContainerCmd remove = dockerClient.removeContainerCmd(containerId).withForce(true);

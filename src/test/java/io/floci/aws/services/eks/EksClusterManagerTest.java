@@ -4211,9 +4211,9 @@ class EksClusterManagerTest {
 
             logStreamer = Mockito.mock(ContainerLogStreamer.class);
             mockHandle = Mockito.mock(Closeable.class);
-            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(mockHandle);
-            when(logStreamer.attachFromNowForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledFromNowForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(mockHandle);
 
             manager = new EksClusterManager(containerBuilder, lifecycleManager,
@@ -4232,7 +4232,7 @@ class EksClusterManagerTest {
 
             manager.setUpGuest(cluster);
 
-            verify(logStreamer).attachForAccount(
+            verify(logStreamer).attachPolledForAccount(
                     eq("000000000000"),
                     eq("container-id-123456789012345678901234567890"),
                     eq("/aws/eks/prod-cluster/cluster"),
@@ -4281,7 +4281,7 @@ class EksClusterManagerTest {
 
         @Test
         void attachmentFailureLogsWarningAndContinuesWithoutAborting() {
-            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenThrow(new RuntimeException("Docker attach connection failed"));
 
             Cluster cluster = new Cluster();
@@ -4317,7 +4317,7 @@ class EksClusterManagerTest {
             manager.startCluster(stale);
             manager.setUpGuest(stale);
             Closeable freshHandle = Mockito.mock(Closeable.class);
-            when(logStreamer.attachForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+            when(logStreamer.attachPolledForAccount(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                     .thenReturn(freshHandle);
             Cluster recreated = new Cluster();
             recreated.setName("prod-cluster");
@@ -4440,7 +4440,7 @@ class EksClusterManagerTest {
 
             manager.setUpGuest(cluster);
 
-            verify(logStreamer).attachFromNowForAccount(
+            verify(logStreamer).attachPolledFromNowForAccount(
                     eq("000000000000"),
                     eq("adopted-container-id-12345678901234567890"),
                     eq("/aws/eks/prod-cluster/cluster"),

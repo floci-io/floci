@@ -94,7 +94,7 @@ class ElastiCacheContainerManagerTest {
                     "io.floci.resource-id", "my-group",
                     "io.floci.account", "000000000000",
                     "io.floci.region", "eu-west-1"));
-            verify(logStreamer).attach(eq("container-id"), anyString(), any(), eq("eu-west-1"), anyString());
+            verify(logStreamer).attachPolled(eq("container-id"), anyString(), any(), eq("eu-west-1"), anyString());
         }
     }
 
@@ -106,7 +106,7 @@ class ElastiCacheContainerManagerTest {
                         new ContainerLifecycleManager.EndpointInfo("127.0.0.1", 6379))));
         when(lifecycleManager.isDockerReachable()).thenReturn(false);
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
-        when(logStreamer.attach(any(), any(), any(), any(), any()))
+        when(logStreamer.attachPolled(any(), any(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("log attach failed after daemon went away"));
 
         ContainerBuilder containerBuilder = mock(ContainerBuilder.class);

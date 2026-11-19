@@ -385,7 +385,7 @@ class EcrRegistryManagerTest {
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("second-container", Map.of()));
         Closeable firstLogStream = Mockito.mock(Closeable.class);
         Closeable secondLogStream = Mockito.mock(Closeable.class);
-        when(logStreamer.attach(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(logStreamer.attachPolled(anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(firstLogStream, secondLogStream);
 
         assertTrue(manager.tryEnsureStarted());
@@ -495,8 +495,8 @@ class EcrRegistryManagerTest {
 
         manager.ensureStarted();
 
-        verify(logStreamer).attach(eq("container-id"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
-        verify(logStreamer, never()).attachFromNow(any(), any(), any(), any(), any());
+        verify(logStreamer).attachPolled(eq("container-id"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
+        verify(logStreamer, never()).attachPolledFromNow(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -514,8 +514,8 @@ class EcrRegistryManagerTest {
 
         manager.ensureStarted();
 
-        verify(logStreamer).attachFromNow(eq("0123456789abcdef"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
-        verify(logStreamer, never()).attach(any(), any(), any(), any(), any());
+        verify(logStreamer).attachPolledFromNow(eq("0123456789abcdef"), eq("/aws/ecr/registry"), any(), eq("us-east-1"), eq("ecr:registry"));
+        verify(logStreamer, never()).attachPolled(any(), any(), any(), any(), any());
     }
 
     @Test

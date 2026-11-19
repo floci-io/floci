@@ -187,7 +187,7 @@ class RabbitMqManagerTest {
         manager.startContainer(broker);
 
         assertEquals("/aws/amazonmq/broker/b-1/general", broker.generalLogGroup());
-        verify(logStreamer).attach(eq("container-id"), eq(broker.generalLogGroup()),
+        verify(logStreamer).attachPolled(eq("container-id"), eq(broker.generalLogGroup()),
                 any(), any(), eq("amazonmq:b-1"));
     }
 
