@@ -1041,6 +1041,42 @@ class IamRequestResourceEnforcementIntegrationTest {
         return arn;
     }
 
+    /**
+     * A Kinesis request is checked on the stream its StreamName or StreamARN names, from the generated table, so a
+     * grant on one stream does not reach another; and an {@code aws:ResourceTag} condition reads the tags Kinesis
+     * holds on that stream, as AddTagsToStream leaves them.
+     */
+    @Test
+    void aKinesisRequestIsCheckedOnTheStreamItNamesWithItsTags() {
+        String tagged = kinesisStream("res-stream-" + suffix());
+        String other = kinesisStream("res-stream-" + suffix());
+        adminJson("kinesis", "Kinesis_20131202.AddTagsToStream").body("{\"StreamName\":\"" + tagged
+                + "\",\"Tags\":{\"team\":\"data\"}}").post("/").then().statusCode(200);
+        String streams = "arn:aws:kinesis:" + REGION + ":" + ACCOUNT + ":stream/";
+
+        User user = user("res-stream");
+        user.policy(allowOn("kinesis:DescribeStreamSummary", streams + tagged) + ",{\"Effect\":\"Allow\","
+                + "\"Action\":\"kinesis:ListShards\",\"Resource\":\"*\",\"Condition\":{\"StringEquals\":"
+                + "{\"aws:ResourceTag/team\":\"data\"}}}");
+        send(user, "kinesis", "Kinesis_20131202.DescribeStreamSummary", "1.1", "{\"StreamName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "kinesis", "Kinesis_20131202.DescribeStreamSummary", "1.1",
+                "{\"StreamARN\":\"" + streams + other + "\"}"), "kinesis:DescribeStreamSummary");
+        send(user, "kinesis", "Kinesis_20131202.ListShards", "1.1", "{\"StreamName\":\"" + tagged + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "kinesis", "Kinesis_20131202.ListShards", "1.1", "{\"StreamName\":\"" + other + "\"}"),
+                "kinesis:ListShards");
+    }
+
+    /** A Kinesis stream of one shard an administrator creates, deleted after the test; its name. */
+    private String kinesisStream(String name) {
+        adminJson("kinesis", "Kinesis_20131202.CreateStream").body("{\"StreamName\":\"" + name
+                + "\",\"ShardCount\":1}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("kinesis", "Kinesis_20131202.DeleteStream").body("{\"StreamName\":\""
+                + name + "\"}").post("/").then().statusCode(200));
+        return name;
+    }
+
     @Test
     void aCloudMapNamespaceAndServiceAreCheckedOnTheArnsTheirIdsGive() {
         String namespaceId = cloudMapNamespace("res-ns-" + suffix());

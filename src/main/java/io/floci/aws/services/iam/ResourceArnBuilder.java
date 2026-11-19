@@ -186,7 +186,6 @@ public class ResourceArnBuilder {
         return switch (credentialScope) {
             case "s3"             -> buildS3Resources(operation, path, ctx, region);
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
-            case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
@@ -1358,35 +1357,6 @@ public class ResourceArnBuilder {
             return tableName;
         }
         return AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
-    }
-
-    // ── Kinesis ──────────────────────────────────────────────────────────────────
-    private String buildKinesisArn(ContainerRequestContext ctx, String region, String accountId) {
-        JsonNode json = readJsonBody(ctx);
-        if (json != null && json.isObject()) {
-            if (json.hasNonNull("StreamARN")) {
-                String streamArn = json.get("StreamARN").asText().trim();
-                if (!streamArn.isEmpty()) {
-                    return streamArn;
-                }
-            }
-            if (json.hasNonNull("StreamName")) {
-                String streamName = json.get("StreamName").asText().trim();
-                if (!streamName.isEmpty()) {
-                    if (AwsArnUtils.isArnFor(streamName, "kinesis")) {
-                        return streamName;
-                    }
-                    return AwsArnUtils.Arn.of("kinesis", region, accountId, "stream/" + streamName).toString();
-                }
-            }
-            if (json.hasNonNull("ResourceARN")) {
-                String resourceArn = json.get("ResourceARN").asText().trim();
-                if (!resourceArn.isEmpty()) {
-                    return resourceArn;
-                }
-            }
-        }
-        return AwsArnUtils.Arn.of("kinesis", region, accountId, "stream/*").toString();
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────
