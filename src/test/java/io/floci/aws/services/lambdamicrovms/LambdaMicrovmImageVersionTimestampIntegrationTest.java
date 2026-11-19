@@ -1,5 +1,6 @@
 package io.floci.aws.services.lambdamicrovms;
 
+import io.floci.aws.services.lambdamicrovms.LambdaMicrovmImageFixture.BuildInputs;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.config.JsonPathConfig;
@@ -7,7 +8,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.math.BigDecimal;
-import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -23,6 +23,12 @@ class LambdaMicrovmImageVersionTimestampIntegrationTest {
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    private final LambdaMicrovmImageFixture images = new LambdaMicrovmImageFixture(cleanup, "version-time-",
+            new BuildInputs("arn:aws:lambda:us-east-1:aws:microvm-image:original", null,
+                    "arn:aws:iam::000000000000:role/build", "s3://artifacts/original.zip"),
+            new BuildInputs("arn:aws:lambda:us-east-1:aws:microvm-image:replacement", null,
+                    "arn:aws:iam::000000000000:role/build", "s3://artifacts/replacement.zip"));
 
     @Test
     void getPreservesVersionTimestampWhenParentBuildsAnotherVersion() {
@@ -64,17 +70,11 @@ class LambdaMicrovmImageVersionTimestampIntegrationTest {
     }
 
     private String createImage() {
-        String image = "version-time-" + UUID.randomUUID();
-        given().contentType("application/json")
-                .body("{\"name\":\"" + image + "\"," + fields("original") + "}")
-                .when().post(IMAGES).then().statusCode(201);
-        cleanup.register(() -> given().when().delete(IMAGES + "/" + image).then().statusCode(200));
-        return image;
+        return images.create();
     }
 
     private void updateImage(String image) {
-        given().contentType("application/json").body("{" + fields("replacement") + "}")
-                .when().put(IMAGES + "/" + image).then().statusCode(200);
+        images.update(image);
     }
 
     private BigDecimal versionTimestamp(String image, String version) {
@@ -82,9 +82,4 @@ class LambdaMicrovmImageVersionTimestampIntegrationTest {
                 .then().statusCode(200).extract().jsonPath(EXACT_NUMBERS).getObject("updatedAt", BigDecimal.class);
     }
 
-    private static String fields(String label) {
-        return "\"baseImageArn\":\"arn:aws:lambda:us-east-1:aws:microvm-image:" + label + "\","
-                + "\"buildRoleArn\":\"arn:aws:iam::000000000000:role/build\","
-                + "\"codeArtifact\":{\"uri\":\"s3://artifacts/" + label + ".zip\"}";
-    }
 }
