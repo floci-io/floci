@@ -248,6 +248,34 @@ class CloudFormationEksIntegrationTest {
         }
     }
 
+    /** EKS Auto Mode stays out of AWS::EKS::Cluster for now, so a template enabling it still creates its cluster. */
+    @Test
+    void aClusterEnablingAutoModeIsCreatedWithoutIt() {
+        String stack = "cfn-eks-auto-" + Long.toString(System.nanoTime(), 36);
+        String autoMode = "\"ComputeConfig\": {\"Enabled\": true, \"NodePools\": [\"general-purpose\", \"system\"],"
+                + " \"NodeRoleArn\": \"arn:aws:iam::000000000000:role/eks-auto-node\"},"
+                + " \"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}},"
+                + " \"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}";
+        // The Gateway API settings, which Floci doesn't model, don't fail the conversion either.
+        String gatewayApi = "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": false,"
+                + " \"GatewayApi\": {\"Crds\": {\"Managed\": true}}}}";
+        String template = "{\"Resources\": {"
+                + "\"Subject\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + autoMode + "}},"
+                + "\"Gateway\": {\"Type\": \"AWS::EKS::Cluster\", \"Properties\": {" + ROLE + gatewayApi + "}}}}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(client, stack, template, "CREATE_COMPLETE");
+            for (String resource : List.of("Subject", "Gateway")) {
+                JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, resource)).jsonPath();
+                assertNull(cluster.get("cluster.computeConfig"), resource);
+                assertNull(cluster.get("cluster.storageConfig"), resource);
+                assertNull(cluster.get("cluster.kubernetesNetworkConfig.elasticLoadBalancing"), resource);
+            }
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
     @Test
     void changingTheServiceCidrReplacesTheClusterWithTheNewOne() {
         String stack = "cfn-eks-cidr-" + Long.toString(System.nanoTime(), 36);

@@ -1117,7 +1117,10 @@ def test_the_vendored_file_is_well_formed():
         for kind in ("app", "gwy", "net")]
     assert operations["elasticloadbalancing:CreateRule"]["creates"] == [
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
-    assert set(document["handBuilt"]) >= {"s3", "sqs"}
+    assert set(document["handBuilt"]) >= {"s3"}
+    # An SQS request names its queue by URL, which SQS finds as its handlers do; a create names it by name.
+    assert operations["sqs:SendMessage"]["resources"] == [{"type": "queue", "fill": {}, "find": ["QueueUrl"]}]
+    assert operations["sqs:CreateQueue"]["resources"] == [{"type": "queue", "fill": {"QueueName": "QueueName"}}]
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
@@ -2452,6 +2455,27 @@ def test_being_ends_a_types_name_in_documentation():
     formats = {"workflow": "arn:${Partition}:svc:${Region}:${Account}:workflow/${WorkflowName}"}
     assert r.doc_names("name of the workflow being run", "workflow", formats)
     assert not r.doc_names("name of the workflowrun being run", "workflow", formats)
+
+
+def test_a_url_of_the_type_is_found_by_its_service():
+    # "The URL of the Amazon SQS queue to which a message is sent", SQS's SendMessage's QueueUrl: a URL names the type,
+    # but is neither its name nor its id.
+    formats = {"queue": "arn:${Partition}:sqs:${Region}:${Account}:${QueueName}"}
+    assert r.doc_names("the url of the queue to which a message is sent", "queue", formats)
+    assert r.doc_kind("the url of the queue to which a message is sent") == "url"
+    assert r.kind_of("QueueUrl") == "url"
+    assert not r.compatible("QueueUrl", "QueueName")
+    # "The URL of a dead-letter queue", ListDeadLetterSourceQueues' QueueUrl: a hyphenated word qualifies the type.
+    assert r.doc_names("the url of a dead-letter queue", "queue", formats)
+
+
+def test_a_lead_drops_its_own_service_name():
+    model = {"metadata": {"serviceFullName": "Amazon Simple Queue Service", "serviceAbbreviation": "Amazon SQS"}}
+    assert r._without_service_name("the url of the amazon sqs queue to delete", model) == "the url of the queue to delete"
+    assert r._without_service_name("the url of the amazon simple queue service queue", model) == "the url of the queue"
+    # Another service's name, or this one's at the end, stays.
+    assert r._without_service_name("the arn of the amazon sns topic", model) == "the arn of the amazon sns topic"
+    assert r._without_service_name("a queue of amazon sqs", model) == "a queue of amazon sqs"
 
 
 def widget_model(tags: bool) -> dict:

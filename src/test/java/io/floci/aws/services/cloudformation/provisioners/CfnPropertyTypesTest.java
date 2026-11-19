@@ -295,14 +295,55 @@ class CfnPropertyTypesTest {
                         "failed validation constraint for keyword [pattern]"),
                 Arguments.of("SNS ARN is below schema minimum", "SnsDestination", "TopicARN",
                         "arn:aws:sns:a:000000000000:x", "expected minLength: 36, actual: 28"),
-                Arguments.of("SNS ARN is blank", "SnsDestination", "TopicARN", "",
-                        "expected minLength: 36, actual: 0"),
                 Arguments.of("SNS ARN exceeds schema maximum", "SnsDestination", "TopicARN",
                         snsPrefix + "x".repeat(1100 - snsPrefix.length()),
                         "expected maxLength: 1024, actual: 1100"),
                 Arguments.of("EventBridge ARN has wrong service", "EventBridgeDestination", "EventBusArn",
                         "arn:aws:sns:us-east-1:000000000000:event-bus/topic-name",
                         "failed validation constraint for keyword [pattern]"));
+    }
+
+    @Test
+    void handlerReaderGroupsEveryFailingConstraintForBlankTopicArn() {
+        String path = "#/EventDestination/SnsDestination/TopicARN";
+        String properties = """
+                {"ConfigurationSetName":"set","EventDestination":{"MatchingEventTypes":["SEND"],
+                "SnsDestination":{"TopicARN":""}}}
+                """;
+
+        assertHandlerReaderFailure("AWS::SES::ConfigurationSetEventDestination", properties,
+                "Model validation failed (" + path + ": 2 schema violations found)\n"
+                        + path + ": expected minLength: 36, actual: 0 (" + path + ")\n"
+                        + path + ": failed validation constraint for keyword [pattern] (" + path + ")");
+    }
+
+    @Test
+    void handlerReaderGroupsRequiredAndStringConstraintViolations() {
+        assertHandlerReaderFailure("AWS::SES::ConfigurationSetEventDestination", """
+                {"ConfigurationSetName":"set","EventDestination":{"SnsDestination":{"TopicARN":""}}}
+                """, """
+                Model validation failed (#/EventDestination: 3 schema violations found)
+                #/EventDestination: required key [MatchingEventTypes] not found (#/EventDestination)
+                #/EventDestination/SnsDestination/TopicARN: 2 schema violations found (#/EventDestination/SnsDestination/TopicARN)
+                """.stripTrailing());
+    }
+
+    @Test
+    void handlerReaderChecksEveryStringConstraintAlongsideAnUnconvertedType() {
+        RequestShapeModel model = model("""
+                {"operations":{"AWS::Test::Thing":"Root"},"shapes":{
+                  "Root":{"type":"structure","members":{"Name":"Name","Count":"Count"}},
+                  "Name":{"type":"string","minLength":2,"pattern":"[A-Z]+"},
+                  "Count":{"type":"integer"}}}
+                """);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new CfnPropertyTypes.HandlerReader(engine(), model)
+                        .read("AWS::Test::Thing", json("{\"Name\":\"\",\"Count\":\"not-a-number\"}")));
+
+        assertEquals("Model validation failed (#/Name: expected minLength: 2, actual: 0\n"
+                + "#/Name: failed validation constraint for keyword [pattern]\n"
+                + "#/Count: expected type: Integer, found: String" + HINT + ")", failure.getMessage());
     }
 
     @ParameterizedTest(name = "{0}")
@@ -325,11 +366,18 @@ class CfnPropertyTypesTest {
                         "MatchingEventTypes":["SEND"],"Name":"bad name"}}
                         """, "#/EventDestination/Name: failed validation constraint for keyword [pattern]"),
                 Arguments.of("dimension name minimum", dimensions.formatted("", "value"),
-                        "#/EventDestination/CloudWatchDestination/DimensionConfigurations/0/DimensionName: "
-                                + "expected minLength: 1, actual: 0"),
+                        groupedStringViolations(
+                                "#/EventDestination/CloudWatchDestination/DimensionConfigurations/0/DimensionName",
+                                "expected minLength: 1, actual: 0")),
                 Arguments.of("default dimension value maximum", dimensions.formatted("name", "x".repeat(257)),
-                        "#/EventDestination/CloudWatchDestination/DimensionConfigurations/0/DefaultDimensionValue: "
-                                + "expected maxLength: 256, actual: 257"));
+                        groupedStringViolations(
+                                "#/EventDestination/CloudWatchDestination/DimensionConfigurations/0/DefaultDimensionValue",
+                                "expected maxLength: 256, actual: 257")));
+    }
+
+    private static String groupedStringViolations(String path, String lengthViolation) {
+        return path + ": 2 schema violations found)\n" + path + ": " + lengthViolation + " (" + path
+                + ")\n" + path + ": failed validation constraint for keyword [pattern] (" + path;
     }
 
     @Test

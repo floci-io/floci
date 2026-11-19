@@ -111,7 +111,7 @@ class XrayTest {
         assertThat(defaults.samplingRule().fixedRate()).isEqualTo(0.05);
         assertThat(defaults.samplingRule().reservoirSize()).isEqualTo(1);
         assertThat(defaults.samplingRule().resourceARN())
-                .startsWith("arn:aws:xray:us-east-1:")
+                .startsWith("arn:" + TestFixtures.partition() + ":xray:" + TestFixtures.region().id() + ":")
                 .endsWith(":sampling-rule/Default");
     }
 

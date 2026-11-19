@@ -1,5 +1,7 @@
 package io.floci.aws.services.redshift.proxy;
 
+import io.floci.aws.core.common.SqlParameterParser;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -44,10 +46,6 @@ public final class RedshiftSqlInterceptor {
     private static final Pattern TABLE_DDL_PROBE = Pattern.compile(
             "(?is)^\\s*(?:(?:--[^\\n]*\\n)|(?:/\\*.*?\\*/)|\\s)*(?:CREATE|ALTER)\\s+(?:(?:GLOBAL|LOCAL)\\s+)?"
                     + "(?:(?:TEMP|TEMPORARY|UNLOGGED)\\s+)?TABLE\\b");
-
-    /** Single-quoted string literal (doubled '' is escaped quote) and PostgreSQL dollar-quoted string literal ($tag$...$tag$). */
-    private static final Pattern STRING_LITERAL_PATTERN = Pattern.compile(
-            "'(?:[^']|'')*'|(?s)\\$([^$\\s]*)\\$.*?\\$\\1\\$");
 
     private static final Pattern DISTSTYLE_PATTERN = Pattern.compile("(?i)\\bDISTSTYLE\\s+(ALL|EVEN|KEY|AUTO)\\b");
     private static final Pattern DISTKEY_PAREN_PATTERN = Pattern.compile("(?i)\\bDISTKEY\\s*\\([^)]*\\)");
@@ -137,13 +135,15 @@ public final class RedshiftSqlInterceptor {
     }
 
     private static String maskStringLiterals(String sql, List<String> out) {
-        Matcher m = STRING_LITERAL_PATTERN.matcher(sql);
         StringBuilder sb = new StringBuilder(sql.length());
-        while (m.find()) {
-            out.add(m.group());
-            m.appendReplacement(sb, Matcher.quoteReplacement(MASK_SENTINEL + (out.size() - 1) + MASK_SENTINEL));
+        int copied = 0;
+        for (int[] span : SqlParameterParser.literalSpans(sql, SqlParameterParser.Options.REDSHIFT)) {
+            sb.append(sql, copied, span[0]);
+            out.add(sql.substring(span[0], span[1]));
+            sb.append(MASK_SENTINEL).append(out.size() - 1).append(MASK_SENTINEL);
+            copied = span[1];
         }
-        m.appendTail(sb);
+        sb.append(sql, copied, sql.length());
         return sb.toString();
     }
 

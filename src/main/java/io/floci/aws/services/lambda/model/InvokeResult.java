@@ -12,6 +12,7 @@ public class InvokeResult {
     private String requestId;
     private String executedVersion;
     private String durableExecutionArn;
+    private boolean timedOut;
 
     public InvokeResult() {
     }
@@ -78,5 +79,13 @@ public class InvokeResult {
 
     public void setDurableExecutionArn(String durableExecutionArn) {
         this.durableExecutionArn = durableExecutionArn;
+    }
+
+    public boolean isTimedOut() {
+        return timedOut;
+    }
+
+    public void setTimedOut(boolean timedOut) {
+        this.timedOut = timedOut;
     }
 }

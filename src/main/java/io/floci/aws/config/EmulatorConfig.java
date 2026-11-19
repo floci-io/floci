@@ -2713,6 +2713,20 @@ public interface EmulatorConfig {
         /** How long a crawl keeps the crawler RUNNING before it succeeds; 0 = a crawl finishes as soon as it starts. */
         @WithDefault("0")
         int crawlerRunDurationSeconds();
+
+        /**
+         * How a Spark ({@code glueetl}) job run executes: {@code immediate} follows Glue's state machine and runs no
+         * script; {@code docker} runs the job's script in a container of {@link #image()}, which needs a Docker daemon
+         * and about 7 GB of disk for the image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        /** The image a {@code docker} job run uses: AWS's image for running Glue 5.0 jobs locally. */
+        @WithDefault("public.ecr.aws/glue/aws-glue-libs:5") // partition-literal: configurable; ECR Public exists only in the commercial partition
+        String image();
+
+        Optional<String> dockerNetwork();
     }
 
     interface SesServiceConfig {
@@ -4392,11 +4406,10 @@ public interface EmulatorConfig {
 
         /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call
-         * leases a connection from it, and a few streams hold one for as long as they run:
-         * CodeBuild phase execs, EKS audit followers and ECS Exec sessions. The streams a Lambda
-         * container holds for its whole lifetime live in the separate streaming pool. Once
-         * long-lived connections fill this pool, create, start, stop and remove wait for a free
-         * connection, including the calls that would release one, so the emulator stalls.
+         * leases a connection from it; streams that stay open while a container or a command runs
+         * live in the separate streaming pool. Once this pool is full, create, start, stop and
+         * remove wait for a free connection, including the calls that would release one, so the
+         * emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100. Connections are opened on demand, so a
          * small stack never approaches the limit.
@@ -4406,8 +4419,11 @@ public interface EmulatorConfig {
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived streams that occupy a slot for a container's entire lifetime: container log
-         * follow, and for each Lambda container its exit watcher and one exec per extension.
+         * long-lived streams that occupy a slot for a container's entire lifetime or a long
+         * command's run: container log follow, for each Lambda container its exit watcher and one
+         * exec per extension, and the output of each CodeBuild phase, SSM command, ECS Exec
+         * session, EKS audit follower, ECR garbage collection, user data script and EMR bootstrap
+         * action.
          * Total live containers is unbounded across distinct functions (each {@code WarmPool}
          * caps only per-function), so this pool is sized generously rather than tied to any
          * single function's warm-pool cap.

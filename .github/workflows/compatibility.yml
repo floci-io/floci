@@ -210,6 +210,13 @@ jobs:
           key: maven-${{ runner.os }}-${{ hashFiles('pom.xml') }}
           restore-keys: maven-${{ runner.os }}-
 
+      # The Maven distribution ./mvnw runs, saved by ci.yml on main, so this job does not fetch it from
+      # Maven Central with the wrapper's one unretried wget.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/wrapper
+          key: maven-wrapper-${{ runner.os }}-${{ hashFiles('.mvn/wrapper/maven-wrapper.properties') }}
+
       - name: Build native executable (quick build)
         # Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
         # REST invokers for AwsQueryController.dispatch and AwsJson11Controller.handle are each the
@@ -218,7 +225,7 @@ jobs:
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
         # maven.test.skip rather than skipTests: skipTests only stops surefire, so the build still
         # compiled all of src/test (about 25s per arch) for a native image that never uses it.
-        run: mvn clean package -Dnative -Dmaven.test.skip=true -B -Dquarkus.native.additional-build-args-append="-Ob,-H:-AOTSingleCallsiteInline"
+        run: ./mvnw clean package -Dnative -Dmaven.test.skip=true -B -Dquarkus.native.additional-build-args-append="-Ob,-H:-AOTSingleCallsiteInline"
 
       # Quarkus always writes GraalVM's build-output JSON next to the native source jar. Surfacing
       # it here gives every PR a size record for both architectures: code area, image heap, total

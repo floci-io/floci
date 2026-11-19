@@ -710,13 +710,7 @@ public class EksClusterManager
      * k3s container that failed for its own reasons.
      */
     public boolean isDockerReachable() {
-        try {
-            lifecycleManager.getDockerClient().pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            LOG.debugv("Docker daemon is not reachable: {0}", e.getMessage());
-            return false;
-        }
+        return lifecycleManager.isDockerReachable();
     }
 
     /**
@@ -1822,7 +1816,7 @@ public class EksClusterManager
                 .withAttachStdout(true)
                 .withAttachStderr(false)
                 .exec();
-        return dockerClient
+        return lifecycleManager.getStreamingDockerClient()
                 .execStartCmd(execCreate.getId())
                 .exec(logStreamer.execLogCallbackForAccount(
                         accountId, logGroup, logStream, region, "eks-audit:" + clusterName, false));
@@ -3880,6 +3874,7 @@ public class EksClusterManager
         }
         return UserDataPipeline.executeUserData(
                 dockerClient,
+                lifecycleManager.getStreamingDockerClient(),
                 node.containerId(),
                 context,
                 userData,

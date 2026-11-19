@@ -5,6 +5,7 @@ import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.PendingInvocation;
 import io.floci.aws.services.lambda.model.RegisteredExtension;
 import io.floci.aws.services.lambda.model.ResponseStreamListener;
+import io.netty.handler.codec.http.HttpHeaders;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
@@ -19,6 +20,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -84,6 +86,8 @@ public class RuntimeApiServer {
     private static final String INIT_ERROR_PATH = "/" + RUNTIME_API_VERSION + "/runtime/init/error";
 
     private static final String RESPONSE_MODE_HEADER = "Lambda-Runtime-Function-Response-Mode";
+    private static final String FUNCTION_ERROR_TYPE_TRAILER = "Lambda-Runtime-Function-Error-Type";
+    private static final String FUNCTION_ERROR_BODY_TRAILER = "Lambda-Runtime-Function-Error-Body";
 
     private static final String EXTENSIONS_API_VERSION = "2020-01-01";
     private static final String EXTENSION_REGISTER_PATH = "/" + EXTENSIONS_API_VERSION + "/extension/register";
@@ -641,6 +645,7 @@ public class RuntimeApiServer {
                 // automatically (no client-side change needed) and matches AWS's actual wire
                 // protocol.
                 .setHttp2ClearTextEnabled(false));
+        httpServer.connectionHandler(RequestTrailers::install);
         httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
             if (result.succeeded()) {
                 LOG.infov("RuntimeApiServer started on port {0}", String.valueOf(port));
@@ -1027,12 +1032,30 @@ public class RuntimeApiServer {
         ctx.request().handler(chunk -> listener.onChunk(chunk.getBytes()));
         ctx.request().exceptionHandler(e -> {
             LOG.warnv("Streamed response of invocation {0} broke off: {1}", requestId, e.getMessage());
+            listener.onFailure("Runtime.TruncatedResponse", null);
             completeStreamedResponse(requestId);
         });
         ctx.request().endHandler(v -> {
+            HttpHeaders trailers = RequestTrailers.take(ctx.request().connection());
+            if (trailers != null && trailers.contains(FUNCTION_ERROR_TYPE_TRAILER)) {
+                listener.onFailure(trailers.get(FUNCTION_ERROR_TYPE_TRAILER),
+                        decodeErrorBody(requestId, trailers.get(FUNCTION_ERROR_BODY_TRAILER)));
+            }
             completeStreamedResponse(requestId);
             sendStatusOk(ctx);
         });
+    }
+
+    private String decodeErrorBody(String requestId, String encoded) {
+        if (encoded == null) {
+            return null;
+        }
+        try {
+            return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Error body trailer of invocation {0} is not base64: {1}", requestId, e.getMessage());
+            return null;
+        }
     }
 
     private void completeStreamedResponse(String requestId) {

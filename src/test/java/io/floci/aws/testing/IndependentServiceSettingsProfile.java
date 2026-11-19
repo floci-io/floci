@@ -77,6 +77,9 @@ import java.util.Map;
  *   forwards to its targets, and {@code floci.services.elbv2.backend-keep-alive=false} opens a
  *   fresh connection to the target for every request it forwards.
  *   {@code ElbV2BackendNoKeepAliveIntegrationTest} relies on both.</li>
+ *   <li>{@code floci.services.glue.runner-mode=docker} runs a Spark job's script through the Docker
+ *   runner rather than simulating the run. {@code GlueScriptRunIntegrationTest} relies on it, with
+ *   the container replaced by a mock runner.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes. Each one is read by a single service: the
@@ -84,7 +87,7 @@ import java.util.Map;
  * Neptune cluster creation, Route53 VPC association and authorization, CloudFront origin fetches,
  * Cognito app client validation, the Scheduler dispatcher, the RDS Data API and Aurora auto-pause,
  * Firehose delivery, the Lambda runtime image resolver, the IoT MQTT broker, EC2, SageMaker
- * training jobs, Bedrock Runtime, ElastiCache, Service Quotas and the ELBv2 data plane, which
+ * training jobs, Bedrock Runtime, ElastiCache, Service Quotas, Glue job runs and the ELBv2 data plane, which
  * only acts once a class creates a listener or registers a target. Each class is the only one here
  * that calls its service, so no override reaches another class. Strict claiming is read for every
  * request, but only changes the answer to an RPC-signaled request no protocol claims, which only
@@ -134,7 +137,8 @@ public class IndependentServiceSettingsProfile implements QuarkusTestProfile {
                 Map.entry("floci.protocols.strict-claiming", "true"),
                 Map.entry("floci.services.servicequotas.standard-on-demand-vcpus", "7"),
                 Map.entry("floci.services.elbv2.mock", "false"),
-                Map.entry("floci.services.elbv2.backend-keep-alive", "false")));
+                Map.entry("floci.services.elbv2.backend-keep-alive", "false"),
+                Map.entry("floci.services.glue.runner-mode", "docker")));
         overrides.putAll(new YamlConfigSource("runtime-images", """
                 floci:
                   services:

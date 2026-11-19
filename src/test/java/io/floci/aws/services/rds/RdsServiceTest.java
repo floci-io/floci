@@ -8932,6 +8932,46 @@ class RdsServiceTest {
     }
 
     @Test
+    void proxyAndItsTargetGroupSurviveRestartThroughJsonStorage(@TempDir Path tempDir) {
+        Path proxyFile = tempDir.resolve("rds-proxies.json");
+        Path targetGroupFile = tempDir.resolve("rds-proxy-target-groups.json");
+        TypeReference<Map<String, DbProxy>> proxyType = new TypeReference<>() {};
+        TypeReference<Map<String, DbProxyTargetGroup>> targetGroupType = new TypeReference<>() {};
+        RdsService first = proxyStoreService(regionResolver, config,
+                new PersistentStorage<>(proxyFile, proxyType),
+                new PersistentStorage<>(targetGroupFile, targetGroupType),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        DbProxy proxy = first.createDbProxy("restart-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        DbProxyTargetGroup targetGroup = first.configureDbProxyTargetGroup("restart-proxy", "default",
+                70, 30, 45, "SET search_path TO app", List.of("EXCLUDE_VARIABLE_SETS"), "us-east-1");
+
+        PersistentStorage<String, DbProxy> reloadedProxies = new PersistentStorage<>(proxyFile, proxyType);
+        reloadedProxies.load();
+        PersistentStorage<String, DbProxyTargetGroup> reloadedTargetGroups =
+                new PersistentStorage<>(targetGroupFile, targetGroupType);
+        reloadedTargetGroups.load();
+        assertEquals("restart-proxy",
+                reloadedTargetGroups.get("us-east-1::restart-proxy").orElseThrow().getDbProxyName());
+        RdsService restarted = proxyStoreService(regionResolver, config, reloadedProxies, reloadedTargetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+
+        DbProxy restoredProxy = restarted.getDbProxy("restart-proxy");
+        assertEquals(proxy.getDbProxyArn(), restoredProxy.getDbProxyArn());
+        assertEquals(proxy.getProxyPort(), restoredProxy.getProxyPort());
+        DbProxyTargetGroup restoredGroup =
+                restarted.describeDbProxyTargetGroups("restart-proxy").iterator().next();
+        assertEquals("restart-proxy", restoredGroup.getDbProxyName());
+        assertEquals(targetGroup.getTargetGroupArn(), restoredGroup.getTargetGroupArn());
+        assertEquals(70, restoredGroup.getMaxConnectionsPercent());
+        assertEquals(30, restoredGroup.getMaxIdleConnectionsPercent());
+        assertEquals(45, restoredGroup.getConnectionBorrowTimeout());
+        assertEquals("SET search_path TO app", restoredGroup.getInitQuery());
+        assertEquals(List.of("EXCLUDE_VARIABLE_SETS"), restoredGroup.getSessionPinningFilters());
+    }
+
+    @Test
     void createDbProxyRejectsDuplicate() {
         rdsService.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
                 PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());

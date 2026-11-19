@@ -1,4 +1,4 @@
-package io.floci.aws.services.s3;
+package io.floci.aws.testing;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -13,24 +13,24 @@ import java.util.Map;
 import java.util.zip.CRC32;
 
 /** Splits an AWS event stream into its messages, checking the prelude and message CRCs of each. */
-final class EventStreamMessages {
+public final class EventStreamMessages {
 
     private EventStreamMessages() {
     }
 
-    record Message(Map<String, String> headers, byte[] payload) {
+    public record Message(Map<String, String> headers, byte[] payload) {
 
         /** The event type of an event message, or the message type of any other. */
-        String type() {
+        public String type() {
             return headers.getOrDefault(":event-type", headers.get(":message-type"));
         }
 
-        String text() {
+        public String text() {
             return new String(payload, StandardCharsets.UTF_8);
         }
     }
 
-    static List<Message> decode(byte[] stream) {
+    public static List<Message> decode(byte[] stream) {
         List<Message> messages = new ArrayList<>();
         int offset = 0;
         try {

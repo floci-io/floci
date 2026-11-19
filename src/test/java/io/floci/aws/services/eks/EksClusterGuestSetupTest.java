@@ -11,6 +11,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
@@ -232,6 +233,25 @@ class EksClusterGuestSetupTest {
         assertEquals(new EksClusterManager.SetUpNode(CONTAINER_ID, null), waiting.get(10, TimeUnit.SECONDS));
     }
 
+    // Catches: a node group's user data script, which may run for minutes, holding a control-plane
+    // connection for as long as it runs instead of a streaming one.
+    @Test
+    void userDataOutputStreamsOnTheStreamingClient() {
+        DockerClient streaming = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getStreamingDockerClient()).thenReturn(streaming);
+        ContainerExecStubs.completeEveryExec(dockerClient, streaming, CONTAINER_ID, 0, "joined\n", "");
+        Cluster cluster = cluster();
+        manager.startCluster(cluster);
+        manager.setUpGuest(cluster);
+
+        UserDataPipeline.ExecutionResult result =
+                manager.executeUserData(cluster, "workers", "#!/bin/bash\necho joined\n");
+
+        assertTrue(result.isSuccess(), result.getFailureMessage());
+        verify(streaming).execStartCmd("exec-" + CONTAINER_ID);
+        verify(dockerClient, never()).execStartCmd("exec-" + CONTAINER_ID);
+    }
+
     @Test
     void userDataFollowsANodeReplacedWhileItWaits() throws Exception {
         Cluster cluster = cluster();
@@ -323,7 +343,10 @@ class EksClusterGuestSetupTest {
         when(docker.execCreateCmd(anyString())).thenReturn(execCreateCmd);
         when(execCreateCmd.exec()).thenReturn(execCreate);
         ExecStartCmd execStartCmd = Mockito.mock(ExecStartCmd.class, Mockito.RETURNS_SELF);
-        when(docker.execStartCmd("exec-123")).thenReturn(execStartCmd);
+        // The audit follower runs tail -F for the cluster's lifetime, so it streams on the streaming client.
+        DockerClient streamingDocker = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getStreamingDockerClient()).thenReturn(streamingDocker);
+        when(streamingDocker.execStartCmd("exec-123")).thenReturn(execStartCmd);
         ResultCallback.Adapter<?> auditFollower = Mockito.mock(ResultCallback.Adapter.class);
         Mockito.doReturn(auditFollower).when(execStartCmd).exec(any());
         RegionResolver regionResolver = Mockito.mock(RegionResolver.class);

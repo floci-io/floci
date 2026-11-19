@@ -35,6 +35,7 @@ import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterStatus;
+import io.floci.aws.services.eks.model.ComputeConfig;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.CreateFargateProfileRequest;
 import io.floci.aws.services.eks.model.CreateNodeGroupRequest;
@@ -50,6 +51,7 @@ import io.floci.aws.services.eks.model.NodegroupStatus;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.eks.model.Provider;
 import io.floci.aws.services.eks.model.ResourcesVpcConfig;
+import io.floci.aws.services.eks.model.StorageConfig;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -758,6 +760,38 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    /**
+     * Refuses the EKS Auto Mode configurations AWS refuses, with its errors. Its compute, block storage
+     * and load balancing capabilities "must all be enabled or disabled in the same request", and node
+     * pools launch their nodes with the node role, so a compute configuration naming pools names it.
+     */
+    private static void validateAutoMode(ComputeConfig compute, StorageConfig storage,
+                                         KubernetesNetworkConfig network) {
+        boolean computeEnabled = compute != null && Boolean.TRUE.equals(compute.enabled());
+        boolean blockStorageEnabled = storage != null && storage.blockStorage() != null
+                && Boolean.TRUE.equals(storage.blockStorage().enabled());
+        boolean loadBalancingEnabled = network != null && network.getElasticLoadBalancing() != null
+                && Boolean.TRUE.equals(network.getElasticLoadBalancing().enabled());
+        if (computeEnabled != blockStorageEnabled || computeEnabled != loadBalancingEnabled) {
+            throw new AwsException("InvalidParameterException", "For EKS Auto Mode, please ensure that all "
+                    + "required configs, including computeConfig, kubernetesNetworkConfig, and blockStorage are "
+                    + "all either fully enabled or fully disabled.", 400);
+        }
+        if (compute == null) {
+            return;
+        }
+        boolean hasNodePools = compute.nodePools() != null && !compute.nodePools().isEmpty();
+        boolean hasNodeRole = compute.nodeRoleArn() != null && !compute.nodeRoleArn().isEmpty();
+        if (hasNodePools && !hasNodeRole) {
+            throw new AwsException("InvalidParameterException",
+                    "When Compute Config nodeRoleArn is null or empty, nodePool list cannot be populated", 400);
+        }
+        if (hasNodeRole && !hasNodePools) {
+            throw new AwsException("InvalidParameterException",
+                    "When Compute Config nodeRoleArn is not null or empty, nodePool value(s) must be provided.", 400);
+        }
+    }
+
     private Cluster createReservedCluster(CreateClusterRequest request, String name) {
         AccessConfig requestedAccess = request.getAccessConfig();
         String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
@@ -765,6 +799,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         if (!Set.of("CONFIG_MAP", "API_AND_CONFIG_MAP", "API").contains(authenticationMode)) {
             throw new AwsException("InvalidParameterException", "Invalid authenticationMode", 400);
         }
+        validateAutoMode(request.getComputeConfig(), request.getStorageConfig(), request.getKubernetesNetworkConfig());
         AccessConfig accessConfig = new AccessConfig(authenticationMode,
                 requestedAccess == null || requestedAccess.bootstrapClusterCreatorAdminPermissions() == null
                         || requestedAccess.bootstrapClusterCreatorAdminPermissions());
@@ -776,6 +811,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         Cluster cluster = new Cluster();
         cluster.setName(name);
         cluster.setAccessConfig(accessConfig);
+        cluster.setComputeConfig(request.getComputeConfig());
+        cluster.setStorageConfig(request.getStorageConfig());
         cluster.setArn(arn);
         cluster.setAccountId(accountId);
         cluster.setCreatedAt(Instant.now());
@@ -1817,6 +1854,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         config.setServiceIpv4Cidr(resolvedCidr);
         config.setIpFamily(resolveIpFamily(request));
+        config.setElasticLoadBalancing(request != null ? request.getElasticLoadBalancing() : null);
         return config;
     }
 

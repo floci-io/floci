@@ -14,7 +14,15 @@ public class KubernetesNetworkConfig {
     @JsonProperty("ipFamily")
     private String ipFamily;
 
+    @JsonProperty("elasticLoadBalancing")
+    private ElasticLoadBalancing elasticLoadBalancing;
+
     public KubernetesNetworkConfig() {}
+
+    public ElasticLoadBalancing getElasticLoadBalancing() { return elasticLoadBalancing; }
+    public void setElasticLoadBalancing(ElasticLoadBalancing elasticLoadBalancing) {
+        this.elasticLoadBalancing = elasticLoadBalancing;
+    }
 
     public String getServiceIpv4Cidr() { return serviceIpv4Cidr; }
     public void setServiceIpv4Cidr(String serviceIpv4Cidr) { this.serviceIpv4Cidr = serviceIpv4Cidr; }

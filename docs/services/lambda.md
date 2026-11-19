@@ -17,6 +17,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `UpdateFunctionConfiguration` | Update runtime, handler, memory, timeout, environment, architectures, tracing, layers, and more |
 | `DeleteFunction` | Remove a function |
 | `Invoke` | Invoke a function synchronously or asynchronously. A durable function starts a durable execution |
+| `InvokeWithResponseStream` | Invoke a function and stream its response as event stream frames (see Response streaming below) |
 | `CreateEventSourceMapping` | Connect SQS / Kinesis / DynamoDB Streams to a function |
 | `GetEventSourceMapping` | Get event source mapping details |
 | `ListEventSourceMappings` | List all event source mappings |
@@ -315,6 +316,19 @@ Not emulated yet:
 - The `Deleting` state AWS shows for about a minute after `DeleteFunction` of a durable function.
   Floci removes it at once.
 
+## Response streaming
+
+`InvokeWithResponseStream` answers with an `application/vnd.amazon.eventstream` body. It has one
+`PayloadChunk` event for each chunk the function streams and one `InvokeComplete` event at the end.
+A function that does not stream sends its whole response as one `PayloadChunk`. Every invocation
+type runs the function, so `DryRun` and `Event` stream like `RequestResponse`.
+
+`X-Amz-Executed-Version`, `x-amzn-Remapped-Content-Type`, `Qualifier`, `X-Amz-Client-Context` and
+`X-Amz-Log-Type: Tail` are supported. With a log tail, `InvokeComplete` carries `LogResult`.
+`InvokeComplete` carries `ErrorCode` for a failed invocation. An error a streaming handler throws
+also sets `ErrorDetails`, a timeout is `Sandbox.Timeout`, and a runtime that exits in the middle of
+a stream is `Runtime.TruncatedResponse`.
+
 ## Code signing configuration pagination
 
 `ListCodeSigningConfigs` accepts `MaxItems` from 1 to 10,000 and returns `NextMarker`
@@ -494,7 +508,7 @@ Pagination uses Lambda's shared validation: out-of-range integers return
 marker returns `InvalidParameterValueException` with `Invalid pagination key.`.
 Missing or inaccessible function references return `ResourceNotFoundException`.
 
-A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
+A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci does not read for a function URL. A handler that does not stream is answered as with `BUFFERED`.
 
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
@@ -659,7 +673,6 @@ For a longer drain, explicitly stop with the larger timeout and then start Floci
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
-- `InvokeWithResponseStream`
 
 Code signing enforcement is not emulated: an attached configuration never gates a deployment.
 The attachment lifecycle is supported for `$LATEST`: `PutFunctionCodeSigningConfig` attaches or

@@ -10,4 +10,11 @@ public interface ResponseStreamListener {
     void onStart(String contentType);
 
     void onChunk(byte[] chunk);
+
+    /**
+     * The stream ended in a failure: the function reported {@code errorType} in its trailers, or the
+     * runtime broke off ({@code Runtime.TruncatedResponse}). {@code errorBody} is the error JSON, or null.
+     */
+    default void onFailure(String errorType, String errorBody) {
+    }
 }

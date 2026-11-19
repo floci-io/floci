@@ -18,7 +18,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [S3 Tables](s3tables.md) | `/buckets`, `/namespaces/*`, `/tables/*` | REST JSON | 27 |
 | [DynamoDB](dynamodb.md) | `POST /` + `X-Amz-Target: DynamoDB_20120810.*` | JSON 1.1 | 53 |
 | [DynamoDB Streams](dynamodb.md#streams) | `POST /` + `X-Amz-Target: DynamoDBStreams_20120810.*` | JSON 1.1 | 4 |
-| [Lambda](lambda.md) | `/2015-03-31/functions/...` + `/2025-12-01/durable-executions/...` | REST JSON | 68 |
+| [Lambda](lambda.md) | `/2015-03-31/functions/...` + `/2025-12-01/durable-executions/...` | REST JSON | 69 |
 | [Lambda MicroVMs](lambda-microvms.md) | `/2025-09-09/...` + `/2026-04-04/...` | REST JSON | 23 |
 | [Lambda Web Functions](lambda-web-functions.md) | `/2025-03-07/web-functions/...` | REST JSON | 20 |
 | [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 101 |
@@ -35,7 +35,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 32 |
 | [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 15 |
 | [Payment Cryptography](payment-cryptography.md) | `POST /` + `X-Amz-Target: PaymentCryptographyControlPlane.*` | JSON 1.0 | 32 |
-| [Payment Cryptography data plane](payment-cryptography-data.md) | `POST /keys/{KeyIdentifier}/encrypt` and the rest | REST JSON | 12 |
+| [Payment Cryptography data plane](payment-cryptography-data.md) | `POST /keys/{KeyIdentifier}/encrypt` and the rest | REST JSON | 13 |
 | [Secrets Manager](secrets-manager.md) | `POST /` + `X-Amz-Target: secretsmanager.*` | JSON 1.1 | 23 |
 | [Step Functions](step-functions.md) | `POST /` + `X-Amz-Target: AmazonStatesService.*` | JSON 1.1 | 32 |
 | [SWF](swf.md) | `POST /` + `X-Amz-Target: SimpleWorkflowService.*` | JSON 1.0 | 39 |

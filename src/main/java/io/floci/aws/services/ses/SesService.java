@@ -10,6 +10,8 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.ses.address.SesAddressLength;
 import io.floci.aws.services.ses.address.SesAddressSyntax;
+import io.floci.aws.services.ses.mime.SesContentScan;
+import io.floci.aws.services.ses.mime.SesMimeParser;
 import io.floci.aws.services.ses.model.BulkEmailEntry;
 import io.floci.aws.services.ses.model.BulkEmailEntryResult;
 import io.floci.aws.services.ses.model.ConfigurationSet;
@@ -450,7 +452,7 @@ public class SesService {
         if (content.hasAttachments()) {
             mime = SmtpRelay.encodeMime(simpleRelayMessage(request, content, effectiveReturnPath, messageId,
                     request.toAddresses(), request.ccAddresses(), null));
-            Message parsedMime = SmtpRelay.parseMime(mime);
+            Message parsedMime = SesMimeParser.parse(mime);
             rejectBlockedAttachments(parsedMime);
             SesContentScan.Result scan = SesContentScan.scan(mime, parsedMime);
             if (scan == SesContentScan.Result.UNREADABLE) {

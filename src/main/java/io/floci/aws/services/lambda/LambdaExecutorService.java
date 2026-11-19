@@ -224,6 +224,13 @@ public class LambdaExecutorService implements Resettable {
                 UUID.randomUUID().toString(), listener, null);
     }
 
+    /** As {@link #invokeStreaming}, for a request that carries a client context and may ask for a log tail. */
+    InvokeResult invokeStreaming(LambdaFunction fn, byte[] payload, int chainDepth, String invokedQualifier,
+                                 String clientContext, boolean logTail, ResponseStreamListener listener) {
+        return invoke(fn, payload, InvocationType.RequestResponse, chainDepth, invokedQualifier, clientContext,
+                UUID.randomUUID().toString(), listener, null, logTail);
+    }
+
     private InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
                                 String invokedQualifier, String clientContext, String requestId,
                                 ResponseStreamListener listener, String traceId) {
@@ -472,6 +479,7 @@ public class LambdaExecutorService implements Resettable {
                 InvokeResult result = new InvokeResult(200, "Unhandled",
                         buildErrorPayload("Task timed out after " + fn.getTimeout() + " seconds", "Function.TimedOut"),
                         null, requestId);
+                result.setTimedOut(true);
                 includeLogTail(result, handle, logs);
                 warmPool.destroyHandle(handle);
                 return result;

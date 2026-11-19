@@ -439,6 +439,66 @@ class PostgresProtocolHandlerTest {
     }
 
     @Test
+    void forceSslRefusesPlaintextStartupBeforeContactingTheBackend() throws Exception {
+        try (ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = acceptTestSocket(clientServer)) {
+
+            AtomicReference<Object> outcome = new AtomicReference<>();
+            Thread authThread = Thread.ofVirtual().start(() -> outcome.set(authenticateRequiringSsl(proxyClient)));
+
+            DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+            writeStartup(clientOut, "dbadmin", "appdb");
+            DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+            Map<Character, String> error = readErrorResponse(clientIn);
+
+            assertEquals("FATAL", error.get('S'));
+            assertEquals("28000", error.get('C'));
+            assertEquals("no pg_hba.conf entry for host \"" + ourClient.getLocalAddress().getHostAddress()
+                    + "\", user \"dbadmin\", database \"appdb\", no encryption", error.get('M'));
+            assertEquals(-1, clientIn.read(), "the proxy closes the refused connection");
+            authThread.join(5_000);
+            assertFalse(authThread.isAlive(), "authThread did not terminate");
+            assertEquals("no session", outcome.get());
+        }
+    }
+
+    @Test
+    void forceSslAcceptsStartupOverTls() throws Exception {
+        try (ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = acceptTestSocket(clientServer)) {
+
+            Thread authThread = Thread.ofVirtual().start(() -> authenticateRequiringSsl(proxyClient));
+
+            DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+            writeSslRequest(clientOut);
+            assertEquals('S', new DataInputStream(ourClient.getInputStream()).readUnsignedByte());
+            try (SSLSocket sslClient = trustedClientSocket(ourClient)) {
+                sslClient.startHandshake();
+                writeStartup(new DataOutputStream(sslClient.getOutputStream()), "dbadmin", "appdb");
+                readCleartextPasswordChallenge(new DataInputStream(sslClient.getInputStream()));
+            } finally {
+                authThread.join(5_000);
+                assertFalse(authThread.isAlive(), "authThread did not terminate");
+            }
+        }
+    }
+
+    private Object authenticateRequiringSsl(Socket proxyClient) {
+        try {
+            PostgresProtocolHandler.AuthenticatedSession session = PostgresProtocolHandler.authenticate(
+                    proxyClient, NEVER_CONNECT, "dbadmin", "adminpass", "postgres",
+                    false, testSigV4Validator(), testBinding(), testTlsCertificates(),
+                    (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                    true, true, (user, database, parameters) -> { }, null, true);
+            return session == null ? "no session" : session;
+        } catch (IOException e) {
+            return e;
+        }
+    }
+
+    @Test
     void acceptsPostgresSslRequestAndContinuesStartup() throws Exception {
         AtomicReference<String> backendDatabase = new AtomicReference<>();
 

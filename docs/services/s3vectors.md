@@ -65,6 +65,13 @@ bucket default, or `AES256` when the bucket has no setting. Missing creation tim
 are set to the migration time and saved through the configured storage backend;
 the original creation time is unavailable. Later reads and restarts retain that value.
 
+Bucket and index names follow the same rules, as S3 Vectors applies them: 3 to 63
+characters, labels of lowercase letters, numbers and hyphens that begin and end with a
+letter or number, joined by single dots, not an IPv4 address, and without the prefix
+`sthree-` or the suffixes `-s3alias` and `--x-s3`. `CreateVectorBucket` and
+`CreateIndex` refuse any other name with a `ValidationException`, CloudFormation with a
+`ValidationError`.
+
 Index dimensions must be between 1 and 4096. Metadata configuration accepts up to
 10 unique non-filterable keys, each a non-blank string of 1 to 63 characters.
 Queries reject filters on these keys, including filters nested in logical expressions.

@@ -92,7 +92,8 @@ public class CodeArtifactPypiController {
             CodeArtifactPypiExternalConnectionImporter externalConnectionImporter,
             CodeArtifactPypiUpstreamRepositoryImporter upstreamRepositoryImporter) {
         this(service, pypiserver, externalConnectionImporter, upstreamRepositoryImporter,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+                HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1)
+                        .connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver,

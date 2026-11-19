@@ -13,6 +13,31 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SqlParameterParserTest {
 
     @Test
+    void blankQuotedEmptiesLiteralsIdentifiersAndDollarBodiesAndDropsComments() {
+        assertEquals("select '', '' from t where a = ''",
+                SqlParameterParser.blankQuoted(
+                        "select 'a join b', \"group by\" from t where a = $$ x $$", Options.REDSHIFT));
+        assertEquals("select 1   from t",
+                SqlParameterParser.blankQuoted("select 1 /* join */ from t", Options.REDSHIFT));
+    }
+
+    @Test
+    void blankQuotedReadsABackslashQuoteInAnEscapeStringAsPartOfTheLiteral() {
+        assertEquals("select E'' from t join u",
+                SqlParameterParser.blankQuoted("select E'\\' x' from t join u", Options.REDSHIFT));
+    }
+
+    @Test
+    void literalSpansCoverStringsAndDollarBodiesButNotIdentifiersOrComments() {
+        String sql = "select E'\\'' , \"a'b\", $t$ x $t$ /* 'c' */ -- 'd'\n, 'e''f'";
+
+        List<String> literals = SqlParameterParser.literalSpans(sql, Options.REDSHIFT).stream()
+                .map(span -> sql.substring(span[0], span[1])).toList();
+
+        assertEquals(List.of("'\\''", "$t$ x $t$", "'e''f'"), literals);
+    }
+
+    @Test
     void rewritesNamedPlaceholdersToPositional() {
         ParsedSql parsed = SqlParameterParser.parse(
                 "select * from t where id = :id and name = :name", Options.REDSHIFT);
