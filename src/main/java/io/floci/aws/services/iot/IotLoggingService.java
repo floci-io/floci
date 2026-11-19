@@ -19,6 +19,7 @@ public class IotLoggingService {
     private static final List<String> LOG_LEVELS = List.of("DEBUG", "INFO", "ERROR", "WARN", "DISABLED");
 
     private final StorageBackend<String, IotV2LoggingOptions> store;
+    private final Object lock = new Object();
 
     @Inject
     public IotLoggingService(StorageFactory storageFactory) {
@@ -45,15 +46,17 @@ public class IotLoggingService {
                     + "' at 'defaultLogLevel' failed to satisfy constraint: Member must satisfy enum value set: "
                     + LOG_LEVELS, 400);
         }
-        Optional<IotV2LoggingOptions> current = store.get(region);
-        if (current.isEmpty() && (roleArn == null || defaultLogLevel == null)) {
-            throw new AwsException("InvalidRequestException",
-                    "roleArn and defaultLogLevel are required for the initial setup.", 400);
+        synchronized (lock) {
+            Optional<IotV2LoggingOptions> current = store.get(region);
+            if (current.isEmpty() && (roleArn == null || defaultLogLevel == null)) {
+                throw new AwsException("InvalidRequestException",
+                        "roleArn and defaultLogLevel are required for the initial setup.", 400);
+            }
+            IotV2LoggingOptions prior = current.orElse(new IotV2LoggingOptions(null, null, false));
+            store.put(region, new IotV2LoggingOptions(roleArn != null ? roleArn : prior.roleArn(),
+                    defaultLogLevel != null ? defaultLogLevel : prior.defaultLogLevel(),
+                    disableAllLogs != null ? disableAllLogs : prior.disableAllLogs()));
         }
-        IotV2LoggingOptions prior = current.orElse(new IotV2LoggingOptions(null, null, false));
-        store.put(region, new IotV2LoggingOptions(roleArn != null ? roleArn : prior.roleArn(),
-                defaultLogLevel != null ? defaultLogLevel : prior.defaultLogLevel(),
-                disableAllLogs != null ? disableAllLogs : prior.disableAllLogs()));
     }
 
     public IotV2LoggingOptions getV2LoggingOptions(String region) {
