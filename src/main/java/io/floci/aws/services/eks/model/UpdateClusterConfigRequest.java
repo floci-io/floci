@@ -4,8 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
- * The members of UpdateClusterConfig that floci applies. The REST controller refuses any other member; the service's
- * other callers build this record directly.
+ * The members of UpdateClusterConfig that floci applies. The REST controller refuses any other member.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)

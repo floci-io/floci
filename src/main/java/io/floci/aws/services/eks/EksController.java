@@ -351,8 +351,8 @@ public class EksController {
 
     /**
      * The body is checked against its botocore shape as {@link #createCluster} checks its own. A member floci does
-     * not apply is refused rather than dropped, and so is a request naming more than one update family, which EKS
-     * refuses as well. The service applies several families at once for its other callers.
+     * not apply is refused rather than dropped. The service applies every family the request names; this endpoint
+     * refuses more than one, as EKS does.
      */
     @POST
     @Path("/clusters/{name}/update-config")

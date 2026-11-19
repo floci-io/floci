@@ -1034,6 +1034,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    static final List<String> DEFAULT_PUBLIC_ACCESS_CIDRS = List.of("0.0.0.0/0");
+
     private static final Map<String, Integer> AUTHENTICATION_MODE_RANK =
             Map.of("CONFIG_MAP", 0, "API_AND_CONFIG_MAP", 1, "API", 2);
 
@@ -1067,9 +1069,13 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         // Validated whole before anything is written, so a refused request changes nothing.
         ResourcesVpcConfig vpc = cluster.getResourcesVpcConfig();
         ResourcesVpcConfig requestedVpc = request.resourcesVpcConfig();
-        Boolean publicAccess = vpc == null || vpc.getEndpointPublicAccess() == null ? Boolean.TRUE : vpc.getEndpointPublicAccess();
-        Boolean privateAccess = vpc == null || vpc.getEndpointPrivateAccess() == null ? Boolean.FALSE : vpc.getEndpointPrivateAccess();
-        List<String> cidrs = vpc == null ? null : vpc.getPublicAccessCidrs();
+        Boolean storedPublic = vpc == null || vpc.getEndpointPublicAccess() == null ? Boolean.TRUE : vpc.getEndpointPublicAccess();
+        Boolean storedPrivate = vpc == null || vpc.getEndpointPrivateAccess() == null ? Boolean.FALSE : vpc.getEndpointPrivateAccess();
+        List<String> storedCidrs = vpc == null || vpc.getPublicAccessCidrs() == null
+                ? DEFAULT_PUBLIC_ACCESS_CIDRS : vpc.getPublicAccessCidrs();
+        Boolean publicAccess = storedPublic;
+        Boolean privateAccess = storedPrivate;
+        List<String> cidrs = storedCidrs;
         if (requestedVpc != null) {
             requireSameMembers("subnetIds", requestedVpc.getSubnetIds(), vpc == null ? null : vpc.getSubnetIds());
             requireSameMembers("securityGroupIds", requestedVpc.getSecurityGroupIds(),
@@ -1083,7 +1089,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             requireValidPublicAccessCidrs(requestedVpc.getPublicAccessCidrs(),
                     stored == null || stored.getIpFamily() == null ? "ipv4" : stored.getIpFamily());
             cidrs = requestedVpc.getPublicAccessCidrs() != null ? requestedVpc.getPublicAccessCidrs() : cidrs;
-            requireEndpointChange(vpc, publicAccess, privateAccess, cidrs);
+            requireEndpointChange(vpc != null, storedPublic, storedPrivate, storedCidrs, publicAccess, privateAccess, cidrs);
         }
         Logging logging = request.logging() == null || request.logging().getClusterLogging() == null
                 ? null : buildLogging(mergedLogging(cluster.getLogging(), request.logging()));
@@ -1160,29 +1166,6 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 && Objects.equals(existing.accessConfig(), request.accessConfig());
     }
 
-    /**
-     * Puts back values an update changed, with no AWS rules applied: a stack rollback may move the
-     * authentication mode backwards, which UpdateClusterConfig refuses.
-     */
-    public synchronized void restoreClusterConfig(String name, ResourcesVpcConfig endpoint, Logging logging,
-                                                  String authenticationMode) {
-        Cluster cluster = requireClusterInRequestRegion(name);
-        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster), current -> {
-            if (endpoint != null && current.getResourcesVpcConfig() != null) {
-                current.getResourcesVpcConfig().setEndpointPublicAccess(endpoint.getEndpointPublicAccess());
-                current.getResourcesVpcConfig().setEndpointPrivateAccess(endpoint.getEndpointPrivateAccess());
-                current.getResourcesVpcConfig().setPublicAccessCidrs(endpoint.getPublicAccessCidrs());
-            }
-            if (logging != null) {
-                current.setLogging(logging);
-            }
-            if (authenticationMode != null && current.getAccessConfig() != null) {
-                current.setAccessConfig(new AccessConfig(authenticationMode,
-                        current.getAccessConfig().bootstrapClusterCreatorAdminPermissions()));
-            }
-        });
-    }
-
     /** The cluster's current settings with the request applied on top, in the shape createCluster validates. */
     private static Logging mergedLogging(Logging current, Logging requested) {
         List<LogSetup> merged = new ArrayList<>();
@@ -1201,7 +1184,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
-    private static Set<String> enabledLogTypes(Logging logging) {
+    /** The log types a {@link Logging} setting enables; empty for a null setting. */
+    public static Set<String> enabledLogTypes(Logging logging) {
         Set<String> enabled = new HashSet<>();
         if (logging != null && logging.getClusterLogging() != null) {
             for (LogSetup setup : logging.getClusterLogging()) {
@@ -1214,25 +1198,19 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     /** EKS refuses an endpoint update that leaves both endpoints off or changes nothing. */
-    private static void requireEndpointChange(ResourcesVpcConfig stored, Boolean publicAccess, Boolean privateAccess,
+    private static void requireEndpointChange(boolean stored, Boolean storedPublic, Boolean storedPrivate,
+                                              List<String> storedCidrs, Boolean publicAccess, Boolean privateAccess,
                                               List<String> cidrs) {
         if (Boolean.FALSE.equals(publicAccess) && Boolean.FALSE.equals(privateAccess)) {
             throw new AwsException("InvalidParameterException",
                     "You must enable private access to disable public access", 400);
         }
-        if (stored == null) {
-            return;
-        }
-        List<String> storedCidrs = stored.getPublicAccessCidrs() != null
-                ? stored.getPublicAccessCidrs() : List.of("0.0.0.0/0");
-        List<String> effectiveCidrs = cidrs != null ? cidrs : List.of("0.0.0.0/0");
-        if (publicAccess.equals(stored.getEndpointPublicAccess() == null || stored.getEndpointPublicAccess())
-                && privateAccess.equals(stored.getEndpointPrivateAccess() != null && stored.getEndpointPrivateAccess())
-                && new HashSet<>(effectiveCidrs).equals(new HashSet<>(storedCidrs))) {
+        if (stored && publicAccess.equals(storedPublic) && privateAccess.equals(storedPrivate)
+                && new HashSet<>(cidrs).equals(new HashSet<>(storedCidrs))) {
             throw new AwsException("InvalidParameterException",
                     "Cluster is already at the desired configuration with endpointPrivateAccess: " + privateAccess
                             + " , endpointPublicAccess: " + publicAccess
-                            + ", and Public Endpoint Restrictions: [" + String.join(",", effectiveCidrs) + "]", 400);
+                            + ", and Public Endpoint Restrictions: [" + String.join(",", cidrs) + "]", 400);
         }
     }
 
@@ -2006,14 +1984,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     request.getEndpointPrivateAccess() != null ? request.getEndpointPrivateAccess() : Boolean.FALSE);
             requireValidPublicAccessCidrs(request.getPublicAccessCidrs(), ipFamily);
             response.setPublicAccessCidrs(
-                    request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : List.of("0.0.0.0/0"));
+                    request.getPublicAccessCidrs() != null ? request.getPublicAccessCidrs() : DEFAULT_PUBLIC_ACCESS_CIDRS);
         } else {
             response.setSubnetIds(List.of());
             response.setSecurityGroupIds(List.of());
             response.setVpcId("");
             response.setEndpointPublicAccess(Boolean.TRUE);
             response.setEndpointPrivateAccess(Boolean.FALSE);
-            response.setPublicAccessCidrs(List.of("0.0.0.0/0"));
+            response.setPublicAccessCidrs(DEFAULT_PUBLIC_ACCESS_CIDRS);
         }
         return response;
     }
