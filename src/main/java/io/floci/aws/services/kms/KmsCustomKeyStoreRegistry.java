@@ -47,14 +47,15 @@ public class KmsCustomKeyStoreRegistry {
 
     /** A persisted CONNECTING state cannot have a live request after process startup. */
     private synchronized void recoverInterruptedConnections() {
-        for (KmsCustomKeyStore stored : storage.scan(ignored -> true)) {
+        for (AccountAwareStorageBackend.AccountEntry<KmsCustomKeyStore> entry : storage.scanAllAccountEntries(ignored -> true)) {
+            KmsCustomKeyStore stored = entry.value();
             if (KmsCustomKeyStore.STATE_CONNECTING.equals(stored.getConnectionState())) {
                 KmsCustomKeyStore recovered = stored.copy();
                 recovered.setConnectionState(KmsCustomKeyStore.STATE_FAILED);
                 recovered.setConnectionErrorCode("INTERNAL_ERROR");
                 recovered.setConnectionErrorMessage(
                         "The previous XKS connection attempt was interrupted; disconnect before retrying");
-                storage.put(key(recovered.getRegion(), recovered.getCustomKeyStoreId()), recovered);
+                storage.putForAccount(entry.accountId(), key(recovered.getRegion(), recovered.getCustomKeyStoreId()), recovered);
             }
         }
     }
@@ -118,15 +119,8 @@ public class KmsCustomKeyStoreRegistry {
             throw new AwsException("ValidationException", "CustomKeyStoreId is required", 400);
         }
         KmsCustomKeyStore current = require(candidate.getCustomKeyStoreId(), region);
-        boolean currentDisconnected = KmsCustomKeyStore.STATE_DISCONNECTED.equals(current.getConnectionState());
-        boolean currentConnected = KmsCustomKeyStore.STATE_CONNECTED.equals(current.getConnectionState());
-        if (!currentDisconnected && !currentConnected) {
-            throw invalidState("The custom key store must be connected or disconnected before it can be updated");
-        }
         boolean endpointChanged = !Objects.equals(candidate.getProxyUriEndpoint(), current.getProxyUriEndpoint());
-        if (endpointChanged && !currentDisconnected) {
-            throw invalidState("Disconnect the custom key store before changing XksProxyUriEndpoint");
-        }
+        validateUpdateState(current, endpointChanged);
         XksCustomKeyStoreValidation.requiredName(candidate.getCustomKeyStoreName());
         requireProxyMetadata(candidate);
         ensureUnique(candidate, region, current.getCustomKeyStoreId());
@@ -211,6 +205,17 @@ public class KmsCustomKeyStoreRegistry {
             throw invalidState("The custom key store must be disconnected before it can be deleted");
         }
         storage.delete(key(region, id));
+    }
+
+    static void validateUpdateState(KmsCustomKeyStore current, boolean endpointChanged) {
+        boolean disconnected = KmsCustomKeyStore.STATE_DISCONNECTED.equals(current.getConnectionState());
+        boolean connected = KmsCustomKeyStore.STATE_CONNECTED.equals(current.getConnectionState());
+        if (!disconnected && !connected) {
+            throw invalidState("The custom key store must be connected or disconnected before it can be updated");
+        }
+        if (endpointChanged && !disconnected) {
+            throw invalidState("Disconnect the custom key store before changing XksProxyUriEndpoint");
+        }
     }
 
     private static void requireState(KmsCustomKeyStore store, String expected) {

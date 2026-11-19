@@ -1,5 +1,7 @@
 package io.floci.aws.services.kms;
 
+import io.floci.aws.core.common.RequestContext;
+
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -19,8 +21,8 @@ import static org.mockito.Mockito.mock;
 class KmsCustomKeyStoreServiceTest {
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
-    private static final String ACCESS_KEY = "ABCDEFGHIJKLMNOPQRST";
-    private static final String SECRET_KEY = "A".repeat(43);
+    private static final String ACCESS_KEY = XksTestFixtures.ACCESS_KEY_ID;
+    private static final String SECRET_KEY = XksTestFixtures.SECRET_ACCESS_KEY;
     private KmsCustomKeyStoreRegistry registry;
     private XksProxyClient proxy;
     private KmsCustomKeyStoreService service;
@@ -29,9 +31,9 @@ class KmsCustomKeyStoreServiceTest {
     void setUp() {
         registry = new KmsCustomKeyStoreRegistry(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 new RegionResolver(REGION, ACCOUNT),
-                new XksCredentialCipher("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="));
+                XksTestFixtures.credentialCipher());
         proxy = mock(XksProxyClient.class);
-        service = new KmsCustomKeyStoreService(registry, proxy);
+        service = new KmsCustomKeyStoreService(registry, proxy, mock(RequestContext.class));
     }
 
     @Test
@@ -93,11 +95,6 @@ class KmsCustomKeyStoreServiceTest {
     }
 
     private static KmsCustomKeyStore candidate() {
-        KmsCustomKeyStore store = new KmsCustomKeyStore();
-        store.setCustomKeyStoreName("primary");
-        store.setAccessKeyId(ACCESS_KEY);
-        store.setProxyUriEndpoint("https://proxy.example.com");
-        store.setProxyUriPath("/kms/xks/v1");
-        return store;
+        return XksTestFixtures.candidate("primary");
     }
 }

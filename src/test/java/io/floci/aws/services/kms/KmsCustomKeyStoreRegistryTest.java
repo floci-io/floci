@@ -25,7 +25,7 @@ class KmsCustomKeyStoreRegistryTest {
     @BeforeEach
     void setUp() {
         registry = new KmsCustomKeyStoreRegistry(AccountAwareStorageBackend.inMemory(ACCOUNT),
-                new RegionResolver(REGION, ACCOUNT), new XksCredentialCipher("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="));
+                new RegionResolver(REGION, ACCOUNT), XksTestFixtures.credentialCipher());
     }
 
     @Test
@@ -125,7 +125,7 @@ class KmsCustomKeyStoreRegistryTest {
     void recoversPersistedConnectingStateAfterRegistryRestart() {
         AccountAwareStorageBackend<KmsCustomKeyStore> storage = AccountAwareStorageBackend.inMemory(ACCOUNT);
         RegionResolver resolver = new RegionResolver(REGION, ACCOUNT);
-        XksCredentialCipher cipher = new XksCredentialCipher("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=");
+        XksCredentialCipher cipher = XksTestFixtures.credentialCipher();
         KmsCustomKeyStoreRegistry firstProcess = new KmsCustomKeyStoreRegistry(storage, resolver, cipher);
         KmsCustomKeyStore created = firstProcess.create(candidate("interrupted"), "A".repeat(43), REGION);
         firstProcess.beginConnect(created.getCustomKeyStoreId(), REGION);
@@ -139,11 +139,28 @@ class KmsCustomKeyStoreRegistryTest {
     }
 
     @Test
+    void recoversInterruptedConnectionsAcrossAllAccounts() {
+        AccountAwareStorageBackend<KmsCustomKeyStore> storage = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        KmsCustomKeyStore otherAccountStore = candidate("other-account");
+        otherAccountStore.setCustomKeyStoreId("cks-other-account");
+        otherAccountStore.setRegion(REGION);
+        otherAccountStore.setConnectionState(KmsCustomKeyStore.STATE_CONNECTING);
+        storage.putForAccount("111122223333", key(REGION, otherAccountStore.getCustomKeyStoreId()), otherAccountStore);
+
+        new KmsCustomKeyStoreRegistry(storage, new RegionResolver(REGION, ACCOUNT),
+                XksTestFixtures.credentialCipher());
+
+        KmsCustomKeyStore recovered = storage.scanForAccount("111122223333", ignored -> true).getFirst();
+        assertEquals(KmsCustomKeyStore.STATE_FAILED, recovered.getConnectionState());
+        assertEquals("INTERNAL_ERROR", recovered.getConnectionErrorCode());
+    }
+
+    @Test
     void failedStateWriteDoesNotMutateThePreviouslyStoredObject() {
         AccountAwareStorageBackend<KmsCustomKeyStore> storage = spy(AccountAwareStorageBackend.inMemory(ACCOUNT));
         KmsCustomKeyStoreRegistry testRegistry = new KmsCustomKeyStoreRegistry(storage,
                 new RegionResolver(REGION, ACCOUNT),
-                new XksCredentialCipher("MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="));
+                XksTestFixtures.credentialCipher());
         KmsCustomKeyStore created = testRegistry.create(candidate("write-failure"), "A".repeat(43), REGION);
         testRegistry.beginConnect(created.getCustomKeyStoreId(), REGION);
         doThrow(new IllegalStateException("simulated persistence failure"))
@@ -165,15 +182,14 @@ class KmsCustomKeyStoreRegistryTest {
         AwsException failure = assertThrows(AwsException.class,
                 () -> registry.update(update, null, REGION));
         assertEquals("CustomKeyStoreInvalidStateException", failure.getErrorCode());
-        assertEquals("primary", registry.require(created.getCustomKeyStoreId(), REGION).getCustomKeyStoreName());
+        assertEquals("concurrent", registry.require(created.getCustomKeyStoreId(), REGION).getCustomKeyStoreName());
+    }
+
+    private static String key(String region, String id) {
+        return region + "::" + id;
     }
 
     private static KmsCustomKeyStore candidate(String name) {
-        KmsCustomKeyStore store = new KmsCustomKeyStore();
-        store.setCustomKeyStoreName(name);
-        store.setAccessKeyId("ABCDEFGHIJKLMNOPQRST");
-        store.setProxyUriEndpoint("https://proxy.example.com");
-        store.setProxyUriPath("/kms/xks/v1");
-        return store;
+        return XksTestFixtures.candidate(name);
     }
 }

@@ -17,9 +17,9 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.time.Duration;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -49,14 +49,11 @@ class XksProxyClientTest {
     }
 
     @Test
-    void allowsPrivateAddressesOnlyForTheExplicitlyConfiguredProxyHost() throws Exception {
-        ConcurrentHashMap<String, AtomicInteger> allowedHosts = new ConcurrentHashMap<>();
-        allowedHosts.put("proxy.internal", new AtomicInteger(1));
+    void rejectsPrivateAddressesEvenWhenTheyBelongToTheConfiguredProxyHost() {
         XksProxyClient.PublicOnlyDnsResolver resolver =
-                new XksProxyClient.PublicOnlyDnsResolver(loopbackResolver(), allowedHosts);
+                new XksProxyClient.PublicOnlyDnsResolver(loopbackResolver());
 
-        assertEquals(1, resolver.resolve("proxy.internal").length);
-        assertThrows(UnknownHostException.class, () -> resolver.resolve("other.internal"));
+        assertThrows(UnknownHostException.class, () -> resolver.resolve("proxy.internal"));
     }
 
     @Test
@@ -67,6 +64,10 @@ class XksProxyClientTest {
                 URI.create("https://proxy.example.com:8443"), "/kms/xks/v1"));
         assertThrows(XksProxyClient.XksProxyException.class, () -> XksProxyClient.healthUri(
                 URI.create("https://proxy.example.com"), "/prefix/../kms/xks/v1"));
+        assertThrows(XksProxyClient.XksProxyException.class, () -> XksProxyClient.healthUri(
+                URI.create("https://127.0.0.1"), "/kms/xks/v1"));
+        assertThrows(XksProxyClient.XksProxyException.class, () -> XksProxyClient.healthUri(
+                URI.create("https://proxy.example.com"), "/kms/xks/v"));
     }
 
     @Test
@@ -102,11 +103,14 @@ class XksProxyClientTest {
 
     @Test
     void boundsSlowDnsResolutionByTheTotalHealthCheckDeadline() {
+        CountDownLatch dnsEntered = new CountDownLatch(1);
+        CountDownLatch releaseDns = new CountDownLatch(1);
         DnsResolver slowResolver = new DnsResolver() {
             @Override
             public InetAddress[] resolve(String host) throws UnknownHostException {
                 try {
-                    Thread.sleep(2_000);
+                    dnsEntered.countDown();
+                    releaseDns.await();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new UnknownHostException("DNS lookup interrupted");
@@ -124,6 +128,7 @@ class XksProxyClientTest {
             AwsException failure = assertThrows(AwsException.class, () -> client.requireHealthy(
                     URI.create("https://slow.example.com:443"), "/kms/xks/v1",
                     ACCESS_KEY, SECRET_KEY, "us-east-1", "ConnectCustomKeyStore"));
+            assertTrue(dnsEntered.await(1, TimeUnit.SECONDS));
             assertEquals("XksProxyUriUnreachableException", failure.getErrorCode());
         }
         assertTrue(Duration.ofNanos(System.nanoTime() - started).toMillis() < 1_000);
@@ -133,12 +138,13 @@ class XksProxyClientTest {
     void boundsAHealthResponseThatTricklesBytes(@TempDir Path tlsDirectory) throws Exception {
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDirectory);
         HttpsServer server = LocalHttpsServer.issuedBy(ca);
+        CountDownLatch releaseResponse = new CountDownLatch(1);
         server.createContext("/kms/xks/v1/health", exchange -> {
             exchange.sendResponseHeaders(200, 0);
             try {
                 exchange.getResponseBody().write('{');
                 exchange.getResponseBody().flush();
-                Thread.sleep(1_000);
+                releaseResponse.await(2, TimeUnit.SECONDS);
                 exchange.getResponseBody().write('}');
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

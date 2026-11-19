@@ -15,6 +15,7 @@ import io.floci.aws.services.kms.model.KmsGrant;
 import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.kms.model.KmsKeySpec;
 import io.floci.aws.services.kms.model.KmsKeyUsage;
+import io.floci.aws.services.kms.model.KmsCustomKeyStore;
 import io.floci.aws.services.kms.model.KmsMessageType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -133,8 +134,8 @@ public class KmsJsonHandler {
     }
 
     private Response handleCreateCustomKeyStore(JsonNode request, String region) {
-        String type = requiredText(request, "CustomKeyStoreType");
-        String connectivity = requiredText(request, "XksProxyConnectivity");
+        String type = requiredStringText(request, "CustomKeyStoreType");
+        String connectivity = requiredStringText(request, "XksProxyConnectivity");
         if (!"EXTERNAL_KEY_STORE".equals(type) || !"PUBLIC_ENDPOINT".equals(connectivity)
                 || hasValue(request, "XksProxyVpcEndpointServiceName")
                 || hasValue(request, "XksProxyVpcEndpointServiceOwner")) {
@@ -145,9 +146,9 @@ public class KmsJsonHandler {
         if (!credential.isObject()) {
             throw new AwsException("ValidationException", "XksProxyAuthenticationCredential is required", 400);
         }
-        KmsCustomKeyStore store = customKeyStoreService.create(requiredText(request, "CustomKeyStoreName"),
-                requiredText(request, "XksProxyUriEndpoint"), requiredText(request, "XksProxyUriPath"),
-                requiredText(credential, "AccessKeyId"), requiredText(credential, "RawSecretAccessKey"), region);
+        KmsCustomKeyStore store = customKeyStoreService.create(requiredStringText(request, "CustomKeyStoreName"),
+                requiredStringText(request, "XksProxyUriEndpoint"), requiredStringText(request, "XksProxyUriPath"),
+                requiredStringText(credential, "AccessKeyId"), requiredStringText(credential, "RawSecretAccessKey"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CustomKeyStoreId", store.getCustomKeyStoreId());
         return Response.ok(response).build();
@@ -189,8 +190,8 @@ public class KmsJsonHandler {
         JsonNode credential = request.path("XksProxyAuthenticationCredential");
         if (!credential.isMissingNode() && !credential.isNull()) {
             if (!credential.isObject()) throw new AwsException("SerializationException", "XksProxyAuthenticationCredential must be an object", 400);
-            accessKeyId = requiredText(credential, "AccessKeyId");
-            secretAccessKey = requiredText(credential, "RawSecretAccessKey");
+            accessKeyId = requiredStringText(credential, "AccessKeyId");
+            secretAccessKey = requiredStringText(credential, "RawSecretAccessKey");
         }
         JsonNode connectivity = request.path("XksProxyConnectivity");
         if (hasValue(request, "XksProxyVpcEndpointServiceName")
@@ -811,6 +812,14 @@ public class KmsJsonHandler {
                 requiredText(request, "Description"),
                 region);
         return Response.ok().build();
+    }
+
+    private String requiredStringText(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        if (!value.isTextual() || value.asText().isBlank()) {
+            throw new AwsException("ValidationException", field + " must be a non-empty string", 400);
+        }
+        return value.asText();
     }
 
     private String requiredText(JsonNode request, String field) {

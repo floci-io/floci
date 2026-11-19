@@ -17,7 +17,6 @@ import org.jboss.logging.Logger;
 @ApplicationScoped
 public class KmsCustomKeyStoreService {
     private static final Logger LOG = Logger.getLogger(KmsCustomKeyStoreService.class);
-    private static final int MAX_PAGE_SIZE = 1000;
     private final KmsCustomKeyStoreRegistry registry;
     private final XksProxyClient proxyClient;
     private final RequestContext requestContext;
@@ -30,12 +29,8 @@ public class KmsCustomKeyStoreService {
         this.requestContext = requestContext;
     }
 
-    KmsCustomKeyStoreService(KmsCustomKeyStoreRegistry registry, XksProxyClient proxyClient) {
-        this(registry, proxyClient, null);
-    }
-
     private String requestId() {
-        return requestContext == null || requestContext.getRequestId() == null
+        return requestContext.getRequestId() == null
                 ? UUID.randomUUID().toString() : requestContext.getRequestId();
     }
 
@@ -66,7 +61,7 @@ public class KmsCustomKeyStoreService {
         if ((id != null || name != null) && all.isEmpty()) {
             throw new AwsException("CustomKeyStoreNotFoundException", "The specified custom key store was not found", 400);
         }
-        int pageSize = limit == null ? Math.max(1, all.size()) : Math.min(MAX_PAGE_SIZE, XksCustomKeyStoreValidation.pageSize(limit));
+        int pageSize = limit == null ? Math.max(1, all.size()) : XksCustomKeyStoreValidation.pageSize(limit);
         String scope = "DescribeCustomKeyStores\n" + registry.accountId() + "\n" + region + "\n"
                 + (id == null ? "" : id) + "\n" + (name == null ? "" : name) + "\n";
         int start = 0;
@@ -97,16 +92,7 @@ public class KmsCustomKeyStoreService {
         }
         boolean endpointChanged = !effectiveEndpoint.equals(current.getProxyUriEndpoint());
         boolean pathChanged = !effectivePath.equals(current.getProxyUriPath());
-        boolean disconnected = KmsCustomKeyStore.STATE_DISCONNECTED.equals(current.getConnectionState());
-        boolean connected = KmsCustomKeyStore.STATE_CONNECTED.equals(current.getConnectionState());
-        if (!disconnected && !connected) {
-            throw new AwsException("CustomKeyStoreInvalidStateException",
-                    "The custom key store must be connected or disconnected before it can be updated", 400);
-        }
-        if (endpointChanged && !disconnected) {
-            throw new AwsException("CustomKeyStoreInvalidStateException",
-                    "Disconnect the custom key store before changing XksProxyUriEndpoint", 400);
-        }
+        KmsCustomKeyStoreRegistry.validateUpdateState(current, endpointChanged);
         if (credentialsChanged || pathChanged || endpointChanged) {
             XksCustomKeyStoreValidation.ProxyConfiguration config =
                     XksCustomKeyStoreValidation.proxyConfiguration(effectiveEndpoint, effectivePath,

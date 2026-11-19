@@ -8,11 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class XksCredentialCipherTest {
-    private static final String KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
-
     @Test
     void encryptsWithFreshNonceAndAuthenticatesContext() {
-        XksCredentialCipher cipher = new XksCredentialCipher(KEY);
+        XksCredentialCipher cipher = XksTestFixtures.credentialCipher();
         String first = cipher.encrypt("secret-value", "account/region/store");
         String second = cipher.encrypt("secret-value", "account/region/store");
 

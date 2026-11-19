@@ -46,14 +46,12 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 /** AWS KMS XKS v1 health-check client for PUBLIC_ENDPOINT custom key stores. */
@@ -63,8 +61,6 @@ public class XksProxyClient implements AutoCloseable {
     private static final Duration HTTP_TIMEOUT = Duration.ofMillis(250);
     private static final int MAX_RESPONSE_BYTES = 16 * 1024;
     private static final String SERVICE = "kms-xks-proxy";
-    private static final Pattern ACCESS_KEY_ID = Pattern.compile("[A-Z2-7]{20,30}");
-    private static final Pattern SECRET_ACCESS_KEY = Pattern.compile("[A-Za-z0-9+/=]{43,64}");
     private static final Pattern REGION = Pattern.compile("[a-z0-9-]{1,32}");
     private static final Pattern URI_PATH = Pattern.compile("/[A-Za-z0-9/_-]{9,127}");
     private static final Pattern ENDPOINT = Pattern.compile("https://[A-Za-z0-9.-]+");
@@ -74,7 +70,6 @@ public class XksProxyClient implements AutoCloseable {
     private final ObjectMapper objectMapper;
     private final CloseableHttpClient httpClient;
     private final boolean allowTestEndpoint;
-    private final ConcurrentHashMap<String, AtomicInteger> configuredPrivateHosts = new ConcurrentHashMap<>();
     private final ThreadPoolExecutor requestExecutor;
 
     @Inject
@@ -100,7 +95,7 @@ public class XksProxyClient implements AutoCloseable {
         this.requestExecutor = new ThreadPoolExecutor(4, 4, 0, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(8), requestThreadFactory, new ThreadPoolExecutor.AbortPolicy());
         DnsResolver publicOnlyResolver = allowTestEndpoint ? dnsResolver
-                : new PublicOnlyDnsResolver(dnsResolver, configuredPrivateHosts);
+                : new PublicOnlyDnsResolver(dnsResolver);
         Timeout timeout = Timeout.of(allowTestEndpoint ? Duration.ofSeconds(3) : HTTP_TIMEOUT);
         PoolingHttpClientConnectionManagerBuilder connections = PoolingHttpClientConnectionManagerBuilder.create()
                 .setDnsResolver(publicOnlyResolver)
@@ -133,11 +128,9 @@ public class XksProxyClient implements AutoCloseable {
     public void requireHealthy(URI endpoint, String uriPath, String accessKeyId, String secretAccessKey,
                                String region, String kmsOperation, String kmsRequestId) {
         URI target = healthUri(endpoint, uriPath, allowTestEndpoint);
-        String configuredHost = target.getHost().toLowerCase(Locale.ROOT).replaceFirst("\\.$", "");
-        configuredPrivateHosts.computeIfAbsent(configuredHost, ignored -> new AtomicInteger()).incrementAndGet();
         try {
-            if (accessKeyId == null || !ACCESS_KEY_ID.matcher(accessKeyId).matches()
-                || secretAccessKey == null || !SECRET_ACCESS_KEY.matcher(secretAccessKey).matches()
+            if (accessKeyId == null || !XksCustomKeyStoreValidation.ACCESS_KEY_ID.matcher(accessKeyId).matches()
+                || secretAccessKey == null || !XksCustomKeyStoreValidation.SECRET_ACCESS_KEY.matcher(secretAccessKey).matches()
                 || region == null || !REGION.matcher(region).matches()
                 || isBlank(kmsOperation) || !kmsOperation.matches("[A-Za-z0-9]{1,64}")) {
             throw new XksProxyException("XksProxyInvalidConfigurationException",
@@ -266,9 +259,34 @@ public class XksProxyClient implements AutoCloseable {
                 throw new XksProxyException("XksProxyInvalidResponseException",
                         "Could not process the XKS proxy health response", 400, e);
             }
-        } finally {
-            configuredPrivateHosts.computeIfPresent(configuredHost, (host, references) ->
-                    references.decrementAndGet() == 0 ? null : references);
+        }
+    }
+
+    private <T> T executeWithDeadline(HttpPost request, Callable<T> operation) throws IOException {
+        Future<T> future;
+        try {
+            future = requestExecutor.submit(operation);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            throw new IOException("XKS proxy request capacity is exhausted", e);
+        }
+        try {
+            return future.get(HTTP_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            request.cancel();
+            future.cancel(true);
+            SocketTimeoutException timeout = new SocketTimeoutException("XKS proxy request exceeded the 250 ms deadline");
+            timeout.initCause(e);
+            throw timeout;
+        } catch (InterruptedException e) {
+            request.cancel();
+            future.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while waiting for XKS proxy", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof IOException io) throw io;
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            throw new IOException("XKS proxy request failed", cause);
         }
     }
 
@@ -279,7 +297,7 @@ public class XksProxyClient implements AutoCloseable {
     private static URI healthUri(URI endpoint, String uriPath, boolean allowTestEndpoint) {
         if (endpoint == null || !"https".equalsIgnoreCase(endpoint.getScheme()) || isBlank(endpoint.getHost())
                 || (!allowTestEndpoint && (!ENDPOINT.matcher(endpoint.toString()).matches()
-                    || endpoint.getPort() != -1))
+                    || endpoint.getPort() != -1 || endpoint.getHost().matches("[0-9.]+")))
                 || endpoint.getRawUserInfo() != null
                 || (endpoint.getRawPath() != null && !endpoint.getRawPath().isEmpty())
                 || endpoint.getRawQuery() != null || endpoint.getRawFragment() != null) {
@@ -337,11 +355,8 @@ public class XksProxyClient implements AutoCloseable {
 
     static final class PublicOnlyDnsResolver implements DnsResolver {
         private final DnsResolver delegate;
-        private final ConcurrentHashMap<String, AtomicInteger> configuredPrivateHosts;
-
-        PublicOnlyDnsResolver(DnsResolver delegate, ConcurrentHashMap<String, AtomicInteger> configuredPrivateHosts) {
+        PublicOnlyDnsResolver(DnsResolver delegate) {
             this.delegate = delegate;
-            this.configuredPrivateHosts = configuredPrivateHosts;
         }
 
         @Override
@@ -350,11 +365,9 @@ public class XksProxyClient implements AutoCloseable {
             if (addresses == null || addresses.length == 0) {
                 throw new UnknownHostException("XKS proxy host has no addresses");
             }
-            if (!configuredPrivateHosts.containsKey(host.toLowerCase(Locale.ROOT).replaceFirst("\\.$", ""))) {
-                for (InetAddress address : addresses) {
-                    if (SsrfProtection.isBlockedAddress(address)) {
-                        throw new UnknownHostException("XKS proxy host resolves to a non-public address");
-                    }
+            for (InetAddress address : addresses) {
+                if (SsrfProtection.isBlockedAddress(address)) {
+                    throw new UnknownHostException("XKS proxy host resolves to a non-public address");
                 }
             }
             return addresses.clone();

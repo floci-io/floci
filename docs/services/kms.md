@@ -77,12 +77,13 @@ your deployment secret manager), keep it stable across restarts, and back it up 
 does not generate a fallback key: without the setting, credential persistence and connection fail
 closed. Changing or losing the key makes existing encrypted proxy credentials unreadable.
 
-The proxy endpoint must be an HTTPS origin. To support a proxy beside Floci or on a Docker
-network, the exact hostname configured as the XKS endpoint may resolve to private or loopback
-addresses; this exception does not apply to any other hostname. DNS results for other hosts that
-include loopback, private, link-local or metadata addresses are rejected. Redirects and automatic
-retries are disabled, the health check has a 250 ms total deadline and a bounded worker pool, the
-health response is size-limited, and proxy-controlled error text is not persisted or logged.
+The proxy endpoint must be an HTTPS origin with a publicly routable DNS hostname. DNS results
+containing loopback, private, link-local, multicast, reserved or cloud-metadata addresses are
+rejected even when they belong to the configured endpoint hostname; IP-literal endpoints are also
+rejected. This deliberately fails closed rather than treating a caller-supplied hostname as a
+private-network trust grant. Redirects and automatic retries are disabled, the health check has a
+250 ms end-to-end deadline and a bounded worker pool, the health response is size-limited, and
+proxy-controlled error text is not persisted or logged.
 
 The cryptographic data plane (`Origin=EXTERNAL_KEY_STORE`, `XksKeyId`, and routing Encrypt/Decrypt
 through the proxy) is a separate follow-up milestone. `AWS_CLOUDHSM` and `VPC_ENDPOINT_SERVICE`

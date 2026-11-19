@@ -9,11 +9,11 @@ import java.util.regex.Pattern;
 /** Request validation shared by the XKS Custom Key Store management operations. */
 final class XksCustomKeyStoreValidation {
 
-    private static final Pattern ACCESS_KEY_ID = Pattern.compile("[A-Z2-7]{20,30}");
-    private static final Pattern SECRET_ACCESS_KEY = Pattern.compile("[A-Za-z0-9+/=]{43,64}");
+    static final Pattern ACCESS_KEY_ID = Pattern.compile("[A-Z2-7]{20,30}");
+    static final Pattern SECRET_ACCESS_KEY = Pattern.compile("[A-Za-z0-9+/=]{43,64}");
     private static final Pattern CUSTOM_KEY_STORE_ID = Pattern.compile("[A-Za-z0-9_-]{1,64}");
     private static final int MAX_NAME_LENGTH = 256;
-    private static final int MAX_PAGE_SIZE = 1000;
+    static final int MAX_PAGE_SIZE = 1000;
 
     private XksCustomKeyStoreValidation() {
     }
