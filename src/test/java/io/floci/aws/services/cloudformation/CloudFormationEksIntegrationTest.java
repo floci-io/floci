@@ -19,7 +19,6 @@ import static io.floci.aws.services.cloudformation.CfnStackTestSupport.subjectSt
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -249,14 +248,15 @@ class CloudFormationEksIntegrationTest {
         }
     }
 
+    /** EKS Auto Mode stays out of AWS::EKS::Cluster for now, so a template enabling it still creates its cluster. */
     @Test
-    void aClusterIsCreatedWithAutoModesComputeStorageAndLoadBalancing() {
+    void aClusterEnablingAutoModeIsCreatedWithoutIt() {
         String stack = "cfn-eks-auto-" + Long.toString(System.nanoTime(), 36);
-        String nodeRole = "arn:aws:iam::000000000000:role/eks-auto-node";
         String autoMode = "\"ComputeConfig\": {\"Enabled\": true, \"NodePools\": [\"general-purpose\", \"system\"],"
-                + " \"NodeRoleArn\": \"" + nodeRole + "\"}, \"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}},"
+                + " \"NodeRoleArn\": \"arn:aws:iam::000000000000:role/eks-auto-node\"},"
+                + " \"StorageConfig\": {\"BlockStorage\": {\"Enabled\": true}},"
                 + " \"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}";
-        // Floci doesn't model the Gateway API settings, so they are not read.
+        // The Gateway API settings, which Floci doesn't model, don't fail the conversion either.
         String gatewayApi = "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": false,"
                 + " \"GatewayApi\": {\"Crds\": {\"Managed\": true}}}}";
         String template = "{\"Resources\": {"
@@ -265,27 +265,12 @@ class CloudFormationEksIntegrationTest {
         try (CloudFormationClient client = AwsTestClients.create(
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
             CfnStackWaits.createStack(client, stack, template, "CREATE_COMPLETE");
-            JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, "Subject")).jsonPath();
-            assertTrue(cluster.getBoolean("cluster.computeConfig.enabled"));
-            assertEquals(List.of("general-purpose", "system"), cluster.getList("cluster.computeConfig.nodePools"));
-            assertEquals(nodeRole, cluster.getString("cluster.computeConfig.nodeRoleArn"));
-            assertTrue(cluster.getBoolean("cluster.storageConfig.blockStorage.enabled"));
-            assertTrue(cluster.getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
-            assertFalse(given().get("/clusters/" + physicalId(client, stack, "Gateway")).jsonPath()
-                    .getBoolean("cluster.kubernetesNetworkConfig.elasticLoadBalancing.enabled"));
-        } finally {
-            CfnStackWaits.deleteStack(stack);
-        }
-    }
-
-    @Test
-    void aClusterEnablingOnlyAutoModesLoadBalancingFailsTheStack() {
-        String stack = "cfn-eks-auto-lb-" + Long.toString(System.nanoTime(), 36);
-        try (CloudFormationClient client = AwsTestClients.create(
-                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
-            CfnStackWaits.createStack(client, stack, subjectStack("", "", "AWS::EKS::Cluster", ROLE
-                    + "\"KubernetesNetworkConfig\": {\"ElasticLoadBalancing\": {\"Enabled\": true}}"),
-                    "ROLLBACK_COMPLETE");
+            for (String resource : List.of("Subject", "Gateway")) {
+                JsonPath cluster = given().get("/clusters/" + physicalId(client, stack, resource)).jsonPath();
+                assertNull(cluster.get("cluster.computeConfig"), resource);
+                assertNull(cluster.get("cluster.storageConfig"), resource);
+                assertNull(cluster.get("cluster.kubernetesNetworkConfig.elasticLoadBalancing"), resource);
+            }
         } finally {
             CfnStackWaits.deleteStack(stack);
         }

@@ -10,6 +10,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.CreateClusterRequest;
+import io.floci.aws.services.eks.model.KubernetesNetworkConfig;
 import io.floci.aws.services.eks.model.LogSetup;
 import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
@@ -115,14 +116,16 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> templateTags = ctx.resolveTags(props, "Tags");
         request.setTags(templateTags);
         request.setEncryptionConfig(createSetting(props, "EncryptionConfig", ctx, new TypeReference<>() { }));
-        request.setKubernetesNetworkConfig(
-                createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { }));
+        KubernetesNetworkConfig network =
+                createSetting(props, "KubernetesNetworkConfig", ctx, new TypeReference<>() { });
+        if (network != null) {
+            // EKS Auto Mode stays out until ComputeConfig and StorageConfig go with it: CreateCluster refuses load
+            // balancing without the other two.
+            network.setElasticLoadBalancing(null);
+        }
+        request.setKubernetesNetworkConfig(network);
         request.setResourcesVpcConfig(createSetting(props, "ResourcesVpcConfig", ctx, new TypeReference<>() { }));
         request.setAccessConfig(createSetting(props, "AccessConfig", ctx, new TypeReference<>() { }));
-        // EKS Auto Mode: CreateCluster refuses compute, block storage and load balancing unless all three are on
-        // or all three are off.
-        request.setComputeConfig(createSetting(props, "ComputeConfig", ctx, new TypeReference<>() { }));
-        request.setStorageConfig(createSetting(props, "StorageConfig", ctx, new TypeReference<>() { }));
         request.setLogging(logging(props, ctx));
         Cluster created = eksService.createCluster(request);
         // The cluster this resource named before is gone or replaced; publish writes only what the
@@ -145,8 +148,9 @@ public class EksCfnProvisioner implements CfnResourceProvisioner {
      * A property in its API request shape, or null when the template leaves it out. The
      * template value is read against the type the resource schema declares, so a value of another type
      * fails the resource with CloudFormation's wording. The request model has no ServiceIpv6Cidr member
-     * of KubernetesNetworkConfig, no GatewayApi member of its ElasticLoadBalancing and no
-     * ControlPlaneEgressMode member of ResourcesVpcConfig, so those are not read.
+     * of KubernetesNetworkConfig and no ControlPlaneEgressMode member of ResourcesVpcConfig, so those
+     * are not read, and a create leaves out KubernetesNetworkConfig's ElasticLoadBalancing, as it does
+     * EKS Auto Mode's other settings.
      */
     private static <T> T createSetting(JsonNode props, String name, ProvisionContext ctx, TypeReference<T> type) {
         JsonNode resolved = readSetting(props, name, ctx);
