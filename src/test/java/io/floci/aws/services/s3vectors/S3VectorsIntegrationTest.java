@@ -44,7 +44,7 @@ class S3VectorsIntegrationTest {
             .statusCode(200)
             .body("vectorBucketArn", containsString("arn:aws:s3vectors:"));
 
-        // A second create under the taken name, with S3 Vectors' message
+        // A second create under the taken name, with S3 Vectors' message (measured on AWS)
         given()
             .contentType(JSON_CONTENT_TYPE)
             .body("""
@@ -112,7 +112,7 @@ class S3VectorsIntegrationTest {
             .statusCode(200)
             .body("indexArn", containsString("arn:aws:s3vectors:"));
 
-        // A second create under the taken name, with S3 Vectors' message
+        // A second create under the taken name, with S3 Vectors' message (measured on AWS)
         given()
             .contentType(JSON_CONTENT_TYPE)
             .body("""

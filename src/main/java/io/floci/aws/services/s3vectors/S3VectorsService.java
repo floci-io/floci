@@ -49,7 +49,7 @@ public class S3VectorsService implements StoredResourceArns {
     /** S3 Vectors' not-found messages (measured on AWS). */
     private static final String NO_SUCH_BUCKET = "The specified vector bucket could not be found";
     private static final String NO_SUCH_INDEX = "The specified index could not be found";
-    /** S3 Vectors' messages for a create under a name already taken. */
+    /** S3 Vectors' messages for a create under a name already taken (measured on AWS). */
     private static final String BUCKET_EXISTS = "A vector bucket with the specified name already exists";
     private static final String INDEX_EXISTS = "An index with the specified name already exists";
     private static final Logger LOG = Logger.getLogger(S3VectorsService.class);
