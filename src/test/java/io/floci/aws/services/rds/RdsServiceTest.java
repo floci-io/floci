@@ -3993,6 +3993,61 @@ class RdsServiceTest {
     }
 
     @Test
+    void dbProxyEndpointUsesTheConfiguredHostLikeAnInstanceDoes() {
+        when(rdsConfig.endpointHost()).thenReturn(Optional.of("db.local"));
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci.local");
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver, null);
+
+        DbProxy proxy = service.createDbProxy("host-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+
+        assertEquals("db.local", proxy.getEndpointHost());
+    }
+
+    @Test
+    void dbProxyEndpointWithoutAConfiguredHostKeepsTheDockerResolvedOne() {
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci.local");
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver, null);
+
+        DbProxy proxy = service.createDbProxy("docker-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+
+        assertEquals("floci.local", proxy.getEndpointHost());
+    }
+
+    @Test
+    void restoredDbProxyKeepsTheConfiguredHost(@TempDir Path tempDir) {
+        when(rdsConfig.endpointHost()).thenReturn(Optional.of("db.local"));
+        Path proxyFile = tempDir.resolve("rds-proxies.json");
+        Path targetGroupFile = tempDir.resolve("rds-proxy-target-groups.json");
+        TypeReference<Map<String, DbProxy>> proxyType = new TypeReference<>() {};
+        TypeReference<Map<String, DbProxyTargetGroup>> targetGroupType = new TypeReference<>() {};
+        RdsService first = proxyStoreService(regionResolver, config,
+                new PersistentStorage<>(proxyFile, proxyType),
+                new PersistentStorage<>(targetGroupFile, targetGroupType),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        first.createDbProxy("host-restart-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+
+        PersistentStorage<String, DbProxy> reloadedProxies = new PersistentStorage<>(proxyFile, proxyType);
+        reloadedProxies.load();
+        PersistentStorage<String, DbProxyTargetGroup> reloadedTargetGroups =
+                new PersistentStorage<>(targetGroupFile, targetGroupType);
+        reloadedTargetGroups.load();
+        RdsService restarted = proxyStoreService(regionResolver, config, reloadedProxies, reloadedTargetGroups,
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+
+        assertEquals("db.local", restarted.getDbProxy("host-restart-proxy").getEndpointHost());
+    }
+
+    @Test
     void dbInstanceEndpointUsesPublishedProxyPort() {
         CurrentContainerNetworkResolver currentContainerNetworkResolver = mock(CurrentContainerNetworkResolver.class);
         when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));

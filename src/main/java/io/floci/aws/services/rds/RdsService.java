@@ -7253,7 +7253,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         proxy.setTags(tags);
         proxy.setProxyPort(proxyPort);
-        proxy.setEndpointHost(mock ? "localhost" : proxyEndpointHost());
+        proxy.setEndpointHost(mock ? "localhost" : advertisedProxyHost());
         proxy.setStatus("available");
         Instant now = Instant.now();
         proxy.setCreatedAt(now);
@@ -9337,6 +9337,18 @@ public class RdsService implements Resettable, ResourceProvider {
         return dockerHostResolver != null ? dockerHostResolver.resolve() : "localhost";
     }
 
+    /**
+     * The endpoint address a DB proxy advertises: the configured {@code floci.services.rds.endpoint-host}
+     * when one is set, floci's docker-resolved address otherwise. Instances and clusters already
+     * advertise the configured host through {@link #proxyEndpoint(int)}; the proxy's own records were
+     * built without it, so a fixed host changed with the container's start order only for proxies.
+     */
+    private String advertisedProxyHost() {
+        return config.services().rds().endpointHost()
+                .filter(host -> !host.isBlank())
+                .orElse(proxyEndpointHost());
+    }
+
     private void validateDbProxyCreate(String name, String engineFamily, String roleArn,
                                        List<String> subnetIds, List<DbProxyAuth> auth,
                                        String defaultAuthScheme, int idleClientTimeout) {
@@ -10332,7 +10344,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     ensureRestoredDefaultTargetGroup(proxy);
                     continue;
                 }
-                proxy.setEndpointHost(proxyEndpointHost());
+                proxy.setEndpointHost(advertisedProxyHost());
                 persistRestoredProxy(proxy);
                 DbProxyTargetGroup targetGroup = ensureRestoredDefaultTargetGroup(proxy);
                 if (targetGroup.getTargets().isEmpty()) {
