@@ -21,7 +21,7 @@ import static org.mockito.Mockito.when;
 class ContainerLifecycleManagerImagesTest {
 
     private final DockerClient docker = mock(DockerClient.class);
-    private final ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+    private final ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
 
     @Test
     void aCommitNamesTheImageAndSetsItsUserAndLabels() {

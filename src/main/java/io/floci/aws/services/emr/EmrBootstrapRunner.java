@@ -216,8 +216,9 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
         ContainerExec.Result result;
         try (ActionOutput stdout = new ActionOutput(prefix, logged);
              ActionOutput stderr = new ActionOutput(prefix, logged)) {
-            result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId,
-                    command.toArray(String[]::new), env, NO_TIMEOUT, stdout, stderr);
+            // A user's script with no timeout: its output streams on the streaming pool for as long as it runs.
+            result = ContainerExec.run(lifecycleManager.getDockerClient(), lifecycleManager.getStreamingDockerClient(),
+                    containerId, command.toArray(String[]::new), env, NO_TIMEOUT, stdout, stderr);
             if (logged) {
                 writeLogs(bootstrap, number, stdout, stderr);
             }

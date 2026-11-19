@@ -4573,7 +4573,10 @@ class EksClusterManagerTest {
             when(execCreateCmd.exec()).thenReturn(execCreate);
 
             ExecStartCmd execStartCmd = Mockito.mock(ExecStartCmd.class, Mockito.RETURNS_SELF);
-            when(dockerClient.execStartCmd("exec-123")).thenReturn(execStartCmd);
+            // The audit follower runs tail -F for the cluster's lifetime, so it streams on the streaming client.
+            DockerClient streamingDockerClient = Mockito.mock(DockerClient.class);
+            when(lifecycleManager.getStreamingDockerClient()).thenReturn(streamingDockerClient);
+            when(streamingDockerClient.execStartCmd("exec-123")).thenReturn(execStartCmd);
             ResultCallback.Adapter<?> mockAuditHandle = Mockito.mock(ResultCallback.Adapter.class);
             Mockito.doReturn(mockAuditHandle).when(execStartCmd).exec(any());
 

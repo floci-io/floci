@@ -4392,11 +4392,10 @@ public interface EmulatorConfig {
 
         /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call
-         * leases a connection from it, and a few streams hold one for as long as they run:
-         * CodeBuild phase execs, EKS audit followers and ECS Exec sessions. The streams a Lambda
-         * container holds for its whole lifetime live in the separate streaming pool. Once
-         * long-lived connections fill this pool, create, start, stop and remove wait for a free
-         * connection, including the calls that would release one, so the emulator stalls.
+         * leases a connection from it; streams that stay open while a container or a command runs
+         * live in the separate streaming pool. Once this pool is full, create, start, stop and
+         * remove wait for a free connection, including the calls that would release one, so the
+         * emulator stalls.
          *
          * <p>1024 rather than the former hard-coded 100. Connections are opened on demand, so a
          * small stack never approaches the limit.
@@ -4406,8 +4405,11 @@ public interface EmulatorConfig {
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived streams that occupy a slot for a container's entire lifetime: container log
-         * follow, and for each Lambda container its exit watcher and one exec per extension.
+         * long-lived streams that occupy a slot for a container's entire lifetime or a long
+         * command's run: container log follow, for each Lambda container its exit watcher and one
+         * exec per extension, and the output of each CodeBuild phase, SSM command, ECS Exec
+         * session, EKS audit follower, ECR garbage collection, user data script and EMR bootstrap
+         * action.
          * Total live containers is unbounded across distinct functions (each {@code WarmPool}
          * caps only per-function), so this pool is sized generously rather than tied to any
          * single function's warm-pool cap.

@@ -438,7 +438,6 @@ public class DockerClientProducer {
      * short-lived call in Floci. Kept on its own connection pool, separate from the
      * {@link StreamingDocker} bean, so long-lived streams can never occupy every lease in this
      * pool and starve these short calls until httpclient5's connection-request timeout fires.
-     * CodeBuild phase execs, EKS audit followers and ECS Exec sessions still use this pool.
      */
     @Produces
     @ApplicationScoped
@@ -449,7 +448,8 @@ public class DockerClientProducer {
 
     /**
      * Streaming DockerClient: container log-follow ({@link ContainerLogStreamer}), Lambda
-     * extension execs and Lambda exit watchers, and Lambda Web attach streams. Each
+     * extension execs and Lambda exit watchers, Lambda Web attach streams, and the output of
+     * long-running execs (CodeBuild phases, SSM run commands, ECS Exec sessions, EKS audit log followers, ECR garbage collection, EC2 and EKS user data and EMR bootstrap actions). Each
      * stream occupies a connection pool slot for its entire lifetime, so sharing the
      * control-plane pool meant a fan-out of many concurrent streams exhausted it and blocked
      * control-plane calls. Sized separately because {@code WarmPool}'s cap is per-function,

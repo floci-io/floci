@@ -94,6 +94,7 @@ public class ContainerLifecycleManager {
     private static final String LOOPBACK_HOST_IP = "127.0.0.1";
 
     private final DockerClient dockerClient;
+    private final DockerClient streamingDockerClient;
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
@@ -112,11 +113,12 @@ public class ContainerLifecycleManager {
 
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
+                                     @StreamingDocker DockerClient streamingDockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
                                      EmulatorConfig config) {
-        this(dockerClient, imageCacheService, containerDetector, config,
-                RetryingTarCopier.DEFAULT_BACKOFF_MS);
+        this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
     }
 
     ContainerLifecycleManager(DockerClient dockerClient,
@@ -135,7 +137,20 @@ public class ContainerLifecycleManager {
                               long archiveRetryBackoffMillis,
                               LongSupplier nanoTime,
                               CreateWait createWait) {
+        this(dockerClient, dockerClient, imageCacheService, containerDetector, config, archiveRetryBackoffMillis,
+                nanoTime, createWait);
+    }
+
+    private ContainerLifecycleManager(DockerClient dockerClient,
+                                      DockerClient streamingDockerClient,
+                                      ImageCacheService imageCacheService,
+                                      ContainerDetector containerDetector,
+                                      EmulatorConfig config,
+                                      long archiveRetryBackoffMillis,
+                                      LongSupplier nanoTime,
+                                      CreateWait createWait) {
         this.dockerClient = dockerClient;
+        this.streamingDockerClient = streamingDockerClient;
         this.imageCacheService = imageCacheService;
         this.containerDetector = containerDetector;
         this.config = config;
@@ -1604,6 +1619,17 @@ public class ContainerLifecycleManager {
      */
     public DockerClient getDockerClient() {
         return dockerClient;
+    }
+
+    /**
+     * Returns the {@link StreamingDocker} client, for a request that holds its connection for as long
+     * as what it follows, so it never takes a control-plane lease: an exec start whose output may run
+     * long, a container wait, or a followed log. Only those belong here: the streaming transport
+     * replays nothing but a container wait after a dropped connection, while the control-plane one
+     * also replays reads.
+     */
+    public DockerClient getStreamingDockerClient() {
+        return streamingDockerClient;
     }
 
     /**

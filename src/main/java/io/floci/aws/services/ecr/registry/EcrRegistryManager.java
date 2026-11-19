@@ -715,7 +715,8 @@ public class EcrRegistryManager {
                 final String finalExecId = execId;
 
                 try {
-                    ResultCallback.Adapter<Frame> asyncCallback = dockerClient.execStartCmd(finalExecId)
+                    ResultCallback.Adapter<Frame> asyncCallback = lifecycleManager.getStreamingDockerClient()
+                            .execStartCmd(finalExecId)
                             .exec(new ResultCallback.Adapter<Frame>() {
                                 @Override
                                 public void onNext(Frame frame) {
