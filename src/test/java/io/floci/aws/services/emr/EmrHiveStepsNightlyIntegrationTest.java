@@ -149,7 +149,7 @@ class EmrHiveStepsNightlyIntegrationTest {
 
         // A query that groups its rows through a shuffle, its tasks giving the hosts they ran on: the primary node,
         // whose NodeManager runs them on a cluster without core nodes, not the step's container. Core and task nodes
-        // running a job's containers are EmrDockerRunnerDockerIntegrationTest's, as a cluster with Hive starts slower.
+        // running a job's containers are EmrDockerRunnerNightlyIntegrationTest's, as a cluster with Hive starts slower.
         assertEquals("COMPLETED", hiveStep("-e", "create external table kv (k string, v int) row format delimited"
                 + " fields terminated by ',' location '" + s3Uri("data/rows/") + "';"
                 + " insert overwrite directory '" + s3Uri("out/tez/") + "' row format delimited fields terminated"
