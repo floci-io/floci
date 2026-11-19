@@ -3993,6 +3993,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void dbProxyEndpointUsesConfiguredEndpointHostOnCreateAndRestore() {
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci.local");
+        when(config.services().rds().endpointHost()).thenReturn(Optional.of("db.local"));
+        StorageBackend<String, DbProxy> proxies = new InMemoryStorage<>();
+        StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups = new InMemoryStorage<>();
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver,
+                proxies, proxyTargetGroups);
+
+        DbProxy created = service.createDbProxy("app-proxy", "POSTGRESQL", true, false, PROXY_ROLE_ARN,
+                PROXY_SUBNET_IDS, List.of(), PROXY_AUTH, Map.of());
+        assertEquals("db.local", created.getEndpoint());
+
+        RdsService restarted = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver,
+                proxies, proxyTargetGroups);
+        restarted.restorePersistedRuntime();
+
+        assertEquals("db.local", restarted.getDbProxy("app-proxy").getEndpoint());
+    }
+
+    @Test
     void dbInstanceEndpointUsesPublishedProxyPort() {
         CurrentContainerNetworkResolver currentContainerNetworkResolver = mock(CurrentContainerNetworkResolver.class);
         when(config.services().rds().endpointHost()).thenReturn(Optional.of("localhost"));
