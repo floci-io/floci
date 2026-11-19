@@ -2717,7 +2717,9 @@ public class RdsService implements Resettable, ResourceProvider {
             copiedTags.putAll(tags);
         }
         copy.setTags(copiedTags);
-        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, sourceId)).orElse("");
+        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, sourceId))
+                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DB cluster snapshot data for " + sourceId + " not found.", 404));
         snapshotData.put(clusterSnapshotDataKey(effectiveRegion, targetSnapshotId), sqlDump);
         putClusterSnapshotForScope(accountId, effectiveRegion, targetSnapshotId, copy);
         LOG.infov("Copied DB cluster snapshot {0} to {1}", sourceId, targetSnapshotId);
